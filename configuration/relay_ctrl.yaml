@@ -1,0 +1,231 @@
+esphome:
+  name: relayctrl
+  # platform: ESP32
+  # board: esp32dev 
+  on_boot:
+    priority: -10
+    then:
+      # - output.turn_on: my_slow_pwm
+      - output.set_level:
+          id: my_slow_pwm
+          level: "0%"
+
+esp32:
+  board: esp32dev # esp-wrover-kit
+
+wifi:
+  ssid: "FRITZ!Box 7590 TD"
+  password: "23461468396986328867"
+  domain: .fritz.box
+
+web_server:
+  port: 80
+
+# Enable logging
+# logger:
+#   level: DEBUG
+
+# Enable Home Assistant API
+
+api:
+
+ota:
+  platform: esphome
+  password: "@FelixMarlene1"
+
+# safe_mode: 
+
+
+# Define the binary sensors from outdoor numeric pad
+# binary_sensor:
+#   - platform: gpio
+#     name: "Valid code A"
+#     pin: GPIO23
+#   - platform: gpio
+#     name: "Valid code B"
+#     pin: GPIO22
+#     on_press:
+#       - switch.turn_on: garage_door_bare_switch
+#       - delay: 0.5s
+#       - switch.turn_off: garage_door_bare_switch
+#   - platform: gpio
+#     name: "Garage door status"
+#     pin: GPIO26
+#     device_class: door
+#     filters:
+#       - invert:
+
+# # Reading the analog CT clamps
+# sensor:
+#   - platform: adc
+#     pin: GPIO36
+#     id: gpio36
+#     update_interval: 60s
+#     internal: true
+#   - platform: ct_clamp
+#     sensor: gpio36
+#     name: "Water Heater Power Sensor"
+#     icon: mdi:gauge
+#     unit_of_measurement: "W"
+#     update_interval: 60s
+#     sample_duration: 200ms
+#     filters:
+#       - throttle: 60s
+#   - platform: adc
+#     pin: GPIO35
+#     id: gpio35
+#     update_interval: 60s
+#     internal: true
+#   - platform: ct_clamp
+#     sensor: gpio35
+#     name: "Electric Car Power Sensor"
+#     icon: mdi:gauge
+#     unit_of_measurement: "W"
+#     update_interval: 60s
+#     sample_duration: 200ms
+#     filters:
+#       - throttle: 60s
+#   - platform: wifi_signal
+#     name: "Main Tableau Elec WiFi signal"
+#     icon: "mdi:wifi"
+#     update_interval: 60s
+
+number:
+  - platform: template
+    max_value: 100
+    min_value: 0
+    step: 1
+    id: "valve_pwm"
+    name: "Valve PWM"
+    optimistic: true
+    set_action:
+      then:
+        - lambda: id(my_slow_pwm)->set_level(x/100.0);
+    on_value:
+      then: 
+        #- output.turn_on: my_slow_pwm
+        - lambda: id(my_slow_pwm)->set_level(x/100.0); 
+        # - output.set_level:
+        #     id: my_slow_pwm
+        #     level: !lambda "return(x/100);"
+
+
+
+
+# Define output pins
+output:
+  - platform: slow_pwm
+    id: my_slow_pwm
+    period: 60s
+    turn_on_action:
+      - lambda: |-
+          auto *out1 = id(output_pin_5);
+          out1->turn_on();
+    turn_off_action:
+      - output.turn_off: output_pin_5
+  # - platform: gpio
+  #   pin: GPIO33
+  #   id: output_pin_1 # garage door
+  # - platform: gpio
+  #   pin: GPIO32
+  #   id: output_pin_2 # floor heater
+  # - platform: gpio
+  #   pin: GPIO13
+  #   id: output_pin_3 # water heater
+  # - platform: gpio
+  #   pin: GPIO12
+  #   id: output_pin_4 # parking lights
+  - platform: gpio
+    pin: GPIO21
+    id: output_pin_5 # electric car
+  - platform: gpio
+    pin: GPIO19
+    id: output_pin_6 # (reserve 1)
+  - platform: gpio
+    pin: GPIO18
+    id: output_pin_7 # (reserve 2)
+  # - platform: gpio
+  #   pin: GPIO5
+  #   id: output_pin_8 # (reserve 3)
+
+# Define the lights based on the output pins
+# light:
+#   - platform: binary
+#     name: "Parking Garage light"
+#     output: output_pin_4
+
+# Define the switches based on the output pins
+switch:
+  # - platform: output
+  #   id: garage_door_bare_switch
+  #   output: output_pin_1
+  # - platform: template
+  #   name: "Garage Door Switch"
+  #   icon: "mdi:garage"
+  #   optimistic: true
+  #   lambda: "return id(garage_door_bare_switch).state;"
+  #   turn_on_action:
+  #     - switch.turn_on: garage_door_bare_switch
+  #     - delay: 0.5s
+  #     - switch.turn_off: garage_door_bare_switch
+  #   turn_off_action:
+  #     - switch.turn_on: garage_door_bare_switch
+  #     - delay: 0.5s
+  #     - switch.turn_off: garage_door_bare_switch
+  # - platform: output
+  #   id: floor_heater_bare_switch
+  #   output: output_pin_2
+  - platform: template
+    name: "Valve Switch"
+    icon: "mdi:valve"
+    optimistic: true
+    # lambda: "return id(my_slow_pwm).state;"
+    turn_on_action:
+      - output.turn_on: my_slow_pwm
+    turn_off_action:
+      - output.turn_off: my_slow_pwm
+  # - platform: template
+  #   name: "Floor Heater Switch"
+  #   icon: "mdi:radiator"
+  #   optimistic: trues
+  #   lambda: "return id(floor_heater_bare_switch).state;"
+  #   turn_on_action:
+  #     - switch.turn_on: floor_heater_bare_switch
+  #   turn_off_action:
+  #     - switch.turn_off: floor_heater_bare_switch
+  # - platform: output
+  #   id: water_heater_bare_switch
+  #   output: output_pin_3
+  # - platform: template
+  #   name: "Water Heater Switch"
+  #   icon: "mdi:water-boiler"
+  #   optimistic: true
+  #   lambda: "return id(water_heater_bare_switch).state;"
+  #   turn_on_action:
+  #     - switch.turn_on: water_heater_bare_switch
+  #   turn_off_action:
+  #     - switch.turn_off: water_heater_bare_switch
+  - platform: output
+    id: switch1
+    output: output_pin_5
+  # - platform: template
+  #   name: "Electric Car Switch"
+  #   icon: "mdi:car-electric"
+  #   optimistic: true
+  #   lambda: "return id(electric_car_bare_switch).state;"
+  #   turn_on_action:
+  #     - switch.turn_on: electric_car_bare_switch
+  #   turn_off_action:
+  #     - switch.turn_off: electric_car_bare_switch
+  - platform: output
+    id: switch2
+    output: output_pin_6
+  # - platform: template
+  #   name: "Reserve Switch"
+  #   icon: "mdi:crosshairs-question"
+  #   optimistic: true
+  #   lambda: "return id(reserve_bare_switch).state;"
+  #   turn_on_action:
+  #     - switch.turn_on: reserve_bare_switch
+  #   turn_off_action:
+  #     - switch.turn_off: reserve_bare_switch

@@ -1,0 +1,134 @@
+substitutions:
+  devicename: "loradevices"
+
+
+
+esphome:
+  name: $devicename
+  # comment: "MyBlinds"
+  # name_add_mac_suffix: true
+  # project:
+  #   name: "Blinds"
+  #   version: "V0.1"
+
+esp32:
+  variant: esp32
+  cpu_frequency: 240MHz
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_XTAL_FREQ_26: y
+      CONFIG_INT_WDT_TIMEOUT_MS: "800"
+      CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY: y
+      CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK: y
+    # advanced:
+    #   loop_task_stack_size: 16384
+      
+
+external_components:
+  # use all components from a local folder
+  - source:
+      type: local
+      path: local_components
+
+# Enable logging
+logger:
+
+
+# Enable Home Assistant API
+api:
+
+ota:
+  platform: esphome
+  password: "@FelixMarlene1"
+
+wifi:
+  ssid: "FRITZ!Box 7590 TD"
+  password: "23461468396986328867"
+  domain: .fritz.box
+  fast_connect: on
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${devicename}-AP"
+
+captive_portal:
+
+# see: https://esphome.io/components/time.html
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    on_time:
+      - seconds: 0
+        minutes: 50
+        hours: 20
+        days_of_week: MON-SUN
+        then:
+          - loracover.on_sleep_start: rol_1
+
+
+
+# Enable Web server
+web_server:
+  port: 80
+
+
+lora_tracker:
+  id: my_lora_tracker
+
+
+lora_client:
+  name: "RollladenWohnzimmer1"
+  id: rol_1
+  time_id: homeassistant_time
+  short_address: 17
+  subnet_address: 02
+  sleep_duration: 120
+  mac_address: d4:8c:49:c9:fe:30
+
+cover:
+  - platform: loracover
+    lora_client_id: rol_1
+    name: "RollladenWohnzimmer1"
+    id: rol_1_cover
+    invert_position: false
+    open_duration: 60
+    close_duration: 60
+
+sensor:
+  - platform: uptime
+    name: '${devicename} Uptime'
+    unit_of_measurement: days
+    update_interval: 300s
+    filters:
+      - multiply: 0.000011574
+
+  - platform: wifi_signal
+    name: '${devicename} WiFi Signal'
+    update_interval: 300s
+
+  - platform: loracover
+    lora_client_id: rol_1
+    # cover_id: rol_1
+    # name: "RollladenWohnzimmer1 Battery"
+    # id: rol_1_battery
+    # type: BATTERY
+    battery_level:
+      name: "RollladenWohnzimmer1 Battery Level"
+      id: rol_1_battery_level
+    battery_voltage:
+      name: "RollladenWohnzimmer1 Battery Voltage"
+      id: rol_1_battery_voltage
+
+#     update_interval: 600s
+
+#   # - platform: loracover
+#   #   # lora_tracker_id: my_lora_tracker
+#   #   # cover_id: rol_1
+#   #   # name: "RollladenWohnzimmer1 Voltage"
+#   #   # id: rol_1_voltage
+#   #   type: VOLTAGE
+#   #   update_interval: 600s
+
+

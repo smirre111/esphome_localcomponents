@@ -1,0 +1,93 @@
+
+syntax = "proto3";
+
+
+enum BlndOperation {
+    CMD_OPEN = 0;
+    CMD_CLOSE = 1;
+    CMD_STOP = 2;
+    CMD_IDLE = 3;
+}
+
+enum SysOperation {
+    CMD_ENABLE_WIFI = 0;
+    CMD_DISABLE_WIFI = 1;
+    CMD_OTA = 2;
+    CMD_STATUS = 3;
+    CMD_SLEEP = 4;
+
+}
+
+
+enum BlndResponse {
+    RESP_STATUS = 0;
+    RESP_LOG = 1;
+    RESP_AVAILABLE = 2;
+}
+
+enum BlndState
+{
+    BLINDS_MQTT_OPEN = 0;
+    BLINDS_MQTT_OPENING = 1;
+    BLINDS_MQTT_CLOSING = 2;
+    BLINDS_MQTT_CLOSED = 3;
+    BLINDS_MQTT_STOPPED = 4;
+}
+
+message BlndStatus {
+    BlndState state = 1;
+    float voltage = 2;
+    float position = 3;
+}
+
+message BlndLogging {
+    string logmsg = 1;
+}
+
+message BlndAvailable {
+    bool available = 1;
+}
+
+message AddressUpdate {
+    uint32 addr = 1;
+    uint32 subnt = 2;
+}
+
+message TimeUpdate {
+    uint32 openTime = 1;
+    uint32 closeTime = 2;
+}
+
+message SleepUpdate {
+    uint64 sleepDuration = 1;
+}
+
+message BlndOperationMessage {
+    uint32 destAddress = 1;
+    uint32 destSubnet = 2;
+    uint32 senderAddress = 3;
+    uint32 msgId = 4;
+    oneof cmd {
+        BlndOperation operation = 10;
+        SysOperation sysop = 11;
+        AddressUpdate addr = 12;
+        TimeUpdate time = 13;
+        SleepUpdate sleep = 14;
+    }
+}
+
+message BlndResponseMessage {
+    uint32 destAddress = 1;
+    uint32 destSubnet = 2;
+    uint32 senderAddress = 3;
+    uint32 msgId = 4;
+    BlndResponse response = 5;
+    oneof proto {
+        BlndStatus state = 10;
+        BlndLogging logging = 11;
+        BlndAvailable avail= 12;
+    }
+
+
+}
+
