@@ -111,11 +111,7 @@ void LORAListener::set_response(uint8_t *data, size_t len)
         return;
       }
 
-      if (rcv_message->senderaddress != this->short_address_ && this->logged_in_)
-      {
-        ESP_LOGE(TAG, "Adress not for me");
-        return;
-      }
+
 
       // The message ID is checked only after login
       if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER && this->logged_in_)
@@ -131,7 +127,7 @@ void LORAListener::set_response(uint8_t *data, size_t len)
         }
       }
 
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER && !this->logged_in_)
+      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
       {
         ESP_LOGI(TAG, "Registered with LORA server");
         this->logged_in_ = true;
@@ -139,6 +135,12 @@ void LORAListener::set_response(uint8_t *data, size_t len)
 
       }
 
+      if (rcv_message->senderaddress != this->short_address_ && this->logged_in_)
+      {
+        ESP_LOGE(TAG, "Adress not for me");
+        return;
+      }
+      
       //Distriute to registered nodes
       for(int i=0; i < this->nodes_.size(); i++)
       {
@@ -163,6 +165,39 @@ void LORAListener::set_response(uint8_t *data, size_t len)
 
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
       op_message.sysop = CLIENT_OPERATION__CMD_SLEEP;
+      auto status = false;
+
+      uint8_t *txBuf;
+      unsigned len;
+      len = lora_client_operation_message__get_packed_size(&op_message);
+      txBuf = new uint8_t[len];
+      lora_client_operation_message__pack(&op_message, txBuf);
+
+      // this->parent_->sendPacketOnce(txBuf, len);
+      this->parent_->send(txBuf, len);
+
+      if (status)
+      {
+        ESP_LOGW(TAG, "Error writing sleep command to device");
+      }
+    }
+
+
+    void LORAListener::triggerOTA()
+    {
+      ESP_LOGI("LORAListener", "Device %s triggering OTA", this->address_str());
+      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
+      // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
+      // op_message.senderaddress = 0x12345678; // TODO: Use unique address
+      op_message.destaddress = this->short_address_;
+      op_message.destsubnet = this->subnet_address_;
+      op_message.senderaddress = 0xFF; // TODO: Use unique address
+
+      op_message.msgid = ++(this->tx_message_id_); // Incrementing message ID
+
+      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+      op_message.sysop = CLIENT_OPERATION__CMD_OTA;
       auto status = false;
 
       uint8_t *txBuf;

@@ -180,9 +180,9 @@ namespace esphome
       //   }
       // }
 
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER && !this->parent_->logged_in_)
+      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
       {
-        ESP_LOGI(TAG, "Registered with LORA server");
+        ESP_LOGI(TAG, "Registered with LORA server, sending cover config");
 
         this->send_remote_config();
         return;

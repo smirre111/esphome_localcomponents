@@ -37,6 +37,7 @@ namespace esphome
       void set_subnet_address(uint8_t address) { this->subnet_address_ = address; }
       void set_sleep_duration(uint16_t sleep_duration) { this->sleep_duration_ = sleep_duration; }
       void enterSleep();
+      void triggerOTA();
       virtual void set_response(uint8_t *data, size_t len);
 
       // void send_remote_address();

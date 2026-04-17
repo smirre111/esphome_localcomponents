@@ -86,3 +86,12 @@ sensor:
       name: "Rika Humidity"
     update_interval: 60s
 
+  - platform: wifi_signal
+    name: "${device_name} - Wifi Signal"
+    update_interval: 60s
+    icon: mdi:wifi
+
+  - platform: uptime
+    name: "${device_name} - Uptime"
+    update_interval: 60s
+    icon: mdi:clock-outline

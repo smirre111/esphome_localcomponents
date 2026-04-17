@@ -61,8 +61,8 @@ time:
     id: homeassistant_time
     on_time:
       - seconds: 0
-        minutes: 50
-        hours: 20
+        minutes: 0
+        hours: 23
         days_of_week: MON-SUN
         then:
           - loracover.on_sleep_start: rol_1
@@ -84,7 +84,7 @@ lora_client:
   time_id: homeassistant_time
   short_address: 17
   subnet_address: 02
-  sleep_duration: 120
+  sleep_duration: 21600
   mac_address: d4:8c:49:c9:fe:30
 
 cover:
@@ -95,6 +95,15 @@ cover:
     invert_position: false
     open_duration: 60
     close_duration: 60
+
+
+button:
+  - platform: loracover
+    lora_client_id: rol_1
+    name: "Trigger OTA"
+    id: rol_1_trigger_ota_button
+    # type: trigger_ota
+
 
 sensor:
   - platform: uptime
