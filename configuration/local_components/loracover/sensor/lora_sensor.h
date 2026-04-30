@@ -30,7 +30,7 @@ namespace esphome
       uint16_t char_handle_;
       std::unique_ptr<LoraCovEncoder> encoder_;
       std::unique_ptr<LoraCovDecoder> decoder_;
-      // bool logged_in_;
+      // bool registered_;
       sensor::Sensor *battery_{nullptr};
       sensor::Sensor *voltage_{nullptr};
       // sensor::Sensor *illuminance_{nullptr};

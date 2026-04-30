@@ -19,7 +19,7 @@ namespace esphome
     {
       this->encoder_ = make_unique<LoraCovEncoder>();
       this->decoder_ = make_unique<LoraCovDecoder>();
-      // this->logged_in_ = false;
+      // this->registered_ = false;
       this->last_battery_update_ = 0;
       this->current_sensor_ = 0;
     }
@@ -41,13 +41,13 @@ namespace esphome
     //   {
     //     if (param->open.status == ESP_GATT_OK)
     //     {
-    //       this->logged_in_ = false;
+    //       this->registered_ = false;
     //     }
     //     break;
     //   }
     //   case ESP_GATTC_DISCONNECT_EVT:
     //   {
-    //     this->logged_in_ = false;
+    //     this->registered_ = false;
     //     this->node_state = espbt::ClientState::IDLE;
     //     if (this->battery_ != nullptr)
     //       this->battery_->publish_state(NAN);
@@ -135,16 +135,16 @@ namespace esphome
         return;
       }
 
-      // if (rcv_message->senderaddress != this->parent_->short_address_ && this->parent_->logged_in_)
+      // if (rcv_message->senderaddress != this->parent_->short_address_ && this->parent_->registered_)
       // {
       //   ESP_LOGE(TAG, "Adress not for me");
       //   return;
       // }
 
       // // The message ID is checked only after login
-      // if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL && this->parent_->logged_in_)
+      // if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL && this->parent_->registered_)
       // {
-      //   if (rcv_message->msgid > this->parent_->rx_message_id_)
+      //   if (rcv_message->msgid > this->parent_->frame_counter_.rx_message_id)
       //   {
       //     this->parent_->rx_message_id_ = rcv_message->msgid;
       //   }
@@ -155,7 +155,7 @@ namespace esphome
       //   }
       // }
 
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER && !this->parent_->logged_in_)
+      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
       {
         ESP_LOGI(TAG, "Registered with LORA server");
 
@@ -169,6 +169,25 @@ namespace esphome
         ClientBattery *status = rcv_message->state;
 
         float voltage = status->voltage;
+        float battery_level = (voltage - 3.2*3) / (4.2*3 - 3.2*3) * 100.0;
+        battery_level = std::clamp(battery_level, 0.0f, 100.0f);
+
+        if (this->battery_ != nullptr)
+        {
+          this->battery_->publish_state(battery_level);
+
+        }
+        if (this->voltage_ != nullptr)
+        {
+          this->voltage_->publish_state(voltage);
+        }
+      }
+
+      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION)
+      {
+        CoverPosition *position = rcv_message->position;
+
+        float voltage = position->voltage;
         float battery_level = (voltage - 3.2*3) / (4.2*3 - 3.2*3) * 100.0;
         battery_level = std::clamp(battery_level, 0.0f, 100.0f);
 

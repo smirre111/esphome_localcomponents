@@ -34,7 +34,7 @@ LoraCoverComponent = loracov_ns.class_(
 #     }
 # )
 
-CONFIG_SCHEMA = (
+LORA_COVER_SCHEMA = (
     cover.cover_schema(LoraCoverComponent)
     .extend(
         {
@@ -54,27 +54,28 @@ CONFIG_SCHEMA = (
     .extend(cv.COMPONENT_SCHEMA)
 )
 
+CONFIG_SCHEMA = (
+    cover.cover_schema(LoraCoverComponent)
+    .extend(
+        {
+            cv.Optional(CONF_INVERT_POSITION, default=False): cv.boolean,
+            cv.Optional(CONF_OPEN_DURATION, default=False): cv.int_range(0, 120),
+            cv.Optional(CONF_CLOSE_DURATION, default=False): cv.int_range(0, 120),
+        }
+    )
+    .extend(lora_client.LORA_CLIENT_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA)
+)
+
 
 
 
 
 async def to_code(config):
     var = await cover.new_cover(config)
-    # cg.add(var.set_pin(config[CONF_PIN]))
-    # cg.add(var.set_short_address(config[CONF_SHORT_ADDRESS]))
-    # cg.add(var.set_subnet_address(config[CONF_SUBNET_ADDRESS]))
-    # cg.add(var.set_address(config[CONF_MAC_ADDRESS].as_hex))
-
     cg.add(var.set_invert_position(config[CONF_INVERT_POSITION]))
     cg.add(var.set_open_duration(config[CONF_OPEN_DURATION]))
     cg.add(var.set_close_duration(config[CONF_CLOSE_DURATION]))
-    # cg.add(var.set_sleep_duration(config[CONF_SLEEP_DURATION]))
-
-    # Get the time component variable and set it
-    # timeInstance = await cg.get_variable(config[CONF_TIME_ID])
-    # cg.add(var.set_time(timeInstance))
-
-    # cg.add(var.set_time(cv.gethomeassistant.time.var))
     
     await cg.register_component(var, config)
     await lora_client.register_node(var, config)

@@ -31,6 +31,7 @@ from esphome.core.entity_helpers import entity_duplicate_validator, setup_entity
 CODEOWNERS = ["@buxtronix"]
 AUTO_LOAD = ["lora_tracker", "blindsproto"]
 DEPENDENCIES = ["lora_tracker", "time"]
+MULTI_CONF = True
 
 # CONF_INVERT_POSITION = "invert_position"
 # CONF_LORA_TRACKER_ID = "lora_tracker_id"
@@ -260,7 +261,6 @@ CONFIG_SCHEMA = cv.All(
                 }
             ),
         }
-
     )
     .extend(cv.ENTITY_BASE_SCHEMA)
     .extend(cv.MQTT_COMMAND_COMPONENT_SCHEMA)
@@ -376,9 +376,8 @@ async def to_code(config):
     timeInstance = await cg.get_variable(config[CONF_TIME_ID])
     cg.add(var.set_time(timeInstance))
 
-
     # Register LORA listener feature if any of the automation triggers are used
-    if (config.get(CONF_ON_SLEEP_START) ):
+    if config.get(CONF_ON_SLEEP_START):
         register_lora_features({LORAFeatures.LORA_DEVICE})
 
     registration_counts = _get_registration_counts()

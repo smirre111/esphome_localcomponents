@@ -7,6 +7,51 @@
 #endif
 
 #include "blinds.pb-c.h"
+void   lora_cover_operation__init
+                     (LoraCoverOperation         *message)
+{
+  static const LoraCoverOperation init_value = LORA_COVER_OPERATION__INIT;
+  *message = init_value;
+}
+size_t lora_cover_operation__get_packed_size
+                     (const LoraCoverOperation *message)
+{
+  assert(message->base.descriptor == &lora_cover_operation__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t lora_cover_operation__pack
+                     (const LoraCoverOperation *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &lora_cover_operation__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t lora_cover_operation__pack_to_buffer
+                     (const LoraCoverOperation *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &lora_cover_operation__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+LoraCoverOperation *
+       lora_cover_operation__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (LoraCoverOperation *)
+     protobuf_c_message_unpack (&lora_cover_operation__descriptor,
+                                allocator, len, data);
+}
+void   lora_cover_operation__free_unpacked
+                     (LoraCoverOperation *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &lora_cover_operation__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   client_config__init
                      (ClientConfig         *message)
 {
@@ -95,6 +140,51 @@ void   cover_config__free_unpacked
   if(!message)
     return;
   assert(message->base.descriptor == &cover_config__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   login_msg__init
+                     (LoginMsg         *message)
+{
+  static const LoginMsg init_value = LOGIN_MSG__INIT;
+  *message = init_value;
+}
+size_t login_msg__get_packed_size
+                     (const LoginMsg *message)
+{
+  assert(message->base.descriptor == &login_msg__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t login_msg__pack
+                     (const LoginMsg *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &login_msg__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t login_msg__pack_to_buffer
+                     (const LoginMsg *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &login_msg__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+LoginMsg *
+       login_msg__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (LoginMsg *)
+     protobuf_c_message_unpack (&login_msg__descriptor,
+                                allocator, len, data);
+}
+void   login_msg__free_unpacked
+                     (LoginMsg *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &login_msg__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
 void   lora_client_operation_message__init
@@ -367,11 +457,74 @@ void   lora_client_response_message__free_unpacked
   assert(message->base.descriptor == &lora_client_response_message__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
-static const ProtobufCFieldDescriptor client_config__field_descriptors[4] =
+static const ProtobufCFieldDescriptor lora_cover_operation__field_descriptors[2] =
 {
   {
-    "addr",
+    "operation",
     1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    offsetof(LoraCoverOperation, covop_case),
+    offsetof(LoraCoverOperation, operation),
+    &cov_operation__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "position",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    offsetof(LoraCoverOperation, covop_case),
+    offsetof(LoraCoverOperation, position),
+    NULL,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned lora_cover_operation__field_indices_by_name[] = {
+  0,   /* field[0] = operation */
+  1,   /* field[1] = position */
+};
+static const ProtobufCIntRange lora_cover_operation__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 2 }
+};
+const ProtobufCMessageDescriptor lora_cover_operation__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "LoraCoverOperation",
+  "LoraCoverOperation",
+  "LoraCoverOperation",
+  "",
+  sizeof(LoraCoverOperation),
+  2,
+  lora_cover_operation__field_descriptors,
+  lora_cover_operation__field_indices_by_name,
+  1,  lora_cover_operation__number_ranges,
+  (ProtobufCMessageInit) lora_cover_operation__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor client_config__field_descriptors[5] =
+{
+  {
+    "mac_addr",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(ClientConfig, mac_addr),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "addr",
+    2,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT32,
     0,   /* quantifier_offset */
@@ -383,7 +536,7 @@ static const ProtobufCFieldDescriptor client_config__field_descriptors[4] =
   },
   {
     "subnt",
-    2,
+    3,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT32,
     0,   /* quantifier_offset */
@@ -395,7 +548,7 @@ static const ProtobufCFieldDescriptor client_config__field_descriptors[4] =
   },
   {
     "name",
-    3,
+    4,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_BYTES,
     0,   /* quantifier_offset */
@@ -407,7 +560,7 @@ static const ProtobufCFieldDescriptor client_config__field_descriptors[4] =
   },
   {
     "sleepDuration",
-    4,
+    5,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT64,
     0,   /* quantifier_offset */
@@ -419,15 +572,16 @@ static const ProtobufCFieldDescriptor client_config__field_descriptors[4] =
   },
 };
 static const unsigned client_config__field_indices_by_name[] = {
-  0,   /* field[0] = addr */
-  2,   /* field[2] = name */
-  3,   /* field[3] = sleepDuration */
-  1,   /* field[1] = subnt */
+  1,   /* field[1] = addr */
+  0,   /* field[0] = mac_addr */
+  3,   /* field[3] = name */
+  4,   /* field[4] = sleepDuration */
+  2,   /* field[2] = subnt */
 };
 static const ProtobufCIntRange client_config__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 4 }
+  { 0, 5 }
 };
 const ProtobufCMessageDescriptor client_config__descriptor =
 {
@@ -437,7 +591,7 @@ const ProtobufCMessageDescriptor client_config__descriptor =
   "ClientConfig",
   "",
   sizeof(ClientConfig),
-  4,
+  5,
   client_config__field_descriptors,
   client_config__field_indices_by_name,
   1,  client_config__number_ranges,
@@ -495,7 +649,45 @@ const ProtobufCMessageDescriptor cover_config__descriptor =
   (ProtobufCMessageInit) cover_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[8] =
+static const ProtobufCFieldDescriptor login_msg__field_descriptors[1] =
+{
+  {
+    "prand",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoginMsg, prand),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned login_msg__field_indices_by_name[] = {
+  0,   /* field[0] = prand */
+};
+static const ProtobufCIntRange login_msg__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 1 }
+};
+const ProtobufCMessageDescriptor login_msg__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "LoginMsg",
+  "LoginMsg",
+  "LoginMsg",
+  "",
+  sizeof(LoginMsg),
+  1,
+  login_msg__field_descriptors,
+  login_msg__field_indices_by_name,
+  1,  login_msg__number_ranges,
+  (ProtobufCMessageInit) login_msg__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[9] =
 {
   {
     "destAddress",
@@ -549,10 +741,10 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     "operation",
     10,
     PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_ENUM,
+    PROTOBUF_C_TYPE_MESSAGE,
     offsetof(LoraClientOperationMessage, cmd_case),
     offsetof(LoraClientOperationMessage, operation),
-    &cover_operation__descriptor,
+    &lora_cover_operation__descriptor,
     NULL,
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
@@ -593,12 +785,25 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "login",
+    14,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, login),
+    &login_msg__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   6,   /* field[6] = clientconfig */
   7,   /* field[7] = coverconfig */
   0,   /* field[0] = destAddress */
   1,   /* field[1] = destSubnet */
+  8,   /* field[8] = login */
   3,   /* field[3] = msgId */
   4,   /* field[4] = operation */
   2,   /* field[2] = senderAddress */
@@ -608,7 +813,7 @@ static const ProtobufCIntRange lora_client_operation_message__number_ranges[2 + 
 {
   { 1, 0 },
   { 10, 4 },
-  { 0, 8 }
+  { 0, 9 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -618,7 +823,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  8,
+  9,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
   2,  lora_client_operation_message__number_ranges,
@@ -739,7 +944,7 @@ const ProtobufCMessageDescriptor client_battery__descriptor =
   (ProtobufCMessageInit) client_battery__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor cover_position__field_descriptors[1] =
+static const ProtobufCFieldDescriptor cover_position__field_descriptors[3] =
 {
   {
     "position",
@@ -753,14 +958,40 @@ static const ProtobufCFieldDescriptor cover_position__field_descriptors[1] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "voltage",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverPosition, voltage),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "current",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverPosition, current),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cover_position__field_indices_by_name[] = {
+  2,   /* field[2] = current */
   0,   /* field[0] = position */
+  1,   /* field[1] = voltage */
 };
 static const ProtobufCIntRange cover_position__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 1 }
+  { 0, 3 }
 };
 const ProtobufCMessageDescriptor cover_position__descriptor =
 {
@@ -770,14 +1001,14 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   "CoverPosition",
   "",
   sizeof(CoverPosition),
-  1,
+  3,
   cover_position__field_descriptors,
   cover_position__field_indices_by_name,
   1,  cover_position__number_ranges,
   (ProtobufCMessageInit) cover_position__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[8] =
+static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[9] =
 {
   {
     "destAddress",
@@ -875,11 +1106,24 @@ static const ProtobufCFieldDescriptor lora_client_response_message__field_descri
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "login",
+    14,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientResponseMessage, proto_case),
+    offsetof(LoraClientResponseMessage, login),
+    &login_msg__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_response_message__field_indices_by_name[] = {
   4,   /* field[4] = avail */
   0,   /* field[0] = destAddress */
   1,   /* field[1] = destSubnet */
+  8,   /* field[8] = login */
   3,   /* field[3] = msgId */
   7,   /* field[7] = position */
   5,   /* field[5] = register */
@@ -890,7 +1134,7 @@ static const ProtobufCIntRange lora_client_response_message__number_ranges[2 + 1
 {
   { 1, 0 },
   { 10, 4 },
-  { 0, 8 }
+  { 0, 9 }
 };
 const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
 {
@@ -900,41 +1144,41 @@ const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
   "LoraClientResponseMessage",
   "",
   sizeof(LoraClientResponseMessage),
-  8,
+  9,
   lora_client_response_message__field_descriptors,
   lora_client_response_message__field_indices_by_name,
   2,  lora_client_response_message__number_ranges,
   (ProtobufCMessageInit) lora_client_response_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCEnumValue cover_operation__enum_values_by_number[3] =
+static const ProtobufCEnumValue cov_operation__enum_values_by_number[3] =
 {
-  { "CMD_OPEN", "COVER_OPERATION__CMD_OPEN", 0 },
-  { "CMD_CLOSE", "COVER_OPERATION__CMD_CLOSE", 1 },
-  { "CMD_STOP", "COVER_OPERATION__CMD_STOP", 2 },
+  { "CMD_OPEN", "COV_OPERATION__CMD_OPEN", 0 },
+  { "CMD_CLOSE", "COV_OPERATION__CMD_CLOSE", 1 },
+  { "CMD_STOP", "COV_OPERATION__CMD_STOP", 2 },
 };
-static const ProtobufCIntRange cover_operation__value_ranges[] = {
+static const ProtobufCIntRange cov_operation__value_ranges[] = {
 {0, 0},{0, 3}
 };
-static const ProtobufCEnumValueIndex cover_operation__enum_values_by_name[3] =
+static const ProtobufCEnumValueIndex cov_operation__enum_values_by_name[3] =
 {
   { "CMD_CLOSE", 1 },
   { "CMD_OPEN", 0 },
   { "CMD_STOP", 2 },
 };
-const ProtobufCEnumDescriptor cover_operation__descriptor =
+const ProtobufCEnumDescriptor cov_operation__descriptor =
 {
   PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
-  "CoverOperation",
-  "CoverOperation",
-  "CoverOperation",
+  "CovOperation",
+  "CovOperation",
+  "CovOperation",
   "",
   3,
-  cover_operation__enum_values_by_number,
+  cov_operation__enum_values_by_number,
   3,
-  cover_operation__enum_values_by_name,
+  cov_operation__enum_values_by_name,
   1,
-  cover_operation__value_ranges,
+  cov_operation__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
 static const ProtobufCEnumValue client_operation__enum_values_by_number[5] =

@@ -20,9 +20,28 @@ namespace esphome
 {
   namespace lora_tracker
   {
-
     class LORATracker;
     class LORAClientNode;
+    class LORAListener;
+
+    struct FrameCounter
+    {
+      uint32_t rx_message_id;
+      uint32_t tx_message_id;
+
+    };
+
+    struct LORAClientRestoreState
+    {
+      uint32_t rx_message_id;
+      uint32_t tx_message_id;
+      bool logged_in;
+
+      void apply(LORAListener *listener);
+
+    } __attribute__((packed));
+
+ 
 
     class LORAListener : public EntityBase, public Component
     {
@@ -42,7 +61,10 @@ namespace esphome
 
       // void send_remote_address();
       // void send_remote_sleep_time();
+      void send_login();
       virtual void send_remote_config();
+      uint32_t incrTxMessageId();
+      void setRxMessageId(uint32_t msg_id);
 
       // std::string address_str() const;
       uint64_t address_uint64() const { return this->address_uint64_; };
@@ -93,7 +115,7 @@ namespace esphome
 
     public:
       LORATracker *parent_{nullptr};
-    
+
     protected:
       time::RealTimeClock *time;
 
@@ -107,20 +129,28 @@ namespace esphome
       uint8_t short_address_{0};
       uint8_t subnet_address_{0};
       uint64_t sleep_duration_{86400}; // Default to 24 hours
-      bool logged_in_;
+      bool registered_;
 
-      uint32_t rx_message_id_{0};
-      uint32_t tx_message_id_{0};
-
-
+      // uint32_t rx_message_id_{0};
+      // uint32_t tx_message_id_{0};
+      FrameCounter frame_counter_{0, 0};
 
       char address_str_[MAC_ADDR_STR_LEN]{}; // 18 bytes: "AA:BB:CC:DD:EE:FF\0"
-     
-    protected: 
-      esp_bd_addr_t remote_bda_;             // 6 bytes
 
+    protected:
+      esp_bd_addr_t remote_bda_; // 6 bytes
 
+      optional<LORAClientRestoreState> restore_state_();
+      void save_state_(bool save);
+      ESPPreferenceObject rtc_;
     };
+
+    inline void LORAClientRestoreState::apply(LORAListener *listener)
+    {
+      listener->frame_counter_.rx_message_id = this->rx_message_id;
+      listener->frame_counter_.tx_message_id = this->tx_message_id + 64;
+      listener->registered_ = this->logged_in;
+    }
 
     class LORAClient : public LORAListener
     {

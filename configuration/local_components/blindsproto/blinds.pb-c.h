@@ -15,8 +15,10 @@ PROTOBUF_C__BEGIN_DECLS
 #endif
 
 
+typedef struct LoraCoverOperation LoraCoverOperation;
 typedef struct ClientConfig ClientConfig;
 typedef struct CoverConfig CoverConfig;
+typedef struct LoginMsg LoginMsg;
 typedef struct LoraClientOperationMessage LoraClientOperationMessage;
 typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
@@ -27,12 +29,12 @@ typedef struct LoraClientResponseMessage LoraClientResponseMessage;
 
 /* --- enums --- */
 
-typedef enum _CoverOperation {
-  COVER_OPERATION__CMD_OPEN = 0,
-  COVER_OPERATION__CMD_CLOSE = 1,
-  COVER_OPERATION__CMD_STOP = 2
-    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(COVER_OPERATION)
-} CoverOperation;
+typedef enum _CovOperation {
+  COV_OPERATION__CMD_OPEN = 0,
+  COV_OPERATION__CMD_CLOSE = 1,
+  COV_OPERATION__CMD_STOP = 2
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(COV_OPERATION)
+} CovOperation;
 typedef enum _ClientOperation {
   CLIENT_OPERATION__CMD_ENABLE_WIFI = 0,
   CLIENT_OPERATION__CMD_DISABLE_WIFI = 1,
@@ -44,9 +46,31 @@ typedef enum _ClientOperation {
 
 /* --- messages --- */
 
+typedef enum {
+  LORA_COVER_OPERATION__COVOP__NOT_SET = 0,
+  LORA_COVER_OPERATION__COVOP_OPERATION = 1,
+  LORA_COVER_OPERATION__COVOP_POSITION = 2
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_COVER_OPERATION__COVOP__CASE)
+} LoraCoverOperation__CovopCase;
+
+struct  LoraCoverOperation
+{
+  ProtobufCMessage base;
+  LoraCoverOperation__CovopCase covop_case;
+  union {
+    float position;
+    CovOperation operation;
+  };
+};
+#define LORA_COVER_OPERATION__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&lora_cover_operation__descriptor) \
+    , LORA_COVER_OPERATION__COVOP__NOT_SET, {0} }
+
+
 struct  ClientConfig
 {
   ProtobufCMessage base;
+  uint64_t mac_addr;
   uint32_t addr;
   uint32_t subnt;
   ProtobufCBinaryData name;
@@ -54,7 +78,7 @@ struct  ClientConfig
 };
 #define CLIENT_CONFIG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&client_config__descriptor) \
-    , 0, 0, {0,NULL}, 0 }
+    , 0, 0, 0, {0,NULL}, 0 }
 
 
 struct  CoverConfig
@@ -68,12 +92,23 @@ struct  CoverConfig
     , 0, 0 }
 
 
+struct  LoginMsg
+{
+  ProtobufCMessage base;
+  uint32_t prand;
+};
+#define LOGIN_MSG__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&login_msg__descriptor) \
+    , 0 }
+
+
 typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET = 0,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION = 10,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP = 11,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG = 12,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG = 13
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG = 13,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN = 14
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
 
@@ -88,7 +123,8 @@ struct  LoraClientOperationMessage
   union {
     ClientConfig *clientconfig;
     CoverConfig *coverconfig;
-    CoverOperation operation;
+    LoginMsg *login;
+    LoraCoverOperation *operation;
     ClientOperation sysop;
   };
 };
@@ -131,10 +167,12 @@ struct  CoverPosition
 {
   ProtobufCMessage base;
   float position;
+  float voltage;
+  float current;
 };
 #define COVER_POSITION__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&cover_position__descriptor) \
-    , 0 }
+    , 0, 0, 0 }
 
 
 typedef enum {
@@ -142,7 +180,8 @@ typedef enum {
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL = 10,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER = 11,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE = 12,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION = 13
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION = 13,
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN = 14
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_RESPONSE_MESSAGE__PROTO__CASE)
 } LoraClientResponseMessage__ProtoCase;
 
@@ -156,6 +195,7 @@ struct  LoraClientResponseMessage
   LoraClientResponseMessage__ProtoCase proto_case;
   union {
     ClientAvailable *avail;
+    LoginMsg *login;
     CoverPosition *position;
     ClientRegister *register_;
     ClientBattery *state;
@@ -166,6 +206,25 @@ struct  LoraClientResponseMessage
     , 0, 0, 0, 0, LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET, {0} }
 
 
+/* LoraCoverOperation methods */
+void   lora_cover_operation__init
+                     (LoraCoverOperation         *message);
+size_t lora_cover_operation__get_packed_size
+                     (const LoraCoverOperation   *message);
+size_t lora_cover_operation__pack
+                     (const LoraCoverOperation   *message,
+                      uint8_t             *out);
+size_t lora_cover_operation__pack_to_buffer
+                     (const LoraCoverOperation   *message,
+                      ProtobufCBuffer     *buffer);
+LoraCoverOperation *
+       lora_cover_operation__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   lora_cover_operation__free_unpacked
+                     (LoraCoverOperation *message,
+                      ProtobufCAllocator *allocator);
 /* ClientConfig methods */
 void   client_config__init
                      (ClientConfig         *message);
@@ -203,6 +262,25 @@ CoverConfig *
                       const uint8_t       *data);
 void   cover_config__free_unpacked
                      (CoverConfig *message,
+                      ProtobufCAllocator *allocator);
+/* LoginMsg methods */
+void   login_msg__init
+                     (LoginMsg         *message);
+size_t login_msg__get_packed_size
+                     (const LoginMsg   *message);
+size_t login_msg__pack
+                     (const LoginMsg   *message,
+                      uint8_t             *out);
+size_t login_msg__pack_to_buffer
+                     (const LoginMsg   *message,
+                      ProtobufCBuffer     *buffer);
+LoginMsg *
+       login_msg__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   login_msg__free_unpacked
+                     (LoginMsg *message,
                       ProtobufCAllocator *allocator);
 /* LoraClientOperationMessage methods */
 void   lora_client_operation_message__init
@@ -320,11 +398,17 @@ void   lora_client_response_message__free_unpacked
                       ProtobufCAllocator *allocator);
 /* --- per-message closures --- */
 
+typedef void (*LoraCoverOperation_Closure)
+                 (const LoraCoverOperation *message,
+                  void *closure_data);
 typedef void (*ClientConfig_Closure)
                  (const ClientConfig *message,
                   void *closure_data);
 typedef void (*CoverConfig_Closure)
                  (const CoverConfig *message,
+                  void *closure_data);
+typedef void (*LoginMsg_Closure)
+                 (const LoginMsg *message,
                   void *closure_data);
 typedef void (*LoraClientOperationMessage_Closure)
                  (const LoraClientOperationMessage *message,
@@ -350,10 +434,12 @@ typedef void (*LoraClientResponseMessage_Closure)
 
 /* --- descriptors --- */
 
-extern const ProtobufCEnumDescriptor    cover_operation__descriptor;
+extern const ProtobufCEnumDescriptor    cov_operation__descriptor;
 extern const ProtobufCEnumDescriptor    client_operation__descriptor;
+extern const ProtobufCMessageDescriptor lora_cover_operation__descriptor;
 extern const ProtobufCMessageDescriptor client_config__descriptor;
 extern const ProtobufCMessageDescriptor cover_config__descriptor;
+extern const ProtobufCMessageDescriptor login_msg__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_operation_message__descriptor;
 extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;

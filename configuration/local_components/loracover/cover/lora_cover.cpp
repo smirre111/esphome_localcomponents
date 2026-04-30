@@ -23,10 +23,22 @@ namespace esphome
 
     void LoraCoverComponent::setup()
     {
-      this->position = COVER_OPEN;
+
+      auto restore = this->restore_state_();
+      if (restore.has_value())
+      {
+        restore->apply(this);
+      }
+
+      if (!restore.has_value())
+      {
+        this->position = 0.5f;
+      }
+
+      // this->position = COVER_OPEN;
       this->encoder_ = make_unique<LoraCovEncoder>();
       this->decoder_ = make_unique<LoraCovDecoder>();
-      // this->logged_in_ = false;
+      // this->registered_ = false;
     }
 
     void LoraCoverComponent::loop()
@@ -52,7 +64,7 @@ namespace esphome
       traits.set_supports_stop(true);
       traits.set_supports_position(true);
       traits.set_supports_tilt(false);
-      traits.set_is_assumed_state(false);
+      traits.set_is_assumed_state(true);
       return traits;
     }
 
@@ -74,10 +86,17 @@ namespace esphome
         op_message.destsubnet = this->parent_->subnet_address_;
         op_message.senderaddress = 0xFF; // TODO: Use unique address
 
-        op_message.msgid = ++(this->parent_->tx_message_id_); // Incrementing message ID
+        op_message.msgid = this->parent_->incrTxMessageId(); // Incrementing message ID
 
         op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
-        op_message.operation = COVER_OPERATION__CMD_STOP;
+        
+        LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
+        covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
+        covop.operation = COV_OPERATION__CMD_STOP;
+        
+        // op_message.operation = COV_OPERATION__CMD_STOP;
+        op_message.operation = &covop;
+
 
         uint8_t *txBuf;
         unsigned len;
@@ -91,7 +110,7 @@ namespace esphome
         {
           ESP_LOGW(TAG, "[%s] Error writing stop command to device, error = %d", this->get_name().c_str(), status);
         }
-        this->publish_state();
+        this->publish_state(true);
       }
 
       if (call.get_position().has_value())
@@ -117,14 +136,26 @@ namespace esphome
           op_message.destsubnet = this->parent_->subnet_address_;
           op_message.senderaddress = 0xFF; // TODO: Use unique address
 
-          op_message.msgid = ++(this->parent_->tx_message_id_); // Incrementing message ID
+          op_message.msgid = this->parent_->incrTxMessageId(); // Incrementing message ID
           op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+          LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
           if (pos == COVER_OPEN)
-            op_message.operation = COVER_OPERATION__CMD_OPEN;
+          {
+            covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
+            covop.operation = COV_OPERATION__CMD_OPEN;
+          }
           else if (pos == COVER_CLOSED)
-            op_message.operation = COVER_OPERATION__CMD_CLOSE;
+          {
+            covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
+            covop.operation = COV_OPERATION__CMD_CLOSE;
+          }
           else
-            op_message.operation = COVER_OPERATION__CMD_STOP;
+          {
+            covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
+            covop.position = pos;
+          }
+          op_message.operation = &covop;
+
           auto status = false;
           // esp_ble_gattc_write_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->char_handle_,
           //                          packet->length, packet->data, ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
@@ -160,14 +191,14 @@ namespace esphome
         return;
       }
 
-      // if (rcv_message->senderaddress != this->parent_->short_address_ && this->parent_->logged_in_)
+      // if (rcv_message->senderaddress != this->parent_->short_address_ && this->parent_->registered_)
       // {
       //   ESP_LOGE(TAG, "Adress not for me");
       //   return;
       // }
 
       // // The message ID is checked only after login
-      // if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER && this->parent_->logged_in_)
+      // if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER && this->parent_->registered_)
       // {
       //   if (rcv_message->msgid > this->parent_->rx_message_id_)
       //   {
@@ -186,7 +217,6 @@ namespace esphome
 
         this->send_remote_config();
         return;
-      
       }
 
       if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION)
@@ -195,9 +225,8 @@ namespace esphome
         float pos = position->position;
 
         this->position = pos;
-        this->publish_state();
+        this->publish_state(true);
       }
-     
     }
 
     // void LoraCoverComponent::send_remote_duration()
@@ -240,8 +269,8 @@ namespace esphome
       ESP_LOGI(TAG, "Sending remote config for device %s", this->parent_->address_str());
       // Implementation to send remote address
 
-      this->parent_->tx_message_id_ = 0;
-      this->parent_->rx_message_id_ = 0;
+      // this->parent_->frame_counter_.tx_message_id = 0;
+      // this->parent_->frame_counter_.rx_message_id = 0;
 
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
@@ -252,15 +281,12 @@ namespace esphome
       op_message.destsubnet = this->parent_->subnet_address_;
       op_message.senderaddress = 0xFF; // TODO: Use unique address
 
-      op_message.msgid = ++(this->parent_->tx_message_id_); // Incrementing message ID
+      op_message.msgid = this->parent_->incrTxMessageId(); //++(this->parent_->frame_counter_.tx_message_id); Incrementing message ID
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
-
-
 
       CoverConfig coverconfig = COVER_CONFIG__INIT;
       coverconfig.closetime = this->close_duration_;
       coverconfig.opentime = this->open_duration_;
-
 
       op_message.coverconfig = &coverconfig;
 
