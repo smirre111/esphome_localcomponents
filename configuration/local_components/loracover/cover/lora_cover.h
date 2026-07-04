@@ -28,6 +28,9 @@ namespace esphome
       void set_invert_position(bool invert_position) { this->invert_position_ = invert_position; }
       void set_open_duration(int open_duration) { this->open_duration_ = open_duration; }
       void set_close_duration(int close_duration) { this->close_duration_ = close_duration; }
+      void set_blind_height_mm(float v) { this->blind_height_mm_ = v; }
+      void set_axle_diameter_mm(float v) { this->axle_diameter_mm_ = v; }
+      void set_blind_thickness_mm(float v) { this->blind_thickness_mm_ = v; }
       // void set_sleep_duration(uint64_t sleep_duration) { this->sleep_duration_ = sleep_duration; }
 
       void set_response(uint8_t *data, size_t len) override;
@@ -43,6 +46,9 @@ namespace esphome
       bool invert_position_;
       int open_duration_{60};
       int close_duration_{60};
+      float blind_height_mm_{2000.0f};
+      float axle_diameter_mm_{60.0f};
+      float blind_thickness_mm_{8.0f};
       // uint64_t sleep_duration_{28800};
 
       std::unique_ptr<LoraCovEncoder> encoder_;

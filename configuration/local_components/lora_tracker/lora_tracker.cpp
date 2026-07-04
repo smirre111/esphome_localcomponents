@@ -112,6 +112,14 @@ namespace esphome
     {
       ESP_ERROR_CHECK(this->init_memory_pool());
       ESP_LOGI(TAG, "LORATracker memory pool initialized");
+
+      // Created here (before setup()/sendTask) so it is always valid by the time
+      // either the main loop or the send task touches the radio.
+      this->radio_mutex_ = xSemaphoreCreateMutex();
+      if (this->radio_mutex_ == nullptr)
+      {
+        ESP_LOGE(TAG, "Failed to create radio mutex");
+      }
     }
 
     float LORATracker::get_setup_priority() const { return setup_priority::AFTER_BLUETOOTH; }
@@ -204,15 +212,33 @@ namespace esphome
 
     void LORATracker::checkReception()
     {
+      // Read the FIFO + link quality under the radio mutex so the SPI burst can
+      // never interleave with a TX copy on the send task.  Dispatch happens
+      // AFTER releasing the mutex: set_response() does crypto, NVS writes and
+      // scheduler work that must not block the radio (and only ever runs on the
+      // main-loop task, so buf_ has no other reader).
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
 
       int rxLen = lora_receive_packet(buf_, sizeof(buf_));
       if (rxLen > 0)
       {
+        // F-11: cache link quality for this packet before dispatch so clients
+        // can publish it to Home Assistant.
+        this->last_packet_rssi_ = lora_packetRssi();
+        this->last_packet_snr_  = lora_packetSnr();
+      }
+
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreGive(this->radio_mutex_);
+
+      if (rxLen > 0)
+      {
         ESP_LOGI(TAG, "Received packet with length %d", rxLen);
-        float packetStrength = lora_packetRssi() + lora_packetSnr() * 0.25;
+        float packetStrength = this->last_packet_rssi_ + this->last_packet_snr_ * 0.25;
 
         ESP_LOGI(TAG, "Packet RSSI: %d, SNR: %.2f, Estimated Strength: %.2f dBm",
-                 lora_packetRssi(), lora_packetSnr(), packetStrength);
+                 this->last_packet_rssi_, this->last_packet_snr_, packetStrength);
 
         // ESP_LOGI(TAG, "%s byte packet received:[%.*s]", rxLen, rxLen, buf_);
         for (int i = 0; i < this->clients_.size(); i++)
@@ -266,6 +292,19 @@ namespace esphome
 
           // Return buffer to pool
           this->return_buffer_to_pool(rx_buffer);
+
+          // Post-burst response window.  The addressed node defers its reply
+          // (ACK / position) until just after this burst ends, then transmits
+          // into the clear channel.  Hold off dequeuing the next burst and keep
+          // the radio in RX so that reply is heard instead of being stepped on
+          // by the next burst.  lora_tx_busy_ is already false, so the main
+          // loop's receive() reads any incoming packet during this window.
+          if (this->radio_mutex_ != nullptr)
+            xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
+          lora_receive(0);
+          if (this->radio_mutex_ != nullptr)
+            xSemaphoreGive(this->radio_mutex_);
+          vTaskDelay(pdMS_TO_TICKS(this->responseWindowMs));
         }
       }
     }
@@ -274,20 +313,24 @@ namespace esphome
     {
       // lora_receive(0);
 
+      // Read the mode and (re)arm RX under the mutex.  checkReception() takes
+      // the mutex itself, so call it AFTER releasing here to avoid re-entrancy
+      // on the non-recursive mutex.
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
       uint8_t mode = lora_getDeviceMode();
-      switch (mode)
+      if (mode != DeviceMode::ReceiveSingle &&
+          mode != DeviceMode::ReceiveContinous &&
+          mode != DeviceMode::Transmit)
       {
-      case DeviceMode::ReceiveSingle:
-      case DeviceMode::ReceiveContinous:
+        lora_receive(0); // put into receive mode
+      }
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreGive(this->radio_mutex_);
+
+      if (mode == DeviceMode::ReceiveSingle || mode == DeviceMode::ReceiveContinous)
       {
         checkReception();
-        break;
-      }
-      case DeviceMode::Transmit:
-        break;
-      default:
-        lora_receive(0);
-        // lora_rxContinuous(); // put into receive mode
       }
 
       // ESP_LOGI(TAG, ". : %d", mode);
@@ -359,13 +402,73 @@ namespace esphome
       TickType_t xLastWakeTime;
       ESP_LOGI(TAG, "Sending packed burst");
       xLastWakeTime = xTaskGetTickCount();
+
+      // Burst indexing: re-stamp header.burstIndex on every copy (and set
+      // burstCount) so the node can compute when the burst ends and defer its
+      // reply into the clear window afterwards.  Unpack once; each copy is
+      // re-packed with its own index.  On unpack failure (should not happen for
+      // our own freshly-packed frames) fall back to sending the raw bytes.
+      LoraClientOperationMessage *burstMsg =
+          lora_client_operation_message__unpack(NULL, len, data);
+      const bool canStamp = (burstMsg != nullptr && burstMsg->header != nullptr);
+      if (canStamp)
+        burstMsg->header->burstcount = this->txSlotsPerRound;
+
       // for (int cnt = 0; cnt < 7; cnt++)
       for (int cnt = 0; cnt < this->txSlotsPerRound; cnt++)
       {
-        this->sendPacketBytes(data, len);
+        this->lora_tx_busy_ = true;
+
+        if (canStamp)
+        {
+          burstMsg->header->burstindex = cnt;
+          size_t clen  = lora_client_operation_message__get_packed_size(burstMsg);
+          uint8_t *cbuf = static_cast<uint8_t *>(malloc(clen));
+          if (cbuf)
+          {
+            lora_client_operation_message__pack(burstMsg, cbuf);
+            this->sendPacketBytes(cbuf, clen);
+            free(cbuf);
+          }
+          else
+          {
+            this->sendPacketBytes(data, len); // OOM fallback: unindexed copy
+          }
+        }
+        else
+        {
+          this->sendPacketBytes(data, len);
+        }
         // sendPacketBytes((uint8_t *)&curTime, sizeof(curTime));
-        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+
+        // Release the radio to RX during the idle gap between copies.  Holding
+        // it TX-busy for the whole 17-copy burst (~1.5 s) kept the hub deaf:
+        // it never opened an RX window to hear the node's CommandAck, and the
+        // node's CAD saw a permanently busy channel and could not transmit the
+        // ACK either — so every cover op retransmitted to 4/4.  Clearing
+        // lora_tx_busy_ here lets the main loop's receive() read any incoming
+        // reply (in the main task, where the scheduler/NVS/publish are safe)
+        // during the gap.  No gap after the final copy — the caller clears
+        // lora_tx_busy_ and the loop returns to RX immediately.
+        if (cnt + 1 < this->txSlotsPerRound)
+        {
+          // Arm RX under the mutex, then drop the busy hint so the main loop can
+          // read the FIFO during the gap.  The mutex (not the flag) guarantees
+          // the next sendPacketBytes() cannot start until any in-progress read
+          // on the main loop has finished.
+          if (this->radio_mutex_ != nullptr)
+            xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
+          lora_receive(0);             // continuous RX for the duration of the gap
+          if (this->radio_mutex_ != nullptr)
+            xSemaphoreGive(this->radio_mutex_);
+
+          this->lora_tx_busy_ = false; // allow loop()->receive() to read the FIFO
+          vTaskDelayUntil(&xLastWakeTime, xFrequency);
+        }
       }
+
+      if (burstMsg != nullptr)
+        lora_client_operation_message__free_unpacked(burstMsg, NULL);
     }
 
     void LORATracker::sendPacketOnce(uint8_t *data, size_t len)
@@ -378,6 +481,11 @@ namespace esphome
     {
 
       // vTaskSuspend(xHandleLoraPolling);
+      // Hold the radio mutex for the whole transmit so a concurrent RX read on
+      // the main loop cannot interleave SPI transactions with the TX sequence.
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
+
       ESP_LOGI(TAG, "Sending packet of length %d", len);
       lora_idle();
 
@@ -423,10 +531,14 @@ namespace esphome
       {
         ESP_LOGI(TAG, "Packet sent, waiting for TX DONE interrupt");
       }
+
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreGive(this->radio_mutex_);
     }
 
     void LORATracker::register_client(LORAClient *client)
     {
+      client->set_parent(this);          // required: lets the client send via the radio
       client->app_id = ++this->app_id_;
       this->clients_.push_back(client);
     }

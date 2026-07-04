@@ -12,17 +12,20 @@ esphome:
 
 esp32:
   board: esp32dev # esp-wrover-kit
+  framework:
+    type: esp-idf
 
 wifi:
   ssid: "FRITZ!Box 7590 TD"
   password: "23461468396986328867"
   domain: .fritz.box
+  # domain: .local
 
 web_server:
   port: 80
 
 # Enable logging
-# logger:
+logger:
 #   level: DEBUG
 
 # Enable Home Assistant API

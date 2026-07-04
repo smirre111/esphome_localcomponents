@@ -73,43 +73,9 @@ namespace esphome
 
       if (call.get_stop())
       {
-        auto *packet = this->encoder_->get_stop_request();
-        auto status = false;
-        // esp_ble_gattc_write_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->char_handle_,
-        //                          packet->length, packet->data, ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-
-        LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-        // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
-        // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-
-        op_message.destaddress = this->parent_->short_address_;
-        op_message.destsubnet = this->parent_->subnet_address_;
-        op_message.senderaddress = 0xFF; // TODO: Use unique address
-
-        op_message.msgid = this->parent_->incrTxMessageId(); // Incrementing message ID
-
-        op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
-        
-        LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
-        covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
-        covop.operation = COV_OPERATION__CMD_STOP;
-        
-        // op_message.operation = COV_OPERATION__CMD_STOP;
-        op_message.operation = &covop;
-
-
-        uint8_t *txBuf;
-        unsigned len;
-        len = lora_client_operation_message__get_packed_size(&op_message);
-        txBuf = new uint8_t[len];
-        lora_client_operation_message__pack(&op_message, txBuf);
-
-        // this->parent_->sendPacketOnce(txBuf, len);
-        this->parent_->parent_->send(txBuf, len);
-        if (status)
-        {
-          ESP_LOGW(TAG, "[%s] Error writing stop command to device, error = %d", this->get_name().c_str(), status);
-        }
+        // F-4: tracked send — retransmits until the node returns a CommandAck.
+        this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                                            COV_OPERATION__CMD_STOP, 0.0f);
         this->publish_state(true);
       }
 
@@ -126,52 +92,24 @@ namespace esphome
             pos = 1 - pos;
 
           this->target_position_ = pos;
-          auto *packet = this->encoder_->get_set_position_request(100 - (uint8_t)(pos * 100));
 
-          LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-          // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
-          // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-          // op_message.senderaddress = 0x12345678; // TODO: Use unique address
-          op_message.destaddress = this->parent_->short_address_;
-          op_message.destsubnet = this->parent_->subnet_address_;
-          op_message.senderaddress = 0xFF; // TODO: Use unique address
-
-          op_message.msgid = this->parent_->incrTxMessageId(); // Incrementing message ID
-          op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
-          LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
+          // F-4: tracked send — the operation is retransmitted with a fresh
+          // msgid until acknowledged, then surfaced as failed if never acked.
           if (pos == COVER_OPEN)
           {
-            covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
-            covop.operation = COV_OPERATION__CMD_OPEN;
+            this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                                                COV_OPERATION__CMD_OPEN, 0.0f);
           }
           else if (pos == COVER_CLOSED)
           {
-            covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
-            covop.operation = COV_OPERATION__CMD_CLOSE;
+            this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                                                COV_OPERATION__CMD_CLOSE, 0.0f);
           }
           else
           {
-            covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
-            covop.position = pos;
+            this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, pos);
           }
-          op_message.operation = &covop;
 
-          auto status = false;
-          // esp_ble_gattc_write_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->char_handle_,
-          //                          packet->length, packet->data, ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-
-          uint8_t *txBuf;
-          unsigned len;
-          len = lora_client_operation_message__get_packed_size(&op_message);
-          txBuf = new uint8_t[len];
-          lora_client_operation_message__pack(&op_message, txBuf);
-          // this->parent_->sendPacketOnce(txBuf, len);
-          this->parent_->parent_->send(txBuf, len);
-
-          if (status)
-          {
-            ESP_LOGW(TAG, "[%s] Error writing set_position command to device, error = %d", this->get_name().c_str(), status);
-          }
           busy_ = true;
           const uint32_t now = millis();
           this->start_dir_time_ = now;
@@ -191,33 +129,34 @@ namespace esphome
         return;
       }
 
-      // if (rcv_message->senderaddress != this->parent_->short_address_ && this->parent_->registered_)
-      // {
-      //   ESP_LOGE(TAG, "Adress not for me");
-      //   return;
-      // }
-
-      // // The message ID is checked only after login
-      // if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER && this->parent_->registered_)
-      // {
-      //   if (rcv_message->msgid > this->parent_->rx_message_id_)
-      //   {
-      //     this->parent_->rx_message_id_ = rcv_message->msgid;
-      //   }
-      //   else
-      //   {
-      //     ESP_LOGE(TAG, "Duplicate or old message ID: %d, ignoring. My MsgID: %d", rcv_message->msgid, this->parent_->rx_message_id_);
-      //     return;
-      //   }
-      // }
-
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
+      if (!rcv_message->header)
       {
-        ESP_LOGI(TAG, "Registered with LORA server, sending cover config");
-
-        this->send_remote_config();
+        ESP_LOGE(TAG, "Response missing header, ignoring");
+        lora_client_response_message__free_unpacked(rcv_message, NULL);
         return;
       }
+
+      // REGISTER is handled before the address filter: the node may not yet have
+      // its assigned address in LittleFS (first-time or power-loss scenario).
+      // LORAListener already verified the MAC before dispatching, so this is safe.
+      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
+      {
+        ESP_LOGI(TAG, "Received REGISTER — sending CoverConfig");
+        this->send_remote_config();
+        lora_client_response_message__free_unpacked(rcv_message, NULL);
+        return;
+      }
+
+      if (rcv_message->header->senderaddress != this->parent_->short_address_ && this->parent_->registered_)
+      {
+        ESP_LOGE(TAG, "Adress not for me");
+        lora_client_response_message__free_unpacked(rcv_message, NULL);
+        return;
+      }
+
+      // NOTE: message-ID validation is done once by LORAListener::set_response
+      // before dispatching bytes here.  Do NOT re-check it — the counter has
+      // already been advanced and a second check would always reject the message.
 
       if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION)
       {
@@ -227,6 +166,7 @@ namespace esphome
         this->position = pos;
         this->publish_state(true);
       }
+      lora_client_response_message__free_unpacked(rcv_message, NULL);
     }
 
     // void LoraCoverComponent::send_remote_duration()
@@ -273,24 +213,23 @@ namespace esphome
       // this->parent_->frame_counter_.rx_message_id = 0;
 
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
-      // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-      // op_message.senderaddress = 0x12345678; // TODO: Use unique address
-
-      op_message.destaddress = this->parent_->short_address_;
-      op_message.destsubnet = this->parent_->subnet_address_;
-      op_message.senderaddress = 0xFF; // TODO: Use unique address
-
-      op_message.msgid = this->parent_->incrTxMessageId(); //++(this->parent_->frame_counter_.tx_message_id); Incrementing message ID
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress = this->parent_->short_address_;
+      header.destsubnet = this->parent_->subnet_address_;
+      header.senderaddress = 0xFF; // TODO: Use unique address
+      header.msgid = this->parent_->incrTxMessageId(); //++(this->parent_->frame_counter_.tx_message_id); Incrementing message ID
+      header.encrypted = 0;
+      op_message.header = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
 
       CoverConfig coverconfig = COVER_CONFIG__INIT;
       coverconfig.closetime = this->close_duration_;
       coverconfig.opentime = this->open_duration_;
+      coverconfig.blindheightmm = this->blind_height_mm_;
+      coverconfig.axlediametermm = this->axle_diameter_mm_;
+      coverconfig.blindthicknessmm = this->blind_thickness_mm_;
 
       op_message.coverconfig = &coverconfig;
-
-      auto status = false;
 
       uint8_t *txBuf;
       unsigned len;
@@ -301,10 +240,6 @@ namespace esphome
       // this->parent_->sendPacketOnce(txBuf, len);
       this->parent_->parent_->send(txBuf, len);
       delete[] txBuf;
-      if (status)
-      {
-        ESP_LOGW(TAG, "Error writing address command to device");
-      }
     }
 
   } // namespace LoraCov

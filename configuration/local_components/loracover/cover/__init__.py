@@ -18,6 +18,9 @@ CONF_INVERT_POSITION = "invert_position"
 CONF_OPEN_DURATION = "open_duration"
 CONF_CLOSE_DURATION = "close_duration"
 CONF_SLEEP_DURATION = "sleep_duration"
+CONF_BLIND_HEIGHT_MM = "blind_height_mm"
+CONF_AXLE_DIAMETER_MM = "axle_diameter_mm"
+CONF_BLIND_THICKNESS_MM = "blind_thickness_mm"
 # CONF_TIME_ID = "time_id"  # New config key for time component
 
 
@@ -45,6 +48,9 @@ LORA_COVER_SCHEMA = (
             cv.Optional(CONF_INVERT_POSITION, default=False): cv.boolean,
             cv.Optional(CONF_OPEN_DURATION, default=False): cv.int_range(0, 120),
             cv.Optional(CONF_CLOSE_DURATION, default=False): cv.int_range(0, 120),
+            cv.Optional(CONF_BLIND_HEIGHT_MM, default=2000.0): cv.float_range(min=1),
+            cv.Optional(CONF_AXLE_DIAMETER_MM, default=60.0): cv.float_range(min=1),
+            cv.Optional(CONF_BLIND_THICKNESS_MM, default=8.0): cv.float_range(min=0.1),
             # cv.Optional(CONF_SLEEP_DURATION, default=False): cv.int_range(0, 864000),
             # cv.Required(CONF_TIME_ID): cv.use_id(time_.RealTimeClock),  # Require time component ID
         }
@@ -61,6 +67,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_INVERT_POSITION, default=False): cv.boolean,
             cv.Optional(CONF_OPEN_DURATION, default=False): cv.int_range(0, 120),
             cv.Optional(CONF_CLOSE_DURATION, default=False): cv.int_range(0, 120),
+            cv.Optional(CONF_BLIND_HEIGHT_MM, default=2000.0): cv.float_range(min=1),
+            cv.Optional(CONF_AXLE_DIAMETER_MM, default=60.0): cv.float_range(min=1),
+            cv.Optional(CONF_BLIND_THICKNESS_MM, default=8.0): cv.float_range(min=0.1),
         }
     )
     .extend(lora_client.LORA_CLIENT_SCHEMA)
@@ -76,6 +85,9 @@ async def to_code(config):
     cg.add(var.set_invert_position(config[CONF_INVERT_POSITION]))
     cg.add(var.set_open_duration(config[CONF_OPEN_DURATION]))
     cg.add(var.set_close_duration(config[CONF_CLOSE_DURATION]))
-    
+    cg.add(var.set_blind_height_mm(config[CONF_BLIND_HEIGHT_MM]))
+    cg.add(var.set_axle_diameter_mm(config[CONF_AXLE_DIAMETER_MM]))
+    cg.add(var.set_blind_thickness_mm(config[CONF_BLIND_THICKNESS_MM]))
+
     await cg.register_component(var, config)
     await lora_client.register_node(var, config)

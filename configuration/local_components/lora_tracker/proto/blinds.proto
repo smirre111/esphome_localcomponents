@@ -1,93 +1,171 @@
 
 syntax = "proto3";
 
+// Authoritative copy — kept in sync with:
+//   c:\Development\PlatformIO\PlatformIO\BlindsESP\proto\blinds.proto
+// Regenerate stubs with:
+//   protoc-c --c_out=local_components/blindsproto \
+//             --proto_path=local_components/lora_tracker/proto \
+//             blinds.proto
 
-enum BlndOperation {
+
+enum CovOperation {
     CMD_OPEN = 0;
     CMD_CLOSE = 1;
     CMD_STOP = 2;
-    CMD_IDLE = 3;
 }
 
-enum SysOperation {
+
+message LoraCoverOperation {
+    oneof covop {
+        CovOperation operation = 1;
+        float position = 2;
+    }
+}
+
+enum ClientOperation {
     CMD_ENABLE_WIFI = 0;
     CMD_DISABLE_WIFI = 1;
     CMD_OTA = 2;
     CMD_STATUS = 3;
     CMD_SLEEP = 4;
-
 }
 
 
-enum BlndResponse {
-    RESP_STATUS = 0;
-    RESP_LOG = 1;
-    RESP_AVAILABLE = 2;
+message ClientConfig {
+    uint64 mac_addr = 1;
+    uint32 addr = 2;
+    uint32 subnt = 3;
+    bytes name = 4;
+    uint64 sleepDuration = 5;
 }
 
-enum BlndState
-{
-    BLINDS_MQTT_OPEN = 0;
-    BLINDS_MQTT_OPENING = 1;
-    BLINDS_MQTT_CLOSING = 2;
-    BLINDS_MQTT_CLOSED = 3;
-    BLINDS_MQTT_STOPPED = 4;
+message CoverConfig {
+    uint32 openTime = 1;
+    uint32 closeTime = 2;
+    float blindHeightMm = 3;
+    float axleDiameterMm = 4;
+    float blindThicknessMm = 5;
 }
 
-message BlndStatus {
-    BlndState state = 1;
-    float voltage = 2;
-    float position = 3;
+message LoginMsg {
+    uint32 nonce = 1;
 }
 
-message BlndLogging {
-    string logmsg = 1;
+// Exchange used to provision a per-peer base nonce for nonce derivation.
+message BaseNonceExchange {
+    // Optional key identifier for which key this base-nonce is associated
+    bytes key_id = 1;
+    // 4-byte base nonce unique per-peer
+    bytes base_nonce = 2;
 }
 
-message BlndAvailable {
+
+// Encryption algorithm identifiers for on-air encrypted payloads.
+enum EncryptionAlgo {
+    ENC_NONE = 0;
+    ENC_AES_GCM_128 = 1;        // AES-GCM 128-bit key (recommended)
+}
+
+// Result of processing a command on the node.
+enum AckStatus {
+    ACK_OK = 0;    // command accepted / executed
+    ACK_ERROR = 1; // command rejected or failed
+    ACK_BUSY = 2;  // node busy, command not applied
+}
+
+// Acknowledgement of a received command, sent node -> hub so the hub can
+// confirm delivery and stop retransmitting.  ack_msg_id echoes the
+// LoraHeader.msgId of the command being acknowledged.
+message CommandAck {
+    uint32 ack_msg_id = 1;
+    AckStatus status = 2;
+}
+
+// When a payload is encrypted, the structured protobuf messages are not
+// present; instead the envelope carries this EncryptedPayload which holds
+// algorithm metadata, IV, optional key identifier, auth tag and ciphertext.
+message EncryptedPayload {
+    EncryptionAlgo algo = 1;
+    // Optional key identifier (e.g. key index or key fingerprint)
+    bytes key_id = 2;
+    // AEAD IV / nonce
+    bytes iv = 3;
+    // Optional additional authenticated data (if used)
+    bytes aad = 4;
+    // Authentication tag (for AEAD algorithms)
+    bytes tag = 5;
+    // Ciphertext containing the packed inner protobuf message
+    bytes ciphertext = 6;
+}
+
+
+message LoraHeader {
+    uint32 destAddress = 1;
+    uint32 destSubnet = 2;
+    uint32 senderAddress = 3;
+    uint32 msgId = 4;
+    uint32 encrypted = 5;
+    // Burst scheduling (hub -> node): each copy of a TX burst carries its own
+    // 0-based index and the total count.  The node uses these to compute when
+    // the burst ends and defers its response until the channel is clear.
+    // burstCount == 0 means "not part of a burst" (single-shot) -> no deferral.
+    uint32 burstIndex = 6;
+    uint32 burstCount = 7;
+}
+
+message LoraClientOperationMessage {
+    LoraHeader header = 1;
+    oneof cmd {
+        LoraCoverOperation operation = 10;
+        ClientOperation sysop = 11;
+        ClientConfig clientconfig = 12;
+        CoverConfig coverconfig = 13;
+        LoginMsg login = 14;
+        BaseNonceExchange basenonce = 15;
+        // If `header.encrypted` is set, the payload will be in this field
+        // and contain an AEAD-encrypted blob (see EncryptedPayload).
+        EncryptedPayload encrypted = 20;
+    }
+}
+
+message ClientRegister {
+    uint64 mac_addr = 1;
+    // Set by the node when it needs the hub to (re)push its configuration —
+    // i.e. it is not yet provisioned.  A provisioned node waking from deep
+    // sleep leaves this false so the hub skips the ClientConfig/CoverConfig
+    // bursts and goes straight to the LoginMsg handshake (saves awake radio
+    // time / battery).  The hub also force-pushes once per hub boot regardless,
+    // so config changes flashed into the hub are always delivered.
+    bool needs_config = 2;
+}
+
+message ClientAvailable {
     bool available = 1;
 }
 
-message AddressUpdate {
-    uint32 addr = 1;
-    uint32 subnt = 2;
+message ClientBattery {
+    float voltage = 1;
 }
 
-message TimeUpdate {
-    uint32 openTime = 1;
-    uint32 closeTime = 2;
+message CoverPosition {
+    float position = 1;
+    float voltage = 2;
+    float current = 3;
 }
 
-message SleepUpdate {
-    uint64 sleepDuration = 1;
-}
 
-message BlndOperationMessage {
-    uint32 destAddress = 1;
-    uint32 destSubnet = 2;
-    uint32 senderAddress = 3;
-    uint32 msgId = 4;
-    oneof cmd {
-        BlndOperation operation = 10;
-        SysOperation sysop = 11;
-        AddressUpdate addr = 12;
-        TimeUpdate time = 13;
-        SleepUpdate sleep = 14;
-    }
-}
-
-message BlndResponseMessage {
-    uint32 destAddress = 1;
-    uint32 destSubnet = 2;
-    uint32 senderAddress = 3;
-    uint32 msgId = 4;
-    BlndResponse response = 5;
+message LoraClientResponseMessage {
+    LoraHeader header = 1;
     oneof proto {
-        BlndStatus state = 10;
-        BlndLogging logging = 11;
-        BlndAvailable avail= 12;
+        ClientAvailable avail = 10;
+        ClientRegister register = 11;
+        ClientBattery state = 12;
+        CoverPosition position = 13;
+        LoginMsg login = 14;
+        CommandAck ack = 15;
+        // Encrypted response payload (AEAD blob). When present, structured
+        // fields above must be absent and `header.encrypted` should be set.
+        EncryptedPayload encrypted = 20;
     }
-
-
 }
-

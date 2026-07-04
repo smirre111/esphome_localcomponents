@@ -107,7 +107,16 @@ namespace esphome
       void register_listener(LORAListener *listener);
       void register_client(LORAClient *client);
 
+      // F-11: link-quality of the most recently received packet.  Updated in
+      // checkReception() before the packet is dispatched, so a client that
+      // accepts the packet can read the value that belongs to it.
+      int get_last_rssi() const { return this->last_packet_rssi_; }
+      float get_last_snr() const { return this->last_packet_snr_; }
+
     protected:
+      int   last_packet_rssi_{0};
+      float last_packet_snr_{0.0f};
+
       esp_err_t init_memory_pool(void);
       rx_buffer_t *get_free_buffer(TickType_t timeout);
       esp_err_t return_buffer_to_pool(rx_buffer_t *buffer);
@@ -120,7 +129,12 @@ namespace esphome
       // Group 4: 1-byte types (enums, uint8_t, bool)
       uint8_t app_id_{0};
 
-      // SemaphoreHandle_t xLoraSemaphore;
+      // Serialises all SX1278 SPI access so a TX copy and an RX read can never
+      // overlap on the shared bus.  lora_tx_busy_ is kept only as a lightweight
+      // hint that lets the main loop skip receive() while a copy is actively
+      // transmitting (avoiding needless blocking on the mutex); the mutex is the
+      // actual mutual-exclusion guarantee between sendTask and the main loop.
+      SemaphoreHandle_t radio_mutex_{nullptr};
       bool lora_tx_busy_{false};
       uint8_t buf_[255]; // Maximum Payload size of SX1276/77/78/79 is 255
 
@@ -133,6 +147,12 @@ namespace esphome
       int rxSlotsPerRound{3};
       int txSlotsPerRound{17};
       int roundDurationMs{1500};
+      // Quiet window held in RX after each burst so the addressed node can send
+      // its deferred reply (ACK/position) without being stepped on by the next
+      // burst.  Sized for the node's estimate error + pre-CAD backoff + CAD +
+      // ~60-byte airtime (the node can take a few hundred ms after burst-end to
+      // actually get the reply on air).
+      int responseWindowMs{400};
       int slotDurationMs{roundDurationMs / (rxSlotsPerRound * txSlotsPerRound)};
       int rxIntervalMs{roundDurationMs / rxSlotsPerRound};
       int txIntervalMs{roundDurationMs / txSlotsPerRound};

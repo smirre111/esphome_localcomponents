@@ -19,6 +19,10 @@ typedef struct LoraCoverOperation LoraCoverOperation;
 typedef struct ClientConfig ClientConfig;
 typedef struct CoverConfig CoverConfig;
 typedef struct LoginMsg LoginMsg;
+typedef struct BaseNonceExchange BaseNonceExchange;
+typedef struct CommandAck CommandAck;
+typedef struct EncryptedPayload EncryptedPayload;
+typedef struct LoraHeader LoraHeader;
 typedef struct LoraClientOperationMessage LoraClientOperationMessage;
 typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
@@ -43,6 +47,35 @@ typedef enum _ClientOperation {
   CLIENT_OPERATION__CMD_SLEEP = 4
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(CLIENT_OPERATION)
 } ClientOperation;
+/*
+ * Encryption algorithm identifiers for on-air encrypted payloads.
+ */
+typedef enum _EncryptionAlgo {
+  ENCRYPTION_ALGO__ENC_NONE = 0,
+  /*
+   * AES-GCM 128-bit key (recommended)
+   */
+  ENCRYPTION_ALGO__ENC_AES_GCM_128 = 1
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(ENCRYPTION_ALGO)
+} EncryptionAlgo;
+/*
+ * Result of processing a command on the node.
+ */
+typedef enum _AckStatus {
+  /*
+   * command accepted / executed
+   */
+  ACK_STATUS__ACK_OK = 0,
+  /*
+   * command rejected or failed
+   */
+  ACK_STATUS__ACK_ERROR = 1,
+  /*
+   * node busy, command not applied
+   */
+  ACK_STATUS__ACK_BUSY = 2
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(ACK_STATUS)
+} AckStatus;
 
 /* --- messages --- */
 
@@ -86,20 +119,116 @@ struct  CoverConfig
   ProtobufCMessage base;
   uint32_t opentime;
   uint32_t closetime;
+  float blindheightmm;
+  float axlediametermm;
+  float blindthicknessmm;
 };
 #define COVER_CONFIG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&cover_config__descriptor) \
-    , 0, 0 }
+    , 0, 0, 0, 0, 0 }
 
 
 struct  LoginMsg
 {
   ProtobufCMessage base;
-  uint32_t prand;
+  uint32_t nonce;
 };
 #define LOGIN_MSG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&login_msg__descriptor) \
     , 0 }
+
+
+/*
+ * Exchange used to provision a per-peer base nonce for nonce derivation.
+ */
+struct  BaseNonceExchange
+{
+  ProtobufCMessage base;
+  /*
+   * Optional key identifier for which key this base-nonce is associated
+   */
+  ProtobufCBinaryData key_id;
+  /*
+   * 4-byte base nonce unique per-peer
+   */
+  ProtobufCBinaryData base_nonce;
+};
+#define BASE_NONCE_EXCHANGE__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&base_nonce_exchange__descriptor) \
+    , {0,NULL}, {0,NULL} }
+
+
+/*
+ * Acknowledgement of a received command, sent node -> hub so the hub can
+ * confirm delivery and stop retransmitting.  ack_msg_id echoes the
+ * LoraHeader.msgId of the command being acknowledged.
+ */
+struct  CommandAck
+{
+  ProtobufCMessage base;
+  uint32_t ack_msg_id;
+  AckStatus status;
+};
+#define COMMAND_ACK__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&command_ack__descriptor) \
+    , 0, ACK_STATUS__ACK_OK }
+
+
+/*
+ * When a payload is encrypted, the structured protobuf messages are not
+ * present; instead the envelope carries this EncryptedPayload which holds
+ * algorithm metadata, IV, optional key identifier, auth tag and ciphertext.
+ */
+struct  EncryptedPayload
+{
+  ProtobufCMessage base;
+  EncryptionAlgo algo;
+  /*
+   * Optional key identifier (e.g. key index or key fingerprint)
+   */
+  ProtobufCBinaryData key_id;
+  /*
+   * AEAD IV / nonce
+   */
+  ProtobufCBinaryData iv;
+  /*
+   * Optional additional authenticated data (if used)
+   */
+  ProtobufCBinaryData aad;
+  /*
+   * Authentication tag (for AEAD algorithms)
+   */
+  ProtobufCBinaryData tag;
+  /*
+   * Ciphertext containing the packed inner protobuf message
+   */
+  ProtobufCBinaryData ciphertext;
+};
+#define ENCRYPTED_PAYLOAD__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&encrypted_payload__descriptor) \
+    , ENCRYPTION_ALGO__ENC_NONE, {0,NULL}, {0,NULL}, {0,NULL}, {0,NULL}, {0,NULL} }
+
+
+struct  LoraHeader
+{
+  ProtobufCMessage base;
+  uint32_t destaddress;
+  uint32_t destsubnet;
+  uint32_t senderaddress;
+  uint32_t msgid;
+  uint32_t encrypted;
+  /*
+   * Burst scheduling (hub -> node): each copy of a TX burst carries its own
+   * 0-based index and the total count.  The node uses these to compute when
+   * the burst ends and defers its response until the channel is clear.
+   * burstCount == 0 means "not part of a burst" (single-shot) -> no deferral.
+   */
+  uint32_t burstindex;
+  uint32_t burstcount;
+};
+#define LORA_HEADER__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&lora_header__descriptor) \
+    , 0, 0, 0, 0, 0, 0, 0 }
 
 
 typedef enum {
@@ -108,21 +237,26 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP = 11,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG = 12,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG = 13,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN = 14
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN = 14,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE = 15,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 20
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
 
 struct  LoraClientOperationMessage
 {
   ProtobufCMessage base;
-  uint32_t destaddress;
-  uint32_t destsubnet;
-  uint32_t senderaddress;
-  uint32_t msgid;
+  LoraHeader *header;
   LoraClientOperationMessage__CmdCase cmd_case;
   union {
+    BaseNonceExchange *basenonce;
     ClientConfig *clientconfig;
     CoverConfig *coverconfig;
+    /*
+     * If `header.encrypted` is set, the payload will be in this field
+     * and contain an AEAD-encrypted blob (see EncryptedPayload).
+     */
+    EncryptedPayload *encrypted;
     LoginMsg *login;
     LoraCoverOperation *operation;
     ClientOperation sysop;
@@ -130,17 +264,26 @@ struct  LoraClientOperationMessage
 };
 #define LORA_CLIENT_OPERATION_MESSAGE__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_client_operation_message__descriptor) \
-    , 0, 0, 0, 0, LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET, {0} }
+    , NULL, LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET, {0} }
 
 
 struct  ClientRegister
 {
   ProtobufCMessage base;
   uint64_t mac_addr;
+  /*
+   * Set by the node when it needs the hub to (re)push its configuration —
+   * i.e. it is not yet provisioned.  A provisioned node waking from deep
+   * sleep leaves this false so the hub skips the ClientConfig/CoverConfig
+   * bursts and goes straight to the LoginMsg handshake (saves awake radio
+   * time / battery).  The hub also force-pushes once per hub boot regardless,
+   * so config changes flashed into the hub are always delivered.
+   */
+  protobuf_c_boolean needs_config;
 };
 #define CLIENT_REGISTER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&client_register__descriptor) \
-    , 0 }
+    , 0, 0 }
 
 
 struct  ClientAvailable
@@ -181,20 +324,25 @@ typedef enum {
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER = 11,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE = 12,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION = 13,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN = 14
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN = 14,
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK = 15,
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED = 20
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_RESPONSE_MESSAGE__PROTO__CASE)
 } LoraClientResponseMessage__ProtoCase;
 
 struct  LoraClientResponseMessage
 {
   ProtobufCMessage base;
-  uint32_t destaddress;
-  uint32_t destsubnet;
-  uint32_t senderaddress;
-  uint32_t msgid;
+  LoraHeader *header;
   LoraClientResponseMessage__ProtoCase proto_case;
   union {
+    CommandAck *ack;
     ClientAvailable *avail;
+    /*
+     * Encrypted response payload (AEAD blob). When present, structured
+     * fields above must be absent and `header.encrypted` should be set.
+     */
+    EncryptedPayload *encrypted;
     LoginMsg *login;
     CoverPosition *position;
     ClientRegister *register_;
@@ -203,7 +351,7 @@ struct  LoraClientResponseMessage
 };
 #define LORA_CLIENT_RESPONSE_MESSAGE__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_client_response_message__descriptor) \
-    , 0, 0, 0, 0, LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET, {0} }
+    , NULL, LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET, {0} }
 
 
 /* LoraCoverOperation methods */
@@ -281,6 +429,82 @@ LoginMsg *
                       const uint8_t       *data);
 void   login_msg__free_unpacked
                      (LoginMsg *message,
+                      ProtobufCAllocator *allocator);
+/* BaseNonceExchange methods */
+void   base_nonce_exchange__init
+                     (BaseNonceExchange         *message);
+size_t base_nonce_exchange__get_packed_size
+                     (const BaseNonceExchange   *message);
+size_t base_nonce_exchange__pack
+                     (const BaseNonceExchange   *message,
+                      uint8_t             *out);
+size_t base_nonce_exchange__pack_to_buffer
+                     (const BaseNonceExchange   *message,
+                      ProtobufCBuffer     *buffer);
+BaseNonceExchange *
+       base_nonce_exchange__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   base_nonce_exchange__free_unpacked
+                     (BaseNonceExchange *message,
+                      ProtobufCAllocator *allocator);
+/* CommandAck methods */
+void   command_ack__init
+                     (CommandAck         *message);
+size_t command_ack__get_packed_size
+                     (const CommandAck   *message);
+size_t command_ack__pack
+                     (const CommandAck   *message,
+                      uint8_t             *out);
+size_t command_ack__pack_to_buffer
+                     (const CommandAck   *message,
+                      ProtobufCBuffer     *buffer);
+CommandAck *
+       command_ack__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   command_ack__free_unpacked
+                     (CommandAck *message,
+                      ProtobufCAllocator *allocator);
+/* EncryptedPayload methods */
+void   encrypted_payload__init
+                     (EncryptedPayload         *message);
+size_t encrypted_payload__get_packed_size
+                     (const EncryptedPayload   *message);
+size_t encrypted_payload__pack
+                     (const EncryptedPayload   *message,
+                      uint8_t             *out);
+size_t encrypted_payload__pack_to_buffer
+                     (const EncryptedPayload   *message,
+                      ProtobufCBuffer     *buffer);
+EncryptedPayload *
+       encrypted_payload__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   encrypted_payload__free_unpacked
+                     (EncryptedPayload *message,
+                      ProtobufCAllocator *allocator);
+/* LoraHeader methods */
+void   lora_header__init
+                     (LoraHeader         *message);
+size_t lora_header__get_packed_size
+                     (const LoraHeader   *message);
+size_t lora_header__pack
+                     (const LoraHeader   *message,
+                      uint8_t             *out);
+size_t lora_header__pack_to_buffer
+                     (const LoraHeader   *message,
+                      ProtobufCBuffer     *buffer);
+LoraHeader *
+       lora_header__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   lora_header__free_unpacked
+                     (LoraHeader *message,
                       ProtobufCAllocator *allocator);
 /* LoraClientOperationMessage methods */
 void   lora_client_operation_message__init
@@ -410,6 +634,18 @@ typedef void (*CoverConfig_Closure)
 typedef void (*LoginMsg_Closure)
                  (const LoginMsg *message,
                   void *closure_data);
+typedef void (*BaseNonceExchange_Closure)
+                 (const BaseNonceExchange *message,
+                  void *closure_data);
+typedef void (*CommandAck_Closure)
+                 (const CommandAck *message,
+                  void *closure_data);
+typedef void (*EncryptedPayload_Closure)
+                 (const EncryptedPayload *message,
+                  void *closure_data);
+typedef void (*LoraHeader_Closure)
+                 (const LoraHeader *message,
+                  void *closure_data);
 typedef void (*LoraClientOperationMessage_Closure)
                  (const LoraClientOperationMessage *message,
                   void *closure_data);
@@ -436,10 +672,16 @@ typedef void (*LoraClientResponseMessage_Closure)
 
 extern const ProtobufCEnumDescriptor    cov_operation__descriptor;
 extern const ProtobufCEnumDescriptor    client_operation__descriptor;
+extern const ProtobufCEnumDescriptor    encryption_algo__descriptor;
+extern const ProtobufCEnumDescriptor    ack_status__descriptor;
 extern const ProtobufCMessageDescriptor lora_cover_operation__descriptor;
 extern const ProtobufCMessageDescriptor client_config__descriptor;
 extern const ProtobufCMessageDescriptor cover_config__descriptor;
 extern const ProtobufCMessageDescriptor login_msg__descriptor;
+extern const ProtobufCMessageDescriptor base_nonce_exchange__descriptor;
+extern const ProtobufCMessageDescriptor command_ack__descriptor;
+extern const ProtobufCMessageDescriptor encrypted_payload__descriptor;
+extern const ProtobufCMessageDescriptor lora_header__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_operation_message__descriptor;
 extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;

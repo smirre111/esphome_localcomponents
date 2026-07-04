@@ -187,6 +187,186 @@ void   login_msg__free_unpacked
   assert(message->base.descriptor == &login_msg__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   base_nonce_exchange__init
+                     (BaseNonceExchange         *message)
+{
+  static const BaseNonceExchange init_value = BASE_NONCE_EXCHANGE__INIT;
+  *message = init_value;
+}
+size_t base_nonce_exchange__get_packed_size
+                     (const BaseNonceExchange *message)
+{
+  assert(message->base.descriptor == &base_nonce_exchange__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t base_nonce_exchange__pack
+                     (const BaseNonceExchange *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &base_nonce_exchange__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t base_nonce_exchange__pack_to_buffer
+                     (const BaseNonceExchange *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &base_nonce_exchange__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+BaseNonceExchange *
+       base_nonce_exchange__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (BaseNonceExchange *)
+     protobuf_c_message_unpack (&base_nonce_exchange__descriptor,
+                                allocator, len, data);
+}
+void   base_nonce_exchange__free_unpacked
+                     (BaseNonceExchange *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &base_nonce_exchange__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   command_ack__init
+                     (CommandAck         *message)
+{
+  static const CommandAck init_value = COMMAND_ACK__INIT;
+  *message = init_value;
+}
+size_t command_ack__get_packed_size
+                     (const CommandAck *message)
+{
+  assert(message->base.descriptor == &command_ack__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t command_ack__pack
+                     (const CommandAck *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &command_ack__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t command_ack__pack_to_buffer
+                     (const CommandAck *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &command_ack__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+CommandAck *
+       command_ack__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (CommandAck *)
+     protobuf_c_message_unpack (&command_ack__descriptor,
+                                allocator, len, data);
+}
+void   command_ack__free_unpacked
+                     (CommandAck *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &command_ack__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   encrypted_payload__init
+                     (EncryptedPayload         *message)
+{
+  static const EncryptedPayload init_value = ENCRYPTED_PAYLOAD__INIT;
+  *message = init_value;
+}
+size_t encrypted_payload__get_packed_size
+                     (const EncryptedPayload *message)
+{
+  assert(message->base.descriptor == &encrypted_payload__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t encrypted_payload__pack
+                     (const EncryptedPayload *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &encrypted_payload__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t encrypted_payload__pack_to_buffer
+                     (const EncryptedPayload *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &encrypted_payload__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+EncryptedPayload *
+       encrypted_payload__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (EncryptedPayload *)
+     protobuf_c_message_unpack (&encrypted_payload__descriptor,
+                                allocator, len, data);
+}
+void   encrypted_payload__free_unpacked
+                     (EncryptedPayload *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &encrypted_payload__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   lora_header__init
+                     (LoraHeader         *message)
+{
+  static const LoraHeader init_value = LORA_HEADER__INIT;
+  *message = init_value;
+}
+size_t lora_header__get_packed_size
+                     (const LoraHeader *message)
+{
+  assert(message->base.descriptor == &lora_header__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t lora_header__pack
+                     (const LoraHeader *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &lora_header__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t lora_header__pack_to_buffer
+                     (const LoraHeader *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &lora_header__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+LoraHeader *
+       lora_header__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (LoraHeader *)
+     protobuf_c_message_unpack (&lora_header__descriptor,
+                                allocator, len, data);
+}
+void   lora_header__free_unpacked
+                     (LoraHeader *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &lora_header__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   lora_client_operation_message__init
                      (LoraClientOperationMessage         *message)
 {
@@ -598,7 +778,7 @@ const ProtobufCMessageDescriptor client_config__descriptor =
   (ProtobufCMessageInit) client_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor cover_config__field_descriptors[2] =
+static const ProtobufCFieldDescriptor cover_config__field_descriptors[5] =
 {
   {
     "openTime",
@@ -624,15 +804,54 @@ static const ProtobufCFieldDescriptor cover_config__field_descriptors[2] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "blindHeightMm",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverConfig, blindheightmm),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "axleDiameterMm",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverConfig, axlediametermm),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "blindThicknessMm",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverConfig, blindthicknessmm),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cover_config__field_indices_by_name[] = {
+  3,   /* field[3] = axleDiameterMm */
+  2,   /* field[2] = blindHeightMm */
+  4,   /* field[4] = blindThicknessMm */
   1,   /* field[1] = closeTime */
   0,   /* field[0] = openTime */
 };
 static const ProtobufCIntRange cover_config__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 2 }
+  { 0, 5 }
 };
 const ProtobufCMessageDescriptor cover_config__descriptor =
 {
@@ -642,7 +861,7 @@ const ProtobufCMessageDescriptor cover_config__descriptor =
   "CoverConfig",
   "",
   sizeof(CoverConfig),
-  2,
+  5,
   cover_config__field_descriptors,
   cover_config__field_indices_by_name,
   1,  cover_config__number_ranges,
@@ -652,12 +871,12 @@ const ProtobufCMessageDescriptor cover_config__descriptor =
 static const ProtobufCFieldDescriptor login_msg__field_descriptors[1] =
 {
   {
-    "prand",
+    "nonce",
     1,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT32,
     0,   /* quantifier_offset */
-    offsetof(LoginMsg, prand),
+    offsetof(LoginMsg, nonce),
     NULL,
     NULL,
     0,             /* flags */
@@ -665,7 +884,7 @@ static const ProtobufCFieldDescriptor login_msg__field_descriptors[1] =
   },
 };
 static const unsigned login_msg__field_indices_by_name[] = {
-  0,   /* field[0] = prand */
+  0,   /* field[0] = nonce */
 };
 static const ProtobufCIntRange login_msg__number_ranges[1 + 1] =
 {
@@ -687,7 +906,212 @@ const ProtobufCMessageDescriptor login_msg__descriptor =
   (ProtobufCMessageInit) login_msg__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[9] =
+static const ProtobufCFieldDescriptor base_nonce_exchange__field_descriptors[2] =
+{
+  {
+    "key_id",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(BaseNonceExchange, key_id),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "base_nonce",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(BaseNonceExchange, base_nonce),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned base_nonce_exchange__field_indices_by_name[] = {
+  1,   /* field[1] = base_nonce */
+  0,   /* field[0] = key_id */
+};
+static const ProtobufCIntRange base_nonce_exchange__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 2 }
+};
+const ProtobufCMessageDescriptor base_nonce_exchange__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "BaseNonceExchange",
+  "BaseNonceExchange",
+  "BaseNonceExchange",
+  "",
+  sizeof(BaseNonceExchange),
+  2,
+  base_nonce_exchange__field_descriptors,
+  base_nonce_exchange__field_indices_by_name,
+  1,  base_nonce_exchange__number_ranges,
+  (ProtobufCMessageInit) base_nonce_exchange__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor command_ack__field_descriptors[2] =
+{
+  {
+    "ack_msg_id",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(CommandAck, ack_msg_id),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "status",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(CommandAck, status),
+    &ack_status__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned command_ack__field_indices_by_name[] = {
+  0,   /* field[0] = ack_msg_id */
+  1,   /* field[1] = status */
+};
+static const ProtobufCIntRange command_ack__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 2 }
+};
+const ProtobufCMessageDescriptor command_ack__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "CommandAck",
+  "CommandAck",
+  "CommandAck",
+  "",
+  sizeof(CommandAck),
+  2,
+  command_ack__field_descriptors,
+  command_ack__field_indices_by_name,
+  1,  command_ack__number_ranges,
+  (ProtobufCMessageInit) command_ack__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor encrypted_payload__field_descriptors[6] =
+{
+  {
+    "algo",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(EncryptedPayload, algo),
+    &encryption_algo__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "key_id",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(EncryptedPayload, key_id),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "iv",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(EncryptedPayload, iv),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "aad",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(EncryptedPayload, aad),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "tag",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(EncryptedPayload, tag),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "ciphertext",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(EncryptedPayload, ciphertext),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned encrypted_payload__field_indices_by_name[] = {
+  3,   /* field[3] = aad */
+  0,   /* field[0] = algo */
+  5,   /* field[5] = ciphertext */
+  2,   /* field[2] = iv */
+  1,   /* field[1] = key_id */
+  4,   /* field[4] = tag */
+};
+static const ProtobufCIntRange encrypted_payload__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 6 }
+};
+const ProtobufCMessageDescriptor encrypted_payload__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "EncryptedPayload",
+  "EncryptedPayload",
+  "EncryptedPayload",
+  "",
+  sizeof(EncryptedPayload),
+  6,
+  encrypted_payload__field_descriptors,
+  encrypted_payload__field_indices_by_name,
+  1,  encrypted_payload__number_ranges,
+  (ProtobufCMessageInit) encrypted_payload__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor lora_header__field_descriptors[7] =
 {
   {
     "destAddress",
@@ -695,7 +1119,7 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT32,
     0,   /* quantifier_offset */
-    offsetof(LoraClientOperationMessage, destaddress),
+    offsetof(LoraHeader, destaddress),
     NULL,
     NULL,
     0,             /* flags */
@@ -707,7 +1131,7 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT32,
     0,   /* quantifier_offset */
-    offsetof(LoraClientOperationMessage, destsubnet),
+    offsetof(LoraHeader, destsubnet),
     NULL,
     NULL,
     0,             /* flags */
@@ -719,7 +1143,7 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT32,
     0,   /* quantifier_offset */
-    offsetof(LoraClientOperationMessage, senderaddress),
+    offsetof(LoraHeader, senderaddress),
     NULL,
     NULL,
     0,             /* flags */
@@ -731,8 +1155,88 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT32,
     0,   /* quantifier_offset */
-    offsetof(LoraClientOperationMessage, msgid),
+    offsetof(LoraHeader, msgid),
     NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "encrypted",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, encrypted),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "burstIndex",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, burstindex),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "burstCount",
+    7,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, burstcount),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned lora_header__field_indices_by_name[] = {
+  6,   /* field[6] = burstCount */
+  5,   /* field[5] = burstIndex */
+  0,   /* field[0] = destAddress */
+  1,   /* field[1] = destSubnet */
+  4,   /* field[4] = encrypted */
+  3,   /* field[3] = msgId */
+  2,   /* field[2] = senderAddress */
+};
+static const ProtobufCIntRange lora_header__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 7 }
+};
+const ProtobufCMessageDescriptor lora_header__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "LoraHeader",
+  "LoraHeader",
+  "LoraHeader",
+  "",
+  sizeof(LoraHeader),
+  7,
+  lora_header__field_descriptors,
+  lora_header__field_indices_by_name,
+  1,  lora_header__number_ranges,
+  (ProtobufCMessageInit) lora_header__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[8] =
+{
+  {
+    "header",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    0,   /* quantifier_offset */
+    offsetof(LoraClientOperationMessage, header),
+    &lora_header__descriptor,
     NULL,
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
@@ -797,23 +1301,47 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "basenonce",
+    15,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, basenonce),
+    &base_nonce_exchange__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "encrypted",
+    20,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, encrypted),
+    &encrypted_payload__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
-  6,   /* field[6] = clientconfig */
-  7,   /* field[7] = coverconfig */
-  0,   /* field[0] = destAddress */
-  1,   /* field[1] = destSubnet */
-  8,   /* field[8] = login */
-  3,   /* field[3] = msgId */
-  4,   /* field[4] = operation */
-  2,   /* field[2] = senderAddress */
-  5,   /* field[5] = sysop */
+  6,   /* field[6] = basenonce */
+  3,   /* field[3] = clientconfig */
+  4,   /* field[4] = coverconfig */
+  7,   /* field[7] = encrypted */
+  0,   /* field[0] = header */
+  5,   /* field[5] = login */
+  1,   /* field[1] = operation */
+  2,   /* field[2] = sysop */
 };
-static const ProtobufCIntRange lora_client_operation_message__number_ranges[2 + 1] =
+static const ProtobufCIntRange lora_client_operation_message__number_ranges[3 + 1] =
 {
   { 1, 0 },
-  { 10, 4 },
-  { 0, 9 }
+  { 10, 1 },
+  { 20, 7 },
+  { 0, 8 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -823,14 +1351,14 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  9,
+  8,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
-  2,  lora_client_operation_message__number_ranges,
+  3,  lora_client_operation_message__number_ranges,
   (ProtobufCMessageInit) lora_client_operation_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor client_register__field_descriptors[1] =
+static const ProtobufCFieldDescriptor client_register__field_descriptors[2] =
 {
   {
     "mac_addr",
@@ -844,14 +1372,27 @@ static const ProtobufCFieldDescriptor client_register__field_descriptors[1] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "needs_config",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(ClientRegister, needs_config),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned client_register__field_indices_by_name[] = {
   0,   /* field[0] = mac_addr */
+  1,   /* field[1] = needs_config */
 };
 static const ProtobufCIntRange client_register__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 1 }
+  { 0, 2 }
 };
 const ProtobufCMessageDescriptor client_register__descriptor =
 {
@@ -861,7 +1402,7 @@ const ProtobufCMessageDescriptor client_register__descriptor =
   "ClientRegister",
   "",
   sizeof(ClientRegister),
-  1,
+  2,
   client_register__field_descriptors,
   client_register__field_indices_by_name,
   1,  client_register__number_ranges,
@@ -1008,52 +1549,16 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   (ProtobufCMessageInit) cover_position__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[9] =
+static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[8] =
 {
   {
-    "destAddress",
+    "header",
     1,
     PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
+    PROTOBUF_C_TYPE_MESSAGE,
     0,   /* quantifier_offset */
-    offsetof(LoraClientResponseMessage, destaddress),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "destSubnet",
-    2,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraClientResponseMessage, destsubnet),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "senderAddress",
-    3,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraClientResponseMessage, senderaddress),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "msgId",
-    4,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraClientResponseMessage, msgid),
-    NULL,
+    offsetof(LoraClientResponseMessage, header),
+    &lora_header__descriptor,
     NULL,
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
@@ -1118,23 +1623,47 @@ static const ProtobufCFieldDescriptor lora_client_response_message__field_descri
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "ack",
+    15,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientResponseMessage, proto_case),
+    offsetof(LoraClientResponseMessage, ack),
+    &command_ack__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "encrypted",
+    20,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientResponseMessage, proto_case),
+    offsetof(LoraClientResponseMessage, encrypted),
+    &encrypted_payload__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_response_message__field_indices_by_name[] = {
-  4,   /* field[4] = avail */
-  0,   /* field[0] = destAddress */
-  1,   /* field[1] = destSubnet */
-  8,   /* field[8] = login */
-  3,   /* field[3] = msgId */
-  7,   /* field[7] = position */
-  5,   /* field[5] = register */
-  2,   /* field[2] = senderAddress */
-  6,   /* field[6] = state */
+  6,   /* field[6] = ack */
+  1,   /* field[1] = avail */
+  7,   /* field[7] = encrypted */
+  0,   /* field[0] = header */
+  5,   /* field[5] = login */
+  4,   /* field[4] = position */
+  2,   /* field[2] = register */
+  3,   /* field[3] = state */
 };
-static const ProtobufCIntRange lora_client_response_message__number_ranges[2 + 1] =
+static const ProtobufCIntRange lora_client_response_message__number_ranges[3 + 1] =
 {
   { 1, 0 },
-  { 10, 4 },
-  { 0, 9 }
+  { 10, 1 },
+  { 20, 7 },
+  { 0, 8 }
 };
 const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
 {
@@ -1144,10 +1673,10 @@ const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
   "LoraClientResponseMessage",
   "",
   sizeof(LoraClientResponseMessage),
-  9,
+  8,
   lora_client_response_message__field_descriptors,
   lora_client_response_message__field_indices_by_name,
-  2,  lora_client_response_message__number_ranges,
+  3,  lora_client_response_message__number_ranges,
   (ProtobufCMessageInit) lora_client_response_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
@@ -1213,5 +1742,63 @@ const ProtobufCEnumDescriptor client_operation__descriptor =
   client_operation__enum_values_by_name,
   1,
   client_operation__value_ranges,
+  NULL,NULL,NULL,NULL   /* reserved[1234] */
+};
+static const ProtobufCEnumValue encryption_algo__enum_values_by_number[2] =
+{
+  { "ENC_NONE", "ENCRYPTION_ALGO__ENC_NONE", 0 },
+  { "ENC_AES_GCM_128", "ENCRYPTION_ALGO__ENC_AES_GCM_128", 1 },
+};
+static const ProtobufCIntRange encryption_algo__value_ranges[] = {
+{0, 0},{0, 2}
+};
+static const ProtobufCEnumValueIndex encryption_algo__enum_values_by_name[2] =
+{
+  { "ENC_AES_GCM_128", 1 },
+  { "ENC_NONE", 0 },
+};
+const ProtobufCEnumDescriptor encryption_algo__descriptor =
+{
+  PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
+  "EncryptionAlgo",
+  "EncryptionAlgo",
+  "EncryptionAlgo",
+  "",
+  2,
+  encryption_algo__enum_values_by_number,
+  2,
+  encryption_algo__enum_values_by_name,
+  1,
+  encryption_algo__value_ranges,
+  NULL,NULL,NULL,NULL   /* reserved[1234] */
+};
+static const ProtobufCEnumValue ack_status__enum_values_by_number[3] =
+{
+  { "ACK_OK", "ACK_STATUS__ACK_OK", 0 },
+  { "ACK_ERROR", "ACK_STATUS__ACK_ERROR", 1 },
+  { "ACK_BUSY", "ACK_STATUS__ACK_BUSY", 2 },
+};
+static const ProtobufCIntRange ack_status__value_ranges[] = {
+{0, 0},{0, 3}
+};
+static const ProtobufCEnumValueIndex ack_status__enum_values_by_name[3] =
+{
+  { "ACK_BUSY", 2 },
+  { "ACK_ERROR", 1 },
+  { "ACK_OK", 0 },
+};
+const ProtobufCEnumDescriptor ack_status__descriptor =
+{
+  PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
+  "AckStatus",
+  "AckStatus",
+  "AckStatus",
+  "",
+  3,
+  ack_status__enum_values_by_number,
+  3,
+  ack_status__enum_values_by_name,
+  1,
+  ack_status__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };

@@ -111,7 +111,10 @@ cover:
     invert_position: false
     open_duration: 60
     close_duration: 60
-    
+    blind_height_mm: 2000.0
+    axle_diameter_mm: 60.0
+    blind_thickness_mm: 8.0
+
   - platform: loracover
     lora_client_id: rol_2
     name: "RollladenWohnzimmer2"
@@ -119,6 +122,9 @@ cover:
     invert_position: false
     open_duration: 60
     close_duration: 60
+    blind_height_mm: 2000.0
+    axle_diameter_mm: 60.0
+    blind_thickness_mm: 8.0
 
 
 
@@ -158,6 +164,12 @@ sensor:
     battery_voltage:
       name: "RollladenWohnzimmer1 Battery Voltage"
       id: rol_1_battery_voltage
+    link_rssi:
+      name: "RollladenWohnzimmer1 Link RSSI"
+      id: rol_1_link_rssi
+    motor_current:
+      name: "RollladenWohnzimmer1 Motor Current"
+      id: rol_1_motor_current
 
   - platform: loracover
     lora_client_id: rol_2
@@ -171,6 +183,23 @@ sensor:
     battery_voltage:
       name: "RollladenWohnzimmer2 Battery Voltage"
       id: rol_2_battery_voltage
+    link_rssi:
+      name: "RollladenWohnzimmer2 Link RSSI"
+      id: rol_2_link_rssi
+    motor_current:
+      name: "RollladenWohnzimmer2 Motor Current"
+      id: rol_2_motor_current
+
+
+binary_sensor:
+  - platform: loracover
+    lora_client_id: rol_1
+    name: "RollladenWohnzimmer1 Command Failed"
+    id: rol_1_command_failed
+  - platform: loracover
+    lora_client_id: rol_2
+    name: "RollladenWohnzimmer2 Command Failed"
+    id: rol_2_command_failed
 
 
 

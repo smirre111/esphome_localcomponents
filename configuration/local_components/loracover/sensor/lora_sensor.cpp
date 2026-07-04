@@ -135,34 +135,34 @@ namespace esphome
         return;
       }
 
-      // if (rcv_message->senderaddress != this->parent_->short_address_ && this->parent_->registered_)
-      // {
-      //   ESP_LOGE(TAG, "Adress not for me");
-      //   return;
-      // }
+      if (!rcv_message->header)
+      {
+        ESP_LOGE(TAG, "Response missing header, ignoring");
+        lora_client_response_message__free_unpacked(rcv_message, NULL);
+        return;
+      }
 
-      // // The message ID is checked only after login
-      // if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL && this->parent_->registered_)
-      // {
-      //   if (rcv_message->msgid > this->parent_->frame_counter_.rx_message_id)
-      //   {
-      //     this->parent_->rx_message_id_ = rcv_message->msgid;
-      //   }
-      //   else
-      //   {
-      //     ESP_LOGE(TAG, "Duplicate or old message ID: %d, ignoring. My MsgID: %d", rcv_message->msgid, this->parent_->rx_message_id_);
-      //     return;
-      //   }
-      // }
-
+      // REGISTER is handled before the address filter: the node may not yet have
+      // its assigned address in LittleFS (first-time or power-loss scenario).
+      // LORAListener already verified the MAC before dispatching, so this is safe.
       if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
       {
-        ESP_LOGI(TAG, "Registered with LORA server");
-
+        ESP_LOGI(TAG, "Received REGISTER — sending sensor config (no-op)");
         this->send_remote_config();
+        lora_client_response_message__free_unpacked(rcv_message, NULL);
         return;
-      
       }
+
+      if (rcv_message->header->senderaddress != this->parent_->short_address_ && this->parent_->registered_)
+      {
+        ESP_LOGE(TAG, "Adress not for me");
+        lora_client_response_message__free_unpacked(rcv_message, NULL);
+        return;
+      }
+
+      // NOTE: message-ID validation is done once by LORAListener::set_response
+      // before dispatching bytes here.  Do NOT re-check it — the counter has
+      // already been advanced and a second check would always reject the message.
 
       if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE)
       {
@@ -180,6 +180,11 @@ namespace esphome
         if (this->voltage_ != nullptr)
         {
           this->voltage_->publish_state(voltage);
+        }
+        // F-11: publish hub-side link RSSI for this packet.
+        if (this->rssi_ != nullptr && this->parent_ != nullptr && this->parent_->parent_ != nullptr)
+        {
+          this->rssi_->publish_state(this->parent_->parent_->get_last_rssi());
         }
       }
 
@@ -200,8 +205,18 @@ namespace esphome
         {
           this->voltage_->publish_state(voltage);
         }
+        // F-11: motor current rides in the position frame (raw ADC counts).
+        if (this->motor_current_ != nullptr)
+        {
+          this->motor_current_->publish_state(position->current);
+        }
+        // F-11: publish hub-side link RSSI for this packet.
+        if (this->rssi_ != nullptr && this->parent_ != nullptr && this->parent_->parent_ != nullptr)
+        {
+          this->rssi_->publish_state(this->parent_->parent_->get_last_rssi());
+        }
       }
-     
+      lora_client_response_message__free_unpacked(rcv_message, NULL);
     }
 
 

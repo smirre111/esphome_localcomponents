@@ -249,7 +249,11 @@ CONFIG_SCHEMA = cv.All(
             # cv.Optional(CONF_NAME): cv.string,
 
             cv.Required(CONF_MAC_ADDRESS): cv.mac_address,
-            cv.Required(CONF_SHORT_ADDRESS): cv.int_range(min=0, max=0xFF),
+            # F-9: short_address is now optional.  When omitted it is derived
+            # from the MAC (low byte) and made collision-free across all
+            # lora_client entries at code-generation time.  0x00/0xFE/0xFF are
+            # reserved (broadcast / subnet-broadcast).
+            cv.Optional(CONF_SHORT_ADDRESS): cv.int_range(min=1, max=0xFD),
             cv.Required(CONF_SUBNET_ADDRESS): cv.int_range(min=0, max=0xFF),
             cv.Required(CONF_TIME_ID): cv.use_id(time_.RealTimeClock),  # Require time component ID
             cv.Optional(CONF_SLEEP_DURATION, default=False): cv.int_range(0, 864000),
@@ -350,6 +354,54 @@ def register_lora_features(features: set[LORAFeatures]) -> None:
     _get_required_features().update(features)
 
 
+# F-9: short-address auto-assignment ------------------------------------------
+RESERVED_ADDRESSES = {0x00, 0xFE, 0xFF}
+LORA_ADDR_ASSIGNMENTS_KEY = "lora_client_addr_assignments"
+
+
+def _compute_address_assignments() -> dict[str, int]:
+    """Resolve a collision-free short_address for every lora_client.
+
+    Entries with an explicit short_address keep it; the rest are derived from
+    the MAC low byte and linear-probed (skipping reserved/used values) so the
+    result is deterministic and collision-free.  Computed once and cached in
+    CORE.data because each lora_client is code-generated independently.
+    """
+    cache = CORE.data.get(LORA_ADDR_ASSIGNMENTS_KEY)
+    if cache is not None:
+        return cache
+
+    assignments: dict[str, int] = {}
+    used: set[int] = set()
+    clients = CORE.config.get("lora_client", [])
+
+    # First pass: honour explicitly configured addresses.
+    for conf in clients:
+        if CONF_SHORT_ADDRESS in conf:
+            addr = conf[CONF_SHORT_ADDRESS]
+            assignments[conf[CONF_ID].id] = addr
+            used.add(addr)
+
+    # Second pass: derive from MAC low byte, probing for a free slot.
+    for conf in clients:
+        if CONF_SHORT_ADDRESS in conf:
+            continue
+        addr = conf[CONF_MAC_ADDRESS].parts[5]  # low byte of the MAC
+        for _ in range(0xFD):
+            if addr not in used and addr not in RESERVED_ADDRESSES:
+                break
+            addr += 1
+            if addr > 0xFD:
+                addr = 0x01
+        else:
+            raise cv.Invalid("Unable to auto-assign a free short_address — address space exhausted")
+        assignments[conf[CONF_ID].id] = addr
+        used.add(addr)
+
+    CORE.data[LORA_ADDR_ASSIGNMENTS_KEY] = assignments
+    return assignments
+
+
 
 
 
@@ -363,7 +415,16 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_BT_ENABLED", True)
 
     # cg.add(var.set_pin(config[CONF_PIN]))
-    cg.add(var.set_short_address(config[CONF_SHORT_ADDRESS]))
+    # F-9: use the explicit short_address or the auto-derived collision-free one.
+    short_address = config.get(CONF_SHORT_ADDRESS)
+    if short_address is None:
+        short_address = _compute_address_assignments()[config[CONF_ID].id]
+        _LOGGER.info(
+            "lora_client '%s': auto-assigned short_address %d from MAC",
+            config[CONF_ID].id,
+            short_address,
+        )
+    cg.add(var.set_short_address(short_address))
     cg.add(var.set_subnet_address(config[CONF_SUBNET_ADDRESS]))
     cg.add(var.set_address(config[CONF_MAC_ADDRESS].as_hex))
 
