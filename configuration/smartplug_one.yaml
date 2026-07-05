@@ -27,8 +27,8 @@ esp8266:
 ####
 
 wifi:
-  ssid: "FRITZ!Box 7590 TD"
-  password: "23461468396986328867"
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
   domain: .fritz.box
 
 #  ssid: !secret wifi_ssid
