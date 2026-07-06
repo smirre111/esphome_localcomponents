@@ -160,15 +160,18 @@ static bool s_encrypt_payload_gcm(const uint8_t *nonce, const uint8_t *aad, size
 // LoginMsg / BaseNonceExchange / ClientConfig are sent via their own paths and
 // stay plaintext regardless).  Returns malloc'd wire bytes in *out/*out_len;
 // caller frees with free().
-static bool s_pack_operation_message(LoraClientOperationMessage *plain, uint8_t **out, size_t *out_len)
+static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool encrypt,
+                                     uint8_t **out, size_t *out_len)
 {
   if (!plain || !plain->header || !out || !out_len)
     return false;
 
   const uint32_t dest = plain->header->destaddress;
 
-  // No session yet -> plaintext bootstrap (matches legacy behaviour).
-  if (s_base_nonce_map.find(dest) == s_base_nonce_map.end())
+  // Send plaintext when the caller hasn't confirmed the session (encrypt==false)
+  // or no base nonce exists yet.  This keeps a node that never established
+  // encryption controllable and avoids emitting ciphertext it cannot decrypt.
+  if (!encrypt || s_base_nonce_map.find(dest) == s_base_nonce_map.end())
   {
     *out_len = lora_client_operation_message__get_packed_size(plain);
     *out     = static_cast<uint8_t *>(malloc(*out_len));
@@ -803,20 +806,12 @@ namespace esphome
         if (rcv_message->header && rcv_message->header->msgid > this->frame_counter_.rx_message_id)
         {
           this->setRxMessageId(rcv_message->header->msgid);
-          if (!this->login_acked_)
-          {
-            // Node sent a valid message.  Mark login as acknowledged so the
-            // hourly retry interval stops firing.  Do NOT cancel "login_startup"
-            // here — the startup timer must always fire after a hub reboot so that
-            // LoginMsg and BaseNonceExchange are sent and the AES-GCM nonce map
-            // is repopulated (it is a file-scope static cleared on every reboot).
-            this->login_acked_         = true;
-            this->login_retry_count_   = 0;
-            this->pending_login_nonce_ = 0;   // next challenge mints a fresh nonce
-            this->cancel_timeout("login_retry");
-            ESP_LOGI(TAG, "[%s] Login acknowledged by node", this->get_name().c_str());
-          }
-          // this->frame_counter_.rx_message_id = rcv_message->header->msgid;
+          // NOTE: login is NOT acknowledged here.  A plaintext status frame (e.g.
+          // a position report during boot homing) does not prove the node holds
+          // the session key.  Marking login acked on any msgid-bump and then
+          // encrypting downlink left a node that missed the LoginMsg unable to
+          // decrypt commands.  login_acked_/session_confirmed_ are set only after
+          // we successfully DECRYPT a frame from the node (encrypted branch below).
         }
         else
         {
@@ -905,6 +900,20 @@ namespace esphome
           return;
         }
 
+        // A successful decrypt proves the node holds the matching base nonce —
+        // the encrypted session is confirmed both ways.  Only now do we treat
+        // login as acknowledged and allow the hub to encrypt downlink commands.
+        this->session_confirmed_ = true;
+        if (!this->login_acked_)
+        {
+          this->login_acked_         = true;
+          this->login_retry_count_   = 0;
+          this->pending_login_nonce_ = 0;
+          this->cancel_timeout("login_retry");
+          ESP_LOGI(TAG, "[%s] Login acknowledged by node (encrypted session confirmed)",
+                   this->get_name().c_str());
+        }
+
         // F-4: inspect the decrypted inner message for a CommandAck (or a
         // position update) so the operation-retransmit state machine can resolve.
         {
@@ -977,7 +986,7 @@ namespace esphome
       // authenticated; falls back to plaintext only before a session exists.
       uint8_t *buf = nullptr;
       size_t   len = 0;
-      if (s_pack_operation_message(&op_message, &buf, &len))
+      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
       {
         this->parent_->send(buf, len);
         free(buf);
@@ -1088,7 +1097,7 @@ namespace esphome
       // Encrypt the sysop in-session so SLEEP cannot be forged/injected.
       uint8_t *txBuf = nullptr;
       size_t   len   = 0;
-      if (s_pack_operation_message(&op_message, &txBuf, &len))
+      if (s_pack_operation_message(&op_message, this->session_confirmed_, &txBuf, &len))
       {
         this->parent_->send(txBuf, len);
         free(txBuf);
@@ -1139,7 +1148,7 @@ namespace esphome
       // Encrypt the sysop in-session so OTA cannot be forged/injected.
       uint8_t *txBuf = nullptr;
       size_t   len   = 0;
-      if (s_pack_operation_message(&op_message, &txBuf, &len))
+      if (s_pack_operation_message(&op_message, this->session_confirmed_, &txBuf, &len))
       {
         this->parent_->send(txBuf, len);
         free(txBuf);
@@ -1231,6 +1240,10 @@ namespace esphome
 
       this->frame_counter_.tx_message_id = 0;
       this->frame_counter_.rx_message_id = 0;
+      // New login challenge: the encrypted session is not confirmed until the
+      // node proves it by sending a frame we can decrypt.  Until then the hub
+      // sends commands in plaintext (see s_pack_operation_message callers).
+      this->session_confirmed_ = false;
 
       // Store the base-nonce on the hub side before sending so it is ready to
       // validate the first encrypted response the node sends back.

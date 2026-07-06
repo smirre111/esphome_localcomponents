@@ -158,6 +158,13 @@ namespace esphome
       // node sends a valid message after the login challenge.
       uint32_t last_sleep_epoch_{0};   // Unix epoch when enterSleep() was last called
       bool     login_acked_{false};
+      // True once the hub has successfully DECRYPTED a frame from this node,
+      // proving the node holds the matching AES-GCM base nonce.  The hub encrypts
+      // downlink commands (and treats login as acknowledged) ONLY once this is
+      // set; until then it sends plaintext, so a node that missed the LoginMsg can
+      // still be controlled and Part B stays consistent (node has no session ->
+      // accepts plaintext).  Cleared at each new login challenge and on sleep.
+      bool     session_confirmed_{false};
       uint8_t  login_retry_count_{0};
       // Pending base-nonce for an in-flight login challenge.  Generated once
       // per challenge by send_login() and reused on every retry until the node
