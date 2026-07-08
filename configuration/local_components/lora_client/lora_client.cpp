@@ -18,7 +18,10 @@
 static constexpr const char    *kLoRaAesGcmKey  = "LoRaKey1";
 static constexpr size_t         kAesGcmKeyBytes = 16;
 static constexpr size_t         kAesGcmIvBytes  = 12;
-static constexpr size_t         kAesGcmTagBytes = 16;
+static constexpr size_t         kAesGcmTagBytes = 8;  // truncated AES-GCM tag (slim on-air)
+// PSA algorithm carrying the shortened tag length — key policy + encrypt/decrypt.
+// MUST match the node (CmdDispatcher.cpp).
+#define LORA_GCM_ALG PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_GCM, kAesGcmTagBytes)
 
 // PSA key slot — imported once at setup(), reused for every decrypt call.
 static psa_key_id_t s_aes_gcm_key_id = PSA_KEY_ID_NULL;
@@ -63,7 +66,7 @@ static bool s_init_psa_gcm_key()
 
   psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
   psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT);
-  psa_set_key_algorithm(&attrs, PSA_ALG_GCM);
+  psa_set_key_algorithm(&attrs, LORA_GCM_ALG);
   psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
   psa_set_key_bits(&attrs, kAesGcmKeyBytes * 8);
   psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
@@ -106,8 +109,8 @@ static bool s_build_header_aad(const LoraHeader *h, uint8_t *aad, size_t *aad_le
   s_u32_be(h->destsubnet,    aad + 4);
   s_u32_be(h->senderaddress, aad + 8);
   s_u32_be(h->msgid,         aad + 12);
-  s_u32_be(h->encrypted,     aad + 16);
-  *aad_len = 20;
+  // encrypted header field removed — AAD is the 16-byte 4-field header.
+  *aad_len = 16;
   return true;
 }
 
@@ -136,7 +139,7 @@ static bool s_encrypt_payload_gcm(const uint8_t *nonce, const uint8_t *aad, size
 
   size_t       ct_len = 0;
   psa_status_t st     = psa_aead_encrypt(
-      s_aes_gcm_key_id, PSA_ALG_GCM,
+      s_aes_gcm_key_id, LORA_GCM_ALG,
       nonce, kAesGcmIvBytes,
       aad,   aad_len,
       plain, plain_len,
@@ -181,22 +184,25 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
     return true;
   }
 
-  // Serialise the inner (full plaintext operation message).
-  size_t   inner_len = lora_client_operation_message__get_packed_size(plain);
+  // Encrypt the payload ONLY — the inner message's header is redundant (the node
+  // uses the plaintext outer header), so strip it before packing.
+  LoraClientOperationMessage inner_msg = *plain;
+  inner_msg.header = nullptr;
+  size_t   inner_len = lora_client_operation_message__get_packed_size(&inner_msg);
   uint8_t *inner     = static_cast<uint8_t *>(malloc(inner_len));
   if (!inner)
     return false;
-  lora_client_operation_message__pack(plain, inner);
+  lora_client_operation_message__pack(&inner_msg, inner);
 
-  // Outer header mirrors the inner addressing + msgid with encrypted=1.  AAD
-  // covers only these five fields, so the tracker's burst re-stamping of
-  // burstIndex/burstCount does not invalidate the GCM tag.
+  // Outer header mirrors the inner addressing + msgid.  AAD covers only these
+  // four header fields, so the tracker's burst re-stamping of burstIndex/
+  // burstCount does not invalidate the GCM tag.  Encryption is signalled by the
+  // `encrypted` oneof case, not a header flag.
   LoraHeader outer      = LORA_HEADER__INIT;
   outer.destaddress     = plain->header->destaddress;
   outer.destsubnet      = plain->header->destsubnet;
   outer.senderaddress   = plain->header->senderaddress;
   outer.msgid           = plain->header->msgid;
-  outer.encrypted       = 1;
 
   uint8_t  iv[12];
   uint64_t counter = static_cast<uint64_t>(outer.msgid) | kDownlinkNonceFlag;
@@ -216,7 +222,6 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
   free(inner);
 
   EncryptedPayload enc     = ENCRYPTED_PAYLOAD__INIT;
-  enc.algo                 = ENCRYPTION_ALGO__ENC_AES_GCM_128;
   enc.tag.data             = tag;
   enc.tag.len              = kAesGcmTagBytes;
   enc.ciphertext.data      = cipher;
@@ -625,8 +630,8 @@ namespace esphome
         u32_to_be(header->destsubnet, aad_out + 4);
         u32_to_be(header->senderaddress, aad_out + 8);
         u32_to_be(header->msgid, aad_out + 12);
-        u32_to_be(header->encrypted, aad_out + 16);
-        *aad_len = 20;
+        // encrypted header field removed — AAD is the 16-byte 4-field header.
+        *aad_len = 16;
         return true;
       };
 
@@ -668,7 +673,7 @@ namespace esphome
 
         size_t       plain_len = 0;
         psa_status_t status    = psa_aead_decrypt(
-            s_aes_gcm_key_id, PSA_ALG_GCM,
+            s_aes_gcm_key_id, LORA_GCM_ALG,
             nonce,  kAesGcmIvBytes,
             aad,    aad_len,
             ct_buf, ct_len,
@@ -826,14 +831,7 @@ namespace esphome
       if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED && rcv_message->encrypted)
       {
         EncryptedPayload *enc = rcv_message->encrypted;
-        ESP_LOGI(TAG, "Received encrypted payload algo=%d ciphertext=%d bytes", enc->algo, (int)enc->ciphertext.len);
-
-        if (enc->algo != ENCRYPTION_ALGO__ENC_AES_GCM_128)
-        {
-          ESP_LOGE(TAG, "Unsupported encryption algorithm: %d", enc->algo);
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
-          return;
-        }
+        ESP_LOGI(TAG, "Received encrypted payload ciphertext=%d bytes", (int)enc->ciphertext.len);
 
         // Use the header's msgid as the unified frame counter.  Replay protection
         // was already enforced above (msgid > frame_counter_.rx_message_id).
@@ -914,28 +912,34 @@ namespace esphome
                    this->get_name().c_str());
         }
 
-        // F-4: inspect the decrypted inner message for a CommandAck (or a
-        // position update) so the operation-retransmit state machine can resolve.
-        {
-          LoraClientResponseMessage *inner =
-              lora_client_response_message__unpack(NULL, cipher_len, plaintext);
-          if (inner)
-          {
-            if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && inner->ack)
-              this->handle_command_ack_(inner->ack->ack_msg_id);
-            else if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
-                     this->op_awaiting_ack_)
-              this->handle_command_ack_(this->op_last_msgid_); // position confirms delivery
-            lora_client_response_message__free_unpacked(inner, NULL);
-          }
-        }
-
-        // Forward decrypted inner protobuf bytes to registered nodes
-        for (int i = 0; i < this->nodes_.size(); i++)
-        {
-          this->nodes_[i]->set_response(plaintext, cipher_len);
-        }
+        // The inner is now payload-only (no header).  Unpack it, resolve the F-4
+        // ack/position state machine, then RE-ATTACH the plaintext outer header
+        // and re-pack before forwarding to nodes (loracover requires a header for
+        // addressing — the header is no longer carried inside the ciphertext).
+        LoraClientResponseMessage *inner =
+            lora_client_response_message__unpack(NULL, cipher_len, plaintext);
         free(plaintext);
+        if (inner)
+        {
+          if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && inner->ack)
+            this->handle_command_ack_(inner->ack->ack_msg_id);
+          else if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
+                   this->op_awaiting_ack_)
+            this->handle_command_ack_(this->op_last_msgid_); // position confirms delivery
+
+          inner->header = rcv_message->header; // borrow outer header for forwarding
+          size_t   fwd_len = lora_client_response_message__get_packed_size(inner);
+          uint8_t *fwd     = static_cast<uint8_t *>(malloc(fwd_len));
+          if (fwd)
+          {
+            lora_client_response_message__pack(inner, fwd);
+            for (size_t i = 0; i < this->nodes_.size(); i++)
+              this->nodes_[i]->set_response(fwd, fwd_len);
+            free(fwd);
+          }
+          inner->header = nullptr; // detach borrowed header before free (rcv_message owns it)
+          lora_client_response_message__free_unpacked(inner, NULL);
+        }
         lora_client_response_message__free_unpacked(rcv_message, NULL);
         return;
       }
@@ -965,7 +969,6 @@ namespace esphome
       header.destsubnet    = this->subnet_address_;
       header.senderaddress = 0xFF;
       header.msgid         = this->incrTxMessageId();
-      header.encrypted     = 0;
       op_message.header    = &header;
       op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
 
@@ -1088,7 +1091,6 @@ namespace esphome
       header.destsubnet = this->subnet_address_;
       header.senderaddress = 0xFF; // TODO: Use unique address
       header.msgid = this->incrTxMessageId(); // Incrementing message ID
-      header.encrypted = 0;
       op_message.header = &header;
 
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
@@ -1139,7 +1141,6 @@ namespace esphome
       header.destsubnet = this->subnet_address_;
       header.senderaddress = 0xFF; // TODO: Use unique address
       header.msgid = this->incrTxMessageId(); // Incrementing message ID
-      header.encrypted = 0;
       op_message.header = &header;
 
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
@@ -1200,7 +1201,6 @@ namespace esphome
       header.destsubnet    = this->subnet_address_;
       header.senderaddress = 0xFF; // hub/controller address placeholder
       header.msgid         = this->incrTxMessageId();
-      header.encrypted     = 0;
       op_message.header    = &header;
       op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE;
       op_message.basenonce = &exchange;
@@ -1255,7 +1255,6 @@ namespace esphome
       header.destsubnet    = this->subnet_address_;
       header.senderaddress = 0xFF;
       header.msgid         = this->incrTxMessageId();
-      header.encrypted     = 0;
       op_message.header    = &header;
       op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
 
@@ -1293,7 +1292,6 @@ namespace esphome
       header.destsubnet = this->subnet_address_;
       header.senderaddress = 0xFF; // TODO: Use unique address
       header.msgid = this->incrTxMessageId(); //++(this->frame_counter_.tx_message_id); // Incrementing message ID
-      header.encrypted = 0;
       op_message.header = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
 

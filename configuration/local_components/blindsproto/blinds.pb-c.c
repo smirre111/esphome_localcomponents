@@ -1008,59 +1008,11 @@ const ProtobufCMessageDescriptor command_ack__descriptor =
   (ProtobufCMessageInit) command_ack__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor encrypted_payload__field_descriptors[6] =
+static const ProtobufCFieldDescriptor encrypted_payload__field_descriptors[2] =
 {
   {
-    "algo",
-    1,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_ENUM,
-    0,   /* quantifier_offset */
-    offsetof(EncryptedPayload, algo),
-    &encryption_algo__descriptor,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "key_id",
-    2,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(EncryptedPayload, key_id),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "iv",
-    3,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(EncryptedPayload, iv),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "aad",
-    4,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(EncryptedPayload, aad),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
     "tag",
-    5,
+    1,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_BYTES,
     0,   /* quantifier_offset */
@@ -1072,7 +1024,7 @@ static const ProtobufCFieldDescriptor encrypted_payload__field_descriptors[6] =
   },
   {
     "ciphertext",
-    6,
+    2,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_BYTES,
     0,   /* quantifier_offset */
@@ -1084,17 +1036,13 @@ static const ProtobufCFieldDescriptor encrypted_payload__field_descriptors[6] =
   },
 };
 static const unsigned encrypted_payload__field_indices_by_name[] = {
-  3,   /* field[3] = aad */
-  0,   /* field[0] = algo */
-  5,   /* field[5] = ciphertext */
-  2,   /* field[2] = iv */
-  1,   /* field[1] = key_id */
-  4,   /* field[4] = tag */
+  1,   /* field[1] = ciphertext */
+  0,   /* field[0] = tag */
 };
 static const ProtobufCIntRange encrypted_payload__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 6 }
+  { 0, 2 }
 };
 const ProtobufCMessageDescriptor encrypted_payload__descriptor =
 {
@@ -1104,14 +1052,14 @@ const ProtobufCMessageDescriptor encrypted_payload__descriptor =
   "EncryptedPayload",
   "",
   sizeof(EncryptedPayload),
-  6,
+  2,
   encrypted_payload__field_descriptors,
   encrypted_payload__field_indices_by_name,
   1,  encrypted_payload__number_ranges,
   (ProtobufCMessageInit) encrypted_payload__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_header__field_descriptors[7] =
+static const ProtobufCFieldDescriptor lora_header__field_descriptors[6] =
 {
   {
     "destAddress",
@@ -1162,18 +1110,6 @@ static const ProtobufCFieldDescriptor lora_header__field_descriptors[7] =
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "encrypted",
-    5,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, encrypted),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
     "burstIndex",
     6,
     PROTOBUF_C_LABEL_NONE,
@@ -1199,18 +1135,18 @@ static const ProtobufCFieldDescriptor lora_header__field_descriptors[7] =
   },
 };
 static const unsigned lora_header__field_indices_by_name[] = {
-  6,   /* field[6] = burstCount */
-  5,   /* field[5] = burstIndex */
+  5,   /* field[5] = burstCount */
+  4,   /* field[4] = burstIndex */
   0,   /* field[0] = destAddress */
   1,   /* field[1] = destSubnet */
-  4,   /* field[4] = encrypted */
   3,   /* field[3] = msgId */
   2,   /* field[2] = senderAddress */
 };
-static const ProtobufCIntRange lora_header__number_ranges[1 + 1] =
+static const ProtobufCIntRange lora_header__number_ranges[2 + 1] =
 {
   { 1, 0 },
-  { 0, 7 }
+  { 6, 4 },
+  { 0, 6 }
 };
 const ProtobufCMessageDescriptor lora_header__descriptor =
 {
@@ -1220,10 +1156,10 @@ const ProtobufCMessageDescriptor lora_header__descriptor =
   "LoraHeader",
   "",
   sizeof(LoraHeader),
-  7,
+  6,
   lora_header__field_descriptors,
   lora_header__field_indices_by_name,
-  1,  lora_header__number_ranges,
+  2,  lora_header__number_ranges,
   (ProtobufCMessageInit) lora_header__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
@@ -1239,6 +1175,18 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     &lora_header__descriptor,
     NULL,
     0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "encrypted",
+    9,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, encrypted),
+    &encrypted_payload__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
@@ -1313,34 +1261,21 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
-  {
-    "encrypted",
-    20,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, encrypted),
-    &encrypted_payload__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
-  6,   /* field[6] = basenonce */
-  3,   /* field[3] = clientconfig */
-  4,   /* field[4] = coverconfig */
-  7,   /* field[7] = encrypted */
+  7,   /* field[7] = basenonce */
+  4,   /* field[4] = clientconfig */
+  5,   /* field[5] = coverconfig */
+  1,   /* field[1] = encrypted */
   0,   /* field[0] = header */
-  5,   /* field[5] = login */
-  1,   /* field[1] = operation */
-  2,   /* field[2] = sysop */
+  6,   /* field[6] = login */
+  2,   /* field[2] = operation */
+  3,   /* field[3] = sysop */
 };
-static const ProtobufCIntRange lora_client_operation_message__number_ranges[3 + 1] =
+static const ProtobufCIntRange lora_client_operation_message__number_ranges[2 + 1] =
 {
   { 1, 0 },
-  { 10, 1 },
-  { 20, 7 },
+  { 9, 1 },
   { 0, 8 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
@@ -1354,7 +1289,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   8,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
-  3,  lora_client_operation_message__number_ranges,
+  2,  lora_client_operation_message__number_ranges,
   (ProtobufCMessageInit) lora_client_operation_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
@@ -1564,6 +1499,18 @@ static const ProtobufCFieldDescriptor lora_client_response_message__field_descri
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
+    "encrypted",
+    9,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientResponseMessage, proto_case),
+    offsetof(LoraClientResponseMessage, encrypted),
+    &encrypted_payload__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
     "avail",
     10,
     PROTOBUF_C_LABEL_NONE,
@@ -1635,34 +1582,21 @@ static const ProtobufCFieldDescriptor lora_client_response_message__field_descri
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
-  {
-    "encrypted",
-    20,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, encrypted),
-    &encrypted_payload__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
 };
 static const unsigned lora_client_response_message__field_indices_by_name[] = {
-  6,   /* field[6] = ack */
-  1,   /* field[1] = avail */
-  7,   /* field[7] = encrypted */
+  7,   /* field[7] = ack */
+  2,   /* field[2] = avail */
+  1,   /* field[1] = encrypted */
   0,   /* field[0] = header */
-  5,   /* field[5] = login */
-  4,   /* field[4] = position */
-  2,   /* field[2] = register */
-  3,   /* field[3] = state */
+  6,   /* field[6] = login */
+  5,   /* field[5] = position */
+  3,   /* field[3] = register */
+  4,   /* field[4] = state */
 };
-static const ProtobufCIntRange lora_client_response_message__number_ranges[3 + 1] =
+static const ProtobufCIntRange lora_client_response_message__number_ranges[2 + 1] =
 {
   { 1, 0 },
-  { 10, 1 },
-  { 20, 7 },
+  { 9, 1 },
   { 0, 8 }
 };
 const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
@@ -1676,7 +1610,7 @@ const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
   8,
   lora_client_response_message__field_descriptors,
   lora_client_response_message__field_indices_by_name,
-  3,  lora_client_response_message__number_ranges,
+  2,  lora_client_response_message__number_ranges,
   (ProtobufCMessageInit) lora_client_response_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };

@@ -85,18 +85,14 @@ message CommandAck {
 // When a payload is encrypted, the structured protobuf messages are not
 // present; instead the envelope carries this EncryptedPayload which holds
 // algorithm metadata, IV, optional key identifier, auth tag and ciphertext.
+// Slim on-air AEAD envelope.  Algorithm is fixed (AES-GCM-128 with a truncated
+// tag), and the IV/AAD are reconstructed by the receiver from the plaintext
+// outer header — so only the tag and ciphertext are transmitted.  The ciphertext
+// is the payload-only inner message (its header is NOT re-encrypted; the receiver
+// uses the outer header).
 message EncryptedPayload {
-    EncryptionAlgo algo = 1;
-    // Optional key identifier (e.g. key index or key fingerprint)
-    bytes key_id = 2;
-    // AEAD IV / nonce
-    bytes iv = 3;
-    // Optional additional authenticated data (if used)
-    bytes aad = 4;
-    // Authentication tag (for AEAD algorithms)
-    bytes tag = 5;
-    // Ciphertext containing the packed inner protobuf message
-    bytes ciphertext = 6;
+    bytes tag = 1;        // truncated AES-GCM-128 auth tag
+    bytes ciphertext = 2; // AEAD-encrypted payload-only inner protobuf
 }
 
 
@@ -105,7 +101,8 @@ message LoraHeader {
     uint32 destSubnet = 2;
     uint32 senderAddress = 3;
     uint32 msgId = 4;
-    uint32 encrypted = 5;
+    // field 5 (encrypted) removed — encryption is inferred from the oneof case
+    // (presence of the `encrypted` payload), not a header flag.
     // Burst scheduling (hub -> node): each copy of a TX burst carries its own
     // 0-based index and the total count.  The node uses these to compute when
     // the burst ends and defers its response until the channel is clear.
@@ -123,9 +120,9 @@ message LoraClientOperationMessage {
         CoverConfig coverconfig = 13;
         LoginMsg login = 14;
         BaseNonceExchange basenonce = 15;
-        // If `header.encrypted` is set, the payload will be in this field
-        // and contain an AEAD-encrypted blob (see EncryptedPayload).
-        EncryptedPayload encrypted = 20;
+        // When this field is present the message is encrypted (AEAD blob); the
+        // structured fields above are absent.  Field 9 keeps a 1-byte tag.
+        EncryptedPayload encrypted = 9;
     }
 }
 
@@ -164,8 +161,8 @@ message LoraClientResponseMessage {
         CoverPosition position = 13;
         LoginMsg login = 14;
         CommandAck ack = 15;
-        // Encrypted response payload (AEAD blob). When present, structured
-        // fields above must be absent and `header.encrypted` should be set.
-        EncryptedPayload encrypted = 20;
+        // When present the message is encrypted (AEAD blob); structured fields
+        // above are absent.  Field 9 keeps a 1-byte tag.
+        EncryptedPayload encrypted = 9;
     }
 }

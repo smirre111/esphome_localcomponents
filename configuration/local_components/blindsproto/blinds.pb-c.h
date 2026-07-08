@@ -178,35 +178,27 @@ struct  CommandAck
  * When a payload is encrypted, the structured protobuf messages are not
  * present; instead the envelope carries this EncryptedPayload which holds
  * algorithm metadata, IV, optional key identifier, auth tag and ciphertext.
+ * Slim on-air AEAD envelope.  Algorithm is fixed (AES-GCM-128 with a truncated
+ * tag), and the IV/AAD are reconstructed by the receiver from the plaintext
+ * outer header — so only the tag and ciphertext are transmitted.  The ciphertext
+ * is the payload-only inner message (its header is NOT re-encrypted; the receiver
+ * uses the outer header).
  */
 struct  EncryptedPayload
 {
   ProtobufCMessage base;
-  EncryptionAlgo algo;
   /*
-   * Optional key identifier (e.g. key index or key fingerprint)
-   */
-  ProtobufCBinaryData key_id;
-  /*
-   * AEAD IV / nonce
-   */
-  ProtobufCBinaryData iv;
-  /*
-   * Optional additional authenticated data (if used)
-   */
-  ProtobufCBinaryData aad;
-  /*
-   * Authentication tag (for AEAD algorithms)
+   * truncated AES-GCM-128 auth tag
    */
   ProtobufCBinaryData tag;
   /*
-   * Ciphertext containing the packed inner protobuf message
+   * AEAD-encrypted payload-only inner protobuf
    */
   ProtobufCBinaryData ciphertext;
 };
 #define ENCRYPTED_PAYLOAD__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&encrypted_payload__descriptor) \
-    , ENCRYPTION_ALGO__ENC_NONE, {0,NULL}, {0,NULL}, {0,NULL}, {0,NULL}, {0,NULL} }
+    , {0,NULL}, {0,NULL} }
 
 
 struct  LoraHeader
@@ -216,8 +208,9 @@ struct  LoraHeader
   uint32_t destsubnet;
   uint32_t senderaddress;
   uint32_t msgid;
-  uint32_t encrypted;
   /*
+   * field 5 (encrypted) removed — encryption is inferred from the oneof case
+   * (presence of the `encrypted` payload), not a header flag.
    * Burst scheduling (hub -> node): each copy of a TX burst carries its own
    * 0-based index and the total count.  The node uses these to compute when
    * the burst ends and defers its response until the channel is clear.
@@ -228,7 +221,7 @@ struct  LoraHeader
 };
 #define LORA_HEADER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_header__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0 }
 
 
 typedef enum {
@@ -239,7 +232,7 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG = 13,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN = 14,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE = 15,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 20
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
 
@@ -253,8 +246,8 @@ struct  LoraClientOperationMessage
     ClientConfig *clientconfig;
     CoverConfig *coverconfig;
     /*
-     * If `header.encrypted` is set, the payload will be in this field
-     * and contain an AEAD-encrypted blob (see EncryptedPayload).
+     * When this field is present the message is encrypted (AEAD blob); the
+     * structured fields above are absent.  Field 9 keeps a 1-byte tag.
      */
     EncryptedPayload *encrypted;
     LoginMsg *login;
@@ -326,7 +319,7 @@ typedef enum {
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION = 13,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN = 14,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK = 15,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED = 20
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_RESPONSE_MESSAGE__PROTO__CASE)
 } LoraClientResponseMessage__ProtoCase;
 
@@ -339,8 +332,8 @@ struct  LoraClientResponseMessage
     CommandAck *ack;
     ClientAvailable *avail;
     /*
-     * Encrypted response payload (AEAD blob). When present, structured
-     * fields above must be absent and `header.encrypted` should be set.
+     * When present the message is encrypted (AEAD blob); structured fields
+     * above are absent.  Field 9 keeps a 1-byte tag.
      */
     EncryptedPayload *encrypted;
     LoginMsg *login;

@@ -218,7 +218,6 @@ namespace esphome
       header.destsubnet = this->parent_->subnet_address_;
       header.senderaddress = 0xFF; // TODO: Use unique address
       header.msgid = this->parent_->incrTxMessageId(); //++(this->parent_->frame_counter_.tx_message_id); Incrementing message ID
-      header.encrypted = 0;
       op_message.header = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
 
