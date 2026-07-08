@@ -109,8 +109,8 @@ cover:
     name: "RollladenWohnzimmer1"
     id: rol_1_cover
     invert_position: false
-    open_duration: 60
-    close_duration: 60
+    open_duration: 48
+    close_duration: 42
     blind_height_mm: 2000.0
     axle_diameter_mm: 60.0
     blind_thickness_mm: 8.0
@@ -120,8 +120,8 @@ cover:
     name: "RollladenWohnzimmer2"
     id: rol_2_cover
     invert_position: false
-    open_duration: 60
-    close_duration: 60
+    open_duration: 48
+    close_duration: 42
     blind_height_mm: 2000.0
     axle_diameter_mm: 60.0
     blind_thickness_mm: 8.0
