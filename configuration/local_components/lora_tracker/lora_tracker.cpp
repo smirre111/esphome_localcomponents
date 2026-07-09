@@ -259,11 +259,14 @@ namespace esphome
         if (xQueueReceive(data_queue, &rx_buffer, portMAX_DELAY) == pdTRUE)
         {
 
-          // Validate before processing
+          // Validate before processing.  Use continue, NOT return: this is the
+          // persistent TX task's for(;;) loop, so returning would delete the task
+          // and permanently stop all hub->node transmission.  The invalid buffer
+          // cannot be safely returned to the pool, so skip this iteration.
           if (!this->validate_buffer(rx_buffer))
           {
             ESP_LOGE(TAG, "Received invalid buffer, skipping");
-            return;
+            continue;
           }
 
           // Additional bounds check
@@ -272,7 +275,7 @@ namespace esphome
             ESP_LOGE(TAG, "Buffer length %d exceeds max %d",
                      rx_buffer->length, BUFFER_SIZE);
             this->return_buffer_to_pool(rx_buffer);
-            return;
+            continue;
           }
 
           ESP_LOGI(TAG, "Processing %d bytes from buffer %p",

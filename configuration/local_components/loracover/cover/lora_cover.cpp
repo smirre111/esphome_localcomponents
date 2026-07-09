@@ -216,7 +216,7 @@ namespace esphome
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress = this->parent_->short_address_;
       header.destsubnet = this->parent_->subnet_address_;
-      header.senderaddress = 0xFF; // TODO: Use unique address
+      header.senderaddress = lora_tracker::kHubAddress;
       header.msgid = this->parent_->incrTxMessageId(); //++(this->parent_->frame_counter_.tx_message_id); Incrementing message ID
       op_message.header = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;

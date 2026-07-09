@@ -25,6 +25,13 @@ namespace esphome
 
   namespace lora_tracker
   {
+    // The hub/controller's own LoRa address, used as senderAddress on every
+    // downlink frame.  A small value keeps a 1-byte protobuf varint; nodes use
+    // 17/18, broadcast is 0xFF and subnet 0xFE, so 0x01 is free.  (Nodes learn
+    // the hub address dynamically from the received senderAddress, so this can
+    // change hub-side without a node change.)
+    static constexpr uint8_t kHubAddress = 0x01;
+
     class LORATracker;
     class LORAClientNode;
     class LORAListener;
@@ -188,7 +195,8 @@ namespace esphome
 
       static constexpr uint8_t  kRestoreStateVersion  = 2;
       static constexpr uint8_t  kMaxLoginRetries      = 24; // 24 × 1 h = 1 day
-      static constexpr uint32_t kLoginRetryIntervalMs = 3600000; // 1 h between login retries
+      static constexpr uint32_t kLoginRetryIntervalMs = 3600000; // 1 h ceiling between login retries
+      static constexpr uint32_t kLoginRetryBaseMs     = 5000;    // first retry delay; doubles each retry up to the ceiling
       // Delay between receiving REGISTER and firing the login challenge.  The
       // REGISTER path first queues ClientConfig + each node's config, each sent
       // as a ~1.5-1.9 s burst.  A shorter delay (was 500 ms) queued LoginMsg on

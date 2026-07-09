@@ -505,10 +505,14 @@ namespace esphome
 
     void LORAListener::schedule_login_retry_()
     {
-      // Mirrors schedule_op_retry_(): a ONE-SHOT set_timeout that re-arms itself
-      // after each retransmit, so the first retry always waits the FULL interval
-      // and leaves the node's burst-deferred login-ack a quiet window to arrive.
-      this->set_timeout("login_retry", kLoginRetryIntervalMs, [this]()
+      // Self-re-arming ONE-SHOT set_timeout with exponential backoff: fast early
+      // retries (a transient handshake loss recovers in seconds) growing to the
+      // 1 h ceiling.  delay = base << retry_count, capped at kLoginRetryIntervalMs.
+      const uint32_t shift = (this->login_retry_count_ < 20) ? this->login_retry_count_ : 20;
+      uint64_t delay = static_cast<uint64_t>(kLoginRetryBaseMs) << shift;
+      if (delay > kLoginRetryIntervalMs)
+        delay = kLoginRetryIntervalMs;
+      this->set_timeout("login_retry", static_cast<uint32_t>(delay), [this]()
       {
         if (this->login_acked_)
           return; // acked already; one-shot, nothing to re-arm
@@ -808,7 +812,13 @@ namespace esphome
       // The message ID is checked only after login
       if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
       {
-        if (rcv_message->header && rcv_message->header->msgid > this->frame_counter_.rx_message_id)
+        // Accept only a forward jump within a bounded window — a huge msgid from a
+        // corrupt/spurious frame would otherwise ratchet rx up and wedge the link
+        // (dropping every legitimate lower id) until the next login resets it.
+        static constexpr uint32_t kMsgIdWindow = 1024;
+        if (rcv_message->header &&
+            rcv_message->header->msgid > this->frame_counter_.rx_message_id &&
+            rcv_message->header->msgid <= this->frame_counter_.rx_message_id + kMsgIdWindow)
         {
           this->setRxMessageId(rcv_message->header->msgid);
           // NOTE: login is NOT acknowledged here.  A plaintext status frame (e.g.
@@ -967,7 +977,7 @@ namespace esphome
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = this->short_address_;
       header.destsubnet    = this->subnet_address_;
-      header.senderaddress = 0xFF;
+      header.senderaddress = kHubAddress;
       header.msgid         = this->incrTxMessageId();
       op_message.header    = &header;
       op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
@@ -1036,6 +1046,18 @@ namespace esphome
                    this->get_name().c_str(), (unsigned)kOpMaxRetries);
           this->op_awaiting_ack_ = false;
           this->set_command_failed_(true);
+          // Half-open-session recovery: if the command failed while the encrypted
+          // session is NOT confirmed, the node may have re-keyed (it has a session)
+          // while the hub still thinks it has none — so the hub sends plaintext that
+          // the node's Part B rejects.  Force an immediate fresh login (which resets
+          // the retry backoff to fast) so the node re-sends its login-ack and the
+          // session re-confirms in seconds instead of waiting out the backoff.
+          if (!this->session_confirmed_)
+          {
+            ESP_LOGW(TAG, "[%s] Command failed with unconfirmed session — forcing re-login",
+                     this->get_name().c_str());
+            this->do_login_and_arm_retry_();
+          }
           return;
         }
         uint32_t msgid = this->tx_cover_operation_();
@@ -1089,7 +1111,7 @@ namespace esphome
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress = this->short_address_;
       header.destsubnet = this->subnet_address_;
-      header.senderaddress = 0xFF; // TODO: Use unique address
+      header.senderaddress = kHubAddress; // TODO: Use unique address
       header.msgid = this->incrTxMessageId(); // Incrementing message ID
       op_message.header = &header;
 
@@ -1139,7 +1161,7 @@ namespace esphome
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress = this->short_address_;
       header.destsubnet = this->subnet_address_;
-      header.senderaddress = 0xFF; // TODO: Use unique address
+      header.senderaddress = kHubAddress; // TODO: Use unique address
       header.msgid = this->incrTxMessageId(); // Incrementing message ID
       op_message.header = &header;
 
@@ -1199,7 +1221,7 @@ namespace esphome
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = this->short_address_;
       header.destsubnet    = this->subnet_address_;
-      header.senderaddress = 0xFF; // hub/controller address placeholder
+      header.senderaddress = kHubAddress; // hub/controller address placeholder
       header.msgid         = this->incrTxMessageId();
       op_message.header    = &header;
       op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE;
@@ -1253,7 +1275,7 @@ namespace esphome
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = this->short_address_;
       header.destsubnet    = this->subnet_address_;
-      header.senderaddress = 0xFF;
+      header.senderaddress = kHubAddress;
       header.msgid         = this->incrTxMessageId();
       op_message.header    = &header;
       op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
@@ -1290,7 +1312,7 @@ namespace esphome
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress = this->short_address_;
       header.destsubnet = this->subnet_address_;
-      header.senderaddress = 0xFF; // TODO: Use unique address
+      header.senderaddress = kHubAddress; // TODO: Use unique address
       header.msgid = this->incrTxMessageId(); //++(this->frame_counter_.tx_message_id); // Incrementing message ID
       op_message.header = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
