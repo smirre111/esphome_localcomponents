@@ -122,10 +122,22 @@ struct  CoverConfig
   float blindheightmm;
   float axlediametermm;
   float blindthicknessmm;
+  /*
+   * Slat-slack handling at the bottom (closed) end.  openTime/closeTime are the
+   * bar-TRAVEL-only times (top <-> sill).  These add the extra motor run at the
+   * sill where the bar is parked and the slats nest/un-nest:
+   *   openSlack  = un-seal time: motor runs UP with position pinned at 0 before
+   *                travel starts, when opening FROM the fully-sealed state.
+   *   closeSlack = seal time: extra run budget after travel reaches 0 on a full
+   *                close, so the timed backstop does not cut the compression.
+   * Both in seconds; 0 = disabled (legacy behaviour).
+   */
+  uint32_t openslack;
+  uint32_t closeslack;
 };
 #define COVER_CONFIG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&cover_config__descriptor) \
-    , 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  LoginMsg

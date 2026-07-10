@@ -28,6 +28,8 @@ namespace esphome
       void set_invert_position(bool invert_position) { this->invert_position_ = invert_position; }
       void set_open_duration(int open_duration) { this->open_duration_ = open_duration; }
       void set_close_duration(int close_duration) { this->close_duration_ = close_duration; }
+      void set_open_slack(int open_slack) { this->open_slack_ = open_slack; }
+      void set_close_slack(int close_slack) { this->close_slack_ = close_slack; }
       void set_blind_height_mm(float v) { this->blind_height_mm_ = v; }
       void set_axle_diameter_mm(float v) { this->axle_diameter_mm_ = v; }
       void set_blind_thickness_mm(float v) { this->blind_thickness_mm_ = v; }
@@ -46,6 +48,8 @@ namespace esphome
       bool invert_position_;
       int open_duration_{60};
       int close_duration_{60};
+      int open_slack_{0};
+      int close_slack_{0};
       float blind_height_mm_{2000.0f};
       float axle_diameter_mm_{60.0f};
       float blind_thickness_mm_{8.0f};

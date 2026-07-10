@@ -227,6 +227,8 @@ namespace esphome
       coverconfig.blindheightmm = this->blind_height_mm_;
       coverconfig.axlediametermm = this->axle_diameter_mm_;
       coverconfig.blindthicknessmm = this->blind_thickness_mm_;
+      coverconfig.openslack = this->open_slack_;
+      coverconfig.closeslack = this->close_slack_;
 
       op_message.coverconfig = &coverconfig;
 

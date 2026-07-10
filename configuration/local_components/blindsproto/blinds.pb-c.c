@@ -778,7 +778,7 @@ const ProtobufCMessageDescriptor client_config__descriptor =
   (ProtobufCMessageInit) client_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor cover_config__field_descriptors[5] =
+static const ProtobufCFieldDescriptor cover_config__field_descriptors[7] =
 {
   {
     "openTime",
@@ -840,18 +840,44 @@ static const ProtobufCFieldDescriptor cover_config__field_descriptors[5] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "openSlack",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(CoverConfig, openslack),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "closeSlack",
+    7,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(CoverConfig, closeslack),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cover_config__field_indices_by_name[] = {
   3,   /* field[3] = axleDiameterMm */
   2,   /* field[2] = blindHeightMm */
   4,   /* field[4] = blindThicknessMm */
+  6,   /* field[6] = closeSlack */
   1,   /* field[1] = closeTime */
+  5,   /* field[5] = openSlack */
   0,   /* field[0] = openTime */
 };
 static const ProtobufCIntRange cover_config__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 5 }
+  { 0, 7 }
 };
 const ProtobufCMessageDescriptor cover_config__descriptor =
 {
@@ -861,7 +887,7 @@ const ProtobufCMessageDescriptor cover_config__descriptor =
   "CoverConfig",
   "",
   sizeof(CoverConfig),
-  5,
+  7,
   cover_config__field_descriptors,
   cover_config__field_indices_by_name,
   1,  cover_config__number_ranges,
