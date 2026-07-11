@@ -113,7 +113,7 @@ cover:
     #   open_slack  = un-seal run before travel when opening from fully closed
     #   close_slack = seal run budget after travel reaches 0 on a full close
     # Starting estimates — recalibrate with a stopwatch.
-    open_duration: 40
+    open_duration: 38
     close_duration: 36
     open_slack: 7
     close_slack: 7
@@ -126,7 +126,7 @@ cover:
     name: "RollladenWohnzimmer2"
     id: rol_2_cover
     invert_position: false
-    open_duration: 40
+    open_duration: 38
     close_duration: 36
     open_slack: 7
     close_slack: 7
