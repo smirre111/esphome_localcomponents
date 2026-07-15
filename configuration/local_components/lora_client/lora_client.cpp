@@ -1046,18 +1046,19 @@ namespace esphome
                    this->get_name().c_str(), (unsigned)kOpMaxRetries);
           this->op_awaiting_ack_ = false;
           this->set_command_failed_(true);
-          // Half-open-session recovery: if the command failed while the encrypted
-          // session is NOT confirmed, the node may have re-keyed (it has a session)
-          // while the hub still thinks it has none — so the hub sends plaintext that
-          // the node's Part B rejects.  Force an immediate fresh login (which resets
-          // the retry backoff to fast) so the node re-sends its login-ack and the
-          // session re-confirms in seconds instead of waiting out the backoff.
-          if (!this->session_confirmed_)
-          {
-            ESP_LOGW(TAG, "[%s] Command failed with unconfirmed session — forcing re-login",
-                     this->get_name().c_str());
-            this->do_login_and_arm_retry_();
-          }
+          // Session recovery.  A command that goes fully unacked means the session
+          // is effectively dead — either the hub never confirmed it (node re-keyed
+          // while the hub still thinks it has none, Part B rejects plaintext), OR
+          // the hub had confirmed it earlier but the node has since re-keyed/hung
+          // leaving a STALE-confirmed flag (observed 2026-07-11: node 1 failed 4x
+          // without recovering because session_confirmed_ was still true).  In both
+          // cases clear the confirmation and force an immediate fresh login so the
+          // next command rebuilds the session in seconds instead of silently
+          // retrying a dead session or waiting out the backoff.
+          this->session_confirmed_ = false;
+          ESP_LOGW(TAG, "[%s] Command failed after retries — clearing session, forcing re-login",
+                   this->get_name().c_str());
+          this->do_login_and_arm_retry_();
           return;
         }
         uint32_t msgid = this->tx_cover_operation_();

@@ -70,6 +70,7 @@ time:
         days_of_week: MON-SUN
         then:
           - loracover.on_sleep_start: rol_1
+          - loracover.on_sleep_start: rol_2
 
 
 
