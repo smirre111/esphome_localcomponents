@@ -1368,6 +1368,7 @@ namespace esphome
       clientconfig.name.data = (uint8_t *)this->get_name().c_str();
       clientconfig.name.len = strlen(this->get_name().c_str());
       clientconfig.sleepduration = this->sleep_duration_;
+      clientconfig.batteryinterval = this->battery_update_interval_;
 
       // TimeUpdate time_update = TIME_UPDATE__INIT;
       // time_update.closetime = this->close_duration_;

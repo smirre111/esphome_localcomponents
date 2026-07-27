@@ -69,6 +69,7 @@ namespace esphome
       void set_short_address(uint8_t address) { this->short_address_ = address; }
       void set_subnet_address(uint8_t address) { this->subnet_address_ = address; }
       void set_sleep_duration(uint16_t sleep_duration) { this->sleep_duration_ = sleep_duration; }
+      void set_battery_update_interval(uint32_t seconds) { this->battery_update_interval_ = seconds; }
       void enterSleep();
       void triggerOTA();
       virtual void set_response(uint8_t *data, size_t len);
@@ -153,6 +154,7 @@ namespace esphome
       uint8_t  short_address_{0};
       uint8_t  subnet_address_{0};
       uint64_t sleep_duration_{86400}; // Default to 24 hours
+      uint32_t battery_update_interval_{900}; // Battery force-send interval [s]; default 15 min
       bool     registered_;
 
       // uint32_t rx_message_id_{0};

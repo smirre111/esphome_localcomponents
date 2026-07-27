@@ -688,7 +688,7 @@ const ProtobufCMessageDescriptor lora_cover_operation__descriptor =
   (ProtobufCMessageInit) lora_cover_operation__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor client_config__field_descriptors[5] =
+static const ProtobufCFieldDescriptor client_config__field_descriptors[6] =
 {
   {
     "mac_addr",
@@ -750,9 +750,22 @@ static const ProtobufCFieldDescriptor client_config__field_descriptors[5] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "batteryInterval",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ClientConfig, batteryinterval),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned client_config__field_indices_by_name[] = {
   1,   /* field[1] = addr */
+  5,   /* field[5] = batteryInterval */
   0,   /* field[0] = mac_addr */
   3,   /* field[3] = name */
   4,   /* field[4] = sleepDuration */
@@ -761,7 +774,7 @@ static const unsigned client_config__field_indices_by_name[] = {
 static const ProtobufCIntRange client_config__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 5 }
+  { 0, 6 }
 };
 const ProtobufCMessageDescriptor client_config__descriptor =
 {
@@ -771,7 +784,7 @@ const ProtobufCMessageDescriptor client_config__descriptor =
   "ClientConfig",
   "",
   sizeof(ClientConfig),
-  5,
+  6,
   client_config__field_descriptors,
   client_config__field_indices_by_name,
   1,  client_config__number_ranges,

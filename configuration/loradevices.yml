@@ -90,8 +90,9 @@ lora_client:
     short_address: 17
     subnet_address: 02
     sleep_duration: 21600
+    battery_update_interval: 15min
     mac_address: e0:8c:fe:5f:b7:a4
-    
+
 
   - id: rol_2
     name: "RollladenWohnzimmer2"
@@ -99,6 +100,7 @@ lora_client:
     short_address: 18
     subnet_address: 02
     sleep_duration: 21600
+    battery_update_interval: 15min
     mac_address: e0:8c:fe:5f:9e:c4
 
 #mac_address: c4:9e:5f:fe:8c:e0

@@ -108,10 +108,15 @@ struct  ClientConfig
   uint32_t subnt;
   ProtobufCBinaryData name;
   uint64_t sleepduration;
+  /*
+   * Battery send interval in seconds (node force-sends battery this often).
+   * 0 = unset (old hub / not configured) -> node keeps its current default.
+   */
+  uint32_t batteryinterval;
 };
 #define CLIENT_CONFIG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&client_config__descriptor) \
-    , 0, 0, 0, {0,NULL}, 0 }
+    , 0, 0, 0, {0,NULL}, 0, 0 }
 
 
 struct  CoverConfig

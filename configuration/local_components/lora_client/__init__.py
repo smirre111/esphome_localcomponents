@@ -43,6 +43,7 @@ CONF_ON_SLEEP_START = "on_sleep_start"
 CONF_SHORT_ADDRESS = "short_address"
 CONF_SUBNET_ADDRESS = "subnet_address"
 CONF_SLEEP_DURATION = "sleep_duration"
+CONF_BATTERY_UPDATE_INTERVAL = "battery_update_interval"
 CONF_TIME_ID = "time_id"  # New config key for time component
 
 _LOGGER = logging.getLogger(__name__)
@@ -257,7 +258,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_SUBNET_ADDRESS): cv.int_range(min=0, max=0xFF),
             cv.Required(CONF_TIME_ID): cv.use_id(time_.RealTimeClock),  # Require time component ID
             cv.Optional(CONF_SLEEP_DURATION, default=False): cv.int_range(0, 864000),
-            
+            # How often the node force-sends its battery status.  Accepts a time
+            # period (e.g. "15min", "900s"); pushed to the node via ClientConfig.
+            cv.Optional(CONF_BATTERY_UPDATE_INTERVAL, default="15min"): cv.All(
+                cv.positive_time_period_seconds,
+                cv.Range(min=cv.TimePeriod(seconds=10), max=cv.TimePeriod(seconds=86400)),
+            ),
+
             cv.Optional(CONF_ON_SLEEP_START): automation.validate_automation(
                 {
                     cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(SleepTrigger),
@@ -432,6 +439,7 @@ async def to_code(config):
     # cg.add(var.set_open_duration(config[CONF_OPEN_DURATION]))
     # cg.add(var.set_close_duration(config[CONF_CLOSE_DURATION]))
     cg.add(var.set_sleep_duration(config[CONF_SLEEP_DURATION]))
+    cg.add(var.set_battery_update_interval(config[CONF_BATTERY_UPDATE_INTERVAL].total_seconds))
 
     # Get the time component variable and set it
     timeInstance = await cg.get_variable(config[CONF_TIME_ID])

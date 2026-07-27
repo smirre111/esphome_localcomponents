@@ -16,6 +16,22 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-07-27 — v1.0.12: configurable battery interval + stale-proto cleanup
+
+- **Battery update interval is now configurable from the hub YAML** (default
+  15 min; was hardcoded 5 min on the node). New `ClientConfig.batteryInterval`
+  proto field (stubs regenerated via WSL protoc-c to all 5 locations); hub
+  `battery_update_interval` option (a time period, e.g. `15min`) pushed via the
+  existing config path; node stores it in `config.txt` and `taskBatteryMonitor`
+  reads it each cycle (floored at 10 s). `0` = unset → node keeps its default, so
+  version-skew is safe both directions. Node → v1.0.12; hub OTA'd
+  (`config_hash=0x353a4b75`, banner-confirmed).
+- **Removed the stale ESPHome-side proto reference copy**
+  `local_components/lora_tracker/proto/blinds.proto` — unused (the hub builds from
+  the `blindsproto` stubs; the authoritative proto lives in `BlindsESP/proto`).
+- Deploy: hub OTA'd now (skew-safe, so hub-first was fine); nodes pick up v1.0.12
+  and the configured interval on their next OTA from `https_hosted`.
+
 ### 2026-07-27 — v1.0.11: tracked/acked sysops + cross-talk pre-decrypt filter + deep-sleep cap
 
 - **Node 1 recovery confirmed.** After the node-1 outage (silent ~85 min while the
