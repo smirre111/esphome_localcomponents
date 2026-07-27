@@ -144,10 +144,19 @@ struct  LoginMsg
 {
   ProtobufCMessage base;
   uint32_t nonce;
+  /*
+   * Set by the hub when it has NOT yet pushed config to this node this session
+   * (config_synced_ == false) — e.g. the hub rebooted (config change / OTA)
+   * while the node stayed awake and re-established via LOGIN instead of REGISTER.
+   * On receipt the node sends a REGISTER, which drives the hub's normal
+   * register -> config-push -> login path, delivering the updated config to an
+   * awake node without requiring it to reboot.  False on a normal login.
+   */
+  protobuf_c_boolean request_register;
 };
 #define LOGIN_MSG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&login_msg__descriptor) \
-    , 0 }
+    , 0, 0 }
 
 
 /*

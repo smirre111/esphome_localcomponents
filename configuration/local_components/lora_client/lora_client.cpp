@@ -787,7 +787,11 @@ namespace esphome
 
       if (!(rcv_message->header) || (rcv_message->header->senderaddress != this->short_address_))
       {
-        ESP_LOGE(TAG, "%s, Address not for me", this->get_name().c_str());
+        // (b) Cross-talk, already filtered BEFORE decryption: each hub client
+        // instance sees every uplink on the shared channel, so a frame from the
+        // OTHER node reaching here is normal and expected.  Drop it at debug —
+        // this used to be logged at ERROR and fired on every peer frame.
+        ESP_LOGD(TAG, "%s, uplink from another node (addr mismatch) — dropping", this->get_name().c_str());
         lora_client_response_message__free_unpacked(rcv_message, NULL);
         return;
       }
@@ -920,6 +924,30 @@ namespace esphome
           this->cancel_timeout("login_retry");
           ESP_LOGI(TAG, "[%s] Login acknowledged by node (encrypted session confirmed)",
                    this->get_name().c_str());
+
+          // Resume-path config-sync guarantee: if this session was recovered via
+          // the base-nonce RESUME path (BaseNonceExchange + NVS-restored counters
+          // after a hub reboot) rather than a fresh send_login(), the node never
+          // saw a request_register flag — so config changes flashed into the hub
+          // this boot would not reach an awake node until its modeled wake.  When
+          // config is still unsynced this boot, schedule a fresh login now:
+          // send_login() sets request_register = !config_synced_, so a node that
+          // supports it responds with a REGISTER and flows through the normal
+          // config-push path.  Deferred (not inline) so this frame finishes first.
+          // Loop-safe: this whole block runs once per session (guarded by the
+          // enclosing !login_acked_), and send_login() does not clear login_acked_,
+          // so a node that ignores the flag (older firmware) simply re-acks without
+          // re-entering here.  Re-checked in the lambda in case a REGISTER already
+          // synced config in the meantime.
+          if (!this->config_synced_)
+          {
+            ESP_LOGI(TAG, "[%s] Session resumed without config sync this boot — scheduling re-login to push config",
+                     this->get_name().c_str());
+            this->set_timeout("config_sync_relogin", 500, [this]() {
+              if (!this->config_synced_)
+                this->send_login();
+            });
+          }
         }
 
         // The inner is now payload-only (no header).  Unpack it, resolve the F-4
@@ -971,7 +999,7 @@ namespace esphome
     // ---------------------------------------------------------------------------
     // F-4: Command ACK / retransmit state machine
     // ---------------------------------------------------------------------------
-    uint32_t LORAListener::tx_cover_operation_()
+    uint32_t LORAListener::tx_tracked_op_()
     {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
@@ -980,22 +1008,32 @@ namespace esphome
       header.senderaddress = kHubAddress;
       header.msgid         = this->incrTxMessageId();
       op_message.header    = &header;
-      op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
 
+      // The tracked op is either a cover operation or a system operation; both are
+      // (re)built here with a fresh msgid so the retransmit path is identical.
       LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
-      if (this->op_covop_case_ == LORA_COVER_OPERATION__COVOP_POSITION)
+      if (this->op_kind_ == TrackedOpKind::SYSOP)
       {
-        covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
-        covop.position   = this->op_position_;
+        op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+        op_message.sysop    = static_cast<ClientOperation>(this->op_sysop_);
       }
       else
       {
-        covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
-        covop.operation  = static_cast<CovOperation>(this->op_operation_);
+        op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+        if (this->op_covop_case_ == LORA_COVER_OPERATION__COVOP_POSITION)
+        {
+          covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
+          covop.position   = this->op_position_;
+        }
+        else
+        {
+          covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
+          covop.operation  = static_cast<CovOperation>(this->op_operation_);
+        }
+        op_message.operation = &covop;
       }
-      op_message.operation = &covop;
 
-      // Encrypt the command in-session (AES-GCM) so the downlink cover op is
+      // Encrypt the command in-session (AES-GCM) so the downlink op is
       // authenticated; falls back to plaintext only before a session exists.
       uint8_t *buf = nullptr;
       size_t   len = 0;
@@ -1006,29 +1044,46 @@ namespace esphome
       }
       else
       {
-        ESP_LOGE(TAG, "[%s] Failed to pack cover operation", this->get_name().c_str());
+        ESP_LOGE(TAG, "[%s] Failed to pack tracked operation", this->get_name().c_str());
       }
       return header.msgid;
     }
 
-    void LORAListener::send_cover_operation(uint32_t covop_case, int32_t operation, float position)
+    void LORAListener::begin_tracked_op_(uint32_t msgid, const char *what)
     {
-      this->op_covop_case_ = covop_case;
-      this->op_operation_  = operation;
-      this->op_position_   = position;
-
-      uint32_t msgid = this->tx_cover_operation_();
       this->op_first_msgid_  = msgid;
       this->op_last_msgid_   = msgid;
       this->op_retry_count_  = 0;
       this->op_awaiting_ack_ = true;
       this->set_command_failed_(false);
 
-      ESP_LOGI(TAG, "[%s] Cover op sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
-               (unsigned)msgid);
+      ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
+               what, (unsigned)msgid);
 
       this->cancel_timeout("op_retry");
       this->schedule_op_retry_();
+    }
+
+    void LORAListener::send_cover_operation(uint32_t covop_case, int32_t operation, float position)
+    {
+      this->op_kind_       = TrackedOpKind::COVER;
+      this->op_covop_case_ = covop_case;
+      this->op_operation_  = operation;
+      this->op_position_   = position;
+
+      this->begin_tracked_op_(this->tx_tracked_op_(), "Cover op");
+    }
+
+    void LORAListener::send_tracked_sysop_(int32_t sysop)
+    {
+      // P1: one-shot sysops used to be sent once, unacked — a single dropped or
+      // replay-rejected frame was lost with no recovery.  Route them through the
+      // exact same tracked machinery as cover ops so a miss is retransmitted (with
+      // a fresh incrementing msgid) until the node acks, then fails + re-logins.
+      this->op_kind_  = TrackedOpKind::SYSOP;
+      this->op_sysop_ = sysop;
+
+      this->begin_tracked_op_(this->tx_tracked_op_(), "Sysop");
     }
 
     void LORAListener::schedule_op_retry_()
@@ -1042,7 +1097,7 @@ namespace esphome
           return; // acked already; one-shot, nothing to re-arm
         if (++this->op_retry_count_ > kOpMaxRetries)
         {
-          ESP_LOGE(TAG, "[%s] Cover op not acknowledged after %u retries — marking failed",
+          ESP_LOGE(TAG, "[%s] Tracked op not acknowledged after %u retries — marking failed",
                    this->get_name().c_str(), (unsigned)kOpMaxRetries);
           this->op_awaiting_ack_ = false;
           this->set_command_failed_(true);
@@ -1061,9 +1116,9 @@ namespace esphome
           this->do_login_and_arm_retry_();
           return;
         }
-        uint32_t msgid = this->tx_cover_operation_();
+        uint32_t msgid = this->tx_tracked_op_();
         this->op_last_msgid_ = msgid;
-        ESP_LOGW(TAG, "[%s] Cover op retransmit %u/%u (msgid=%u)", this->get_name().c_str(),
+        ESP_LOGW(TAG, "[%s] Tracked op retransmit %u/%u (msgid=%u)", this->get_name().c_str(),
                  (unsigned)this->op_retry_count_, (unsigned)kOpMaxRetries, (unsigned)msgid);
         this->schedule_op_retry_(); // re-arm the next one-shot
       });
@@ -1080,7 +1135,7 @@ namespace esphome
       this->op_awaiting_ack_ = false;
       this->cancel_timeout("op_retry");
       this->set_command_failed_(false);
-      ESP_LOGI(TAG, "[%s] Cover op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
+      ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
                (unsigned)ack_msg_id);
     }
 
@@ -1155,32 +1210,11 @@ namespace esphome
     void LORAListener::triggerOTA()
     {
       ESP_LOGI("LORAListener", "Device %s triggering OTA", this->address_str());
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
-      // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-      // op_message.senderaddress = 0x12345678; // TODO: Use unique address
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress = this->short_address_;
-      header.destsubnet = this->subnet_address_;
-      header.senderaddress = kHubAddress; // TODO: Use unique address
-      header.msgid = this->incrTxMessageId(); // Incrementing message ID
-      op_message.header = &header;
-
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
-      op_message.sysop = CLIENT_OPERATION__CMD_OTA;
-
-      // Encrypt the sysop in-session so OTA cannot be forged/injected.
-      uint8_t *txBuf = nullptr;
-      size_t   len   = 0;
-      if (s_pack_operation_message(&op_message, this->session_confirmed_, &txBuf, &len))
-      {
-        this->parent_->send(txBuf, len);
-        free(txBuf);
-      }
-      else
-      {
-        ESP_LOGE(TAG, "[%s] Failed to pack OTA operation", this->get_name().c_str());
-      }
+      // P1: OTA is a one-shot sysop — send it through the tracked/acked path so a
+      // dropped or replay-rejected frame is retransmitted until the node acks,
+      // instead of being silently lost (the observed post-reboot OTA drop).  The
+      // sysop is encrypted in-session by tx_tracked_op_() so it cannot be forged.
+      this->send_tracked_sysop_(CLIENT_OPERATION__CMD_OTA);
     }
 
 
@@ -1285,6 +1319,14 @@ namespace esphome
       // nonce carries the base-nonce for AES-GCM IV derivation.
       // The node stores it as its base_nonce on receipt of CMD_LOGIN.
       login.nonce = base;
+      // If we have not pushed config to this node this session (config_synced_
+      // is cleared on every hub boot and after a failed cover op), ask the node
+      // to REGISTER.  That drives the register -> config-push -> login path so an
+      // awake node that re-established via LOGIN still picks up config changes /
+      // OTA flashed into the hub — without needing to reboot.  Once config is
+      // pushed (config_synced_ becomes true) subsequent logins clear this flag,
+      // so the handshake converges after a single register cycle.
+      login.request_register = !this->config_synced_;
       op_message.login = &login;
 
       uint8_t *txBuf;
@@ -1295,9 +1337,10 @@ namespace esphome
       this->parent_->send(txBuf, txLen);
       delete[] txBuf;
 
-      ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u)",
+      ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
                this->get_name().c_str(), (unsigned)base,
-               (unsigned)this->frame_counter_.tx_message_id);
+               (unsigned)this->frame_counter_.tx_message_id,
+               (int)login.request_register);
     }
 
     void LORAListener::send_remote_config()

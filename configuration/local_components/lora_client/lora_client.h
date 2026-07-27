@@ -227,7 +227,14 @@ namespace esphome
       // burst on top of the register-triggered config bursts.
       void     schedule_login_retry_();
 
-      // ---- F-4: command ACK / retransmit state ----
+      // ---- F-4 / P1: command ACK / retransmit state (cover ops AND sysops) ----
+      // One reusable tracked-delivery state machine backs BOTH cover operations
+      // and one-shot system operations (OTA etc.): (re)transmit with a fresh
+      // incrementing msgid until the node returns a CommandAck, then mark failed
+      // + force re-login after kOpMaxRetries.  op_kind_ selects what tx_tracked_op_
+      // rebuilds on each retransmission.
+      enum class TrackedOpKind : uint8_t { COVER, SYSOP };
+      TrackedOpKind op_kind_{TrackedOpKind::COVER};
       bool     op_awaiting_ack_{false};
       uint32_t op_first_msgid_{0};   // first msgid used for the current logical command
       uint32_t op_last_msgid_{0};    // msgid of the most recent (re)transmission
@@ -236,6 +243,7 @@ namespace esphome
       uint32_t op_covop_case_{0};
       int32_t  op_operation_{0};
       float    op_position_{0.0f};
+      int32_t  op_sysop_{0};         // ClientOperation value when op_kind_ == SYSOP
       bool     command_failed_{false};
       binary_sensor::BinarySensor *command_failed_bsensor_{nullptr};
 
@@ -248,7 +256,13 @@ namespace esphome
       static constexpr uint32_t kOpRetryIntervalMs = 3000;
       static constexpr uint8_t  kOpMaxRetries      = 4;
 
-      uint32_t tx_cover_operation_();        // (re)pack + send the stored op, returns msgid
+      uint32_t tx_tracked_op_();             // (re)pack + send the stored cover/sys op, returns msgid
+      // Send a tracked system operation (e.g. CMD_OTA) through the same
+      // retransmit-until-acked path as cover ops.  sysop is a ClientOperation value.
+      void     send_tracked_sysop_(int32_t sysop);
+      // Shared tail for send_cover_operation / send_tracked_sysop_: record the
+      // msgid, arm ack tracking, and schedule the first retransmit.
+      void     begin_tracked_op_(uint32_t msgid, const char *what);
       void     handle_command_ack_(uint32_t ack_msg_id);
       void     set_command_failed_(bool failed);
       // Arm a ONE-SHOT retransmit timer.  Uses set_timeout (deterministic

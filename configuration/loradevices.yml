@@ -138,6 +138,9 @@ cover:
 
 
 button:
+  - platform: restart
+    name: "Hub Restart"
+    id: hub_restart
   - platform: loracover
     lora_client_id: rol_1
     name: "Trigger OTA1"

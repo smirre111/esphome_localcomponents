@@ -894,7 +894,7 @@ const ProtobufCMessageDescriptor cover_config__descriptor =
   (ProtobufCMessageInit) cover_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor login_msg__field_descriptors[1] =
+static const ProtobufCFieldDescriptor login_msg__field_descriptors[2] =
 {
   {
     "nonce",
@@ -908,14 +908,27 @@ static const ProtobufCFieldDescriptor login_msg__field_descriptors[1] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "request_register",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(LoginMsg, request_register),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned login_msg__field_indices_by_name[] = {
   0,   /* field[0] = nonce */
+  1,   /* field[1] = request_register */
 };
 static const ProtobufCIntRange login_msg__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 1 }
+  { 0, 2 }
 };
 const ProtobufCMessageDescriptor login_msg__descriptor =
 {
@@ -925,7 +938,7 @@ const ProtobufCMessageDescriptor login_msg__descriptor =
   "LoginMsg",
   "",
   sizeof(LoginMsg),
-  1,
+  2,
   login_msg__field_descriptors,
   login_msg__field_indices_by_name,
   1,  login_msg__number_ranges,
