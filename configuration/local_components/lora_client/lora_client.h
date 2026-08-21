@@ -77,6 +77,13 @@ namespace esphome
       // void send_remote_address();
       // void send_remote_sleep_time();
       void send_login();
+      // P1: push wall-clock time to the node.  The node has no clock source of
+      // its own, so this is its only way to learn the time.  Sent once the
+      // encrypted session is confirmed (see set_response), because before that
+      // point the node may not be able to authenticate the frame.  A no-op when
+      // the hub's own clock is not yet valid — sending epoch 0 would be worse
+      // than sending nothing, and the node ignores it anyway.
+      void send_timesync();
       void send_base_nonce_exchange();
       virtual void send_remote_config();
       uint32_t incrTxMessageId();

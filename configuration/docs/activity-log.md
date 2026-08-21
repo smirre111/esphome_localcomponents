@@ -16,6 +16,32 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-21 — Auto-mode P1: TimeSync end-to-end (built + tested, NOT deployed)
+
+- **The node can now learn the time.** It has no clock source of its own (no
+  SNTP, no RTC battery), so the hub seeds it: `send_timesync()` pushes epoch +
+  local UTC offset 750 ms after the encrypted session is confirmed; the node
+  applies it, stores offset/`dstNext` in RTC memory (survives deep sleep — as
+  does the clock itself, since the ESP32's time base is the RTC timer) and logs
+  local wall time.
+- **The log line reports drift, not just time**: the correction is measured
+  before being applied, so each re-sync prints the node's accumulated error.
+  That is why TimeSync ships ahead of the scheduler — it characterises the
+  32.768 kHz crystal against real sleep cycles before anything depends on it.
+- No-op when the hub's own clock is invalid (sending epoch 0 would waste node
+  awake time). Not acked — the P2 beacon carries `nodeEpoch` back instead, so an
+  ACK would just spend battery.
+- **Found a protocol detail the test harness had never modelled:** the AES-GCM
+  nonce counter carries a **direction bit** — `msgid | (1ULL << 63)` on downlink,
+  bare `msgid` on uplink. Every previous harness test decrypted uplinks only, so
+  the first downlink test failed the tag check with correct key, AAD and base
+  nonce. Sim gained explicit `derive_gcm_iv_uplink/downlink`. **SKILL.md's
+  crypto table was wrong about this** (and about the AAD being 20 B, the tag
+  being 16 B, and the ciphertext covering the full inner message) — corrected.
+- Verified: node builds (0x137ae0, 39 % free), hub compiles
+  (`config_hash=0x04280b55`), **87/87 tests pass** (9 new).
+- **Not flashed.** P0+P1 deploy together, nodes first then hub.
+
 ### 2026-08-21 — Auto-mode P0: proto scaffolding (built, NOT deployed)
 
 - **Plan written and approved:** [auto-mode-plan.md](auto-mode-plan.md) — an

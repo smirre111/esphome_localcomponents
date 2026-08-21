@@ -511,3 +511,177 @@ TEST(RealLoraClient, WrongMacRegisterIgnored) {
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// P1 — the hub pushes wall-clock time to the node once the encrypted session is
+// confirmed. The node has no clock source of its own, so this is the only way
+// it ever learns the time; everything the scheduler will later do rests on it.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Decrypt a hub->node frame that was encrypted for `node_addr` with
+// `base_nonce`, and return the inner (payload-only) operation message.
+std::optional<proto_sim::LoraClientOperationMessage>
+decrypt_downlink(const proto_sim::AirFrame& f, uint32_t base_nonce) {
+    auto outer = proto_sim::as_op(f);
+    if (!outer || outer->cmd != proto_sim::LoraClientOperationMessage::Cmd::Encrypted)
+        return std::nullopt;
+
+    // Downlink: the direction bit is OR'd into the nonce counter so hub->node
+    // and node->hub can never reuse an IV under the shared base nonce.
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv_downlink(base_nonce, outer->header.msgId, iv);
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(outer->header.destAddress, outer->header.destSubnet,
+                                outer->header.senderAddress, outer->header.msgId, aad);
+
+    auto plain = proto_sim::aes_gcm_decrypt(iv, aad, sizeof(aad),
+                                            outer->encrypted.ciphertext.data(),
+                                            outer->encrypted.ciphertext.size(),
+                                            outer->encrypted.tag.data(),
+                                            outer->encrypted.tag.size());
+    if (!plain) return std::nullopt;
+    return proto_sim::deserialize_op(plain->data(), plain->size());
+}
+
+// Drive REGISTER -> login -> encrypted ACK, leaving the session confirmed.
+// Returns the base nonce the hub minted, so the caller can decrypt downlinks.
+uint32_t drive_session(proto_sim::SimClock& clock, proto_sim::SimRadio& radio,
+                       LORAClient& listener) {
+    uint32_t captured_nonce = 0;
+    radio.add_sink([&captured_nonce](const proto_sim::AirFrame& f) {
+        if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login)
+            captured_nonce = m->login.nonce;
+    });
+    attach_encrypted_login_ack(radio, listener, /*node_addr=*/18, /*subnet=*/2);
+
+    auto reg = real_helpers::serialize_register(kMacRol2);
+    listener.set_response(reg.data(), reg.size());
+    clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    return captured_nonce;
+}
+
+} // namespace
+
+TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    constexpr std::time_t kHubEpoch = 1787000000;
+    esphome::ESPTime::set_timezone_offset(7200);   // CEST
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(kHubEpoch, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(rol.login_acked_) << "session must be confirmed before TimeSync is due";
+
+    const size_t before = radio.transcript().size();
+    clock.tick(1000);   // past the 750 ms deferred push
+
+    int found = 0;
+    proto_sim::TimeSync got{};
+    for (size_t i = before; i < radio.transcript().size(); ++i) {
+        auto inner = decrypt_downlink(radio.transcript()[i], base);
+        if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) {
+            ++found;
+            got = inner->timesync;
+        }
+    }
+
+    ASSERT_EQ(found, 1) << "exactly one TimeSync must follow session confirmation";
+    EXPECT_EQ(got.epoch,     static_cast<uint64_t>(kHubEpoch));
+    EXPECT_EQ(got.utcOffset, 7200);
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(RealLoraClient, TimeSyncIsEncrypted) {
+    // The node only trusts an authenticated downlink once it has a session, so
+    // a plaintext TimeSync would be both droppable and spoofable — a spoofed
+    // clock is the one input that can make a scheduled node sleep through
+    // every event, or wake at the wrong time indefinitely.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+    esphome::ESPTime::set_timezone_offset(7200);
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    drive_session(clock, radio, rol);
+    const size_t before = radio.transcript().size();
+    clock.tick(1000);
+
+    for (size_t i = before; i < radio.transcript().size(); ++i) {
+        auto m = proto_sim::as_op(radio.transcript()[i]);
+        if (!m) continue;
+        EXPECT_NE(m->cmd, proto_sim::LoraClientOperationMessage::Cmd::TimeSync)
+            << "TimeSync appeared in PLAINTEXT on the wire";
+    }
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(RealLoraClient, NoTimeSyncWhenHubClockInvalid) {
+    // Hub booted but Home Assistant time has not arrived yet. Sending epoch 0
+    // would be worse than sending nothing: the node would burn awake radio time
+    // receiving a frame it must discard. The next login retries the push.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(0, /*valid=*/false);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    const size_t before = radio.transcript().size();
+    clock.tick(1000);
+
+    for (size_t i = before; i < radio.transcript().size(); ++i) {
+        auto inner = decrypt_downlink(radio.transcript()[i], base);
+        if (!inner) continue;
+        EXPECT_NE(inner->cmd, proto_sim::LoraClientOperationMessage::Cmd::TimeSync)
+            << "hub sent TimeSync despite having no valid clock";
+    }
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}

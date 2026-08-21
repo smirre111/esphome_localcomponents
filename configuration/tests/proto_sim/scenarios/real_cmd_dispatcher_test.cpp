@@ -369,3 +369,111 @@ TEST_F(RealNodeFixture, CmdClientConfigAppliesAddressOnlyForMatchingMac) {
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// P1 — TimeSync. The node has no clock source of its own, so this is the only
+// way it ever learns the time. Nothing schedules against it yet; these tests
+// pin the behaviour the scheduler will later depend on.
+//
+// NOTE on what is NOT asserted: the handler calls settimeofday(), which
+// requires CAP_SYS_TIME and fails as an unprivileged host user. That failure
+// is harmless here — every property the scheduler relies on (validity flag,
+// UTC offset, local-time rendering) is independent of whether the host clock
+// actually moved, so the tests assert those instead of the wall clock.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
+                                      int32_t utcoffset, uint64_t dstnext = 0) {
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr               = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = msgid;
+    op.header         = &hdr;
+
+    TimeSync ts  = TIME_SYNC__INIT;
+    ts.epoch     = epoch;
+    ts.utcoffset = utcoffset;
+    ts.dstnext   = dstnext;
+    op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+    op.timesync  = &ts;
+
+    size_t len = lora_client_operation_message__get_packed_size(&op);
+    std::vector<uint8_t> out(len);
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+} // namespace
+
+TEST_F(RealNodeFixture, TimeSyncEstablishesClockAndOffset) {
+    auto frame = pack_timesync_op(/*msgid=*/10, /*epoch=*/1787000000ULL,
+                                  /*utcoffset=*/7200);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    EXPECT_TRUE(CmdDispatcher::isClockValid());
+    EXPECT_EQ(CmdDispatcher::getUtcOffset(), 7200);
+}
+
+TEST_F(RealNodeFixture, TimeSyncRendersLocalWallTime) {
+    auto frame = pack_timesync_op(/*msgid=*/11, /*epoch=*/1787000000ULL,
+                                  /*utcoffset=*/7200);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    // 1787000000 = 2026-08-17 20:53:20 UTC; +2 h (CEST) -> 22:53:20 local.
+    char buf[32];
+    CmdDispatcher::formatLocalTime(1787000000ULL, buf, sizeof(buf));
+    EXPECT_STREQ(buf, "2026-08-17 22:53:20");
+}
+
+TEST_F(RealNodeFixture, TimeSyncHandlesNegativeUtcOffset) {
+    auto frame = pack_timesync_op(/*msgid=*/12, /*epoch=*/1787000000ULL,
+                                  /*utcoffset=*/-18000);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    EXPECT_EQ(CmdDispatcher::getUtcOffset(), -18000);
+    char buf[32];
+    CmdDispatcher::formatLocalTime(1787000000ULL, buf, sizeof(buf));
+    // 20:53:20 UTC - 5 h -> 15:53:20 same day.
+    EXPECT_STREQ(buf, "2026-08-17 15:53:20");
+}
+
+TEST_F(RealNodeFixture, TimeSyncWithZeroEpochIsIgnoredAndKeepsPriorClock) {
+    // The hub sends epoch 0 only if its OWN clock is invalid. A node that
+    // already has a good clock must keep it: a known-stale clock is far better
+    // than none, because I8 makes a clockless node refuse to sleep at all.
+    auto good = pack_timesync_op(/*msgid=*/20, /*epoch=*/1787000000ULL,
+                                 /*utcoffset=*/7200);
+    disp.onReceiveNew(good.data(), static_cast<int>(good.size()));
+    ASSERT_TRUE(CmdDispatcher::isClockValid());
+
+    auto bad = pack_timesync_op(/*msgid=*/21, /*epoch=*/0, /*utcoffset=*/0);
+    disp.onReceiveNew(bad.data(), static_cast<int>(bad.size()));
+
+    EXPECT_TRUE(CmdDispatcher::isClockValid()) << "a zero-epoch TimeSync must not invalidate a good clock";
+    EXPECT_EQ(CmdDispatcher::getUtcOffset(), 7200) << "offset must survive an ignored TimeSync";
+}
+
+TEST_F(RealNodeFixture, TimeSyncStoresDstNextForLaterUse) {
+    auto frame = pack_timesync_op(/*msgid=*/30, /*epoch=*/1787000000ULL,
+                                  /*utcoffset=*/7200, /*dstnext=*/1793491200ULL);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+    EXPECT_EQ(CmdDispatcher::getDstNext(), 1793491200ULL);
+}
+
+TEST_F(RealNodeFixture, TimeSyncIsNotAcked) {
+    // Deliberate: config pushes are not acked either, and the wake beacon is
+    // the designed way for the hub to observe the node's clock. Acking here
+    // would spend battery on a redundant transmission, so if an ACK ever shows
+    // up on the TX queue this test should be the thing that asks why.
+    auto frame = pack_timesync_op(/*msgid=*/40, /*epoch=*/1787000000ULL,
+                                  /*utcoffset=*/7200);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    CmdDispatcher::tx_command_t cmd{};
+    EXPECT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdFALSE)
+        << "TimeSync must not enqueue a reply";
+}

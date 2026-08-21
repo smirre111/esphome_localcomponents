@@ -8,13 +8,30 @@
 #include <functional>
 #include <vector>
 
-namespace esphome::time {
+// Production puts ESPTime in namespace `esphome` (core/time.h) and
+// RealTimeClock in `esphome::time`. Mirror that split exactly, otherwise
+// production code that qualifies esphome::ESPTime::timezone_offset() will not
+// compile against the shim.
+namespace esphome {
 
 struct ESPTime {
     std::time_t timestamp{0};
     bool valid{false};
     bool is_valid() const { return valid; }
+
+    // Local UTC offset in seconds, including DST. Production reads this from
+    // the configured timezone; tests set it directly.
+    static int32_t timezone_offset() { return tz_offset_; }
+    static void set_timezone_offset(int32_t seconds) { tz_offset_ = seconds; }
+
+    static inline int32_t tz_offset_{0};
 };
+
+} // namespace esphome
+
+namespace esphome::time {
+
+using ESPTime = ::esphome::ESPTime;
 
 class RealTimeClock {
 public:

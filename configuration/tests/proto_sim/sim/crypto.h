@@ -21,8 +21,24 @@ namespace proto_sim {
 // 16-byte derived key (kept across calls). idempotent.
 const uint8_t* aes_gcm_key();
 
+// Direction bit OR'd into the GCM nonce counter on DOWNLINK (hub -> node), so
+// the two directions can never reuse an IV under the shared per-peer base
+// nonce. Must match kDownlinkNonceFlag in BOTH lora_client.cpp and
+// CmdDispatcher.cpp. Uplink (node -> hub) uses the bare msgid.
+constexpr uint64_t kDownlinkNonceFlag = (1ULL << 63);
+
 // 12-byte IV = base_nonce[4 BE] || frame_counter[8 BE].
+// For a downlink frame the caller must pass `msgid | kDownlinkNonceFlag`;
+// prefer derive_gcm_iv_downlink() / derive_gcm_iv_uplink() below, which make
+// the direction explicit at the call site.
 void derive_gcm_iv(uint32_t base_nonce, uint64_t frame_counter, uint8_t iv_out[12]);
+
+inline void derive_gcm_iv_uplink(uint32_t base_nonce, uint32_t msgid, uint8_t iv_out[12]) {
+    derive_gcm_iv(base_nonce, static_cast<uint64_t>(msgid), iv_out);
+}
+inline void derive_gcm_iv_downlink(uint32_t base_nonce, uint32_t msgid, uint8_t iv_out[12]) {
+    derive_gcm_iv(base_nonce, static_cast<uint64_t>(msgid) | kDownlinkNonceFlag, iv_out);
+}
 
 // 16-byte AAD = BE concat of (destAddress, destSubnet, senderAddress, msgId).
 // The 5th field (the old `encrypted` header flag) was REMOVED from the proto —

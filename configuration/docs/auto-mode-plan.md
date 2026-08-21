@@ -320,7 +320,7 @@ both firmwares always ship together (SKILL.md rule).
 | Phase | Content | Verifiable by |
 |-------|---------|---------------|
 | **P0** ✅ | Proto: all new messages + oneof/enum wiring; regenerate stubs to all 7 files; rebuild both firmwares with **no behaviour change**. | **Done — built, not yet deployed.** See §6.2. |
-| **P1** | `TimeSync` end-to-end. Hub sends it after every login and on request; node sets its clock and logs it. No scheduling yet. | Node log shows correct local time; `clock offset` sensor (I4) reads ≈0 and lets us measure real crystal drift over a few days — empirical proof of D1. |
+| **P1** ✅ | `TimeSync` end-to-end. Hub sends it once the encrypted session is confirmed; node sets its clock, stores the UTC offset in RTC memory and logs local time + drift. No scheduling yet. | **Done — built and unit-tested, not yet deployed.** See §6.4. |
 | **P2** | `NodeWakeBeacon` + hub `handle_beacon_()` + session-resume (I2). Node still in interactive mode; beacon fires on boot only. | Hub log shows beacon; measure the awake-window saving from skipping login. |
 | **P3** | Node scheduler: `Scheduler.{h,cpp}` + config persistence + auto-mode sleep/wake/execute + I8 clock guard. Schedule hard-coded in YAML defaults only (no HA editing yet). | A node executes a YAML schedule for 48 h unattended; battery drain measured against the interactive baseline. |
 | **P4** | Hub pending-config store + `ScheduleConfig` push + HA entities (switches, datetime, selects, numbers) + I4 diagnostics. | Edit a time in HA → node applies it at the next beacon; `config pending` clears on ack. |
@@ -444,6 +444,58 @@ New P0 coverage (`scenarios/auto_mode_proto_test.cpp`, 13 tests):
 > the parser, so this is safe and consistent with the existing schema — but it
 > does mean a mis-routed frame mis-parses rather than failing cleanly. Worth
 > knowing when debugging.
+
+### 6.4 P1 result (2026-08-21) — built and tested, **not deployed**
+
+**Node** (`CmdDispatcher.cpp`): `CMD_TIMESYNC` handler applies `settimeofday()`,
+stores the UTC offset and `dstNext`, and marks the clock valid. Clock state
+(`s_clock_valid`, `s_utc_offset_s`, `s_dst_next`) lives in `RTC_DATA_ATTR`
+because plain RAM does not survive deep sleep — while the *clock itself* does,
+since the ESP32's time base is the RTC timer. Exposed via
+`CmdDispatcher::isClockValid() / getUtcOffset() / getDstNext() /
+formatLocalTime()`; `isClockValid()` is the gate I8 will use in P3.
+
+The handler logs the correction **before** applying it, so on a re-sync the log
+line is the node's accumulated drift — which is the whole reason TimeSync ships
+ahead of the scheduler: it characterises the crystal against real sleep cycles
+on real hardware, turning D1 from a datasheet claim into a measurement.
+
+Local time is rendered as `epoch + utcOffset` through `gmtime_r`, deliberately
+avoiding `setenv("TZ")`/`tzset()` and the timezone database — entries are local
+minutes-of-day and the hub has already resolved DST.
+
+**Hub** (`lora_client.cpp`): `send_timesync()` pushes `epoch` +
+`ESPTime::timezone_offset()`, deferred 750 ms after the session is confirmed so
+it does not pile onto the just-completed login exchange. It is a **no-op when
+the hub's own clock is invalid** — sending epoch 0 would make the node burn
+awake radio time on a frame it must discard, and the next login retries anyway.
+
+**Deliberately not acked.** Config pushes aren't acked either, and P2's beacon
+carries `nodeEpoch` back, which is the designed way for the hub to observe
+drift. An ACK here would spend battery on a redundant transmission.
+
+**A protocol detail the harness had never modelled**, found by the first
+downlink decrypt test: the GCM nonce counter carries a **direction bit** —
+`counter = msgid | (1ULL << 63)` on downlink, bare `msgid` on uplink
+(`kDownlinkNonceFlag`, defined identically in `lora_client.cpp` and
+`CmdDispatcher.cpp`). Without it the tag check fails even though key, AAD and
+base nonce are all correct. The sim now has
+`derive_gcm_iv_uplink()`/`derive_gcm_iv_downlink()` so the direction is explicit
+at every call site — P4's schedule push is a downlink and would have hit this
+too. [SKILL.md](../SKILL.md) had documented the IV without the direction bit,
+and its AAD (20 B) / tag (16 B) / full-message-ciphertext entries were also
+stale; all corrected.
+
+**Verification:** node builds (0x137ae0, 39 % free), hub compiles
+(`config_hash=0x04280b55`), **87/87 tests pass** (9 new: 6 node-side covering
+clock establishment, negative offsets, local-time rendering, `dstNext`, the
+zero-epoch guard and the no-ack property; 3 hub-side covering the deferred push,
+that it is encrypted, and that no push happens without a valid hub clock).
+
+One thing the host tests deliberately do **not** assert: the actual wall clock.
+`settimeofday()` needs `CAP_SYS_TIME` and fails for an unprivileged host user —
+harmless, because every property the scheduler depends on is independent of
+whether the host clock moved.
 
 ---
 

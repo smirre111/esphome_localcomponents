@@ -925,6 +925,13 @@ namespace esphome
           ESP_LOGI(TAG, "[%s] Login acknowledged by node (encrypted session confirmed)",
                    this->get_name().c_str());
 
+          // P1: seed the node's wall clock.  Deferred rather than sent inline so
+          // this frame's processing finishes first and the TimeSync does not
+          // pile straight onto the just-completed login exchange — the node is
+          // awake and listening for a while yet.  Only now (session_confirmed_)
+          // can the node authenticate an encrypted downlink.
+          this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
+
           // Resume-path config-sync guarantee: if this session was recovered via
           // the base-nonce RESUME path (BaseNonceExchange + NVS-restored counters
           // after a hub reboot) rather than a fresh send_login(), the node never
@@ -1341,6 +1348,54 @@ namespace esphome
                this->get_name().c_str(), (unsigned)base,
                (unsigned)this->frame_counter_.tx_message_id,
                (int)login.request_register);
+    }
+
+    void LORAListener::send_timesync()
+    {
+      if (this->parent_ == nullptr)
+        return;
+      if (this->time == nullptr || !this->time->now().is_valid())
+      {
+        // Home Assistant time not up yet. Skip rather than send epoch 0 — the
+        // next login re-runs this, and the node keeps whatever clock it has.
+        ESP_LOGW(TAG, "[%s] TimeSync skipped — hub clock not valid yet",
+                 this->get_name().c_str());
+        return;
+      }
+
+      const auto     now       = this->time->now();
+      const uint64_t epoch     = static_cast<uint64_t>(now.timestamp);
+      const int32_t  utcoffset = esphome::ESPTime::timezone_offset();
+
+      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = this->incrTxMessageId();
+      op_message.header    = &header;
+
+      TimeSync ts = TIME_SYNC__INIT;
+      ts.epoch     = epoch;
+      ts.utcoffset = utcoffset;
+      ts.dstnext   = 0;   // not yet computed; the node treats 0 as "unknown"
+      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+      op_message.timesync = &ts;
+
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      {
+        this->parent_->send(buf, len);
+        free(buf);
+        ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
+                 this->get_name().c_str(), (unsigned long long) epoch,
+                 (int) utcoffset, (unsigned) header.msgid);
+      }
+      else
+      {
+        ESP_LOGE(TAG, "[%s] Failed to pack TimeSync", this->get_name().c_str());
+      }
     }
 
     void LORAListener::send_remote_config()
