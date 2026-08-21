@@ -40,7 +40,14 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
   being 16 B, and the ciphertext covering the full inner message) — corrected.
 - Verified: node builds (0x137ae0, 39 % free), hub compiles
   (`config_hash=0x04280b55`), **87/87 tests pass** (9 new).
-- **Not flashed.** P0+P1 deploy together, nodes first then hub.
+- **OTA image staged: node bumped to v1.0.13** and copied to
+  `https_hosted/BlindsV3.bin` (verified `ver=1.0.13` in the app descriptor).
+  The bump is **functionally required**, not cosmetic: `validate_image_header()`
+  returns `ESP_FAIL` when the incoming version equals the running one, so an
+  OTA of a build still stamped 1.0.12 is refused before anything is written.
+- **Not flashed.** P0+P1 deploy together, nodes first then hub. Note the
+  TimeSync log line only appears after the HUB is updated — an old hub never
+  sends one.
 
 ### 2026-08-21 — Auto-mode P0: proto scaffolding (built, NOT deployed)
 
