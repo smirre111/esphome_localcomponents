@@ -322,6 +322,186 @@ void   encrypted_payload__free_unpacked
   assert(message->base.descriptor == &encrypted_payload__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   time_sync__init
+                     (TimeSync         *message)
+{
+  static const TimeSync init_value = TIME_SYNC__INIT;
+  *message = init_value;
+}
+size_t time_sync__get_packed_size
+                     (const TimeSync *message)
+{
+  assert(message->base.descriptor == &time_sync__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t time_sync__pack
+                     (const TimeSync *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &time_sync__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t time_sync__pack_to_buffer
+                     (const TimeSync *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &time_sync__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+TimeSync *
+       time_sync__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (TimeSync *)
+     protobuf_c_message_unpack (&time_sync__descriptor,
+                                allocator, len, data);
+}
+void   time_sync__free_unpacked
+                     (TimeSync *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &time_sync__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   schedule_entry__init
+                     (ScheduleEntry         *message)
+{
+  static const ScheduleEntry init_value = SCHEDULE_ENTRY__INIT;
+  *message = init_value;
+}
+size_t schedule_entry__get_packed_size
+                     (const ScheduleEntry *message)
+{
+  assert(message->base.descriptor == &schedule_entry__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t schedule_entry__pack
+                     (const ScheduleEntry *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &schedule_entry__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t schedule_entry__pack_to_buffer
+                     (const ScheduleEntry *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &schedule_entry__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+ScheduleEntry *
+       schedule_entry__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (ScheduleEntry *)
+     protobuf_c_message_unpack (&schedule_entry__descriptor,
+                                allocator, len, data);
+}
+void   schedule_entry__free_unpacked
+                     (ScheduleEntry *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &schedule_entry__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   schedule_config__init
+                     (ScheduleConfig         *message)
+{
+  static const ScheduleConfig init_value = SCHEDULE_CONFIG__INIT;
+  *message = init_value;
+}
+size_t schedule_config__get_packed_size
+                     (const ScheduleConfig *message)
+{
+  assert(message->base.descriptor == &schedule_config__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t schedule_config__pack
+                     (const ScheduleConfig *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &schedule_config__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t schedule_config__pack_to_buffer
+                     (const ScheduleConfig *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &schedule_config__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+ScheduleConfig *
+       schedule_config__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (ScheduleConfig *)
+     protobuf_c_message_unpack (&schedule_config__descriptor,
+                                allocator, len, data);
+}
+void   schedule_config__free_unpacked
+                     (ScheduleConfig *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &schedule_config__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   node_wake_beacon__init
+                     (NodeWakeBeacon         *message)
+{
+  static const NodeWakeBeacon init_value = NODE_WAKE_BEACON__INIT;
+  *message = init_value;
+}
+size_t node_wake_beacon__get_packed_size
+                     (const NodeWakeBeacon *message)
+{
+  assert(message->base.descriptor == &node_wake_beacon__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t node_wake_beacon__pack
+                     (const NodeWakeBeacon *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &node_wake_beacon__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t node_wake_beacon__pack_to_buffer
+                     (const NodeWakeBeacon *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &node_wake_beacon__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+NodeWakeBeacon *
+       node_wake_beacon__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (NodeWakeBeacon *)
+     protobuf_c_message_unpack (&node_wake_beacon__descriptor,
+                                allocator, len, data);
+}
+void   node_wake_beacon__free_unpacked
+                     (NodeWakeBeacon *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &node_wake_beacon__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   lora_header__init
                      (LoraHeader         *message)
 {
@@ -1111,6 +1291,457 @@ const ProtobufCMessageDescriptor encrypted_payload__descriptor =
   (ProtobufCMessageInit) encrypted_payload__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
+static const ProtobufCFieldDescriptor time_sync__field_descriptors[3] =
+{
+  {
+    "epoch",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(TimeSync, epoch),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "utcOffset",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_INT32,
+    0,   /* quantifier_offset */
+    offsetof(TimeSync, utcoffset),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "dstNext",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(TimeSync, dstnext),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned time_sync__field_indices_by_name[] = {
+  2,   /* field[2] = dstNext */
+  0,   /* field[0] = epoch */
+  1,   /* field[1] = utcOffset */
+};
+static const ProtobufCIntRange time_sync__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 3 }
+};
+const ProtobufCMessageDescriptor time_sync__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "TimeSync",
+  "TimeSync",
+  "TimeSync",
+  "",
+  sizeof(TimeSync),
+  3,
+  time_sync__field_descriptors,
+  time_sync__field_indices_by_name,
+  1,  time_sync__number_ranges,
+  (ProtobufCMessageInit) time_sync__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor schedule_entry__field_descriptors[5] =
+{
+  {
+    "minuteOfDay",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleEntry, minuteofday),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "dayMask",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleEntry, daymask),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "action",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleEntry, action),
+    &sched_action__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "positionPct",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleEntry, positionpct),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "kind",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleEntry, kind),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned schedule_entry__field_indices_by_name[] = {
+  2,   /* field[2] = action */
+  1,   /* field[1] = dayMask */
+  4,   /* field[4] = kind */
+  0,   /* field[0] = minuteOfDay */
+  3,   /* field[3] = positionPct */
+};
+static const ProtobufCIntRange schedule_entry__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 5 }
+};
+const ProtobufCMessageDescriptor schedule_entry__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "ScheduleEntry",
+  "ScheduleEntry",
+  "ScheduleEntry",
+  "",
+  sizeof(ScheduleEntry),
+  5,
+  schedule_entry__field_descriptors,
+  schedule_entry__field_indices_by_name,
+  1,  schedule_entry__number_ranges,
+  (ProtobufCMessageInit) schedule_entry__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor schedule_config__field_descriptors[8] =
+{
+  {
+    "version",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleConfig, version),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "mode",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleConfig, mode),
+    &node_mode__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "interactiveTimeout_s",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleConfig, interactivetimeout_s),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "checkinInterval_s",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleConfig, checkininterval_s),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "beaconLead_s",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleConfig, beaconlead_s),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "postEventWindow_s",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleConfig, posteventwindow_s),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "catchupWindow_s",
+    7,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ScheduleConfig, catchupwindow_s),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "entries",
+    8,
+    PROTOBUF_C_LABEL_REPEATED,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(ScheduleConfig, n_entries),
+    offsetof(ScheduleConfig, entries),
+    &schedule_entry__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned schedule_config__field_indices_by_name[] = {
+  4,   /* field[4] = beaconLead_s */
+  6,   /* field[6] = catchupWindow_s */
+  3,   /* field[3] = checkinInterval_s */
+  7,   /* field[7] = entries */
+  2,   /* field[2] = interactiveTimeout_s */
+  1,   /* field[1] = mode */
+  5,   /* field[5] = postEventWindow_s */
+  0,   /* field[0] = version */
+};
+static const ProtobufCIntRange schedule_config__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 8 }
+};
+const ProtobufCMessageDescriptor schedule_config__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "ScheduleConfig",
+  "ScheduleConfig",
+  "ScheduleConfig",
+  "",
+  sizeof(ScheduleConfig),
+  8,
+  schedule_config__field_descriptors,
+  schedule_config__field_indices_by_name,
+  1,  schedule_config__number_ranges,
+  (ProtobufCMessageInit) schedule_config__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[11] =
+{
+  {
+    "reason",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, reason),
+    &wake_reason__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "schedVersion",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, schedversion),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "nodeEpoch",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, nodeepoch),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "mode",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, mode),
+    &node_mode__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "voltage",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, voltage),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "position",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, position),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "awakeWindow_ms",
+    7,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, awakewindow_ms),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "nextEventEpoch",
+    8,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, nexteventepoch),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "sessionResume",
+    9,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, sessionresume),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "clockValid",
+    10,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, clockvalid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "fwVersion",
+    11,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, fwversion),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned node_wake_beacon__field_indices_by_name[] = {
+  6,   /* field[6] = awakeWindow_ms */
+  9,   /* field[9] = clockValid */
+  10,   /* field[10] = fwVersion */
+  3,   /* field[3] = mode */
+  7,   /* field[7] = nextEventEpoch */
+  2,   /* field[2] = nodeEpoch */
+  5,   /* field[5] = position */
+  0,   /* field[0] = reason */
+  1,   /* field[1] = schedVersion */
+  8,   /* field[8] = sessionResume */
+  4,   /* field[4] = voltage */
+};
+static const ProtobufCIntRange node_wake_beacon__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 11 }
+};
+const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "NodeWakeBeacon",
+  "NodeWakeBeacon",
+  "NodeWakeBeacon",
+  "",
+  sizeof(NodeWakeBeacon),
+  11,
+  node_wake_beacon__field_descriptors,
+  node_wake_beacon__field_indices_by_name,
+  1,  node_wake_beacon__number_ranges,
+  (ProtobufCMessageInit) node_wake_beacon__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
 static const ProtobufCFieldDescriptor lora_header__field_descriptors[6] =
 {
   {
@@ -1215,7 +1846,7 @@ const ProtobufCMessageDescriptor lora_header__descriptor =
   (ProtobufCMessageInit) lora_header__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[8] =
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[10] =
 {
   {
     "header",
@@ -1313,6 +1944,30 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "timesync",
+    16,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, timesync),
+    &time_sync__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "schedule",
+    17,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, schedule),
+    &schedule_config__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   7,   /* field[7] = basenonce */
@@ -1322,13 +1977,15 @@ static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   0,   /* field[0] = header */
   6,   /* field[6] = login */
   2,   /* field[2] = operation */
+  9,   /* field[9] = schedule */
   3,   /* field[3] = sysop */
+  8,   /* field[8] = timesync */
 };
 static const ProtobufCIntRange lora_client_operation_message__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 9, 1 },
-  { 0, 8 }
+  { 0, 10 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -1338,7 +1995,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  8,
+  10,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
   2,  lora_client_operation_message__number_ranges,
@@ -1536,7 +2193,7 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   (ProtobufCMessageInit) cover_position__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[8] =
+static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[9] =
 {
   {
     "header",
@@ -1634,10 +2291,23 @@ static const ProtobufCFieldDescriptor lora_client_response_message__field_descri
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "beacon",
+    16,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientResponseMessage, proto_case),
+    offsetof(LoraClientResponseMessage, beacon),
+    &node_wake_beacon__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_response_message__field_indices_by_name[] = {
   7,   /* field[7] = ack */
   2,   /* field[2] = avail */
+  8,   /* field[8] = beacon */
   1,   /* field[1] = encrypted */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
@@ -1649,7 +2319,7 @@ static const ProtobufCIntRange lora_client_response_message__number_ranges[2 + 1
 {
   { 1, 0 },
   { 9, 1 },
-  { 0, 8 }
+  { 0, 9 }
 };
 const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
 {
@@ -1659,7 +2329,7 @@ const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
   "LoraClientResponseMessage",
   "",
   sizeof(LoraClientResponseMessage),
-  8,
+  9,
   lora_client_response_message__field_descriptors,
   lora_client_response_message__field_indices_by_name,
   2,  lora_client_response_message__number_ranges,
@@ -1696,21 +2366,25 @@ const ProtobufCEnumDescriptor cov_operation__descriptor =
   cov_operation__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue client_operation__enum_values_by_number[5] =
+static const ProtobufCEnumValue client_operation__enum_values_by_number[7] =
 {
   { "CMD_ENABLE_WIFI", "CLIENT_OPERATION__CMD_ENABLE_WIFI", 0 },
   { "CMD_DISABLE_WIFI", "CLIENT_OPERATION__CMD_DISABLE_WIFI", 1 },
   { "CMD_OTA", "CLIENT_OPERATION__CMD_OTA", 2 },
   { "CMD_STATUS", "CLIENT_OPERATION__CMD_STATUS", 3 },
   { "CMD_SLEEP", "CLIENT_OPERATION__CMD_SLEEP", 4 },
+  { "CMD_MODE_AUTO", "CLIENT_OPERATION__CMD_MODE_AUTO", 5 },
+  { "CMD_MODE_INTERACTIVE", "CLIENT_OPERATION__CMD_MODE_INTERACTIVE", 6 },
 };
 static const ProtobufCIntRange client_operation__value_ranges[] = {
-{0, 0},{0, 5}
+{0, 0},{0, 7}
 };
-static const ProtobufCEnumValueIndex client_operation__enum_values_by_name[5] =
+static const ProtobufCEnumValueIndex client_operation__enum_values_by_name[7] =
 {
   { "CMD_DISABLE_WIFI", 1 },
   { "CMD_ENABLE_WIFI", 0 },
+  { "CMD_MODE_AUTO", 5 },
+  { "CMD_MODE_INTERACTIVE", 6 },
   { "CMD_OTA", 2 },
   { "CMD_SLEEP", 4 },
   { "CMD_STATUS", 3 },
@@ -1722,9 +2396,9 @@ const ProtobufCEnumDescriptor client_operation__descriptor =
   "ClientOperation",
   "ClientOperation",
   "",
-  5,
+  7,
   client_operation__enum_values_by_number,
-  5,
+  7,
   client_operation__enum_values_by_name,
   1,
   client_operation__value_ranges,
@@ -1786,5 +2460,99 @@ const ProtobufCEnumDescriptor ack_status__descriptor =
   ack_status__enum_values_by_name,
   1,
   ack_status__value_ranges,
+  NULL,NULL,NULL,NULL   /* reserved[1234] */
+};
+static const ProtobufCEnumValue sched_action__enum_values_by_number[4] =
+{
+  { "SCHED_OPEN", "SCHED_ACTION__SCHED_OPEN", 0 },
+  { "SCHED_CLOSE", "SCHED_ACTION__SCHED_CLOSE", 1 },
+  { "SCHED_STOP", "SCHED_ACTION__SCHED_STOP", 2 },
+  { "SCHED_POSITION", "SCHED_ACTION__SCHED_POSITION", 3 },
+};
+static const ProtobufCIntRange sched_action__value_ranges[] = {
+{0, 0},{0, 4}
+};
+static const ProtobufCEnumValueIndex sched_action__enum_values_by_name[4] =
+{
+  { "SCHED_CLOSE", 1 },
+  { "SCHED_OPEN", 0 },
+  { "SCHED_POSITION", 3 },
+  { "SCHED_STOP", 2 },
+};
+const ProtobufCEnumDescriptor sched_action__descriptor =
+{
+  PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
+  "SchedAction",
+  "SchedAction",
+  "SchedAction",
+  "",
+  4,
+  sched_action__enum_values_by_number,
+  4,
+  sched_action__enum_values_by_name,
+  1,
+  sched_action__value_ranges,
+  NULL,NULL,NULL,NULL   /* reserved[1234] */
+};
+static const ProtobufCEnumValue node_mode__enum_values_by_number[2] =
+{
+  { "MODE_INTERACTIVE", "NODE_MODE__MODE_INTERACTIVE", 0 },
+  { "MODE_AUTO", "NODE_MODE__MODE_AUTO", 1 },
+};
+static const ProtobufCIntRange node_mode__value_ranges[] = {
+{0, 0},{0, 2}
+};
+static const ProtobufCEnumValueIndex node_mode__enum_values_by_name[2] =
+{
+  { "MODE_AUTO", 1 },
+  { "MODE_INTERACTIVE", 0 },
+};
+const ProtobufCEnumDescriptor node_mode__descriptor =
+{
+  PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
+  "NodeMode",
+  "NodeMode",
+  "NodeMode",
+  "",
+  2,
+  node_mode__enum_values_by_number,
+  2,
+  node_mode__enum_values_by_name,
+  1,
+  node_mode__value_ranges,
+  NULL,NULL,NULL,NULL   /* reserved[1234] */
+};
+static const ProtobufCEnumValue wake_reason__enum_values_by_number[5] =
+{
+  { "WAKE_BOOT", "WAKE_REASON__WAKE_BOOT", 0 },
+  { "WAKE_TIMER_EVENT", "WAKE_REASON__WAKE_TIMER_EVENT", 1 },
+  { "WAKE_TIMER_CHECKIN", "WAKE_REASON__WAKE_TIMER_CHECKIN", 2 },
+  { "WAKE_BUTTON", "WAKE_REASON__WAKE_BUTTON", 3 },
+  { "WAKE_UNKNOWN", "WAKE_REASON__WAKE_UNKNOWN", 4 },
+};
+static const ProtobufCIntRange wake_reason__value_ranges[] = {
+{0, 0},{0, 5}
+};
+static const ProtobufCEnumValueIndex wake_reason__enum_values_by_name[5] =
+{
+  { "WAKE_BOOT", 0 },
+  { "WAKE_BUTTON", 3 },
+  { "WAKE_TIMER_CHECKIN", 2 },
+  { "WAKE_TIMER_EVENT", 1 },
+  { "WAKE_UNKNOWN", 4 },
+};
+const ProtobufCEnumDescriptor wake_reason__descriptor =
+{
+  PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
+  "WakeReason",
+  "WakeReason",
+  "WakeReason",
+  "",
+  5,
+  wake_reason__enum_values_by_number,
+  5,
+  wake_reason__enum_values_by_name,
+  1,
+  wake_reason__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };

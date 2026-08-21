@@ -16,6 +16,57 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-21 — Auto-mode P0: proto scaffolding (built, NOT deployed)
+
+- **Plan written and approved:** [auto-mode-plan.md](auto-mode-plan.md) — an
+  automatic (scheduled) node mode where a node deep-sleeps between time-based
+  events instead of listening continuously. 6 phases (P0–P5), deployed
+  **node-first, hub-second** throughout (nodes are OTA'd *through* the hub, so a
+  hub update that broke the link would strand them).
+- **P0 shipped to the bench only:** new proto messages `TimeSync`,
+  `ScheduleEntry`, `ScheduleConfig`, `NodeWakeBeacon` + enums `SchedAction`,
+  `NodeMode`, `WakeReason`; oneof wiring `CMD_TIMESYNC=16`, `CMD_SCHEDULE=17`,
+  `PROTO_BEACON=16`; `ClientOperation` gains `CMD_MODE_AUTO=5` /
+  `CMD_MODE_INTERACTIVE=6`. **Nothing sends or handles them yet — zero
+  behaviour change by design.**
+- Stubs regenerated via WSL `protoc-c` (protobuf-c 1.5.2) and distributed to all
+  7 files; `cmp`-verified identical. Diff is additive-only (+1091/−12; the 12 are
+  descriptor array sizes and one trailing comma).
+- **The gate for the whole plan passed:** unknown-field / empty-`oneof` handling
+  is already safe on all four receive paths (node `onReceiveNew`, hub
+  `set_response` ×3) — quiet ignore, correct `free_unpacked`, no log flood. This
+  is what makes node-first deployment safe in every later phase.
+- Builds: node `BlindsV3.bin` 0x135ef0 B (39 % free), links clean; hub compiled,
+  `config_hash=0x04280b55`.
+- **Not flashed.** Deployment (nodes first, then hub) pending — P0 + P1 will be
+  deployed together.
+
+#### Test harness repaired — it had not built since ~v1.0.9
+
+`tests/proto_sim` was **broken and providing zero coverage**: it still modelled a
+protocol version that no longer exists. Repaired and extended; **78/78 pass**.
+The suite now runs before entering each phase. Drift it had missed: the
+`LoraHeader.encrypted` flag (removed), `EncryptedPayload.algo/iv/aad` (removed —
+slim tag+ciphertext envelope), 20-byte AAD (now 16), 16-byte AEAD tag (now
+**truncated to 8**), full-message ciphertext (now **payload-only**), the 500 ms
+REGISTER→login delay (now 4000 ms), and — the subtle one — `login_acked_` now
+being set **only** on a successful decrypt, so a plaintext reply no longer
+acknowledges a login challenge. Missing shims added (`nvs`, `binary_sensor`,
+`MotorCtrl::setRuntime/setSlack`, `SystemCtrl::setSlack/setBatteryInterval`,
+`esp_err_to_name`).
+
+Two traps worth remembering: the `schema_drift_esphome_stubs` gate had pointed at
+the proto directory deleted in v1.0.12 (removed — the hub-vs-esphome gate covers
+it); and PSA Crypto is initialised in `LORAListener::setup()`, which these
+scenarios never call — the resulting key-import failure is the one branch in
+`decrypt_payload_gcm` that returns false **without logging**.
+
+New `scenarios/auto_mode_proto_test.cpp` (13 tests) covers round-trip of every
+new message through the real stubs, the unknown-field forward-compat property,
+and the frame budget measured on real bytes: **8-entry ScheduleConfig = 152 B
+on air, 95.3 ms airtime** — under the 255 B limit but over the 88.2 ms burst
+slot, so D5 (single-shot, non-bursted schedule push) is now test-enforced.
+
 ### 2026-07-27 — v1.0.12: configurable battery interval + stale-proto cleanup
 
 - **Battery update interval is now configurable from the hub YAML** (default
@@ -29,8 +80,11 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 - **Removed the stale ESPHome-side proto reference copy**
   `local_components/lora_tracker/proto/blinds.proto` — unused (the hub builds from
   the `blindsproto` stubs; the authoritative proto lives in `BlindsESP/proto`).
-- Deploy: hub OTA'd now (skew-safe, so hub-first was fine); nodes pick up v1.0.12
-  and the configured interval on their next OTA from `https_hosted`.
+- Deploy: hub OTA'd, then **all nodes OTA'd to v1.0.12** (OTA host `:8070`
+  reachability fixed) — the configurable 15-min battery interval is now active
+  system-wide.
+- **Closed the P2 battery-silence-gap investigation:** root cause was a depleted
+  battery (consistent with node 1's low-battery outage + recovery this session).
 
 ### 2026-07-27 — v1.0.11: tracked/acked sysops + cross-talk pre-decrypt filter + deep-sleep cap
 

@@ -22,6 +22,10 @@ typedef struct LoginMsg LoginMsg;
 typedef struct BaseNonceExchange BaseNonceExchange;
 typedef struct CommandAck CommandAck;
 typedef struct EncryptedPayload EncryptedPayload;
+typedef struct TimeSync TimeSync;
+typedef struct ScheduleEntry ScheduleEntry;
+typedef struct ScheduleConfig ScheduleConfig;
+typedef struct NodeWakeBeacon NodeWakeBeacon;
 typedef struct LoraHeader LoraHeader;
 typedef struct LoraClientOperationMessage LoraClientOperationMessage;
 typedef struct ClientRegister ClientRegister;
@@ -44,7 +48,15 @@ typedef enum _ClientOperation {
   CLIENT_OPERATION__CMD_DISABLE_WIFI = 1,
   CLIENT_OPERATION__CMD_OTA = 2,
   CLIENT_OPERATION__CMD_STATUS = 3,
-  CLIENT_OPERATION__CMD_SLEEP = 4
+  CLIENT_OPERATION__CMD_SLEEP = 4,
+  /*
+   * Immediate mode transition for a node that is currently awake.  These ride
+   * the existing tracked/acked sysop path (retransmit until CommandAck), so a
+   * dropped toggle recovers.  The PERSISTED mode setting lives in
+   * ScheduleConfig.mode — these two must be kept consistent by the hub.
+   */
+  CLIENT_OPERATION__CMD_MODE_AUTO = 5,
+  CLIENT_OPERATION__CMD_MODE_INTERACTIVE = 6
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(CLIENT_OPERATION)
 } ClientOperation;
 /*
@@ -76,6 +88,44 @@ typedef enum _AckStatus {
   ACK_STATUS__ACK_BUSY = 2
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(ACK_STATUS)
 } AckStatus;
+typedef enum _SchedAction {
+  SCHED_ACTION__SCHED_OPEN = 0,
+  SCHED_ACTION__SCHED_CLOSE = 1,
+  SCHED_ACTION__SCHED_STOP = 2,
+  /*
+   * uses positionPct
+   */
+  SCHED_ACTION__SCHED_POSITION = 3
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(SCHED_ACTION)
+} SchedAction;
+typedef enum _NodeMode {
+  /*
+   * today's behaviour: radio listening while awake
+   */
+  NODE_MODE__MODE_INTERACTIVE = 0,
+  /*
+   * deep sleep between scheduled events
+   */
+  NODE_MODE__MODE_AUTO = 1
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(NODE_MODE)
+} NodeMode;
+typedef enum _WakeReason {
+  WAKE_REASON__WAKE_BOOT = 0,
+  /*
+   * woke for a scheduled entry
+   */
+  WAKE_REASON__WAKE_TIMER_EVENT = 1,
+  /*
+   * periodic check-in, no entry due
+   */
+  WAKE_REASON__WAKE_TIMER_CHECKIN = 2,
+  /*
+   * physical button -> switches to interactive
+   */
+  WAKE_REASON__WAKE_BUTTON = 3,
+  WAKE_REASON__WAKE_UNKNOWN = 4
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(WAKE_REASON)
+} WakeReason;
 
 /* --- messages --- */
 
@@ -227,6 +277,159 @@ struct  EncryptedPayload
     , {0,NULL}, {0,NULL} }
 
 
+/*
+ * Hub -> node wall-clock synchronisation.  The node has no clock source of its
+ * own (no SNTP, no RTC battery); its RTC runs off the external 32.768 kHz
+ * crystal (CONFIG_RTC_CLK_SRC_EXT_CRYS, ~+/-20 ppm ~= 2 s/day), which is why
+ * uncapped deep sleep between scheduled events is viable once seeded here.
+ */
+struct  TimeSync
+{
+  ProtobufCMessage base;
+  /*
+   * Unix UTC seconds at hub TX time
+   */
+  uint64_t epoch;
+  /*
+   * LOCAL offset incl. DST, seconds (entries are local)
+   */
+  int32_t utcoffset;
+  /*
+   * epoch of next DST transition, 0 = unknown
+   */
+  uint64_t dstnext;
+};
+#define TIME_SYNC__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&time_sync__descriptor) \
+    , 0, 0, 0 }
+
+
+/*
+ * One schedule slot.  minuteOfDay is ALWAYS an absolute local time: sunrise /
+ * sunset entries and jitter are resolved hub-side before sending, so the node
+ * never computes astronomy and stays autonomous during a hub outage.
+ */
+struct  ScheduleEntry
+{
+  ProtobufCMessage base;
+  /*
+   * 0..1439, local time
+   */
+  uint32_t minuteofday;
+  /*
+   * bit0=MON .. bit6=SUN
+   */
+  uint32_t daymask;
+  SchedAction action;
+  /*
+   * 0..100, only meaningful for SCHED_POSITION
+   */
+  uint32_t positionpct;
+  /*
+   * 0=fixed 1=sunrise 2=sunset (telemetry / HA display only)
+   */
+  uint32_t kind;
+};
+#define SCHEDULE_ENTRY__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&schedule_entry__descriptor) \
+    , 0, 0, SCHED_ACTION__SCHED_OPEN, 0, 0 }
+
+
+/*
+ * Hub -> node.  The complete schedule + mode settings as ONE self-contained
+ * blob (~150 B on air with 8 entries, vs. the 255 B frame limit).  Idempotent:
+ * the node replaces its stored schedule wholesale, so there is no partial-update
+ * state to get out of sync.  Only ENABLED entries are sent.
+ * Sent SINGLE-SHOT (LoraHeader.burstCount = 0), never bursted: at ~150 B its
+ * airtime (~95 ms at SF7/BW500/CR4/8) exceeds the 88 ms burst slot spacing.  It
+ * is only ever sent in reply to a NodeWakeBeacon, so the node is provably
+ * listening and the burst would be redundant anyway.
+ */
+struct  ScheduleConfig
+{
+  ProtobufCMessage base;
+  /*
+   * CRC32 over the canonical blob; echoed by the node
+   */
+  uint32_t version;
+  NodeMode mode;
+  /*
+   * 0 = stay interactive until told otherwise
+   */
+  uint32_t interactivetimeout_s;
+  /*
+   * 0 = no periodic check-in wake
+   */
+  uint32_t checkininterval_s;
+  /*
+   * wake this early to beacon before executing
+   */
+  uint32_t beaconlead_s;
+  /*
+   * keep listening this long after executing
+   */
+  uint32_t posteventwindow_s;
+  /*
+   * 0 = never execute a missed event
+   */
+  uint32_t catchupwindow_s;
+  /*
+   * max 8
+   */
+  size_t n_entries;
+  ScheduleEntry **entries;
+};
+#define SCHEDULE_CONFIG__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&schedule_config__descriptor) \
+    , 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0,NULL }
+
+
+/*
+ * Node -> hub, sent on every wake.  Carries everything the hub needs to decide
+ * whether to push config, plus the telemetry that the periodic battery timer
+ * used to provide (that timer is disabled in auto mode).
+ */
+struct  NodeWakeBeacon
+{
+  ProtobufCMessage base;
+  WakeReason reason;
+  /*
+   * version the node currently has applied; 0 = none
+   */
+  uint32_t schedversion;
+  /*
+   * node clock at TX -> hub measures real drift
+   */
+  uint64_t nodeepoch;
+  NodeMode mode;
+  float voltage;
+  float position;
+  /*
+   * how long the node will keep listening
+   */
+  uint32_t awakewindow_ms;
+  /*
+   * 0 = nothing scheduled
+   */
+  uint64_t nexteventepoch;
+  /*
+   * node kept its AEAD session -> hub may skip login
+   */
+  protobuf_c_boolean sessionresume;
+  /*
+   * false -> node refuses to sleep, needs TimeSync
+   */
+  protobuf_c_boolean clockvalid;
+  /*
+   * capability gate for the hub
+   */
+  uint32_t fwversion;
+};
+#define NODE_WAKE_BEACON__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0 }
+
+
 struct  LoraHeader
 {
   ProtobufCMessage base;
@@ -258,6 +461,8 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG = 13,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN = 14,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE = 15,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC = 16,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE = 17,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
@@ -278,6 +483,12 @@ struct  LoraClientOperationMessage
     EncryptedPayload *encrypted;
     LoginMsg *login;
     LoraCoverOperation *operation;
+    ScheduleConfig *schedule;
+    /*
+     * Automatic-mode additions (P0).  Fields >15 cost a 2-byte tag; both are
+     * low-rate messages so that is irrelevant here.
+     */
+    TimeSync *timesync;
     ClientOperation sysop;
   };
 };
@@ -345,6 +556,7 @@ typedef enum {
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION = 13,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN = 14,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK = 15,
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON = 16,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_RESPONSE_MESSAGE__PROTO__CASE)
 } LoraClientResponseMessage__ProtoCase;
@@ -357,6 +569,10 @@ struct  LoraClientResponseMessage
   union {
     CommandAck *ack;
     ClientAvailable *avail;
+    /*
+     * Automatic-mode addition (P0).
+     */
+    NodeWakeBeacon *beacon;
     /*
      * When present the message is encrypted (AEAD blob); structured fields
      * above are absent.  Field 9 keeps a 1-byte tag.
@@ -505,6 +721,82 @@ EncryptedPayload *
                       const uint8_t       *data);
 void   encrypted_payload__free_unpacked
                      (EncryptedPayload *message,
+                      ProtobufCAllocator *allocator);
+/* TimeSync methods */
+void   time_sync__init
+                     (TimeSync         *message);
+size_t time_sync__get_packed_size
+                     (const TimeSync   *message);
+size_t time_sync__pack
+                     (const TimeSync   *message,
+                      uint8_t             *out);
+size_t time_sync__pack_to_buffer
+                     (const TimeSync   *message,
+                      ProtobufCBuffer     *buffer);
+TimeSync *
+       time_sync__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   time_sync__free_unpacked
+                     (TimeSync *message,
+                      ProtobufCAllocator *allocator);
+/* ScheduleEntry methods */
+void   schedule_entry__init
+                     (ScheduleEntry         *message);
+size_t schedule_entry__get_packed_size
+                     (const ScheduleEntry   *message);
+size_t schedule_entry__pack
+                     (const ScheduleEntry   *message,
+                      uint8_t             *out);
+size_t schedule_entry__pack_to_buffer
+                     (const ScheduleEntry   *message,
+                      ProtobufCBuffer     *buffer);
+ScheduleEntry *
+       schedule_entry__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   schedule_entry__free_unpacked
+                     (ScheduleEntry *message,
+                      ProtobufCAllocator *allocator);
+/* ScheduleConfig methods */
+void   schedule_config__init
+                     (ScheduleConfig         *message);
+size_t schedule_config__get_packed_size
+                     (const ScheduleConfig   *message);
+size_t schedule_config__pack
+                     (const ScheduleConfig   *message,
+                      uint8_t             *out);
+size_t schedule_config__pack_to_buffer
+                     (const ScheduleConfig   *message,
+                      ProtobufCBuffer     *buffer);
+ScheduleConfig *
+       schedule_config__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   schedule_config__free_unpacked
+                     (ScheduleConfig *message,
+                      ProtobufCAllocator *allocator);
+/* NodeWakeBeacon methods */
+void   node_wake_beacon__init
+                     (NodeWakeBeacon         *message);
+size_t node_wake_beacon__get_packed_size
+                     (const NodeWakeBeacon   *message);
+size_t node_wake_beacon__pack
+                     (const NodeWakeBeacon   *message,
+                      uint8_t             *out);
+size_t node_wake_beacon__pack_to_buffer
+                     (const NodeWakeBeacon   *message,
+                      ProtobufCBuffer     *buffer);
+NodeWakeBeacon *
+       node_wake_beacon__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   node_wake_beacon__free_unpacked
+                     (NodeWakeBeacon *message,
                       ProtobufCAllocator *allocator);
 /* LoraHeader methods */
 void   lora_header__init
@@ -662,6 +954,18 @@ typedef void (*CommandAck_Closure)
 typedef void (*EncryptedPayload_Closure)
                  (const EncryptedPayload *message,
                   void *closure_data);
+typedef void (*TimeSync_Closure)
+                 (const TimeSync *message,
+                  void *closure_data);
+typedef void (*ScheduleEntry_Closure)
+                 (const ScheduleEntry *message,
+                  void *closure_data);
+typedef void (*ScheduleConfig_Closure)
+                 (const ScheduleConfig *message,
+                  void *closure_data);
+typedef void (*NodeWakeBeacon_Closure)
+                 (const NodeWakeBeacon *message,
+                  void *closure_data);
 typedef void (*LoraHeader_Closure)
                  (const LoraHeader *message,
                   void *closure_data);
@@ -693,6 +997,9 @@ extern const ProtobufCEnumDescriptor    cov_operation__descriptor;
 extern const ProtobufCEnumDescriptor    client_operation__descriptor;
 extern const ProtobufCEnumDescriptor    encryption_algo__descriptor;
 extern const ProtobufCEnumDescriptor    ack_status__descriptor;
+extern const ProtobufCEnumDescriptor    sched_action__descriptor;
+extern const ProtobufCEnumDescriptor    node_mode__descriptor;
+extern const ProtobufCEnumDescriptor    wake_reason__descriptor;
 extern const ProtobufCMessageDescriptor lora_cover_operation__descriptor;
 extern const ProtobufCMessageDescriptor client_config__descriptor;
 extern const ProtobufCMessageDescriptor cover_config__descriptor;
@@ -700,6 +1007,10 @@ extern const ProtobufCMessageDescriptor login_msg__descriptor;
 extern const ProtobufCMessageDescriptor base_nonce_exchange__descriptor;
 extern const ProtobufCMessageDescriptor command_ack__descriptor;
 extern const ProtobufCMessageDescriptor encrypted_payload__descriptor;
+extern const ProtobufCMessageDescriptor time_sync__descriptor;
+extern const ProtobufCMessageDescriptor schedule_entry__descriptor;
+extern const ProtobufCMessageDescriptor schedule_config__descriptor;
+extern const ProtobufCMessageDescriptor node_wake_beacon__descriptor;
 extern const ProtobufCMessageDescriptor lora_header__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_operation_message__descriptor;
 extern const ProtobufCMessageDescriptor client_register__descriptor;
