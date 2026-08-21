@@ -226,5 +226,15 @@ namespace esphome
 
     }
 
+    // P2: the node reported its own clock in a wake beacon. Publishing the
+    // delta makes the crystal's real drift observable in Home Assistant rather
+    // than only on a serial cable, which is what the uncapped-sleep decision
+    // needs in order to stay honest over time.
+    void LoraCover::on_clock_offset(float offset_s)
+    {
+      if (this->clock_offset_ != nullptr)
+        this->clock_offset_->publish_state(offset_s);
+    }
+
   } // namespace am43
 } // namespace esphome

@@ -184,6 +184,13 @@ sensor:
     motor_current:
       name: "RollladenWohnzimmer1 Motor Current"
       id: rol_1_motor_current
+    # P2: node clock minus hub clock, reported in each wake beacon.
+    # Positive = node runs ahead. Expected within a few seconds on the
+    # external 32.768 kHz crystal; a growing value means the RTC fell back
+    # to the internal RC oscillator and scheduled wakes will drift.
+    clock_offset:
+      name: "RollladenWohnzimmer1 Clock Offset"
+      id: rol_1_clock_offset
 
   - platform: loracover
     lora_client_id: rol_2
@@ -203,6 +210,13 @@ sensor:
     motor_current:
       name: "RollladenWohnzimmer2 Motor Current"
       id: rol_2_motor_current
+    # P2: node clock minus hub clock, reported in each wake beacon.
+    # Positive = node runs ahead. Expected within a few seconds on the
+    # external 32.768 kHz crystal; a growing value means the RTC fell back
+    # to the internal RC oscillator and scheduled wakes will drift.
+    clock_offset:
+      name: "RollladenWohnzimmer2 Clock Offset"
+      id: rol_2_clock_offset
 
 
 binary_sensor:

@@ -321,7 +321,7 @@ both firmwares always ship together (SKILL.md rule).
 |-------|---------|---------------|
 | **P0** ✅ | Proto: all new messages + oneof/enum wiring; regenerate stubs to all 7 files; rebuild both firmwares with **no behaviour change**. | **Done — built, not yet deployed.** See §6.2. |
 | **P1** ✅ | `TimeSync` end-to-end. Hub sends it once the encrypted session is confirmed; node sets its clock, stores the UTC offset in RTC memory and logs local time + drift. No scheduling yet. | **Done — DEPLOYED and verified on hardware 2026-08-21.** See §6.4. |
-| **P2** | `NodeWakeBeacon` + hub `handle_beacon_()` + session-resume (I2). Node still in interactive mode; beacon fires on boot only. | Hub log shows beacon; measure the awake-window saving from skipping login. |
+| **P2** ◐ | `NodeWakeBeacon` + hub `handle_beacon_()` + session-resume (I2). Node still in interactive mode; beacon fires on boot only. | **Beacon + hub handling + clock-offset sensor done and tested (§6.5). The node-side REGISTER-skip that realises I2's battery saving is NOT done — see §6.5.** |
 | **P3** | Node scheduler: `Scheduler.{h,cpp}` + config persistence + auto-mode sleep/wake/execute + I8 clock guard. Schedule hard-coded in YAML defaults only (no HA editing yet). | A node executes a YAML schedule for 48 h unattended; battery drain measured against the interactive baseline. |
 | **P4** | Hub pending-config store + `ScheduleConfig` push + HA entities (switches, datetime, selects, numbers) + I4 diagnostics. | Edit a time in HA → node applies it at the next beacon; `config pending` clears on ack. |
 | **P5** | Sun/jitter resolution (D2, I6), DST push + threshold (I7), catch-up (I3), `skip_next`/`run_now` (I5), interactive-timeout return (D4). | Sunrise entry tracks the actual sunrise across a week; a DST switch corrects within one beacon; sun drift does *not* cause a push until it crosses 15 min. |
@@ -516,6 +516,53 @@ rather than something only visible on a serial cable.
 > DTR/RTS auto-reset circuit, and its power-on path runs `MOTCMD_FULL_UP` to
 > re-establish a position reference — so attaching a serial monitor physically
 > drives that blind to the top.
+
+### 6.5 P2 result (2026-08-21) — beacon done, I2's saving NOT done
+
+**Delivered and tested (98/98):**
+
+*Node* — `SYSCMD_BEACON` builds a `NodeWakeBeacon` carrying wake reason, node
+epoch, mode, voltage, position, `sessionResume`, `clockValid` and `fwVersion`.
+`classifyWakeReason()` reads the deep-sleep cause **before** the reset reason,
+because a deep-sleep wake *is* `ESP_RST_DEEPSLEEP` — checking the reset reason
+first would mislabel every scheduled wake as a boot. Crash-like resets (panic,
+WDT, brownout) report `WAKE_UNKNOWN` rather than `WAKE_BOOT`, so a reset-looping
+node is visible as such — that is precisely the signature of the earlier silent
+battery outage. Queued on every boot, after any REGISTER (which resets counters;
+a beacon queued before it would be dropped by the hub's own replay filter).
+
+*Hub* — `handle_beacon_()` records the reported state and derives
+`clock_offset = node_epoch − hub_epoch`, published through a new
+`clock_offset` sensor on the `loracover` sensor platform. **This is what closes
+P1's open question:** crystal drift becomes a Home Assistant number instead of
+something only a serial cable reveals. Suppressed when the node reports
+`clockValid = false`, otherwise a node that never got a TimeSync would show a
+~56-year "drift" and make the sensor useless.
+
+**NOT delivered — the node-side REGISTER-skip.** I2's actual battery saving is
+the node choosing to send *only* a beacon on wake instead of running the full
+REGISTER → config → login sequence (~4 s of awake radio, `kRegisterToLoginDelayMs`
+alone). Two thirds of the machinery is already in place and verified:
+
+- The hub sets `session_confirmed_` **and** `login_acked_` on any successful
+  decrypt, so an encrypted beacon that decrypts *already* suppresses the login
+  challenge — no hub change needed.
+- If the hub has no nonce for that peer (it rebooted while the node slept), it
+  logs `No base nonce for peer N — re-provisioning` and sends a
+  `BaseNonceExchange`, which the node handles via `CMD_BASENONCE`.
+
+What is missing is the node's boot-path decision to take that route. It is
+deliberately left out rather than rushed: it changes the existing wake path,
+whose failure mode is a node that never re-establishes and goes **silent** — the
+worst outcome this system has. It needs its own cycle with an explicit fallback
+timer (beacon, and if no downlink arrives within N seconds, fall back to
+REGISTER) and a test for "hub rebooted while the node slept".
+
+> **Version coupling:** `CmdDispatcher::kFirmwareVersion` (10013) is
+> hand-maintained against `PROJECT_VER` in the node's `CMakeLists.txt`. A test
+> asserts they match, so the next version bump will fail that test until both
+> are updated — intentional, so the hub's capability gate can never report a
+> version the node is not running.
 
 ---
 

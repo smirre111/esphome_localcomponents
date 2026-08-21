@@ -26,6 +26,9 @@ namespace esphome
       // F-11: link RSSI (hub-side) and motor current (from CoverPosition frame)
       void set_rssi(sensor::Sensor *rssi) { rssi_ = rssi; }
       void set_motor_current(sensor::Sensor *current) { motor_current_ = current; }
+      // P2: node clock minus hub clock, from the wake beacon.
+      void set_clock_offset(sensor::Sensor *offset) { clock_offset_ = offset; }
+      void on_clock_offset(float offset_s) override;
       // void set_illuminance(sensor::Sensor *illuminance) { illuminance_ = illuminance; }
 
       void send_remote_config() override;
@@ -38,6 +41,7 @@ namespace esphome
       sensor::Sensor *voltage_{nullptr};
       sensor::Sensor *rssi_{nullptr};
       sensor::Sensor *motor_current_{nullptr};
+      sensor::Sensor *clock_offset_{nullptr};
       // sensor::Sensor *illuminance_{nullptr};
       uint8_t current_sensor_;
       // The LoraCov often gets into a state where it spams loads of battery update

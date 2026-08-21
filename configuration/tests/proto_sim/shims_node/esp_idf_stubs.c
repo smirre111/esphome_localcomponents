@@ -149,3 +149,18 @@ const char* esp_err_to_name(esp_err_t code) {
         return buf;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Wake cause / reset reason. Both default to "fresh power-on boot", which is
+// what a test gets unless it says otherwise.
+// ---------------------------------------------------------------------------
+#include "esp_sleep.h"
+
+static uint32_t           g_wakeup_causes = 0;
+static esp_reset_reason_t g_reset_reason  = ESP_RST_POWERON;
+
+uint32_t esp_sleep_get_wakeup_causes(void) { return g_wakeup_causes; }
+void proto_sim_set_wakeup_causes(uint32_t causes) { g_wakeup_causes = causes; }
+
+esp_reset_reason_t esp_reset_reason(void) { return g_reset_reason; }
+void proto_sim_set_reset_reason(esp_reset_reason_t reason) { g_reset_reason = reason; }

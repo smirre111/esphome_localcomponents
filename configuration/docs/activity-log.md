@@ -16,6 +16,32 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-21 — Auto-mode P2 (partial): wake beacon + clock-offset sensor
+
+- **Node sends a `NodeWakeBeacon` on every boot/wake** carrying wake reason,
+  its own clock, mode, voltage, position, `sessionResume`, `clockValid` and
+  `fwVersion`. `classifyWakeReason()` reads the deep-sleep cause **before** the
+  reset reason — a deep-sleep wake *is* `ESP_RST_DEEPSLEEP`, so the other order
+  would mislabel every scheduled wake as a boot. Crash-like resets report
+  `WAKE_UNKNOWN`, making a reset-looping node visible rather than silent.
+- **Hub publishes `clock_offset` (node epoch − hub epoch) as a new sensor** on
+  both nodes. **This closes P1's open question**: crystal drift is now a Home
+  Assistant number rather than something only a serial cable shows. Suppressed
+  when the node reports no valid clock, so a node awaiting its first TimeSync
+  cannot show a ~56-year offset.
+- **Deliberately NOT done: the node-side REGISTER-skip**, which is where I2's
+  actual battery saving (~4 s of awake radio per wake) lives. The hub half
+  already works for free — any successful decrypt sets `session_confirmed_` and
+  `login_acked_`, so an encrypted beacon already suppresses the login challenge —
+  and the no-nonce recovery path (`BaseNonceExchange` ⇄ `CMD_BASENONCE`) exists
+  on both sides. What is missing is the node's boot-path decision to take that
+  route. Left out on purpose: it changes the existing wake path, whose failure
+  mode is a node that goes **silent**, and it needs a fallback timer plus a
+  "hub rebooted while the node slept" test.
+- Node builds (0x137d00, 39 % free); hub compiles (`config_hash=0xa48f5a27`);
+  **98/98 tests pass** (11 new). **Not deployed** — needs a PROJECT_VER bump to
+  1.0.14 plus the matching `kFirmwareVersion`, which a test enforces.
+
 ### 2026-08-21 — Auto-mode P1: TimeSync end-to-end (built + tested, NOT deployed)
 
 - **The node can now learn the time.** It has no clock source of its own (no

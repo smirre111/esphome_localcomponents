@@ -13,11 +13,13 @@ from esphome.const import (
     STATE_CLASS_MEASUREMENT,
     UNIT_DECIBEL_MILLIWATT,
     UNIT_PERCENT,
+    UNIT_SECOND,
     UNIT_VOLT,
 )
 
 CONF_LINK_RSSI = "link_rssi"
 CONF_MOTOR_CURRENT = "motor_current"
+CONF_CLOCK_OFFSET = "clock_offset"
 
 AUTO_LOAD = ["loracover", "blindsproto"]
 CODEOWNERS = ["@buxtronix"]
@@ -60,6 +62,17 @@ CONFIG_SCHEMA = (
                 accuracy_decimals=0,
                 icon="mdi:current-dc",
             ),
+            # P2: node clock minus hub clock, reported in the wake beacon.
+            # Positive = the node runs ahead. This is how the 32.768 kHz
+            # crystal's real drift becomes visible without a serial cable, and
+            # it is the measurement the "no sleep cap" decision rests on.
+            cv.Optional(CONF_CLOCK_OFFSET): sensor.sensor_schema(
+                unit_of_measurement=UNIT_SECOND,
+                state_class=STATE_CLASS_MEASUREMENT,
+                accuracy_decimals=0,
+                icon="mdi:clock-alert-outline",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
         }
     )
     .extend(lora_client.LORA_CLIENT_SCHEMA)
@@ -83,6 +96,10 @@ async def to_code(config):
     if rssi_config := config.get(CONF_LINK_RSSI):
         sens = await sensor.new_sensor(rssi_config)
         cg.add(var.set_rssi(sens))
+
+    if clock_offset_config := config.get(CONF_CLOCK_OFFSET):
+        sens = await sensor.new_sensor(clock_offset_config)
+        cg.add(var.set_clock_offset(sens))
 
     if current_config := config.get(CONF_MOTOR_CURRENT):
         sens = await sensor.new_sensor(current_config)

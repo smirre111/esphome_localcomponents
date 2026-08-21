@@ -16,6 +16,11 @@
 #include <string>
 #include <vector>
 
+// Generated protobuf-c type, declared here rather than including
+// blinds.pb-c.h: this header is pulled in by every loracover platform, and the
+// stub header is large and C-linkage. Only a pointer to it is needed.
+struct NodeWakeBeacon;
+
 namespace esphome
 {
   // Forward declaration so LORAListener can hold an optional "command failed"
@@ -85,6 +90,18 @@ namespace esphome
       // than sending nothing, and the node ignores it anyway.
       void send_timesync();
       void send_base_nonce_exchange();
+
+      // ---- P2: wake beacon ----
+      // Latest values reported by the node, for logging and HA diagnostics.
+      // clock_offset_s_ is node_epoch - hub_epoch: positive means the node runs
+      // ahead. This is the measurement the no-sleep-cap decision rests on.
+      bool     clock_offset_valid_{false};
+      int32_t  clock_offset_s_{0};
+      uint32_t last_beacon_reason_{0};
+      uint32_t node_mode_{0};
+      uint32_t node_sched_version_{0};
+      uint32_t node_fw_version_{0};
+      bool     node_session_resume_{false};
       virtual void send_remote_config();
       uint32_t incrTxMessageId();
       void setRxMessageId(uint32_t msg_id);
@@ -222,6 +239,9 @@ namespace esphome
 
       optional<LORAClientRestoreState> restore_state_();
       void save_state_(bool save);
+
+      // P2: record a wake beacon and publish the derived clock offset.
+      void handle_beacon_(const ::NodeWakeBeacon *b);
 
       // Login scheduling helpers
       bool     is_node_awake_() const;

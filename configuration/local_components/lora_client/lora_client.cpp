@@ -971,6 +971,8 @@ namespace esphome
           else if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
                    this->op_awaiting_ack_)
             this->handle_command_ack_(this->op_last_msgid_); // position confirms delivery
+          else if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && inner->beacon)
+            this->handle_beacon_(inner->beacon);
 
           inner->header = rcv_message->header; // borrow outer header for forwarding
           size_t   fwd_len = lora_client_response_message__get_packed_size(inner);
@@ -995,6 +997,9 @@ namespace esphome
       else if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
                this->op_awaiting_ack_)
         this->handle_command_ack_(this->op_last_msgid_);
+      else if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON &&
+               rcv_message->beacon)
+        this->handle_beacon_(rcv_message->beacon);
 
       for (int i = 0; i < this->nodes_.size(); i++)
       {
@@ -1348,6 +1353,53 @@ namespace esphome
                this->get_name().c_str(), (unsigned)base,
                (unsigned)this->frame_counter_.tx_message_id,
                (int)login.request_register);
+    }
+
+    // P2: a node announced a wake.  Everything here is observation — the beacon
+    // does not (yet) change what the hub sends, so shipping it ahead of the
+    // scheduler is behaviour-neutral apart from the clock-offset sensor.
+    void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
+    {
+      if (b == nullptr)
+        return;
+
+      static const char *const kReason[] = {"BOOT", "TIMER_EVENT", "TIMER_CHECKIN",
+                                            "BUTTON", "UNKNOWN"};
+      const char *reason = (b->reason >= 0 && b->reason <= 4) ? kReason[b->reason] : "?";
+
+      this->last_beacon_reason_  = b->reason;
+      this->node_mode_           = b->mode;
+      this->node_sched_version_  = b->schedversion;
+      this->node_fw_version_     = b->fwversion;
+      this->node_session_resume_ = b->sessionresume;
+
+      // Clock drift: the whole reason TimeSync shipped a phase early.  The node
+      // stamps its own epoch into the beacon; comparing against ours turns drift
+      // into a Home Assistant number instead of something only a serial cable
+      // can see.  Only meaningful when BOTH clocks are valid.
+      if (b->clockvalid && b->nodeepoch != 0 &&
+          this->time != nullptr && this->time->now().is_valid())
+      {
+        const int64_t hub_epoch = static_cast<int64_t>(this->time->now().timestamp);
+        const int64_t offset_s  = static_cast<int64_t>(b->nodeepoch) - hub_epoch;
+        this->clock_offset_valid_ = true;
+        this->clock_offset_s_     = static_cast<int32_t>(offset_s);
+        ESP_LOGI(TAG, "[%s] Beacon: reason=%s clock_offset=%+lld s fw=%u resume=%d v=%.2f pos=%.2f",
+                 this->get_name().c_str(), reason, (long long) offset_s,
+                 (unsigned) b->fwversion, (int) b->sessionresume,
+                 b->voltage, b->position);
+        for (auto *node : this->nodes_)
+          node->on_clock_offset(static_cast<float>(offset_s));
+      }
+      else
+      {
+        // A node with no clock is the I8 case: it will refuse to sleep against a
+        // schedule until TimeSync reaches it.  Worth an explicit log line rather
+        // than silently publishing nothing.
+        ESP_LOGI(TAG, "[%s] Beacon: reason=%s clock=INVALID fw=%u resume=%d — TimeSync pending",
+                 this->get_name().c_str(), reason,
+                 (unsigned) b->fwversion, (int) b->sessionresume);
+      }
     }
 
     void LORAListener::send_timesync()

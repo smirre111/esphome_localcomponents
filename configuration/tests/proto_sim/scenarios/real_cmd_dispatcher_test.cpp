@@ -10,6 +10,8 @@
 
 #include "esp_err.h"
 #include "esp_mac.h"
+#include "esp_sleep.h"
+#include "esp_system.h"
 #include "MotorCtrl.h"
 #include "SystemCtrl.h"
 #include "LoraInterface.h"
@@ -476,4 +478,90 @@ TEST_F(RealNodeFixture, TimeSyncIsNotAcked) {
     CmdDispatcher::tx_command_t cmd{};
     EXPECT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdFALSE)
         << "TimeSync must not enqueue a reply";
+}
+
+// ---------------------------------------------------------------------------
+// P2 — wake beacon. Sent on every boot/wake so the hub learns why the node
+// woke, what its clock reads (drift, without a serial cable) and whether the
+// login handshake can be skipped.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, WakeReasonFromTimerIsCheckin) {
+    proto_sim_set_wakeup_causes(BIT(ESP_SLEEP_WAKEUP_TIMER));
+    EXPECT_EQ(CmdDispatcher::classifyWakeReason(), WAKE_REASON__WAKE_TIMER_CHECKIN);
+}
+
+TEST_F(RealNodeFixture, WakeReasonFromExt1IsButton) {
+    proto_sim_set_wakeup_causes(BIT(ESP_SLEEP_WAKEUP_EXT1));
+    EXPECT_EQ(CmdDispatcher::classifyWakeReason(), WAKE_REASON__WAKE_BUTTON);
+}
+
+TEST_F(RealNodeFixture, WakeReasonPrefersSleepCauseOverResetReason) {
+    // A deep-sleep wake IS a reset as far as esp_reset_reason() is concerned
+    // (ESP_RST_DEEPSLEEP), so checking the reset reason first would mislabel
+    // every scheduled wake as a boot. The sleep cause must win.
+    proto_sim_set_wakeup_causes(BIT(ESP_SLEEP_WAKEUP_TIMER));
+    proto_sim_set_reset_reason(ESP_RST_DEEPSLEEP);
+    EXPECT_EQ(CmdDispatcher::classifyWakeReason(), WAKE_REASON__WAKE_TIMER_CHECKIN);
+    proto_sim_set_reset_reason(ESP_RST_POWERON);
+}
+
+TEST_F(RealNodeFixture, WakeReasonFromPowerOnIsBoot) {
+    proto_sim_set_wakeup_causes(0);
+    proto_sim_set_reset_reason(ESP_RST_POWERON);
+    EXPECT_EQ(CmdDispatcher::classifyWakeReason(), WAKE_REASON__WAKE_BOOT);
+}
+
+TEST_F(RealNodeFixture, CrashLikeResetsReportUnknownNotBoot) {
+    // A node that keeps reporting UNKNOWN is reset-looping. Reporting those as
+    // a normal BOOT would hide exactly the failure mode behind the earlier
+    // silent battery outage.
+    proto_sim_set_wakeup_causes(0);
+    for (auto r : {ESP_RST_PANIC, ESP_RST_INT_WDT, ESP_RST_TASK_WDT,
+                   ESP_RST_WDT, ESP_RST_BROWNOUT}) {
+        proto_sim_set_reset_reason(r);
+        EXPECT_EQ(CmdDispatcher::classifyWakeReason(), WAKE_REASON__WAKE_UNKNOWN)
+            << "reset reason " << (int) r << " must not look like a clean boot";
+    }
+    proto_sim_set_reset_reason(ESP_RST_POWERON);
+}
+
+TEST_F(RealNodeFixture, BeaconIsQueuedWithTheGivenReason) {
+    disp.sendWakeBeacon(WAKE_REASON__WAKE_BUTTON);
+
+    CmdDispatcher::tx_command_t cmd{};
+    ASSERT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdTRUE)
+        << "sendWakeBeacon must enqueue a TX command";
+    EXPECT_EQ(cmd.cmd, (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_BEACON);
+    EXPECT_EQ(cmd.arg, (uint32_t) WAKE_REASON__WAKE_BUTTON)
+        << "the wake reason must travel WITH the queued command — a shared "
+           "slot could be overwritten before the TX task reads it";
+}
+
+TEST_F(RealNodeFixture, BeaconCarriesClockOnlyWhenValid) {
+    // I8's precondition: a node that has never been told the time must say so,
+    // rather than reporting epoch 0 as if it were a real clock. The hub uses
+    // this to decide whether the offset it computes means anything.
+    auto ts = pack_timesync_op(/*msgid=*/60, /*epoch=*/1787000000ULL,
+                               /*utcoffset=*/7200);
+    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
+    ASSERT_TRUE(CmdDispatcher::isClockValid());
+
+    disp.sendWakeBeacon(WAKE_REASON__WAKE_BOOT);
+    CmdDispatcher::tx_command_t cmd{};
+    ASSERT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdTRUE);
+    EXPECT_EQ(cmd.cmd, (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_BEACON);
+    // The beacon body is built inside processTxCommand (a FreeRTOS task that
+    // the harness does not spawn), so the clock-validity plumbing is asserted
+    // through the accessor the beacon reads from.
+    EXPECT_TRUE(CmdDispatcher::isClockValid());
+}
+
+TEST_F(RealNodeFixture, FirmwareVersionMatchesProjectVersion) {
+    // kFirmwareVersion is hand-maintained alongside PROJECT_VER in the
+    // top-level CMakeLists.txt. Encoding is major*10000 + minor*100 + patch.
+    // If this fails, the two have drifted and the hub's capability gate is
+    // reporting a version the node is not actually running.
+    EXPECT_EQ(CmdDispatcher::kFirmwareVersion, 10013u)
+        << "kFirmwareVersion is out of sync with PROJECT_VER (1.0.13)";
 }

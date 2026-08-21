@@ -685,3 +685,126 @@ TEST(RealLoraClient, NoTimeSyncWhenHubClockInvalid) {
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);
 }
+
+// ---------------------------------------------------------------------------
+// P2 — wake beacon handling on the hub. The beacon is how the node's clock
+// becomes observable without a serial cable, which is what keeps the
+// "no sleep cap" decision honest over time.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Send an ENCRYPTED uplink from the simulated node into the real listener.
+void send_encrypted_uplink(LORAClient& listener, uint32_t base_nonce,
+                           uint32_t msgid, uint32_t node_addr, uint32_t subnet,
+                           proto_sim::LoraClientResponseMessage inner) {
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = subnet;
+    inner.header.senderAddress = node_addr;
+    inner.header.msgId         = msgid;
+
+    auto plain = proto_sim::serialize_resp_payload(inner);
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
+                                inner.header.senderAddress, inner.header.msgId, aad);
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv_uplink(base_nonce, msgid, iv);
+    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad), plain.data(), plain.size());
+
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = inner.header;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.ciphertext = enc.ciphertext;
+
+    auto bytes = proto_sim::serialize_resp(outer);
+    listener.set_response(bytes.data(), bytes.size());
+}
+
+proto_sim::LoraClientResponseMessage make_beacon(uint64_t node_epoch, bool clock_valid) {
+    proto_sim::LoraClientResponseMessage m;
+    m.proto = proto_sim::LoraClientResponseMessage::Proto::Beacon;
+    m.beacon.reason        = proto_sim::WakeReason::WAKE_TIMER_CHECKIN;
+    m.beacon.nodeEpoch     = node_epoch;
+    m.beacon.mode          = proto_sim::NodeMode::MODE_INTERACTIVE;
+    m.beacon.voltage       = 11.4f;
+    m.beacon.position      = 0.5f;
+    m.beacon.sessionResume = true;
+    m.beacon.clockValid    = clock_valid;
+    m.beacon.fwVersion     = 10013;
+    return m;
+}
+
+struct BeaconRig {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    LORATracker tracker;
+    LORAClient  rol;
+    RealTimeClock time;
+    uint32_t base{0};
+
+    void start(std::time_t hub_epoch) {
+        esphome::shim_hooks::set_active_clock(&clock);
+        esphome::shim_hooks::reset_nvs();
+        esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+        ensure_psa_ready();
+        rol.set_name("rol");
+        rol.set_short_address(18);
+        rol.set_subnet_address(2);
+        rol.set_address(kMacRol2);
+        time.set_now(hub_epoch, /*valid=*/true);
+        rol.set_time(&time);
+        tracker.register_client(&rol);
+        base = drive_session(clock, radio, rol);
+    }
+    ~BeaconRig() {
+        esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+        esphome::shim_hooks::set_active_clock(nullptr);
+    }
+};
+
+} // namespace
+
+TEST(RealLoraClient, BeaconClockOffsetIsNodeMinusHub) {
+    constexpr std::time_t kHubEpoch = 1787000000;
+    BeaconRig rig;
+    rig.start(kHubEpoch);
+    ASSERT_NE(rig.base, 0u);
+
+    // Node runs 7 s AHEAD of the hub.
+    send_encrypted_uplink(rig.rol, rig.base, /*msgid=*/2, 18, 2,
+                          make_beacon(kHubEpoch + 7, /*clock_valid=*/true));
+
+    EXPECT_TRUE(rig.rol.clock_offset_valid_);
+    EXPECT_EQ(rig.rol.clock_offset_s_, 7)
+        << "offset must be node_epoch - hub_epoch; a sign flip would make a "
+           "fast node look slow and send drift correction the wrong way";
+    EXPECT_EQ(rig.rol.node_fw_version_, 10013u);
+    EXPECT_TRUE(rig.rol.node_session_resume_);
+}
+
+TEST(RealLoraClient, BeaconClockOffsetIsNegativeWhenNodeLags) {
+    constexpr std::time_t kHubEpoch = 1787000000;
+    BeaconRig rig;
+    rig.start(kHubEpoch);
+
+    send_encrypted_uplink(rig.rol, rig.base, /*msgid=*/2, 18, 2,
+                          make_beacon(kHubEpoch - 12, /*clock_valid=*/true));
+
+    EXPECT_TRUE(rig.rol.clock_offset_valid_);
+    EXPECT_EQ(rig.rol.clock_offset_s_, -12);
+}
+
+TEST(RealLoraClient, BeaconWithInvalidClockPublishesNoOffset) {
+    // I8's case: a node that has never received a TimeSync reports clockValid
+    // = false. Publishing an offset computed from epoch 0 would show a ~56-year
+    // drift in Home Assistant and make the sensor useless.
+    constexpr std::time_t kHubEpoch = 1787000000;
+    BeaconRig rig;
+    rig.start(kHubEpoch);
+
+    send_encrypted_uplink(rig.rol, rig.base, /*msgid=*/2, 18, 2,
+                          make_beacon(0, /*clock_valid=*/false));
+
+    EXPECT_FALSE(rig.rol.clock_offset_valid_)
+        << "a clockless node must not produce a bogus offset reading";
+}
