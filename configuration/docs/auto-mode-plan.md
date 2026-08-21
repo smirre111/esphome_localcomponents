@@ -320,7 +320,7 @@ both firmwares always ship together (SKILL.md rule).
 | Phase | Content | Verifiable by |
 |-------|---------|---------------|
 | **P0** ✅ | Proto: all new messages + oneof/enum wiring; regenerate stubs to all 7 files; rebuild both firmwares with **no behaviour change**. | **Done — built, not yet deployed.** See §6.2. |
-| **P1** ✅ | `TimeSync` end-to-end. Hub sends it once the encrypted session is confirmed; node sets its clock, stores the UTC offset in RTC memory and logs local time + drift. No scheduling yet. | **Done — built and unit-tested, not yet deployed.** See §6.4. |
+| **P1** ✅ | `TimeSync` end-to-end. Hub sends it once the encrypted session is confirmed; node sets its clock, stores the UTC offset in RTC memory and logs local time + drift. No scheduling yet. | **Done — DEPLOYED and verified on hardware 2026-08-21.** See §6.4. |
 | **P2** | `NodeWakeBeacon` + hub `handle_beacon_()` + session-resume (I2). Node still in interactive mode; beacon fires on boot only. | Hub log shows beacon; measure the awake-window saving from skipping login. |
 | **P3** | Node scheduler: `Scheduler.{h,cpp}` + config persistence + auto-mode sleep/wake/execute + I8 clock guard. Schedule hard-coded in YAML defaults only (no HA editing yet). | A node executes a YAML schedule for 48 h unattended; battery drain measured against the interactive baseline. |
 | **P4** | Hub pending-config store + `ScheduleConfig` push + HA entities (switches, datetime, selects, numbers) + I4 diagnostics. | Edit a time in HA → node applies it at the next beacon; `config pending` clears on ack. |
@@ -495,7 +495,27 @@ that it is encrypted, and that no push happens without a valid hub clock).
 One thing the host tests deliberately do **not** assert: the actual wall clock.
 `settimeofday()` needs `CAP_SYS_TIME` and fails for an unprivileged host user —
 harmless, because every property the scheduler depends on is independent of
-whether the host clock moved.
+whether the host clock moved. **That gap is now closed on hardware** (below).
+
+**Deployed and verified 2026-08-21 ~19:20.** Hub log shows the designed sequence
+on both nodes — session confirmed, then `TimeSync sent` ~750 ms later with
+`utcoffset=+7200`; the epoch decodes to exactly the log's own wall-clock time.
+Node serial closes the loop: `App version: 1.0.13`, and
+`CMD TIMESYNC: 2026-08-21 19:34:54 (UTC+2) — clock established`. It also
+confirms D1's premise directly — `CLK: Using external 32kHz crystal`.
+
+**Still outstanding for P1's real purpose:** the *drift* number. The node only
+prints `drift correction ±N s` on a RE-sync, i.e. when it already had a clock.
+The observed sync followed a power-on reset (cleared RTC memory), so it printed
+"clock established" instead. Drift becomes visible either on the next hub reboot
+while a node stays powered, or — far more usefully — via P2's beacon, which
+carries `nodeEpoch` to the hub and turns drift into a Home Assistant sensor
+rather than something only visible on a serial cable.
+
+> **Do not read node serial casually.** Opening COM6 resets the node through the
+> DTR/RTS auto-reset circuit, and its power-on path runs `MOTCMD_FULL_UP` to
+> re-establish a position reference — so attaching a serial monitor physically
+> drives that blind to the top.
 
 ---
 

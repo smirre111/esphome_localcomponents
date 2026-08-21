@@ -28,16 +28,6 @@ failure. **P3** = latent / cleanup.
   re-login guarantee.
 - Cost: new `LoginMsg` hash field (regen stubs → 4 locations) + hub/node changes.
 
-## P2 — battery-silence gap (investigation)
-
-- 2026-07-12: ~86 min with no battery messages, then activity. An awake node
-  force-sends every 5 min, so a long silence ⇒ deep-asleep, reset-looping, or a
-  dead/blocked task. The 0 V race that accompanied it is fixed, but the silence
-  window itself was never explained.
-- **Diagnostic:** correlate future gaps with the node reset reason
-  (`esp_reset_reason`) + sleep logs on serial; watch the hub log for a
-  REGISTER / session-confirm at the gap's end (a wake/boot marker).
-
 ---
 
 ## Clean (audited, no action)

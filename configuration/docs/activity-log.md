@@ -45,9 +45,33 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
   The bump is **functionally required**, not cosmetic: `validate_image_header()`
   returns `ESP_FAIL` when the incoming version equals the running one, so an
   OTA of a build still stamped 1.0.12 is refused before anything is written.
-- **Not flashed.** P0+P1 deploy together, nodes first then hub. Note the
-  TimeSync log line only appears after the HUB is updated — an old hub never
-  sends one.
+- **DEPLOYED AND VERIFIED 2026-08-21 ~19:20.** Nodes OTA'd to v1.0.13 (manual),
+  hub OTA'd via `esphome upload`. Hub log:
+
+  ```
+  [19:20:13] [RollladenWohnzimmer1] Login acknowledged by node (encrypted session confirmed)
+  [19:20:14] [RollladenWohnzimmer1] TimeSync sent (epoch=1787332813 utcoffset=+7200 s msgid=2)
+  [19:20:24] [RollladenWohnzimmer2] Login acknowledged ... TimeSync sent (epoch=1787332824 ...)
+  ```
+
+  Node serial confirms the other half — `App version: 1.0.13`,
+  `CLK: Using external 32kHz crystal` (D1's premise verified on hardware), and
+  `CMD TIMESYNC: 2026-08-21 19:34:54 (UTC+2) — clock established`.
+- Both `Command Failed` sensors were ON before the hub update (stale state from
+  the node OTA — the node reboots into OTA before acking the tracked sysop) and
+  cleared to OFF on the fresh session.
+- **Caveat:** opening COM6 resets the node via the DTR/RTS auto-reset circuit,
+  which triggers its power-on `MOTCMD_FULL_UP` reference move — i.e. reading
+  node serial physically moves that blind. Ask before doing it.
+
+## Open — node 2 battery ADC reads zero
+
+Node 2 reports 0.0 V / 0 % while node 1 reads 11.4 V / 62 %. Serial shows
+`ADC: value: 0` and `MotorCtrl: Current ADC value 0`, so the reading is zero at
+the source rather than lost in transport. **Predates the auto-mode work** (it was
+0.0 V before the hub update). A battery node whose voltage cannot be seen is what
+caused the earlier silent outage, so this is worth chasing: check the divider
+wiring / ADC channel against node 1, which is on identical firmware.
 
 ### 2026-08-21 — Auto-mode P0: proto scaffolding (built, NOT deployed)
 
