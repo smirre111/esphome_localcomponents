@@ -569,10 +569,13 @@ TEST_F(RealNodeFixture, BeaconCarriesClockOnlyWhenValid) {
 TEST_F(RealNodeFixture, FirmwareVersionMatchesProjectVersion) {
     // kFirmwareVersion is hand-maintained alongside PROJECT_VER in the
     // top-level CMakeLists.txt. Encoding is major*10000 + minor*100 + patch.
+    // This test is the enforcement: a version bump fails here until BOTH are
+    // updated, so the hub's capability gate can never report a version the node
+    // is not actually running.
     // If this fails, the two have drifted and the hub's capability gate is
     // reporting a version the node is not actually running.
-    EXPECT_EQ(CmdDispatcher::kFirmwareVersion, 10013u)
-        << "kFirmwareVersion is out of sync with PROJECT_VER (1.0.13)";
+    EXPECT_EQ(CmdDispatcher::kFirmwareVersion, 10014u)
+        << "kFirmwareVersion is out of sync with PROJECT_VER (1.0.14)";
 }
 
 // ---------------------------------------------------------------------------
