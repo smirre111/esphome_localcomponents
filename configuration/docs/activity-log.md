@@ -16,6 +16,30 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-22 — Auto-mode P3 (started): schedule arithmetic
+
+- **`Scheduler.{h,cpp}` — the calendar logic, dependency-free** (only
+  `<stdint.h>`/`<time.h>`), so it compiles identically on device and host and
+  the tests exercise the *exact* production source with no shims or staging.
+- `next_occurrence()` (strictly after now, lowest index wins a tie, 8-day search
+  so a same-weekday-next-week entry is still found) and `last_missed()` (latest
+  in the window, because replaying an earlier missed entry after a later one
+  leaves the blind in the wrong end state — the opposite tie rule).
+- **All local-time arithmetic is `local = utc + offset` via `gmtime_r`** — no
+  timezone database, no `setenv("TZ")`. The hub has already resolved DST,
+  sunrise/sunset and jitter into absolute local minutes-of-day before a schedule
+  reaches the node.
+- The subtle case now pinned by a test: **the weekday mask must be evaluated in
+  LOCAL time**. A Tuesday-only 00:30 entry at UTC+2 actually fires at 22:30 UTC
+  on *Monday*; checking the UTC weekday would skip it and the blind would simply
+  never move.
+- 24 new tests, **127/127 passing**. Verified non-vacuous by mutation: breaking
+  the Monday-first weekday mapping (`(tm_wday + 6) % 7` → `tm_wday`) fails 8 of
+  them.
+- **Remaining in P3:** schedule persistence in `config.txt`, the auto-mode
+  sleep/wake/execute path, and the I8 clock guard (refuse to sleep without a
+  valid clock).
+
 ### 2026-08-21 — Auto-mode P2 (partial): wake beacon + clock-offset sensor
 
 - **Node sends a `NodeWakeBeacon` on every boot/wake** carrying wake reason,

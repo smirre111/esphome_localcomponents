@@ -193,6 +193,19 @@ if(NOT EXISTS ${BLINDS_ESP_MAIN})
 endif()
 set(NODE_SHIM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shims_node)
 
+# P3: the schedule arithmetic is dependency-free by design (only <stdint.h> and
+# <time.h>), so it compiles directly from the production source with no shims
+# and no staging — the calendar logic under test is byte-for-byte what the node
+# runs.
+if(EXISTS ${BLINDS_ESP_MAIN}/Scheduler.cpp)
+    add_executable(scheduler_test
+        scenarios/scheduler_test.cpp
+        ${BLINDS_ESP_MAIN}/Scheduler.cpp)
+    target_include_directories(scheduler_test PRIVATE ${BLINDS_ESP_MAIN}/include)
+    target_link_libraries(scheduler_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(scheduler_test)
+endif()
+
 if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # Quoted-include searches the dir of the FILE doing the include first
     # (no compiler flag overrides that). We copy the production source +
