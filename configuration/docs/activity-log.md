@@ -16,6 +16,66 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-22 (evening) — auto mode proven on hardware; four real bugs found
+
+**Automatic mode works.** Node 2 slept and woke itself for a scheduled event:
+
+```
+Beacon: reason=TIMER_CHECKIN clock_offset=-4 s fw=10014 resume=1
+'RollladenWohnzimmer2 Clock Offset' >> -4 s
+```
+
+`reason=TIMER_CHECKIN` is a genuine deep-sleep timer wake, ~30 s ahead of the
+event as `beacon_lead` intends. **`clock_offset = −4 s` is the D1 measurement
+outstanding since P1** — the external 32.768 kHz crystal lost 4 s across the
+sleep, comfortably within budget and the first real evidence for the
+uncapped-sleep decision.
+
+Four bugs found, all of which presented as something else:
+
+1. **`config.txt` read truncated at 256 bytes** — the big one. Adding the P3/P4
+   schedule fields pushed the file past a fixed `char buf[256]`, and a `fread`
+   that fills its buffer leaves no null terminator. cJSON failed, **every**
+   setting silently reverted to its compiled default, and the node booted
+   unprovisioned at address 0 — re-registering on every boot, with the hub
+   re-provisioning it each time. Presented for hours as "login not
+   acknowledged" and "the schedule never persists". Now sized from the file,
+   heap-allocated with a 4 KB cap, always terminated, freed on every path, and
+   the parse failure logs loudly.
+2. **A failed OTA stranded the node.** Both failure paths ended in
+   `vTaskDelete(NULL)`; one logged "Rebooting ..." immediately before not
+   rebooting. Only success called `esp_restart()`. A failed update left the node
+   in WiFi OTA mode, off the LoRa air, recoverable only by physical
+   power-cycling. Both paths now restart.
+3. **The wake beacon was sent inside the register→login window**, where msgid
+   counters are not yet synchronised, so the hub dropped it as a replay
+   (`duplicate or old message ID: 3 … My MsgID: 11`). With no beacon the hub
+   never learned the node's clock or schedule version, so **P4 was dead on the
+   register path** while the node's own log looked healthy. Beacon now goes out
+   after `CMD_LOGIN` (register path) or at boot (resume path only).
+4. **Entering deep sleep from the RX task crashed the node** ~1 s after a
+   schedule arrived. Sleep is now QUEUED as `SYSCMD_SLEEP` and runs on
+   `processSysCommand`'s task — the context the nightly `CMD_SLEEP` has always
+   used. Reverting the inline call also exposed that *nothing* put the node to
+   sleep in auto mode at all; both the boot path and the schedule handler now
+   queue it.
+
+Also: **boot always comes up INTERACTIVE** (user decision). Auto mode is never
+resumed from stored config — an unexplained reboot is exactly when you want the
+node reachable, not asleep. The stored schedule *version* is cleared too, so the
+node reports 0, the hub sees a mismatch and re-pushes with `mode=AUTO`; that
+push is what re-arms it. Self-healing, one ~150 B frame per reboot, entries kept.
+
+Plus: unprovisioned nodes now **retry REGISTER** every 60 s (a single lost frame
+used to strand them), and the harness gained **sleep-path coverage** —
+`enterDeepsleep()` was a bare no-op, which is why the crash passed the suite and
+failed on hardware. 152/152, key assertions mutation-checked.
+
+**Still open:** node 1 is parked on 1.0.13 and needs a power-cycle plus a serial
+flash; the OTA path itself is still unreachable from the nodes; and the per-slot
+HA editing entities (last P4 item) are not built.
+
+
 ### 2026-08-22 — Node firmware: failed OTA no longer strands the node
 
 - **Pre-existing bug, found while diagnosing "login not acknowledged" on node 1.**
