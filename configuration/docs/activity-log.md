@@ -149,16 +149,34 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
   cleared to OFF on the fresh session.
 - **Caveat:** opening COM6 resets the node via the DTR/RTS auto-reset circuit,
   which triggers its power-on `MOTCMD_FULL_UP` reference move — i.e. reading
-  node serial physically moves that blind. Ask before doing it.
+  node serial physically moves that blind. Ask before doing it. (Node 2 does
+  have a powered motor supply — it reports 14.4 V — so that move was real.)
 
-## Open — node 2 battery ADC reads zero
+## Closed — "node 2 battery ADC reads zero" was a MISDIAGNOSIS (2026-08-22)
 
-Node 2 reports 0.0 V / 0 % while node 1 reads 11.4 V / 62 %. Serial shows
-`ADC: value: 0` and `MotorCtrl: Current ADC value 0`, so the reading is zero at
-the source rather than lost in transport. **Predates the auto-mode work** (it was
-0.0 V before the hub update). A battery node whose voltage cannot be seen is what
-caused the earlier silent outage, so this is worth chasing: check the divider
-wiring / ADC channel against node 1, which is on identical firmware.
+**There is no ADC fault.** Node 2 reports 14.4 V / 100 %. Recorded here because
+the reasoning error is the reusable part:
+
+- `frtosTasks: ADC: value: 0` in the node log is the **motor-current** task
+  (`ADC_UNIT_2`, channel 8 = GPIO25), *not* the battery. The battery task logs
+  `Battery voltage: …` and never appeared in a 25 s capture because its interval
+  is 15 minutes. Zero motor current at idle is correct.
+- The `0.0 V / 0 %` seen in Home Assistant was **stale hub state**: the hub had
+  25 days of uptime and was read moments before its OTA. After the reboot and a
+  fresh session, node 2 reported a real measurement.
+
+Two unrelated zeros, joined into a fault that did not exist.
+
+Code checked while investigating, all sound: the `ADC_CHANNEL_8` "invalid on
+ADC1" suspicion was wrong (the handle is *named* `adc1_handle` but is
+`ADC_UNIT_2`); `batteryAcquireSupply()` returning false only happens when the
+motor is already running, i.e. the divider's rail is already powered; and
+`ADC_ATTEN_DB_6` is not saturating (14.4 V through the 113k/13k divider is
+~1.66 V, inside the ~1.75 V range).
+
+**Real leftover, minor:** `adc1_handle` in `frtosTasks.cpp` holds an
+`ADC_UNIT_2` handle. That misleading name is what made the wrong hypothesis
+plausible in the first place — worth renaming.
 
 ### 2026-08-21 — Auto-mode P0: proto scaffolding (built, NOT deployed)
 
