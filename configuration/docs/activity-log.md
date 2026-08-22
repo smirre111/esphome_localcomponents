@@ -36,9 +36,34 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 - 24 new tests, **127/127 passing**. Verified non-vacuous by mutation: breaking
   the Monday-first weekday mapping (`(tm_wday + 6) % 7` → `tm_wday`) fails 8 of
   them.
-- **Remaining in P3:** schedule persistence in `config.txt`, the auto-mode
-  sleep/wake/execute path, and the I8 clock guard (refuse to sleep without a
-  valid clock).
+- **Schedule persistence + auto-mode sleep/wake/execute + the I8 guard landed**
+  the same day. `struct Config` carries mode, schedule version, the five timings
+  and up to 8 entries, persisted in `config.txt` (short keys — it lives in a
+  32 KB LittleFS partition and is rewritten on every push). Every field defaults
+  to its current value, so a config written by older firmware simply leaves auto
+  mode off and an upgraded node behaves exactly as before.
+- `CMD_SCHEDULE` applies and persists a pushed schedule, and **is acked** —
+  unlike TimeSync — because the hub retransmits until acknowledged and must know
+  its pending config landed.
+- `enterDeepsleep()` now sleeps to `next_event − beacon_lead`, capped by the
+  check-in interval, falling back to the legacy fixed `sleepDuration` whenever
+  auto mode is off or unusable. **`shouldRunAutoMode()` is the single gate**: it
+  refuses without a valid clock (I8) and without a schedule that can actually
+  fire (Q9 at runtime) — a node that sleeps against a schedule it cannot
+  evaluate does not fail loudly, it just stops answering for weeks.
+- A button wake always wins: it flips the node back to interactive so someone
+  standing at the blind gets a responsive device.
+- **A test caught a real contradiction between the implementation and the
+  proto.** `setSchedule()` treated `0` as "unset, keep default" for all timings,
+  but `blinds.proto` documents *meaningful* zeros for three of them
+  (`interactiveTimeout` = stay interactive, `checkinInterval` = no check-in,
+  `catchupWindow` = never replay). Uniform-but-wrong handling would have
+  silently disabled whatever the hub asked for. Zero handling now follows the
+  proto per field; `beaconLead`/`postEventWindow` have no documented zero and
+  keep their defaults.
+- 14 new node tests, **138/138 passing**. Node builds (0x139480, 39 % free).
+- **Remaining in P3:** nothing. P4 (hub pending-config store, schedule push, HA
+  entities) is next; the interactive→auto return timer is part of it.
 
 ### 2026-08-21 — Auto-mode P2 (partial): wake beacon + clock-offset sensor
 

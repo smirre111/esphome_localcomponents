@@ -27,6 +27,7 @@ extern "C" {
 #include <psa/crypto.h>
 
 #include <cstring>
+#include <sys/time.h>
 #include <vector>
 
 using proto_sim::aes_gcm_decrypt;
@@ -706,4 +707,237 @@ TEST_F(RealNodeFixture, PlaintextDownlinkDoesNotProveSession) {
 
     EXPECT_FALSE(disp.isSessionProven())
         << "a plaintext frame must not be mistaken for a working session";
+}
+
+// ---------------------------------------------------------------------------
+// P3 — automatic mode gating and execution.
+//
+// The gate matters more than the happy path. A node that sleeps against a
+// schedule it cannot evaluate does not fail loudly — it just stops answering,
+// possibly for weeks. Every refusal below is a deliberate "stay interactive"
+// rather than a guess.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+sched::Entry sched_entry(uint16_t minute, uint8_t days,
+                         uint8_t action = sched::ACTION_OPEN, bool enabled = true) {
+    sched::Entry e;
+    e.minuteOfDay = minute;
+    e.dayMask     = days;
+    e.action      = action;
+    e.enabled     = enabled;
+    return e;
+}
+
+// Give the node a clock via a real CMD_TIMESYNC, the only way it ever gets one.
+void give_clock(CmdDispatcher &disp, uint32_t msgid, uint64_t epoch, int32_t offset) {
+    auto f = pack_timesync_op(msgid, epoch, offset);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
+}
+
+} // namespace
+
+TEST_F(RealNodeFixture, AutoModeRefusedWithoutASchedule) {
+    // Q9 at runtime: mode can be AUTO while no entry can fire. Sleeping towards
+    // nothing would strand the node until its check-in — or forever, if that is
+    // disabled too.
+    give_clock(disp, 200, 1787000000ULL, 7200);
+    sys.setAutoMode(true);
+    EXPECT_FALSE(disp.shouldRunAutoMode());
+    EXPECT_EQ(disp.computeSleepSeconds(), 0u)
+        << "no usable schedule must mean: do not sleep on a schedule";
+}
+
+TEST_F(RealNodeFixture, AutoModeRefusedWithAllEntriesDisabled) {
+    give_clock(disp, 201, 1787000000ULL, 7200);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL, sched::ACTION_OPEN, false)};
+    sys.setSchedule(1, 1, 0, 0, 0, 0, 1800, e, 1);
+    EXPECT_FALSE(disp.shouldRunAutoMode());
+}
+
+TEST_F(RealNodeFixture, AutoModeAcceptedWithClockAndUsableSchedule) {
+    give_clock(disp, 202, 1787000000ULL, 7200);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};   // 07:30 daily
+    sys.setSchedule(0xABCD, 1, 0, 0, 0, 0, 1800, e, 1);
+
+    EXPECT_TRUE(disp.shouldRunAutoMode());
+    EXPECT_NE(disp.computeNextEvent(), 0u);
+    EXPECT_GT(disp.computeSleepSeconds(), 0u);
+}
+
+TEST_F(RealNodeFixture, AutoModeIgnoredWhenModeIsInteractive) {
+    give_clock(disp, 203, 1787000000ULL, 7200);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(1, 0, 0, 0, 0, 0, 1800, e, 1);   // INTERACTIVE
+    EXPECT_FALSE(disp.shouldRunAutoMode());
+    EXPECT_EQ(disp.computeSleepSeconds(), 0u);
+}
+
+TEST_F(RealNodeFixture, SleepIsCappedByTheCheckinInterval) {
+    // A weekly entry would otherwise mean a week of radio silence, during which
+    // no hub-side config change could reach the node at all.
+    give_clock(disp, 204, 1787000000ULL, 7200);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_MON)};    // weekly
+    sys.setSchedule(1, 1, 0, 3600, 0, 0, 1800, e, 1);
+
+    const uint64_t sleep_s = disp.computeSleepSeconds();
+    EXPECT_GT(sleep_s, 0u);
+    EXPECT_LE(sleep_s, 3600u)
+        << "check-in must bound how long hub config can sit unseen";
+}
+
+TEST_F(RealNodeFixture, SleepWakesBeaconLeadBeforeTheEvent) {
+    // I1: wake early, beacon, apply pending config, THEN act — so a schedule
+    // edit made an hour ago takes effect on THIS event, cancellation included.
+    //
+    // NOTE: the epoch handed to TimeSync does NOT become the node's clock here.
+    // settimeofday() needs CAP_SYS_TIME and fails for an unprivileged host
+    // user, so the node reads the HOST clock; TimeSync only establishes
+    // validity and the offset. The assertion is therefore on the invariant
+    // (wake == next - lead) measured against the same clock the node used,
+    // with a tolerance for the tick between the two reads.
+    give_clock(disp, 205, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(23 * 60, sched::DAY_ALL)};   // 23:00 UTC
+    // check-in disabled, so the schedule alone decides the wake time.
+    sys.setSchedule(1, 1, 0, /*checkin=*/0, /*lead=*/30, 0, 1800, e, 1);
+
+    const uint64_t next  = disp.computeNextEvent();
+    const uint64_t sleep = disp.computeSleepSeconds();
+    ASSERT_NE(next, 0u);
+    ASSERT_GT(sleep, 0u);
+
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    const uint64_t now = static_cast<uint64_t>(tv.tv_sec);
+
+    EXPECT_NEAR(static_cast<double>(now + sleep + 30),
+                static_cast<double>(next), 2.0)
+        << "must wake at (next - beacon_lead), not at next";
+}
+
+TEST_F(RealNodeFixture, ScheduleConfigIsAppliedAndAcked) {
+    // Unlike TimeSync, a schedule push IS acked: the hub retransmits until
+    // acknowledged and must know its pending config actually landed.
+    ScheduleEntry e1 = SCHEDULE_ENTRY__INIT;
+    e1.minuteofday = 450;              // 07:30
+    e1.daymask     = sched::DAY_ALL;
+    e1.action      = SCHED_ACTION__SCHED_OPEN;
+    ScheduleEntry *entries[] = {&e1};
+
+    ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
+    sc.version              = 0xC0FFEE;
+    sc.mode                 = NODE_MODE__MODE_AUTO;
+    sc.interactivetimeout_s = 900;
+    sc.checkininterval_s    = 7200;
+    sc.beaconlead_s         = 45;
+    sc.posteventwindow_s    = 25;
+    sc.catchupwindow_s      = 600;
+    sc.n_entries            = 1;
+    sc.entries              = entries;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = 300;
+    op.header   = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+    op.schedule = &sc;
+
+    size_t len = lora_client_operation_message__get_packed_size(&op);
+    std::vector<uint8_t> frame(len);
+    lora_client_operation_message__pack(&op, frame.data());
+
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    EXPECT_EQ(sys.getSchedVersion(), 0xC0FFEEu);
+    EXPECT_TRUE(sys.getAutoMode());
+    EXPECT_EQ(sys.getEntryCount(), 1);
+    EXPECT_EQ(sys.getInteractiveTimeout(), 900u);
+    EXPECT_EQ(sys.getCheckinInterval(), 7200u);
+    EXPECT_EQ(sys.getBeaconLead(), 45u);
+    EXPECT_EQ(sys.getPostEventWindow(), 25u);
+    EXPECT_EQ(sys.getCatchupWindow(), 600u);
+    EXPECT_TRUE(sys.hasUsableSchedule());
+
+    CmdDispatcher::tx_command_t cmd{};
+    ASSERT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdTRUE)
+        << "a schedule push must be acked so the hub stops retransmitting";
+    EXPECT_EQ(cmd.cmd, (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_ACK);
+    EXPECT_EQ(cmd.arg, 300u) << "the ack must echo the pushed msgid";
+}
+
+TEST_F(RealNodeFixture, ZeroHandlingFollowsWhatTheProtoDocumentsPerField) {
+    // Zero is NOT uniform across these fields, and making it uniform would
+    // silently disable whatever the hub actually asked for. blinds.proto
+    // documents a meaningful zero for three of them; the other two have none,
+    // and a 0 there would quietly defeat the wake-early-then-act behaviour.
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(1, 1, 0, 0, 0, 0, 0, e, 1);
+
+    EXPECT_EQ(sys.getInteractiveTimeout(), 0u)
+        << "0 means 'stay interactive until told otherwise'";
+    EXPECT_EQ(sys.getCheckinInterval(), 0u)
+        << "0 means 'no periodic check-in wake'";
+    EXPECT_EQ(sys.getCatchupWindow(), 0u)
+        << "0 means 'never execute a missed event'";
+    EXPECT_EQ(sys.getBeaconLead(), 30u)
+        << "no documented zero — default must survive";
+    EXPECT_EQ(sys.getPostEventWindow(), 20u)
+        << "no documented zero — default must survive";
+}
+
+TEST_F(RealNodeFixture, DisabledCheckinLeavesSleepDrivenPurelyByTheSchedule) {
+    // The counterpart to SleepIsCappedByTheCheckinInterval: with check-in
+    // explicitly disabled, the sleep must run all the way to the next event.
+    give_clock(disp, 206, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(23 * 60, sched::DAY_ALL)};   // 23:00 UTC
+    sys.setSchedule(1, 1, 0, /*checkin=*/0, /*lead=*/30, 0, 1800, e, 1);
+
+    const uint64_t next  = disp.computeNextEvent();
+    const uint64_t sleep = disp.computeSleepSeconds();
+    ASSERT_NE(next, 0u);
+    ASSERT_GT(sleep, 0u);
+
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    const uint64_t now = static_cast<uint64_t>(tv.tv_sec);
+
+    EXPECT_NEAR(static_cast<double>(now + sleep + 30),
+                static_cast<double>(next), 2.0)
+        << "with no check-in cap the sleep runs to (next - beacon_lead)";
+    EXPECT_GT(sleep, 3600u)
+        << "and is NOT clipped to the 6 h default check-in that a 0 must disable";
+}
+
+TEST_F(RealNodeFixture, OutOfRangeEntriesAreDroppedNotStored) {
+    // Keeping a corrupt entry would make next_occurrence silently skip it,
+    // which is far harder to diagnose than never loading it.
+    sched::Entry e[] = {
+        sched_entry(1440, sched::DAY_ALL),   // invalid: 24:00
+        sched_entry(450,  sched::DAY_ALL),   // valid
+    };
+    sys.setSchedule(1, 1, 0, 0, 0, 0, 1800, e, 2);
+    EXPECT_EQ(sys.getEntryCount(), 1);
+    EXPECT_EQ(sys.getEntries()[0].minuteOfDay, 450);
+}
+
+TEST_F(RealNodeFixture, ScheduleReplacesWholesaleRatherThanMerging) {
+    // The hub always sends the complete blob, so there is no partial-update
+    // state to get out of sync. A merge would leave deleted entries firing.
+    sched::Entry three[] = {
+        sched_entry(400, sched::DAY_ALL),
+        sched_entry(500, sched::DAY_ALL),
+        sched_entry(600, sched::DAY_ALL),
+    };
+    sys.setSchedule(1, 1, 0, 0, 0, 0, 1800, three, 3);
+    ASSERT_EQ(sys.getEntryCount(), 3);
+
+    sched::Entry one[] = {sched_entry(700, sched::DAY_ALL)};
+    sys.setSchedule(2, 1, 0, 0, 0, 0, 1800, one, 1);
+
+    EXPECT_EQ(sys.getEntryCount(), 1) << "the old entries must be gone, not merged";
+    EXPECT_EQ(sys.getEntries()[0].minuteOfDay, 700);
 }

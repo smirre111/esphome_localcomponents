@@ -229,6 +229,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     add_library(real_cmd_dispatcher STATIC
         ${NODE_STAGE}/CmdDispatcher.cpp
         ${NODE_STAGE}/comm_utils.c
+        ${BLINDS_ESP_MAIN}/Scheduler.cpp
         ${NODE_SHIM_DIR}/esp_idf_stubs.c
         ${NODE_SHIM_DIR}/extern_stubs.cpp
     )
@@ -236,6 +237,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         BEFORE PUBLIC
             ${NODE_STAGE}                 # CmdDispatcher.h + sibling shims
             ${NODE_SHIM_DIR}              # FreeRTOS, ESP-IDF
+            ${BLINDS_ESP_MAIN}/include    # Scheduler.h (dependency-free)
             ${BLINDSPROTO_DIR}            # blinds.pb-c.h
             ${PROTOBUF_C_INCLUDE_DIRS}
     )

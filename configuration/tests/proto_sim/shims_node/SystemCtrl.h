@@ -5,6 +5,10 @@
 #include <cstring>
 #include <string>
 
+// P3: the real Scheduler.h is dependency-free, so the shim uses the production
+// header directly rather than mirroring the Entry type.
+#include "Scheduler.h"
+
 class SystemCtrl {
 public:
     void setAddress(uint8_t addr, uint8_t subnt) { addr_ = addr; subnt_ = subnt; }
@@ -52,6 +56,49 @@ public:
     uint32_t open_slack_s()      const { return open_slack_s_; }
     uint32_t close_slack_s()     const { return close_slack_s_; }
 
+    // ---- P3: schedule / mode ----
+    void setSchedule(uint32_t version, uint8_t mode,
+                     uint32_t interactiveTimeout_s, uint32_t checkinInterval_s,
+                     uint32_t beaconLead_s, uint32_t postEventWindow_s,
+                     uint32_t catchupWindow_s,
+                     const sched::Entry *entries, uint8_t count) {
+        sched_version_ = version;
+        auto_mode_     = mode != 0;
+        // Mirrors production: zero handling follows what the proto DOCUMENTS
+        // per field. interactiveTimeout / checkinInterval / catchupWindow all
+        // have meaningful zeros ("stay interactive", "no check-in", "never
+        // replay"); beaconLead and postEventWindow do not, and a 0 there would
+        // silently defeat the wake-early-then-act behaviour.
+        interactive_timeout_s_ = interactiveTimeout_s;
+        checkin_interval_s_    = checkinInterval_s;
+        catchup_window_s_      = catchupWindow_s;
+        if (beaconLead_s)      beacon_lead_s_       = beaconLead_s;
+        if (postEventWindow_s) post_event_window_s_ = postEventWindow_s;
+
+        entry_count_ = 0;
+        if (entries) {
+            for (uint8_t i = 0; i < count && i < sched::kMaxEntries; i++) {
+                if (entries[i].minuteOfDay >= sched::kMinutesPerDay) continue;
+                entries_[entry_count_++] = entries[i];
+            }
+        }
+    }
+    void setAutoMode(bool on)          { auto_mode_ = on; }
+    bool getAutoMode()                 { return auto_mode_; }
+    uint32_t getSchedVersion()         { return sched_version_; }
+    uint32_t getInteractiveTimeout()   { return interactive_timeout_s_; }
+    uint32_t getCheckinInterval()      { return checkin_interval_s_; }
+    uint32_t getBeaconLead()           { return beacon_lead_s_; }
+    uint32_t getPostEventWindow()      { return post_event_window_s_; }
+    uint32_t getCatchupWindow()        { return catchup_window_s_; }
+    const sched::Entry *getEntries()   { return entries_; }
+    uint8_t getEntryCount()            { return entry_count_; }
+    bool hasUsableSchedule() {
+        for (uint8_t i = 0; i < entry_count_ && i < sched::kMaxEntries; i++)
+            if (entries_[i].valid()) return true;
+        return false;
+    }
+
 private:
     uint8_t   addr_{0}, subnt_{0};
     bool      registered_{false};
@@ -62,4 +109,15 @@ private:
     float     h_{0.0f}, a_{0.0f}, t_{0.0f};
     uint32_t  open_slack_s_{0}, close_slack_s_{0};
     uint32_t  battery_interval_s_{900};  // production default: 15 min
+
+    // P3 — defaults mirror the production struct Config.
+    bool      auto_mode_{false};
+    uint32_t  sched_version_{0};
+    uint32_t  interactive_timeout_s_{1800};
+    uint32_t  checkin_interval_s_{21600};
+    uint32_t  beacon_lead_s_{30};
+    uint32_t  post_event_window_s_{20};
+    uint32_t  catchup_window_s_{1800};
+    uint8_t   entry_count_{0};
+    sched::Entry entries_[sched::kMaxEntries]{};
 };
