@@ -321,7 +321,7 @@ both firmwares always ship together (SKILL.md rule).
 |-------|---------|---------------|
 | **P0** ✅ | Proto: all new messages + oneof/enum wiring; regenerate stubs to all 7 files; rebuild both firmwares with **no behaviour change**. | **Done — built, not yet deployed.** See §6.2. |
 | **P1** ✅ | `TimeSync` end-to-end. Hub sends it once the encrypted session is confirmed; node sets its clock, stores the UTC offset in RTC memory and logs local time + drift. No scheduling yet. | **Done — DEPLOYED and verified on hardware 2026-08-21.** See §6.4. |
-| **P2** ◐ | `NodeWakeBeacon` + hub `handle_beacon_()` + session-resume (I2). Node still in interactive mode; beacon fires on boot only. | **Beacon + hub handling + clock-offset sensor done and tested (§6.5). The node-side REGISTER-skip that realises I2's battery saving is NOT done — see §6.5.** |
+| **P2** ✅ | `NodeWakeBeacon` + hub `handle_beacon_()` + session-resume (I2). Node still in interactive mode; beacon fires on boot only. | **Done — built and tested (§6.5, §6.6). Not deployed.** |
 | **P3** | Node scheduler: `Scheduler.{h,cpp}` + config persistence + auto-mode sleep/wake/execute + I8 clock guard. Schedule hard-coded in YAML defaults only (no HA editing yet). | A node executes a YAML schedule for 48 h unattended; battery drain measured against the interactive baseline. |
 | **P4** | Hub pending-config store + `ScheduleConfig` push + HA entities (switches, datetime, selects, numbers) + I4 diagnostics. | Edit a time in HA → node applies it at the next beacon; `config pending` clears on ack. |
 | **P5** | Sun/jitter resolution (D2, I6), DST push + threshold (I7), catch-up (I3), `skip_next`/`run_now` (I5), interactive-timeout return (D4). | Sunrise entry tracks the actual sunrise across a week; a DST switch corrects within one beacon; sun drift does *not* cause a push until it crosses 15 min. |
@@ -539,24 +539,55 @@ something only a serial cable reveals. Suppressed when the node reports
 `clockValid = false`, otherwise a node that never got a TimeSync would show a
 ~56-year "drift" and make the sensor useless.
 
-**NOT delivered — the node-side REGISTER-skip.** I2's actual battery saving is
-the node choosing to send *only* a beacon on wake instead of running the full
-REGISTER → config → login sequence (~4 s of awake radio, `kRegisterToLoginDelayMs`
-alone). Two thirds of the machinery is already in place and verified:
+### 6.6 P2b (2026-08-22) — resume-first wake, the I2 saving
+
+A provisioned node waking with a valid persisted session now **skips REGISTER →
+config → login entirely** (~4 s of awake radio, `kRegisterToLoginDelayMs` alone)
+and announces itself with the encrypted beacon instead. Most of the machinery
+already existed:
 
 - The hub sets `session_confirmed_` **and** `login_acked_` on any successful
-  decrypt, so an encrypted beacon that decrypts *already* suppresses the login
-  challenge — no hub change needed.
-- If the hub has no nonce for that peer (it rebooted while the node slept), it
-  logs `No base nonce for peer N — re-provisioning` and sends a
-  `BaseNonceExchange`, which the node handles via `CMD_BASENONCE`.
+  decrypt, so an encrypted beacon that decrypts already suppresses the login
+  challenge — no hub change was needed for that half.
+- If the hub has no nonce (it rebooted while the node slept) it logs
+  `No base nonce for peer N — re-provisioning` and sends a `BaseNonceExchange`,
+  handled on the node by `CMD_BASENONCE`.
 
-What is missing is the node's boot-path decision to take that route. It is
-deliberately left out rather than rushed: it changes the existing wake path,
-whose failure mode is a node that never re-establishes and goes **silent** — the
-worst outcome this system has. It needs its own cycle with an explicit fallback
-timer (beacon, and if no downlink arrives within N seconds, fall back to
-REGISTER) and a test for "hub rebooted while the node slept".
+**The failure this design is built around:** the hub rebooted while we slept, it
+holds no nonce, nothing we send can be decrypted, and the node sits there
+believing it is connected — a **silent node**, the worst outcome this system
+has. So the resume path is never taken bare:
+
+| Mechanism | Behaviour |
+|---|---|
+| `armResumeFallback()` | one-shot `esp_timer`, `kResumeFallbackMs` = 12 s |
+| Cancelled by | a **decrypted** downlink only (`noteSessionProven()`), which proves the hub holds the same base nonce |
+| **Not** cancelled by | a plaintext frame — precisely the `BaseNonceExchange` case, where we *want* the fallback to fire |
+| On expiry | `sendRegister()` — the full handshake, exactly as before |
+| If the timer cannot be created | register immediately; losing the saving beats risking a silent node |
+
+`armResumeFallback()` also clears `session_proven_`, so a second wake cannot
+inherit the first wake's proof and skip its own safety net.
+
+**Hub now always answers a beacon with a `TimeSync`**, which does two jobs in one
+frame: it refreshes the node's clock on every wake (correcting accumulated
+drift), and because it is encrypted it *is* the node's proof that the resumed
+session works. It reuses the `"timesync_push"` timeout name, so the login path
+and the beacon path can never double-send.
+
+Tests (5 new): fallback fires when nothing decrypts; does not fire once proven;
+arming clears stale proof; a real encrypted TimeSync proves the session
+end-to-end; a plaintext frame does not.
+
+> Two harness gaps closed along the way: `esp_timer` one-shots are now modelled
+> (nothing fires on its own — `proto_sim_timer_fire_all()` is how a test advances
+> time, keeping this deterministic), and the node fixture now calls
+> `psa_crypto_init()`. That second one is the same trap as §6.3: production does
+> it in `app_main`, and without it every decrypt fails with
+> "PSA key not available" while key, IV and AAD all look correct.
+
+Also fixed: `CmdDispatcher.h` used `esp_timer_handle_t` without including
+`esp_timer.h` — it only compiled on-device via a transitive include.
 
 > **Version coupling:** `CmdDispatcher::kFirmwareVersion` (10013) is
 > hand-maintained against `PROJECT_VER` in the node's `CMakeLists.txt`. A test

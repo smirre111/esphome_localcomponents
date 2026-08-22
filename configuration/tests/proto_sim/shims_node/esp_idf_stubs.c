@@ -155,6 +155,8 @@ const char* esp_err_to_name(esp_err_t code) {
 // what a test gets unless it says otherwise.
 // ---------------------------------------------------------------------------
 #include "esp_sleep.h"
+#include "esp_timer.h"
+#include <stdbool.h>
 
 static uint32_t           g_wakeup_causes = 0;
 static esp_reset_reason_t g_reset_reason  = ESP_RST_POWERON;
@@ -164,3 +166,73 @@ void proto_sim_set_wakeup_causes(uint32_t causes) { g_wakeup_causes = causes; }
 
 esp_reset_reason_t esp_reset_reason(void) { return g_reset_reason; }
 void proto_sim_set_reset_reason(esp_reset_reason_t reason) { g_reset_reason = reason; }
+
+// ---------------------------------------------------------------------------
+// esp_timer one-shots. Nothing fires on its own; proto_sim_timer_fire_all()
+// is how a test advances time.
+// ---------------------------------------------------------------------------
+#define TIMER_MAX 8
+
+struct esp_timer {
+    void (*callback)(void *arg);
+    void *arg;
+    int   armed;
+    int   used;
+};
+
+static struct esp_timer g_timers[TIMER_MAX];
+
+esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *out) {
+    if (!args || !out) return ESP_ERR_INVALID_ARG;
+    for (int i = 0; i < TIMER_MAX; i++) {
+        if (!g_timers[i].used) {
+            g_timers[i].used     = 1;
+            g_timers[i].armed    = 0;
+            g_timers[i].callback = args->callback;
+            g_timers[i].arg      = args->arg;
+            *out = &g_timers[i];
+            return ESP_OK;
+        }
+    }
+    return ESP_FAIL;
+}
+
+esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us) {
+    (void) timeout_us;
+    if (!timer) return ESP_ERR_INVALID_ARG;
+    timer->armed = 1;
+    return ESP_OK;
+}
+
+esp_err_t esp_timer_stop(esp_timer_handle_t timer) {
+    if (!timer) return ESP_ERR_INVALID_ARG;
+    timer->armed = 0;
+    return ESP_OK;
+}
+
+esp_err_t esp_timer_delete(esp_timer_handle_t timer) {
+    if (!timer) return ESP_ERR_INVALID_ARG;
+    timer->used  = 0;
+    timer->armed = 0;
+    return ESP_OK;
+}
+
+void proto_sim_timer_fire_all(void) {
+    for (int i = 0; i < TIMER_MAX; i++) {
+        if (g_timers[i].used && g_timers[i].armed) {
+            g_timers[i].armed = 0;           // one-shot: disarm before firing
+            if (g_timers[i].callback) g_timers[i].callback(g_timers[i].arg);
+        }
+    }
+}
+
+int proto_sim_timer_armed_count(void) {
+    int n = 0;
+    for (int i = 0; i < TIMER_MAX; i++)
+        if (g_timers[i].used && g_timers[i].armed) n++;
+    return n;
+}
+
+void proto_sim_timer_reset(void) {
+    memset(g_timers, 0, sizeof(g_timers));
+}

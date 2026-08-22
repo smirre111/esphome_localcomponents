@@ -24,6 +24,8 @@ extern "C" {
 
 #include "sim/crypto.h"
 
+#include <psa/crypto.h>
+
 #include <cstring>
 #include <vector>
 
@@ -69,6 +71,12 @@ struct RealNodeFixture : public ::testing::Test {
     CmdDispatcher disp{&mot, &sys, &lif, motorMux, buttonMux};
 
     void SetUp() override {
+        // Production initialises PSA Crypto in app_main ("PSA Crypto subsystem
+        // initialised"). The harness constructs CmdDispatcher directly, so
+        // without this every key import fails and decrypt_payload_gcm bails
+        // with "PSA key not available".
+        ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
+
         // Production CmdDispatcher::onReceiveNew expects the node to know
         // its own address (CLIENTCONFIG path was already exercised).
         sys.setAddress(kNodeAddr, kSubnet);
@@ -564,4 +572,138 @@ TEST_F(RealNodeFixture, FirmwareVersionMatchesProjectVersion) {
     // reporting a version the node is not actually running.
     EXPECT_EQ(CmdDispatcher::kFirmwareVersion, 10013u)
         << "kFirmwareVersion is out of sync with PROJECT_VER (1.0.13)";
+}
+
+// ---------------------------------------------------------------------------
+// P2b — resume-first wake.
+//
+// The saving: a provisioned node with a live session skips REGISTER -> config
+// -> login (~4 s of awake radio) and just sends an encrypted beacon.
+//
+// The risk being guarded: the hub rebooted while we slept. It holds no nonce,
+// cannot decrypt anything we send, and we would sit there believing we are
+// connected — a SILENT node, the worst failure this system has. So the resume
+// path is always armed with a fallback that re-registers.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, ResumeFallbackFiresRegisterWhenNothingDecrypts) {
+    proto_sim_timer_reset();
+    disp.armResumeFallback();
+    ASSERT_EQ(proto_sim_timer_armed_count(), 1) << "fallback must be armed";
+
+    // Drain anything already queued so the assertion below is unambiguous.
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    // Hub rebooted: nothing we send can be decrypted, so no downlink ever
+    // proves the session. Time passes.
+    proto_sim_timer_fire_all();
+
+    CmdDispatcher::tx_command_t cmd{};
+    ASSERT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdTRUE)
+        << "a resume that was never proven MUST fall back to REGISTER — "
+           "otherwise the node is silent until its next wake";
+    EXPECT_EQ(cmd.cmd, (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_REGISTER);
+}
+
+TEST_F(RealNodeFixture, ResumeFallbackDoesNotRegisterOnceSessionIsProven) {
+    proto_sim_timer_reset();
+    disp.armResumeFallback();
+
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    // A downlink decrypted successfully — the hub holds the same base nonce.
+    disp.noteSessionProven();
+    ASSERT_TRUE(disp.isSessionProven());
+
+    proto_sim_timer_fire_all();
+
+    CmdDispatcher::tx_command_t cmd{};
+    EXPECT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdFALSE)
+        << "a proven session must NOT re-register — that would throw away the "
+           "~4 s of awake radio the resume path exists to save";
+}
+
+TEST_F(RealNodeFixture, ArmingResumeFallbackClearsAnyStaleProof) {
+    // session_proven_ survives in the object across wakes; arming must reset it
+    // or the second wake would treat the FIRST wake's proof as its own and skip
+    // the fallback entirely.
+    disp.noteSessionProven();
+    ASSERT_TRUE(disp.isSessionProven());
+
+    proto_sim_timer_reset();
+    disp.armResumeFallback();
+    EXPECT_FALSE(disp.isSessionProven())
+        << "arming the fallback must clear stale proof from a previous wake";
+}
+
+TEST_F(RealNodeFixture, DecryptedDownlinkProvesSessionEndToEnd) {
+    // The real path: a LOGIN establishes the base nonce, then an encrypted
+    // downlink arrives and decrypts. That decrypt is what cancels the fallback.
+    constexpr uint32_t kNonce = 0xA5A51234;
+    auto login = pack_login_op(/*msgid=*/1, kNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    proto_sim_timer_reset();
+    disp.armResumeFallback();
+    ASSERT_FALSE(disp.isSessionProven());
+
+    // Encrypted TimeSync from the hub — the reply a beacon actually triggers.
+    TimeSync ts  = TIME_SYNC__INIT;
+    ts.epoch     = 1787000000ULL;
+    ts.utcoffset = 7200;
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+    inner.timesync = &ts;
+    size_t plain_len = lora_client_operation_message__get_packed_size(&inner);
+    std::vector<uint8_t> plain(plain_len);
+    lora_client_operation_message__pack(&inner, plain.data());
+
+    constexpr uint32_t kMsgId = 2;
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(kNodeAddr, kSubnet, kHubAddr, kMsgId, aad);
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv_downlink(kNonce, kMsgId, iv);
+    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad), plain.data(), plain.size());
+
+    LoraClientOperationMessage outer = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = kMsgId;
+    outer.header      = &hdr;
+    EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
+    ep.tag.data        = enc.tag.data();
+    ep.tag.len         = enc.tag.size();
+    ep.ciphertext.data = enc.ciphertext.data();
+    ep.ciphertext.len  = enc.ciphertext.size();
+    outer.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
+    outer.encrypted = &ep;
+
+    size_t frame_len = lora_client_operation_message__get_packed_size(&outer);
+    std::vector<uint8_t> frame(frame_len);
+    lora_client_operation_message__pack(&outer, frame.data());
+
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    EXPECT_TRUE(disp.isSessionProven())
+        << "a successfully decrypted downlink must prove the session";
+    EXPECT_TRUE(CmdDispatcher::isClockValid()) << "and the TimeSync should have applied";
+}
+
+TEST_F(RealNodeFixture, PlaintextDownlinkDoesNotProveSession) {
+    // If the hub lost its state it answers in PLAINTEXT (BaseNonceExchange).
+    // That must NOT count as proof: the whole point is that we can still be
+    // heard. Treating it as proof would cancel the fallback and leave the node
+    // half-connected.
+    proto_sim_timer_reset();
+    disp.armResumeFallback();
+
+    auto login = pack_login_op(/*msgid=*/50, 0xDEADBEEF);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    EXPECT_FALSE(disp.isSessionProven())
+        << "a plaintext frame must not be mistaken for a working session";
 }

@@ -1400,6 +1400,18 @@ namespace esphome
                  this->get_name().c_str(), reason,
                  (unsigned) b->fwversion, (int) b->sessionresume);
       }
+
+      // P2b: ALWAYS answer a beacon with a TimeSync.
+      //
+      // Two jobs in one frame.  It refreshes the node's clock on every wake
+      // (correcting whatever drift accumulated while it slept), and — because
+      // it is encrypted — it is the node's proof that the resumed session
+      // actually works.  A node that took the resume path is sitting on a
+      // fallback timer right now: if this reply never decrypts, it re-registers.
+      //
+      // Same timeout name as the login path, so the two can never double-send:
+      // set_timeout replaces an existing timeout of the same name.
+      this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
     }
 
     void LORAListener::send_timesync()

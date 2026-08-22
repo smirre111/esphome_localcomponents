@@ -29,18 +29,30 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
   Assistant number rather than something only a serial cable shows. Suppressed
   when the node reports no valid clock, so a node awaiting its first TimeSync
   cannot show a ~56-year offset.
-- **Deliberately NOT done: the node-side REGISTER-skip**, which is where I2's
-  actual battery saving (~4 s of awake radio per wake) lives. The hub half
-  already works for free — any successful decrypt sets `session_confirmed_` and
-  `login_acked_`, so an encrypted beacon already suppresses the login challenge —
-  and the no-nonce recovery path (`BaseNonceExchange` ⇄ `CMD_BASENONCE`) exists
-  on both sides. What is missing is the node's boot-path decision to take that
-  route. Left out on purpose: it changes the existing wake path, whose failure
-  mode is a node that goes **silent**, and it needs a fallback timer plus a
-  "hub rebooted while the node slept" test.
-- Node builds (0x137d00, 39 % free); hub compiles (`config_hash=0xa48f5a27`);
-  **98/98 tests pass** (11 new). **Not deployed** — needs a PROJECT_VER bump to
+- **P2b (2026-08-22): resume-first wake — the I2 battery saving.** A provisioned
+  node waking with a valid persisted session now skips REGISTER → config → login
+  entirely (~4 s of awake radio) and announces itself with the encrypted beacon.
+  The hub half already worked for free (any successful decrypt sets
+  `session_confirmed_`/`login_acked_`).
+- The failure this is built around is a **silent node**: hub rebooted while we
+  slept, holds no nonce, cannot decrypt us, and we believe we are connected. So
+  resume is never taken bare — a 12 s one-shot fallback re-registers unless a
+  **decrypted** downlink proves the session. A *plaintext* frame deliberately
+  does not count: that is exactly the `BaseNonceExchange` case where the
+  fallback SHOULD fire. If the timer cannot even be created, the node registers
+  immediately — losing the saving beats risking silence.
+- **The hub now answers every beacon with a TimeSync**, doing two jobs in one
+  frame: refreshing the node's clock each wake (correcting accumulated drift)
+  and, being encrypted, serving as the node's proof that resume worked.
+- Node builds (0x138120, 39 % free); hub compiles (`config_hash=0xa48f5a27`);
+  **103/103 tests pass** (16 new). **Not deployed** — needs a PROJECT_VER bump to
   1.0.14 plus the matching `kFirmwareVersion`, which a test enforces.
+- Harness: `esp_timer` one-shots now modelled (deterministic — a test fires them
+  explicitly), and the node fixture calls `psa_crypto_init()`. That second one is
+  the same trap as the hub tests: production does it in `app_main`, and without
+  it every decrypt fails with "PSA key not available" while key, IV and AAD all
+  look correct. Also fixed `CmdDispatcher.h` using `esp_timer_handle_t` without
+  including `esp_timer.h` — it only compiled on-device via a transitive include.
 
 ### 2026-08-21 — Auto-mode P1: TimeSync end-to-end (built + tested, NOT deployed)
 
