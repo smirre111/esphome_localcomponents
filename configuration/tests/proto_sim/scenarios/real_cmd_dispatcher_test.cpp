@@ -1116,8 +1116,23 @@ TEST_F(RealNodeFixture, ApplyingAScheduleDoesNotSleepImmediately) {
 
     ASSERT_TRUE(sys.getAutoMode()) << "the schedule should still have been applied";
     EXPECT_EQ(sys.deepsleep_calls(), 0)
-        << "applying a schedule must NOT sleep from the RX/dispatcher task — "
-           "that crashed the node on hardware";
+        << "applying a schedule must NOT call enterDeepsleep() from the "
+           "RX/dispatcher task — tearing the radio down from inside the receive "
+           "path crashed the node on hardware";
+
+    // It must still ENTER auto mode, just via the queue: SYSCMD_SLEEP is
+    // handled by processSysCommand's own task, the same context the nightly
+    // CMD_SLEEP has always used.
+    bool queued_sleep = false;
+    CmdDispatcher::tx_command_t sys_cmd{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &sys_cmd, 0) == pdTRUE) {
+        if (sys_cmd.cmd == (blinds_syscmd_base_t) BlindsSysCmd::SYSCMD_SLEEP)
+            queued_sleep = true;
+    }
+    EXPECT_TRUE(queued_sleep)
+        << "a schedule that switches the node INTO auto mode must queue a "
+           "sleep — otherwise auto mode never actually sleeps and the whole "
+           "battery saving is lost";
 }
 
 TEST_F(RealNodeFixture, EnterDeepsleepStillReachesSystemCtrl) {
@@ -1194,4 +1209,48 @@ TEST_F(RealNodeFixture, ArmingRetryIsANoOpWhenAlreadyProvisioned) {
     disp.armRegisterRetry();
     EXPECT_EQ(proto_sim_timer_armed_count(), 0)
         << "nothing to retry when we already have an address";
+}
+
+// ---------------------------------------------------------------------------
+// Boot policy: a node always comes up INTERACTIVE.
+//
+// Automatic mode is never resumed from stored config. An unexplained reboot is
+// precisely when you most want to be able to reach the node — resuming a
+// schedule would put it straight back to sleep instead. Home Assistant (via the
+// hub's schedule push) is what re-arms it.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, BootPolicyLeavesTheNodeInteractive) {
+    // Simulates what app_main does after loading config: forget the stored mode
+    // and version, whatever they were.
+    give_clock(disp, 600, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(0xABCD, /*mode=*/1, 0, 0, 0, 0, 1800, e, 1);
+    ASSERT_TRUE(disp.shouldRunAutoMode()) << "precondition: auto mode was active";
+
+    sys.setAutoMode(false);
+    sys.setSchedVersion(0);
+
+    EXPECT_FALSE(disp.shouldRunAutoMode())
+        << "a reboot must leave the node interactive and reachable";
+    EXPECT_EQ(disp.computeSleepSeconds(), 0u)
+        << "and it must not sleep on the stored schedule";
+    EXPECT_TRUE(sys.hasUsableSchedule())
+        << "the schedule ENTRIES are kept — only the mode and version are cleared";
+}
+
+TEST_F(RealNodeFixture, ClearedVersionMakesTheHubRePushAndReArmAutoMode) {
+    // Version 0 is what the node reports in its beacon, so the hub sees a
+    // mismatch and pushes again. That push is what re-arms auto mode, which is
+    // why clearing the version is not a one-way door.
+    sys.setSchedVersion(0);
+    EXPECT_EQ(sys.getSchedVersion(), 0u);
+
+    give_clock(disp, 601, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(0x1234, /*mode=*/1, 0, 0, 0, 0, 1800, e, 1);   // the re-push
+
+    EXPECT_TRUE(disp.shouldRunAutoMode())
+        << "the hub's push must be able to put the node back into auto mode";
+    EXPECT_EQ(sys.getSchedVersion(), 0x1234u);
 }

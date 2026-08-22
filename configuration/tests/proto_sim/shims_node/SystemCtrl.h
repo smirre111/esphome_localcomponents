@@ -93,6 +93,7 @@ public:
         }
     }
     void setAutoMode(bool on)          { auto_mode_ = on; }
+    void setSchedVersion(uint32_t v)   { sched_version_ = v; }
     bool getAutoMode()                 { return auto_mode_; }
     uint32_t getSchedVersion()         { return sched_version_; }
     uint32_t getInteractiveTimeout()   { return interactive_timeout_s_; }
