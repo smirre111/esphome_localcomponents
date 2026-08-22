@@ -1355,6 +1355,153 @@ namespace esphome
                (int)login.request_register);
     }
 
+    // ------------------------------------------------------------------------
+    // P4: schedule push
+    // ------------------------------------------------------------------------
+    void LORAListener::add_schedule_entry(uint16_t minute_of_day, uint8_t day_mask,
+                                          uint8_t action, uint8_t position_pct)
+    {
+      if (this->sched_entry_count_ >= kMaxScheduleEntries)
+      {
+        ESP_LOGE(TAG, "[%s] More than %u schedule entries — extra ones ignored",
+                 this->get_name().c_str(), (unsigned) kMaxScheduleEntries);
+        return;
+      }
+      SchedEntryCfg &e = this->sched_entries_[this->sched_entry_count_++];
+      e.minute_of_day  = minute_of_day;
+      e.day_mask       = day_mask;
+      e.action         = action;
+      e.position_pct   = position_pct;
+      this->sched_dirty_ = true;
+    }
+
+    void LORAListener::set_auto_mode(bool on)
+    {
+      if (this->auto_mode_ == on)
+        return;
+      this->auto_mode_   = on;
+      this->sched_dirty_ = true;
+      ESP_LOGI(TAG, "[%s] Mode set to %s — will push at next beacon",
+               this->get_name().c_str(), on ? "AUTO" : "INTERACTIVE");
+      // An awake node can be switched immediately; a sleeping one picks it up
+      // from the schedule push when it next beacons.
+      if (this->session_confirmed_)
+        this->send_tracked_sysop_(on ? CLIENT_OPERATION__CMD_MODE_AUTO
+                                     : CLIENT_OPERATION__CMD_MODE_INTERACTIVE);
+    }
+
+    uint32_t LORAListener::schedule_version()
+    {
+      if (!this->sched_dirty_)
+        return this->sched_version_;
+
+      // CRC32 over the canonical blob. Anything the node would act on
+      // differently must feed in here, or a change would not be pushed.
+      uint32_t crc = 0xFFFFFFFFu;
+      auto feed = [&crc](uint32_t v) {
+        for (int b = 0; b < 4; b++)
+        {
+          crc ^= (v >> (b * 8)) & 0xFFu;
+          for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1u)));
+        }
+      };
+
+      feed(this->auto_mode_ ? 1u : 0u);
+      feed(this->interactive_timeout_);
+      feed(this->checkin_interval_);
+      feed(this->beacon_lead_);
+      feed(this->post_event_window_);
+      feed(this->catchup_window_);
+      feed(this->sched_entry_count_);
+      for (uint8_t i = 0; i < this->sched_entry_count_; i++)
+      {
+        const SchedEntryCfg &e = this->sched_entries_[i];
+        feed(e.minute_of_day);
+        feed(e.day_mask);
+        feed(e.action);
+        feed(e.position_pct);
+      }
+
+      this->sched_version_ = crc ^ 0xFFFFFFFFu;
+      // Version 0 is the node's "I have no schedule" sentinel, so never mint it
+      // — a real schedule that happened to hash to 0 would look unconfigured
+      // and be re-pushed on every single beacon.
+      if (this->sched_version_ == 0)
+        this->sched_version_ = 1;
+      this->sched_dirty_ = false;
+      return this->sched_version_;
+    }
+
+    bool LORAListener::schedule_pending()
+    {
+      return this->node_sched_version_ != this->schedule_version();
+    }
+
+    void LORAListener::send_schedule_config()
+    {
+      if (this->parent_ == nullptr)
+        return;
+
+      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = this->incrTxMessageId();
+      // Single-shot, NOT bursted: a full 8-entry schedule is ~152 B, whose
+      // ~95 ms airtime overruns the 88 ms burst slot. It is only ever sent in
+      // reply to a beacon, so the node is provably listening and the burst
+      // would be redundant anyway.
+      header.burstindex    = 0;
+      header.burstcount    = 0;
+      op_message.header    = &header;
+
+      ScheduleEntry  entries[kMaxScheduleEntries];
+      ScheduleEntry *entry_ptrs[kMaxScheduleEntries];
+      for (uint8_t i = 0; i < this->sched_entry_count_; i++)
+      {
+        schedule_entry__init(&entries[i]);
+        entries[i].minuteofday = this->sched_entries_[i].minute_of_day;
+        entries[i].daymask     = this->sched_entries_[i].day_mask;
+        entries[i].action      = static_cast<SchedAction>(this->sched_entries_[i].action);
+        entries[i].positionpct = this->sched_entries_[i].position_pct;
+        entry_ptrs[i]          = &entries[i];
+      }
+
+      ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
+      sc.version              = this->schedule_version();
+      sc.mode                 = this->auto_mode_ ? NODE_MODE__MODE_AUTO
+                                                 : NODE_MODE__MODE_INTERACTIVE;
+      sc.interactivetimeout_s = this->interactive_timeout_;
+      sc.checkininterval_s    = this->checkin_interval_;
+      sc.beaconlead_s         = this->beacon_lead_;
+      sc.posteventwindow_s    = this->post_event_window_;
+      sc.catchupwindow_s      = this->catchup_window_;
+      sc.n_entries            = this->sched_entry_count_;
+      sc.entries              = this->sched_entry_count_ ? entry_ptrs : nullptr;
+
+      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+      op_message.schedule = &sc;
+
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      {
+        this->parent_->send(buf, len);
+        free(buf);
+        ESP_LOGI(TAG, "[%s] ScheduleConfig sent (version=0x%08x mode=%s entries=%u %u B msgid=%u)",
+                 this->get_name().c_str(), (unsigned) sc.version,
+                 this->auto_mode_ ? "AUTO" : "INTERACTIVE",
+                 (unsigned) this->sched_entry_count_, (unsigned) len,
+                 (unsigned) header.msgid);
+      }
+      else
+      {
+        ESP_LOGE(TAG, "[%s] Failed to pack ScheduleConfig", this->get_name().c_str());
+      }
+    }
+
     // P2: a node announced a wake.  Everything here is observation — the beacon
     // does not (yet) change what the hub sends, so shipping it ahead of the
     // scheduler is behaviour-neutral apart from the clock-offset sensor.
@@ -1412,6 +1559,24 @@ namespace esphome
       // Same timeout name as the login path, so the two can never double-send:
       // set_timeout replaces an existing timeout of the same name.
       this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
+
+      // P4: push the schedule if the node is not already on our version.
+      //
+      // Version comparison rather than a dirty flag, so this is self-healing:
+      // a node that missed a push, was reflashed, or lost its config.txt
+      // reports a stale version and gets corrected on its very next wake,
+      // without the hub needing to have remembered that it owed one.
+      //
+      // Deferred past the TimeSync so the two do not land on top of each other,
+      // and ordered second because the node needs a clock before a schedule is
+      // of any use to it.
+      if (this->schedule_pending())
+      {
+        ESP_LOGI(TAG, "[%s] Schedule pending (node=0x%08x hub=0x%08x) — pushing",
+                 this->get_name().c_str(), (unsigned) this->node_sched_version_,
+                 (unsigned) this->schedule_version());
+        this->set_timeout("schedule_push", 2000, [this]() { this->send_schedule_config(); });
+      }
     }
 
     void LORAListener::send_timesync()

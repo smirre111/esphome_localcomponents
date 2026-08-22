@@ -16,6 +16,43 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-22 — Auto-mode P4a: hub schedule push (YAML-defined)
+
+- **The hub can now own and push a schedule.** New `lora_client` options:
+  `auto_mode`, `interactive_timeout`, `checkin_interval`, `beacon_lead`,
+  `post_event_window`, `catchup_window`, and a `schedule:` list (max 8) of
+  `{time, days, action, position}`. `days` accepts presets (`daily`,
+  `weekdays`, `weekend`, `mon-sat`) or a list of day names, and is compiled to
+  the Monday-first bitmask the node uses.
+- **Reconciliation is by VERSION, not by a dirty flag.** The hub CRC32s its
+  canonical blob; the node echoes the version it has applied in every beacon;
+  a mismatch triggers a push. That makes it self-healing — a node that missed a
+  push, was reflashed, or lost `config.txt` reports a stale version and is
+  corrected on its next wake, with no hub-side memory of owing anything.
+  Version 0 is never minted, since that is the node's "no schedule" sentinel.
+- Push is deferred 2 s behind the TimeSync (clock first — a schedule is useless
+  without one) and sent **single-shot**, since ~152 B overruns the 88 ms burst
+  slot.
+- **Two silent bugs, one root cause, caught by deliberately feeding the
+  validator bad input.** `cv.enum()` returns an `EStr` (a *str subclass*)
+  carrying the mapped int in `.enum_value`:
+  - `config[CONF_ACTION] == SCHED_ACTIONS["position"]` compared a string to an
+    int — always False, so the "position needs a percentage" validator **never
+    fired**;
+  - codegen did not emit the mapped value either: `action: position` generated
+    `add_schedule_entry(450, 31, 0, 0)` — **action 0 = OPEN**. A schedule
+    entry meaning "go to 40 %" would have fully opened the blind instead.
+
+  Neither failure produced any diagnostic. Switched to `cv.one_of` (plain
+  string) with the string→int mapping done once, explicitly, in `to_code`.
+  Verified afterwards from the generated `main.cpp`, not just from a clean
+  compile: `(720, 32, 3, 40)` = Sat 12:00, position, 40 %.
+- Hub compiles (`config_hash=0x6fc050ce`); **138/138 tests still pass**.
+  `auto_mode` left **false** in YAML — nothing sleeps yet.
+- **Remaining in P4:** the HA entities for on-the-fly editing (8 slots ×
+  time/action/position/enabled + the mode switch), and the interactive→auto
+  return timer.
+
 ### 2026-08-22 — Auto-mode P3 (started): schedule arithmetic
 
 - **`Scheduler.{h,cpp}` — the calendar logic, dependency-free** (only

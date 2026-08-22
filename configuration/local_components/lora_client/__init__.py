@@ -18,6 +18,7 @@ from esphome.const import (
     CONF_NAME, 
     CONF_ID,
     CONF_MAC_ADDRESS,
+    CONF_TIME,
     CONF_TRIGGER_ID,
 )
 
@@ -243,6 +244,89 @@ TIME_SCHEMA = cv.Schema(
 #     .extend(cv.COMPONENT_SCHEMA)
 # )
 
+
+# ---- P4: automatic (scheduled) mode ----
+CONF_AUTO_MODE           = "auto_mode"
+CONF_INTERACTIVE_TIMEOUT = "interactive_timeout"
+CONF_CHECKIN_INTERVAL    = "checkin_interval"
+CONF_BEACON_LEAD         = "beacon_lead"
+CONF_POST_EVENT_WINDOW   = "post_event_window"
+CONF_CATCHUP_WINDOW      = "catchup_window"
+CONF_SCHEDULE            = "schedule"
+CONF_DAYS                = "days"
+CONF_ACTION              = "action"
+CONF_POSITION            = "position"
+
+# bit0 = MON .. bit6 = SUN, matching sched::DayBit on the node. Monday-first is
+# deliberate and NOT the C tm_wday convention.
+DAY_BITS = {
+    "mon": 1 << 0, "tue": 1 << 1, "wed": 1 << 2, "thu": 1 << 3,
+    "fri": 1 << 4, "sat": 1 << 5, "sun": 1 << 6,
+}
+DAY_PRESETS = {
+    "daily":    0x7F,
+    "weekdays": 0x1F,                  # MON-FRI
+    "weekend":  (1 << 5) | (1 << 6),
+    "mon-sat":  0x3F,
+}
+SCHED_ACTIONS = {"open": 0, "close": 1, "stop": 2, "position": 3}
+
+# Mirrors sched::kMaxEntries on the node AND the one-frame budget: 8 entries is
+# ~152 B on air against the 255 B limit.
+MAX_SCHEDULE_ENTRIES = 8
+
+
+def _validate_days(value):
+    """Accept a preset ("daily", "weekdays", ...) or a list of day names."""
+    if isinstance(value, str):
+        key = value.lower()
+        if key in DAY_PRESETS:
+            return DAY_PRESETS[key]
+        value = [value]
+    if not isinstance(value, list):
+        raise cv.Invalid(
+            f"days must be one of {sorted(DAY_PRESETS)} or a list of day names"
+        )
+    mask = 0
+    for day in value:
+        key = str(day).lower()[:3]
+        if key not in DAY_BITS:
+            raise cv.Invalid(f"unknown day '{day}'; expected one of {sorted(DAY_BITS)}")
+        mask |= DAY_BITS[key]
+    if mask == 0:
+        raise cv.Invalid("days must select at least one day, otherwise the entry never fires")
+    return mask
+
+
+def _validate_entry(config):
+    """A position action without a position would silently drive to 0%."""
+    if config[CONF_ACTION] == "position" and CONF_POSITION not in config:
+        raise cv.Invalid("action: position requires a 'position:' percentage")
+    if config[CONF_ACTION] != "position" and CONF_POSITION in config:
+        raise cv.Invalid("'position:' is only meaningful with action: position")
+    return config
+
+
+SCHEDULE_ENTRY_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            # Local wall-clock time. The node stores minutes-of-day and the hub
+            # resolves DST, so this stays 07:30 across a DST change.
+            cv.Required(CONF_TIME): cv.time_of_day,
+            cv.Optional(CONF_DAYS, default="daily"): _validate_days,
+            # NOTE: cv.one_of, deliberately NOT cv.enum. cv.enum returns an
+            # EStr (str subclass) whose .enum_value holds the int; comparing it
+            # to an int is silently always False, and codegen does not emit the
+            # mapped value either. Both failures are invisible. Keep the plain
+            # string here and map it once, explicitly, in to_code.
+            cv.Optional(CONF_ACTION, default="open"): cv.one_of(*SCHED_ACTIONS, lower=True),
+            cv.Optional(CONF_POSITION): cv.percentage_int,
+        }
+    ),
+    _validate_entry,
+)
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -263,6 +347,43 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_BATTERY_UPDATE_INTERVAL, default="15min"): cv.All(
                 cv.positive_time_period_seconds,
                 cv.Range(min=cv.TimePeriod(seconds=10), max=cv.TimePeriod(seconds=86400)),
+            ),
+
+            # ---- P4: automatic (scheduled) mode ----
+            # auto_mode is the DEFAULT the hub pushes; the node still refuses to
+            # enter it without a valid clock and a schedule that can fire.
+            cv.Optional(CONF_AUTO_MODE, default=False): cv.boolean,
+            # 0 = stay interactive until told otherwise. A documented, meaningful
+            # zero (blinds.proto) — the node does NOT treat it as "unset".
+            cv.Optional(CONF_INTERACTIVE_TIMEOUT, default="30min"): cv.All(
+                cv.positive_time_period_seconds,
+                cv.Range(max=cv.TimePeriod(seconds=86400)),
+            ),
+            # 0 = no periodic check-in. Bounds how long a hub-side config change
+            # can sit unseen by a sleeping node.
+            cv.Optional(CONF_CHECKIN_INTERVAL, default="6h"): cv.All(
+                cv.positive_time_period_seconds,
+                cv.Range(max=cv.TimePeriod(seconds=604800)),
+            ),
+            # Wake this early so the beacon exchange and any pending config land
+            # BEFORE the event runs — an edit made an hour ago then takes effect
+            # on this event, cancellation included.
+            cv.Optional(CONF_BEACON_LEAD, default="30s"): cv.All(
+                cv.positive_time_period_seconds,
+                cv.Range(min=cv.TimePeriod(seconds=5), max=cv.TimePeriod(seconds=300)),
+            ),
+            cv.Optional(CONF_POST_EVENT_WINDOW, default="20s"): cv.All(
+                cv.positive_time_period_seconds,
+                cv.Range(min=cv.TimePeriod(seconds=5), max=cv.TimePeriod(seconds=300)),
+            ),
+            # 0 = never replay a missed event.
+            cv.Optional(CONF_CATCHUP_WINDOW, default="30min"): cv.All(
+                cv.positive_time_period_seconds,
+                cv.Range(max=cv.TimePeriod(seconds=86400)),
+            ),
+            cv.Optional(CONF_SCHEDULE): cv.All(
+                cv.ensure_list(SCHEDULE_ENTRY_SCHEMA),
+                cv.Length(max=MAX_SCHEDULE_ENTRIES),
             ),
 
             cv.Optional(CONF_ON_SLEEP_START): automation.validate_automation(
@@ -440,6 +561,30 @@ async def to_code(config):
     # cg.add(var.set_close_duration(config[CONF_CLOSE_DURATION]))
     cg.add(var.set_sleep_duration(config[CONF_SLEEP_DURATION]))
     cg.add(var.set_battery_update_interval(config[CONF_BATTERY_UPDATE_INTERVAL].total_seconds))
+
+    # ---- P4: automatic (scheduled) mode ----
+    # These become the hub's PENDING schedule. It is pushed to the node at its
+    # next beacon whenever the node reports a different version, so a node that
+    # is asleep right now picks the change up when it next wakes.
+    cg.add(var.set_auto_mode_default(config[CONF_AUTO_MODE]))
+    cg.add(var.set_interactive_timeout(config[CONF_INTERACTIVE_TIMEOUT].total_seconds))
+    cg.add(var.set_checkin_interval(config[CONF_CHECKIN_INTERVAL].total_seconds))
+    cg.add(var.set_beacon_lead(config[CONF_BEACON_LEAD].total_seconds))
+    cg.add(var.set_post_event_window(config[CONF_POST_EVENT_WINDOW].total_seconds))
+    cg.add(var.set_catchup_window(config[CONF_CATCHUP_WINDOW].total_seconds))
+
+    for entry in config.get(CONF_SCHEDULE, []):
+        # cv.time_of_day yields a dict, not a datetime.
+        tod = entry[CONF_TIME]
+        cg.add(
+            var.add_schedule_entry(
+                tod["hour"] * 60 + tod["minute"],
+                entry[CONF_DAYS],
+                SCHED_ACTIONS[entry[CONF_ACTION]],
+                entry.get(CONF_POSITION, 0),
+            )
+        )
+
 
     # Get the time component variable and set it
     timeInstance = await cg.get_variable(config[CONF_TIME_ID])

@@ -92,6 +92,27 @@ lora_client:
     sleep_duration: 21600
     battery_update_interval: 15min
     mac_address: e0:8c:fe:5f:b7:a4
+    # P4: automatic (scheduled) mode. auto_mode stays FALSE until the schedule
+    # has been observed working — the node also refuses auto mode without a
+    # valid clock and a schedule that can actually fire, so this is belt and
+    # braces rather than the only guard.
+    auto_mode: false
+    interactive_timeout: 30min
+    checkin_interval: 6h
+    schedule:
+      - time: "07:30:00"
+        days: weekdays
+        action: open
+      - time: "08:30:00"
+        days: weekend
+        action: open
+      - time: "21:30:00"
+        days: daily
+        action: close
+      - time: "12:00:00"
+        days: sat
+        action: position
+        position: 40
 
 
   - id: rol_2

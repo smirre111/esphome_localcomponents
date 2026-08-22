@@ -91,6 +91,38 @@ namespace esphome
       void send_timesync();
       void send_base_nonce_exchange();
 
+      // ---- P4: schedule push ----
+      // The hub owns the schedule; the node holds a working copy. They are
+      // reconciled by VERSION: the node echoes the version it has applied in
+      // every beacon, and the hub pushes whenever that differs from its own.
+      // A node asleep right now therefore picks up an edit at its next wake.
+      struct SchedEntryCfg
+      {
+        uint16_t minute_of_day;
+        uint8_t  day_mask;      // bit0 = MON .. bit6 = SUN
+        uint8_t  action;        // SchedAction
+        uint8_t  position_pct;
+      };
+      static constexpr uint8_t kMaxScheduleEntries = 8;
+
+      void set_auto_mode_default(bool on) { this->auto_mode_ = on; this->sched_dirty_ = true; }
+      void set_interactive_timeout(uint32_t s) { this->interactive_timeout_ = s; this->sched_dirty_ = true; }
+      void set_checkin_interval(uint32_t s)    { this->checkin_interval_ = s;    this->sched_dirty_ = true; }
+      void set_beacon_lead(uint32_t s)         { this->beacon_lead_ = s;         this->sched_dirty_ = true; }
+      void set_post_event_window(uint32_t s)   { this->post_event_window_ = s;   this->sched_dirty_ = true; }
+      void set_catchup_window(uint32_t s)      { this->catchup_window_ = s;      this->sched_dirty_ = true; }
+      void add_schedule_entry(uint16_t minute_of_day, uint8_t day_mask,
+                              uint8_t action, uint8_t position_pct);
+      // Set the node's mode at runtime (HA switch). Marks the schedule dirty so
+      // the change reaches the node on its next beacon.
+      void set_auto_mode(bool on);
+      bool get_auto_mode() const { return this->auto_mode_; }
+      // CRC32 of the canonical schedule blob — what the node echoes back.
+      uint32_t schedule_version();
+      // True when the node's applied version differs from ours.
+      bool schedule_pending();
+      void send_schedule_config();
+
       // ---- P2: wake beacon ----
       // Latest values reported by the node, for logging and HA diagnostics.
       // clock_offset_s_ is node_epoch - hub_epoch: positive means the node runs
@@ -102,6 +134,20 @@ namespace esphome
       uint32_t node_sched_version_{0};
       uint32_t node_fw_version_{0};
       bool     node_session_resume_{false};
+
+      // P4 schedule state. sched_version_ is cached and recomputed lazily
+      // whenever sched_dirty_ is set, so an HA edit never has to remember to
+      // invalidate it by hand.
+      bool          auto_mode_{false};
+      uint32_t      interactive_timeout_{1800};
+      uint32_t      checkin_interval_{21600};
+      uint32_t      beacon_lead_{30};
+      uint32_t      post_event_window_{20};
+      uint32_t      catchup_window_{1800};
+      SchedEntryCfg sched_entries_[kMaxScheduleEntries]{};
+      uint8_t       sched_entry_count_{0};
+      uint32_t      sched_version_{0};
+      bool          sched_dirty_{true};
       virtual void send_remote_config();
       uint32_t incrTxMessageId();
       void setRxMessageId(uint32_t msg_id);
