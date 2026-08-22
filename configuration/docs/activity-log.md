@@ -49,9 +49,24 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
   compile: `(720, 32, 3, 40)` = Sat 12:00, position, 40 %.
 - Hub compiles (`config_hash=0x6fc050ce`); **138/138 tests still pass**.
   `auto_mode` left **false** in YAML — nothing sleeps yet.
-- **Remaining in P4:** the HA entities for on-the-fly editing (8 slots ×
-  time/action/position/enabled + the mode switch), and the interactive→auto
-  return timer.
+- **P4b: the HA mode switch + schedule-pending indicator.** New
+  `loracover` **switch** platform (`AutoModeSwitch`) and a `type:` option on the
+  existing binary_sensor platform (`command_failed` — the default, so existing
+  configs are untouched — or `schedule_pending`).
+- The switch expresses **intent, not truth**. Requested and actual mode
+  legitimately diverge: the node refuses auto mode without a valid clock or a
+  usable schedule, and a button press at the blind flips it back on its own. So
+  the hub re-publishes the switch state from what the node **reports in its
+  beacon**, which is what stops the HA toggle from claiming a blind is scheduled
+  when it is actually sitting in interactive mode.
+- `schedule_pending` is briefly true after an edit; persistently true means
+  pushes are not landing.
+- Hub compiles (`config_hash=0x772a2504`); wiring verified in the generated
+  `main.cpp`; **138/138 tests pass**.
+- **Remaining in P4:** the per-slot editing entities (time/action/position/
+  enabled per schedule row) and the interactive→auto return timer. The mode
+  switch is the control that actually gates the feature; per-slot editing is
+  convenience on top of the YAML schedule.
 
 ### 2026-08-22 — Auto-mode P3 (started): schedule arithmetic
 

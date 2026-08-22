@@ -27,6 +27,9 @@ namespace esphome
   // binary sensor without forcing the binary_sensor component on every user of
   // this header (the full include lives in lora_client.cpp).
   namespace binary_sensor { class BinarySensor; }
+  // P4b: forward-declared for the same reason — this header is included by
+  // every loracover platform, so pulling in switch.h would be gratuitous.
+  namespace switch_ { class Switch; }
 
   namespace lora_tracker
   {
@@ -160,6 +163,9 @@ namespace esphome
       // CovOperation enum values; position is used only for the POSITION case.
       void send_cover_operation(uint32_t covop_case, int32_t operation, float position);
       void set_command_failed_binary_sensor(binary_sensor::BinarySensor *bs) { this->command_failed_bsensor_ = bs; }
+      // P4b: HA control/visibility of automatic mode.
+      void set_auto_mode_switch(switch_::Switch *sw) { this->auto_mode_switch_ = sw; }
+      void set_schedule_pending_binary_sensor(binary_sensor::BinarySensor *bs) { this->schedule_pending_bsensor_ = bs; }
 
       // std::string address_str() const;
       uint64_t address_uint64() const { return this->address_uint64_; };
@@ -321,6 +327,8 @@ namespace esphome
       int32_t  op_sysop_{0};         // ClientOperation value when op_kind_ == SYSOP
       bool     command_failed_{false};
       binary_sensor::BinarySensor *command_failed_bsensor_{nullptr};
+      switch_::Switch             *auto_mode_switch_{nullptr};
+      binary_sensor::BinarySensor *schedule_pending_bsensor_{nullptr};
 
       // 3000 ms (not 2000): a burst is ~1.5 s and the tracker holds a post-burst
       // RX window after it, so the cycle is ~1.9 s.  2000 ms re-burst almost

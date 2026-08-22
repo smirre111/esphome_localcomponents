@@ -240,6 +240,21 @@ sensor:
       id: rol_2_clock_offset
 
 
+switch:
+  # P4b: automatic-mode control. The switch expresses INTENT — the node still
+  # refuses auto mode without a valid clock and a usable schedule, and a button
+  # press at the blind flips it back to interactive. The published state is
+  # corrected from what the node reports in its wake beacon.
+  - platform: loracover
+    lora_client_id: rol_1
+    name: "RollladenWohnzimmer1 Auto Mode"
+    id: rol_1_auto_mode
+  - platform: loracover
+    lora_client_id: rol_2
+    name: "RollladenWohnzimmer2 Auto Mode"
+    id: rol_2_auto_mode
+
+
 binary_sensor:
   - platform: loracover
     lora_client_id: rol_1
@@ -249,6 +264,19 @@ binary_sensor:
     lora_client_id: rol_2
     name: "RollladenWohnzimmer2 Command Failed"
     id: rol_2_command_failed
+
+  # Briefly true after a schedule edit; persistently true means pushes are not
+  # reaching the node.
+  - platform: loracover
+    lora_client_id: rol_1
+    type: schedule_pending
+    name: "RollladenWohnzimmer1 Schedule Pending"
+    id: rol_1_schedule_pending
+  - platform: loracover
+    lora_client_id: rol_2
+    type: schedule_pending
+    name: "RollladenWohnzimmer2 Schedule Pending"
+    id: rol_2_schedule_pending
 
 
 

@@ -5,6 +5,7 @@
 #include "esphome/core/application.h"
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/switch/switch.h"
 #include "esp_random.h"
 #include <algorithm>
 #include <map>
@@ -1559,6 +1560,27 @@ namespace esphome
       // Same timeout name as the login path, so the two can never double-send:
       // set_timeout replaces an existing timeout of the same name.
       this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
+
+      // P4b: reflect the node's ACTUAL mode in Home Assistant.
+      //
+      // Requested mode and real mode legitimately diverge: the node refuses auto
+      // mode without a valid clock or a usable schedule, and a physical button
+      // press flips it back to interactive on its own. Publishing what the node
+      // reports — rather than what was asked for — is what stops the HA toggle
+      // from lying about a blind that is actually still interactive.
+      if (this->auto_mode_switch_ != nullptr)
+      {
+        const bool node_is_auto = (b->mode == NODE_MODE__MODE_AUTO);
+        if (this->auto_mode_switch_->state != node_is_auto)
+        {
+          ESP_LOGI(TAG, "[%s] Node reports %s — correcting the HA switch",
+                   this->get_name().c_str(), node_is_auto ? "AUTO" : "INTERACTIVE");
+          this->auto_mode_switch_->publish_state(node_is_auto);
+        }
+      }
+
+      if (this->schedule_pending_bsensor_ != nullptr)
+        this->schedule_pending_bsensor_->publish_state(this->schedule_pending());
 
       // P4: push the schedule if the node is not already on our version.
       //
