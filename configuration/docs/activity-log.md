@@ -16,6 +16,44 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-22 — Node firmware: failed OTA no longer strands the node
+
+- **Pre-existing bug, found while diagnosing "login not acknowledged" on node 1.**
+  Both OTA *failure* paths in `SystemCtrl.cpp` ended in `vTaskDelete(NULL)`; only
+  the *success* path called `esp_restart()`. One failure path even logged
+  `"Rebooting ..."` immediately before not rebooting.
+- Consequence: any failed update left the node parked in WiFi OTA mode with the
+  radio app not running — invisible to the hub, uncommandable, recoverable only
+  by physically power-cycling it. The hub meanwhile bursts LoginMsg at a node
+  that is not listening and reports "Login not acknowledged", which points the
+  investigation at the protocol rather than at the node being in the wrong mode.
+- Observed on node 1: parked at 192.168.178.51 for hours, through a manual reset
+  and a second OTA attempt. **Not related to the auto-mode work** — but it is
+  what made two OTA attempts look like a protocol regression.
+- Every exit from those paths is a failure *before* the new image is committed,
+  so the running partition is untouched and a restart just brings the node back
+  on air. Both now `esp_restart()`.
+
+### 2026-08-22 — Node 2 flashed to v1.0.14 over serial; OTA path still broken
+
+- **The OTA never landed on either node.** Both were still on 1.0.13 the whole
+  time; they entered OTA mode, failed to download, and sat there off the LoRa
+  air. That silence was misread (by me) as a possible v1.0.14 fault — it was not.
+  Login and TimeSync work fine.
+- Node 2 flashed over the FT2232 debugger in ~19 s and verified live:
+  `App version: 1.0.14`, `Sending BEACON (reason=0 resume=0 clock=0)`,
+  `CMD_LOGIN → counters reset`, `CMD TIMESYNC … clock established`.
+- **Config wipe → hub re-provision confirmed on hardware**: the full flash
+  cleared `config.txt`, the node wrote defaults, and the hub pushed the real
+  values back (`openDuration 38 / closeDuration 36 / slack 7,7`). The new P3/P4
+  fields persisted too (`autoMode`, `schedVersion`, the five timings, `schedule`).
+- Fixed a misleading log line it exposed: `shouldRunAutoMode()` checked the clock
+  before the mode, so a node with `autoMode:0` logged *"Auto mode requested but
+  clock is not valid"* on every boot — a warning about a request nobody made.
+- **Still open:** nodes cannot reach `schmidteinander.local:8070`. The server is
+  healthy (HTTP 200 from inside WSL) and the firewall allows it, but no
+  connection from a node ever arrives. Serial flashing works around it.
+
 ### 2026-08-22 — Auto-mode P4a: hub schedule push (YAML-defined)
 
 - **The hub can now own and push a schedule.** New `lora_client` options:
@@ -63,10 +101,25 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
   pushes are not landing.
 - Hub compiles (`config_hash=0x772a2504`); wiring verified in the generated
   `main.cpp`; **138/138 tests pass**.
-- **Remaining in P4:** the per-slot editing entities (time/action/position/
-  enabled per schedule row) and the interactive→auto return timer. The mode
-  switch is the control that actually gates the feature; per-slot editing is
-  convenience on top of the YAML schedule.
+- **D4: the interactive→auto return timer landed.** A button press now
+  *suspends* automatic mode rather than turning it off. The first cut wrote
+  `autoMode=false` to `config.txt`, which meant one press silently disabled the
+  schedule until someone re-enabled it in HA — and on a node that afterwards
+  only wakes on its check-in, that could be days. A schedule that stops working
+  quietly is worse than one that never worked.
+- The hub's configured mode is now never touched. The override is a local
+  RTC-backed deadline that expires by itself, with an `esp_timer` that puts the
+  node back to sleep when the window ends (without it the node would just stay
+  awake — the entire cost of the feature). Every press refreshes the window, not
+  just the one that woke the node. `interactiveTimeout == 0` is honoured as the
+  proto documents it — "stay interactive until told otherwise", not "expire
+  immediately". With no valid clock the override is treated as still active,
+  since staying responsive is the safe failure.
+- 6 new tests, **144/144**. Verified non-vacuous by mutation: commenting out the
+  override check fails two of them.
+- **Remaining in P4:** only the per-slot editing entities (time/action/position/
+  enabled per schedule row). The mode switch gates the feature; per-slot editing
+  is convenience on top of the YAML schedule.
 
 ### 2026-08-22 — Auto-mode P3 (started): schedule arithmetic
 

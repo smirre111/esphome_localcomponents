@@ -27,6 +27,7 @@ extern "C" {
 #include <psa/crypto.h>
 
 #include <cstring>
+#include <ctime>
 #include <sys/time.h>
 #include <vector>
 
@@ -943,4 +944,111 @@ TEST_F(RealNodeFixture, ScheduleReplacesWholesaleRatherThanMerging) {
 
     EXPECT_EQ(sys.getEntryCount(), 1) << "the old entries must be gone, not merged";
     EXPECT_EQ(sys.getEntries()[0].minuteOfDay, 700);
+}
+
+// ---------------------------------------------------------------------------
+// D4 — the interactive override.
+//
+// A button press must give whoever is standing at the blind a responsive
+// device. The trap it is designed around: doing that by writing autoMode=false
+// to config.txt means ONE press silently disables the schedule until somebody
+// notices and re-enables it in Home Assistant — and on a node that then only
+// wakes on its check-in, "somebody notices" could be days.
+//
+// So the hub's configured mode is never touched; the override is local and
+// expires on its own.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, ButtonPressSuspendsAutoModeWithoutDisablingIt) {
+    give_clock(disp, 400, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(1, /*mode=*/1, /*interactive=*/1800, 0, 0, 0, 1800, e, 1);
+    ASSERT_TRUE(disp.shouldRunAutoMode());
+
+    disp.enterInteractiveMode();
+
+    EXPECT_TRUE(disp.isTemporarilyInteractive());
+    EXPECT_FALSE(disp.shouldRunAutoMode()) << "auto mode must be suspended";
+    EXPECT_TRUE(sys.getAutoMode())
+        << "the CONFIGURED mode must be untouched — otherwise one press "
+           "disables the schedule permanently";
+    EXPECT_EQ(disp.computeSleepSeconds(), 0u)
+        << "a suspended node must not sleep on its schedule";
+}
+
+TEST_F(RealNodeFixture, InteractiveOverrideExpiresAndAutoModeResumes) {
+    give_clock(disp, 401, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    // 1 s window so expiry is observable without waiting.
+    sys.setSchedule(1, 1, /*interactive=*/1, 0, 0, 0, 1800, e, 1);
+
+    disp.enterInteractiveMode();
+    EXPECT_TRUE(disp.isTemporarilyInteractive());
+
+    // The node reads the HOST clock here (settimeofday needs CAP_SYS_TIME and
+    // fails unprivileged), so real time passing is what expires the window.
+    struct timespec ts{0, 0};
+    ts.tv_sec = 2;
+    nanosleep(&ts, nullptr);
+
+    EXPECT_FALSE(disp.isTemporarilyInteractive()) << "the window must expire";
+    EXPECT_TRUE(disp.shouldRunAutoMode()) << "auto mode must resume by itself";
+}
+
+TEST_F(RealNodeFixture, ZeroTimeoutMeansStayInteractiveIndefinitely) {
+    // blinds.proto documents interactiveTimeout == 0 as "stay interactive until
+    // told otherwise". It must NOT be read as "expire immediately".
+    give_clock(disp, 402, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(1, 1, /*interactive=*/0, 0, 0, 0, 1800, e, 1);
+    ASSERT_EQ(sys.getInteractiveTimeout(), 0u);
+
+    disp.enterInteractiveMode();
+
+    EXPECT_TRUE(disp.isTemporarilyInteractive());
+    EXPECT_EQ(disp.interactiveRemaining(), UINT32_MAX)
+        << "a zero timeout must never expire";
+    EXPECT_FALSE(disp.shouldRunAutoMode());
+}
+
+TEST_F(RealNodeFixture, EachPressRestartsTheWindow) {
+    // Someone adjusting the blind by hand should not have it fall asleep
+    // mid-adjustment because the FIRST press's timeout ran out.
+    give_clock(disp, 403, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(1, 1, /*interactive=*/60, 0, 0, 0, 1800, e, 1);
+
+    disp.enterInteractiveMode();
+    const uint32_t first = disp.interactiveRemaining();
+    ASSERT_GT(first, 0u);
+
+    struct timespec ts{1, 0};
+    nanosleep(&ts, nullptr);
+    const uint32_t decayed = disp.interactiveRemaining();
+    EXPECT_LE(decayed, first) << "the window should be counting down";
+
+    disp.enterInteractiveMode();   // second press
+    EXPECT_GE(disp.interactiveRemaining(), decayed)
+        << "a fresh press must restart the window, not let it keep decaying";
+}
+
+TEST_F(RealNodeFixture, OverrideIsIgnoredWhenAutoModeWasNeverOn) {
+    // An interactive-mode node pressing buttons is just... an interactive node.
+    // The override must not invent state for it.
+    give_clock(disp, 404, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(1, /*mode=*/0, 1800, 0, 0, 0, 1800, e, 1);
+
+    disp.enterInteractiveMode();
+    EXPECT_FALSE(disp.shouldRunAutoMode()) << "still interactive, as configured";
+    EXPECT_FALSE(sys.getAutoMode());
+}
+
+TEST_F(RealNodeFixture, NoOverrideMeansNoSuspension) {
+    give_clock(disp, 405, 1787000000ULL, 0);
+    sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
+    sys.setSchedule(1, 1, 1800, 0, 0, 0, 1800, e, 1);
+    EXPECT_FALSE(disp.isTemporarilyInteractive());
+    EXPECT_EQ(disp.interactiveRemaining(), 0u);
+    EXPECT_TRUE(disp.shouldRunAutoMode());
 }
