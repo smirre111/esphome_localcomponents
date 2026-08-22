@@ -136,11 +136,24 @@ TEST_F(RealNodeFixture, CmdLoginResetsCountersAndStoresNonce) {
     auto bytes = pack_login_op(/*msgid=*/1, kHubNonce);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
-    // sendAvailable() pushes BlindsStatusCmd::SYSCMD_AVAILABLE onto
-    // txCmdQueueNew. CmdDispatcher.cpp:1248: this->sendAvailable();
-    EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 1u)
-        << "CMD_LOGIN handler must enqueue an AVAILABLE ack via "
-           "sendAvailable() — otherwise the hub never sees login_acked.";
+    // CMD_LOGIN enqueues TWO things, in this order:
+    //   1. the wake BEACON — this is the first moment it can be sent, because
+    //      the login just reset both sides' msgid counters. Sent any earlier
+    //      (at boot, during register->login) the hub rejects it as "duplicate
+    //      or old message ID" against its NVS-restored rx counter, and then
+    //      never learns our clock or schedule version.
+    //   2. the AVAILABLE ack — without it the hub never sees login_acked.
+    EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 2u)
+        << "CMD_LOGIN must enqueue the wake beacon AND the AVAILABLE ack";
+
+    CmdDispatcher::tx_command_t first{}, second{};
+    ASSERT_EQ(xQueueReceive(disp.txCmdQueueNew, &first, 0), pdTRUE);
+    ASSERT_EQ(xQueueReceive(disp.txCmdQueueNew, &second, 0), pdTRUE);
+    EXPECT_EQ(first.cmd, (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_BEACON)
+        << "the beacon must go out on the login path";
+    EXPECT_EQ(second.cmd, (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_AVAILABLE);
+    // Put one back so the rate-limit assertion below still has a baseline.
+    xQueueSend(disp.txCmdQueueNew, &second, 0);
 
     // destAddress is set to the hub's senderaddress (=0xFF) by the
     // CMD_LOGIN handler at CmdDispatcher.cpp:1237.
