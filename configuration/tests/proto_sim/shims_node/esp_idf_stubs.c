@@ -177,6 +177,7 @@ struct esp_timer {
     void (*callback)(void *arg);
     void *arg;
     int   armed;
+    int   periodic;   /* stays armed after firing */
     int   used;
 };
 
@@ -200,7 +201,16 @@ esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle
 esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us) {
     (void) timeout_us;
     if (!timer) return ESP_ERR_INVALID_ARG;
-    timer->armed = 1;
+    timer->armed    = 1;
+    timer->periodic = 0;
+    return ESP_OK;
+}
+
+esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer, uint64_t period_us) {
+    (void) period_us;
+    if (!timer) return ESP_ERR_INVALID_ARG;
+    timer->armed    = 1;
+    timer->periodic = 1;
     return ESP_OK;
 }
 
@@ -212,15 +222,18 @@ esp_err_t esp_timer_stop(esp_timer_handle_t timer) {
 
 esp_err_t esp_timer_delete(esp_timer_handle_t timer) {
     if (!timer) return ESP_ERR_INVALID_ARG;
-    timer->used  = 0;
-    timer->armed = 0;
+    timer->used     = 0;
+    timer->armed    = 0;
+    timer->periodic = 0;
     return ESP_OK;
 }
 
 void proto_sim_timer_fire_all(void) {
     for (int i = 0; i < TIMER_MAX; i++) {
         if (g_timers[i].used && g_timers[i].armed) {
-            g_timers[i].armed = 0;           // one-shot: disarm before firing
+            /* One-shots disarm before firing; periodic timers stay armed, so a
+               callback that stops its own timer is still observable. */
+            if (!g_timers[i].periodic) g_timers[i].armed = 0;
             if (g_timers[i].callback) g_timers[i].callback(g_timers[i].arg);
         }
     }

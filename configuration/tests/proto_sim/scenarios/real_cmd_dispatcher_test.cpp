@@ -1065,3 +1065,133 @@ TEST_F(RealNodeFixture, NoOverrideMeansNoSuspension) {
     EXPECT_EQ(disp.interactiveRemaining(), 0u);
     EXPECT_TRUE(disp.shouldRunAutoMode());
 }
+
+// ---------------------------------------------------------------------------
+// Sleep-path coverage.
+//
+// SystemCtrl::enterDeepsleep() used to be a bare no-op in this harness, so the
+// entire sleep path had ZERO host coverage — and the path automatic mode
+// depends on most is exactly the one that was invisible. A change that called
+// enterDeepsleep() from the CMD_SCHEDULE handler therefore passed the suite and
+// crashed on hardware.
+//
+// These pin WHEN sleep is requested, and — more usefully — when it must not be.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, ApplyingAScheduleDoesNotSleepImmediately) {
+    // Direct regression for the crash: entering deep sleep from the RX task
+    // right after applying a schedule reset the node. Auto mode takes effect at
+    // the next boot/wake instead. If someone reinstates the immediate sleep,
+    // this fails first — on the host, not on a node in a window.
+    give_clock(disp, 500, 1787000000ULL, 0);
+    sys.reset_deepsleep_calls();
+
+    ScheduleEntry e1 = SCHEDULE_ENTRY__INIT;
+    e1.minuteofday = 450;
+    e1.daymask     = sched::DAY_ALL;
+    e1.action      = SCHED_ACTION__SCHED_OPEN;
+    ScheduleEntry *entries[] = {&e1};
+
+    ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
+    sc.version   = 0xBEEF;
+    sc.mode      = NODE_MODE__MODE_AUTO;   // switches the node INTO auto mode
+    sc.n_entries = 1;
+    sc.entries   = entries;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = 501;   // must differ from the TimeSync above, or the
+                               // replay filter drops it and the test lies
+    op.header   = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+    op.schedule = &sc;
+
+    size_t len = lora_client_operation_message__get_packed_size(&op);
+    std::vector<uint8_t> frame(len);
+    lora_client_operation_message__pack(&op, frame.data());
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    ASSERT_TRUE(sys.getAutoMode()) << "the schedule should still have been applied";
+    EXPECT_EQ(sys.deepsleep_calls(), 0)
+        << "applying a schedule must NOT sleep from the RX/dispatcher task — "
+           "that crashed the node on hardware";
+}
+
+TEST_F(RealNodeFixture, EnterDeepsleepStillReachesSystemCtrl) {
+    // The counterpart to the assertion above: sleep must still be REACHABLE,
+    // otherwise "did not sleep" could be satisfied by sleep being broken
+    // outright rather than by the schedule handler correctly not calling it.
+    //
+    // Driven directly rather than through processSysCommand(), which is a task
+    // body with an infinite xQueueReceive loop — calling it from a test hangs
+    // the suite (learned the hard way).
+    sys.reset_deepsleep_calls();
+    disp.enterDeepsleep();
+    EXPECT_GE(sys.deepsleep_calls(), 1)
+        << "enterDeepsleep() must still delegate to SystemCtrl";
+}
+
+// ---------------------------------------------------------------------------
+// Unprovisioned REGISTER retry.
+//
+// Address 0 means the node rejects every addressed downlink — including the
+// LoginMsg carrying request_register. So it cannot be TOLD to re-register; it
+// has to keep asking. The boot REGISTER used to be sent exactly once, so one
+// lost frame stranded the node until a physical reset. Observed on node 2.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, UnprovisionedNodeIsDetected) {
+    sys.setAddress(0, 0);
+    EXPECT_FALSE(disp.isProvisioned());
+    sys.setAddress(kNodeAddr, kSubnet);
+    EXPECT_TRUE(disp.isProvisioned());
+}
+
+TEST_F(RealNodeFixture, RegisterRetryReSendsWhileUnprovisioned) {
+    proto_sim_timer_reset();
+    sys.setAddress(0, 0);
+    disp.armRegisterRetry();
+    ASSERT_EQ(proto_sim_timer_armed_count(), 1) << "retry must be armed";
+
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    proto_sim_timer_fire_all();   // the retry interval elapses
+
+    CmdDispatcher::tx_command_t cmd{};
+    ASSERT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdTRUE)
+        << "an unprovisioned node must keep asking — one lost REGISTER must "
+           "not strand it until somebody walks over and resets it";
+    EXPECT_EQ(cmd.cmd, (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_REGISTER);
+
+    sys.setAddress(kNodeAddr, kSubnet);
+}
+
+TEST_F(RealNodeFixture, RegisterRetryStopsOnceProvisioned) {
+    proto_sim_timer_reset();
+    sys.setAddress(0, 0);
+    disp.armRegisterRetry();
+
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    // The hub provisions us.
+    sys.setAddress(kNodeAddr, kSubnet);
+    proto_sim_timer_fire_all();
+
+    CmdDispatcher::tx_command_t cmd{};
+    EXPECT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdFALSE)
+        << "a provisioned node must stop re-registering — otherwise every node "
+           "spends radio time and battery on pointless REGISTERs forever";
+}
+
+TEST_F(RealNodeFixture, ArmingRetryIsANoOpWhenAlreadyProvisioned) {
+    proto_sim_timer_reset();
+    sys.setAddress(kNodeAddr, kSubnet);
+    disp.armRegisterRetry();
+    EXPECT_EQ(proto_sim_timer_armed_count(), 0)
+        << "nothing to retry when we already have an address";
+}

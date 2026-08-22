@@ -38,11 +38,20 @@ public:
     void saveConfiguration()  {}
     void unmountLittleFS()    {}
 
-    // WiFi / OTA / deep-sleep — no-ops.
+    // WiFi / OTA — no-ops.
     void setupWiFi()    {}
     void shutdownWiFi() {}
     void setupOTA()     {}
-    void enterDeepsleep() {}
+
+    // Deep sleep: RECORDED, not ignored.  This used to be a bare no-op, which
+    // meant the entire sleep path — the thing automatic mode depends on most —
+    // had zero host coverage.  A change that called enterDeepsleep() from the
+    // wrong place therefore passed the suite and only failed on hardware.
+    // Counting the calls lets tests assert WHEN sleep is requested, and just as
+    // importantly when it must not be.
+    void enterDeepsleep() { deepsleep_calls_++; }
+    int  deepsleep_calls() const { return deepsleep_calls_; }
+    void reset_deepsleep_calls()  { deepsleep_calls_ = 0; }
 
     // Test inspection.
     const std::string& hostname() const { return hostname_; }
@@ -109,6 +118,7 @@ private:
     float     h_{0.0f}, a_{0.0f}, t_{0.0f};
     uint32_t  open_slack_s_{0}, close_slack_s_{0};
     uint32_t  battery_interval_s_{900};  // production default: 15 min
+    int       deepsleep_calls_{0};
 
     // P3 — defaults mirror the production struct Config.
     bool      auto_mode_{false};

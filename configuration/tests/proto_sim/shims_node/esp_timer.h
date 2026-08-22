@@ -33,6 +33,9 @@ typedef struct {
 
 esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *out);
 esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us);
+// Periodic timers stay armed after firing, unlike one-shots — proto_sim_timer_fire_all()
+// re-arms them so a test can observe repeated behaviour (e.g. REGISTER retries).
+esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer, uint64_t period_us);
 esp_err_t esp_timer_stop(esp_timer_handle_t timer);
 esp_err_t esp_timer_delete(esp_timer_handle_t timer);
 
