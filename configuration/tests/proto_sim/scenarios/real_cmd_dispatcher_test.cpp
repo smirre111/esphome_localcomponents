@@ -1495,6 +1495,62 @@ TEST(FirmwareVersion, ComesFromTheRunningImageNotAConstant) {
     EXPECT_EQ(CmdDispatcher::firmwareVersion(), 90807u);
 }
 
+// A ClientConfig for ANOTHER node must not wedge our link.
+//
+// CLIENTCONFIG is the one message that skips the address filter (a fresh node
+// has cfgAddress 0 and cannot match the hub's destaddress). That exemption let
+// a foreign CLIENTCONFIG reach the msgid check and, with a higher msgid, ratchet
+// rx_message_id_ onto another node's sequence — after which every legitimate
+// command to us is rejected as a replay until the next login. Same counter
+// pollution the address filter was moved ahead of the msgid check to prevent;
+// CLIENTCONFIG was the hole left in it.
+//
+// Observed live on node 2 (address 18), harmless only because the ids happened
+// to fall the other way round:
+//     Dest Adreess: 17 / Config Address: 18
+//     Message ID check
+//     Rejected message ID: 2, ignoring, my MsgID: 3
+//
+// Asserted through behaviour rather than the counter: what matters is that the
+// hub can still talk to us afterwards.
+TEST_F(RealNodeFixture, ForeignClientConfigDoesNotWedgeOurLink) {
+    give_clock(disp, /*msgid=*/50, 1787000000ULL, 0);
+
+    // A ClientConfig for a different node, carrying a much higher msgid.
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = 17;              // not us
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = 900;             // far ahead of our stream
+    op.header = &hdr;
+
+    ClientConfig cfg = CLIENT_CONFIG__INIT;
+    cfg.mac_addr = 0xAABBCCDDEEFFULL;    // not our MAC either
+    cfg.addr     = 17;
+    cfg.subnt    = kSubnet;
+    op.cmd_case     = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
+    op.clientconfig = &cfg;
+
+    size_t len = lora_client_operation_message__get_packed_size(&op);
+    std::vector<uint8_t> bytes(len);
+    lora_client_operation_message__pack(&op, bytes.data());
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_EQ(sys.getConfigAddress(), kNodeAddr)
+        << "a non-matching MAC must not reconfigure us";
+
+    // The hub's NEXT real command to us continues our own sequence (51). If the
+    // foreign frame had advanced our counter to 900, this is silently dropped.
+    auto sched = pack_schedule_op(/*msgid=*/51, 0xFEED, NODE_MODE__MODE_AUTO);
+    disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()));
+
+    EXPECT_EQ(sys.getSchedVersion(), 0xFEEDu)
+        << "after a CLIENTCONFIG for another node, the hub's next command to US "
+           "must still be accepted — otherwise one overheard provisioning frame "
+           "silences the node until its next login";
+}
+
 TEST_F(RealNodeFixture, AnEntryThatFallsDueWhileAwakeIsStillExecuted) {
     // NOTE: the harness has no settimeofday shim, so glibc's fails without root
     // and the node clock is real wall time. The schedule below is therefore
