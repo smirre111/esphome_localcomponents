@@ -1601,6 +1601,97 @@ TEST_F(RealNodeFixture, AnEntryThatFallsDueWhileAwakeIsStillExecuted) {
            "blind never moves";
 }
 
+// ---------------------------------------------------------------------------
+// Catch-up window (I3).
+//
+// last_missed() — the calendar primitive — is covered in scheduler_test,
+// including its window boundaries. What is covered here is the layer above:
+// runDueScheduleEntry() deriving that window from catchupWindow, and refusing
+// to run the same entry twice.
+//
+// The double-execution guard matters more since the quiet-window re-check was
+// added: runDueScheduleEntry() is now called both at boot AND when the hub goes
+// quiet, so a broken s_last_exec_epoch guard would replay an entry on every
+// single wake.
+// ---------------------------------------------------------------------------
+
+namespace {
+// Arms one schedule entry `minutes_ago` in the past with the given catch-up
+// window, and clears the interactive override (a file-level static an earlier
+// test leaves set to "forever" — see the harness notes in the README).
+// Returns the entry's minute-of-day.
+uint16_t arm_missed_entry(CmdDispatcher &d, SystemCtrl &s,
+                          int minutes_ago, uint32_t catchup) {
+    const uint64_t now_s = static_cast<uint64_t>(time(nullptr));
+    const int now_minute = static_cast<int>((now_s / 60) % 1440);
+    const int entry_minute = now_minute - minutes_ago;
+    if (entry_minute < 0) return 0xFFFF;      // caller skips: wraps past midnight
+
+    sched::Entry e = sched_entry(static_cast<uint16_t>(entry_minute),
+                                 sched::DAY_ALL, sched::ACTION_CLOSE);
+    s.setSchedule(/*version=*/0xCA7C, /*mode=*/1, /*interactiveTimeout=*/1,
+                  /*checkin=*/600, /*beaconLead=*/30, /*postEventWindow=*/20,
+                  catchup, &e, 1);
+    give_clock(d, /*msgid=*/800, now_s, 0);
+    d.enterInteractiveMode();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    return static_cast<uint16_t>(entry_minute);
+}
+
+int drain_closes(CmdDispatcher &d) {
+    int n = 0;
+    CmdDispatcher::tx_command_t c{};
+    while (xQueueReceive(d.rxCmdQueueNew, &c, 0) == pdTRUE)
+        if (c.cmd == (blinds_syscmd_base_t) BlindsOpCmd::SYSCMD_CLOSE) ++n;
+    return n;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, CatchupZeroNeverReplaysAMissedEntry) {
+    // catchup_window == 0 is documented as "never replay a miss". A node that
+    // was off overnight must not slam the blind on the morning it comes back.
+    if (arm_missed_entry(disp, sys, /*minutes_ago=*/2, /*catchup=*/0) == 0xFFFF)
+        GTEST_SKIP() << "would wrap past midnight UTC";
+    ASSERT_TRUE(disp.shouldRunAutoMode());
+    (void) drain_closes(disp);
+
+    EXPECT_FALSE(disp.runDueScheduleEntry())
+        << "catchup_window 0 must mean no replay at all";
+    EXPECT_EQ(drain_closes(disp), 0);
+}
+
+TEST_F(RealNodeFixture, AnEntryOlderThanTheCatchupWindowIsNotReplayed) {
+    // Outside the window the miss is stale — acting on it would move the blind
+    // for a reason hours in the past.
+    if (arm_missed_entry(disp, sys, /*minutes_ago=*/20, /*catchup=*/300) == 0xFFFF)
+        GTEST_SKIP() << "would wrap past midnight UTC";
+    ASSERT_TRUE(disp.shouldRunAutoMode());
+    (void) drain_closes(disp);
+
+    EXPECT_FALSE(disp.runDueScheduleEntry())
+        << "a miss 20 min old must not replay under a 5 min catch-up window";
+    EXPECT_EQ(drain_closes(disp), 0);
+}
+
+TEST_F(RealNodeFixture, AnEntryInsideTheCatchupWindowIsReplayedExactlyOnce) {
+    // Inside the window it replays — and, crucially, only once. Since the quiet
+    // window now re-checks, a broken guard would re-run the entry on every wake
+    // and on every hub lull.
+    if (arm_missed_entry(disp, sys, /*minutes_ago=*/3, /*catchup=*/1800) == 0xFFFF)
+        GTEST_SKIP() << "would wrap past midnight UTC";
+    ASSERT_TRUE(disp.shouldRunAutoMode());
+    (void) drain_closes(disp);
+
+    EXPECT_TRUE(disp.runDueScheduleEntry()) << "the miss is inside the window";
+    EXPECT_EQ(drain_closes(disp), 1);
+
+    EXPECT_FALSE(disp.runDueScheduleEntry())
+        << "the same entry must not run twice — runDueScheduleEntry() is called "
+           "at boot AND when the hub goes quiet, so replaying here would move "
+           "the blind again on every wake for the whole catch-up window";
+    EXPECT_EQ(drain_closes(disp), 0);
+}
+
 TEST_F(RealNodeFixture, AutoSleepRechecksTheConditionWhenItFires) {
     give_clock(disp, 760, 1787000000ULL, 0);
     auto sched = pack_schedule_op(/*msgid=*/761, 0xC0E1, NODE_MODE__MODE_AUTO);
