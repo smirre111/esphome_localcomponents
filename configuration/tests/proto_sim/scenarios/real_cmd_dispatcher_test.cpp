@@ -7,6 +7,8 @@
 // directly and inspect the resulting state + TX buffers.
 
 #include <gtest/gtest.h>
+#include <chrono>
+#include <thread>
 
 #include "esp_err.h"
 #include "esp_mac.h"
@@ -1436,6 +1438,63 @@ TEST_F(RealNodeFixture, ButtonPressCancelsAPendingAutoSleep) {
     EXPECT_FALSE(drain_for_sleep(disp))
         << "a sleep armed seconds before a button press must not still fire — "
            "the blind would go unresponsive in the person's hands";
+}
+
+// The node wakes beacon_lead seconds BEFORE its event, so nothing is due at
+// boot. Normally the sleep that follows clamps to now+1 s for an imminent event
+// and the node naps and wakes to execute it. But every downlink refreshes the
+// quiet window, so a talkative hub can hold the node awake PAST the event — and
+// next_occurrence() then reports the event AFTER it, skipping the entry
+// outright. Observed live: woken 15:27:23 for a 15:28:00 CLOSE, still awake at
+// 15:28:03, slept until 15:36, blind never moved.
+TEST_F(RealNodeFixture, AnEntryThatFallsDueWhileAwakeIsStillExecuted) {
+    // NOTE: the harness has no settimeofday shim, so glibc's fails without root
+    // and the node clock is real wall time. The schedule below is therefore
+    // built RELATIVE TO NOW rather than from a pinned epoch.
+    const uint64_t now_s = static_cast<uint64_t>(time(nullptr));
+    const uint16_t now_minute = static_cast<uint16_t>((now_s / 60) % 1440);
+    // One minute ago, in UTC — the entry is given utc_offset 0 below. Skip the
+    // test in the one minute after midnight UTC rather than wrap into
+    // yesterday, where "missed" depends on the day mask instead of the time.
+    if (now_minute == 0) GTEST_SKIP() << "would wrap past midnight UTC";
+
+    sched::Entry e = sched_entry(static_cast<uint16_t>(now_minute - 1),
+                                 sched::DAY_ALL, sched::ACTION_CLOSE);
+    sys.setSchedule(/*version=*/0xD00D, /*mode=*/1,
+                    /*interactiveTimeout=*/1, /*checkin=*/600,
+                    /*beaconLead=*/30, /*postEventWindow=*/20,
+                    /*catchup=*/1800, &e, 1);
+
+    give_clock(disp, 770, now_s, 0);
+
+    // The interactive override is a file-level static shared by every test in
+    // this binary, and an earlier one leaves it set to "interactive forever".
+    // Replace it with a 1 s deadline and wait that out — the clock is real, so
+    // it cannot simply be stepped forward.
+    disp.enterInteractiveMode();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    ASSERT_FALSE(disp.isTemporarilyInteractive())
+        << "precondition: override expired; remaining=" << disp.interactiveRemaining();
+    ASSERT_TRUE(disp.shouldRunAutoMode())
+        << "precondition: the node must actually be in auto mode here";
+
+    // Schedule entries execute via setBlindOperation(), which posts the OPEN /
+    // CLOSE onto the RX command queue.
+    CmdDispatcher::tx_command_t drain_rx{};
+    while (xQueueReceive(disp.rxCmdQueueNew, &drain_rx, 0) == pdTRUE) {}
+
+    disp.armAutoSleep();
+    proto_sim_timer_fire_all();
+
+    int closes = 0;
+    CmdDispatcher::tx_command_t got{};
+    while (xQueueReceive(disp.rxCmdQueueNew, &got, 0) == pdTRUE)
+        if (got.cmd == (blinds_syscmd_base_t) BlindsOpCmd::SYSCMD_CLOSE) ++closes;
+
+    EXPECT_GT(closes, 0)
+        << "an entry that fell due while the hub kept us awake must still run — "
+           "otherwise a talkative hub silently skips scheduled events and the "
+           "blind never moves";
 }
 
 TEST_F(RealNodeFixture, AutoSleepRechecksTheConditionWhenItFires) {
