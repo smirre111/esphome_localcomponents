@@ -214,6 +214,9 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F8 | The node slept ~3 s after REGISTER, before the hub's deferred LoginMsg could arrive — the handshake could never complete | **Fixed — sleep deferred behind a quiet window** |
 | F9 | `schedVersion` (a CRC32) was reloaded through cJSON's `valueint` and saturated at `INT_MAX`, so half of all versions were corrupted on every restart | Fixed — 32-bit fields read via `valuedouble` |
 | F10 | An event was skipped outright if the hub kept the node awake past its scheduled time | Fixed — the quiet window re-runs `runDueScheduleEntry()` |
+| F11 | A beacon predating a mode change reverted the HA switch to the state the user just left | Fixed — correction gated on `schedule_pending()` |
+| F12 | A `CLIENTCONFIG` for another node could ratchet our replay counter onto its sequence | Fixed — CLIENTCONFIG exempt from the msgid check, gated by MAC |
+| F13 | The RTC mode marker said INTERACTIVE for nodes running a schedule | Fixed — `setSchedule()` goes through `setAutoMode()` |
 
 ### F7 — the restart that undid the schedule
 
@@ -333,3 +336,66 @@ wake later.
 The pattern behind F8 and F10 is the same one: **the node treats "time to
 sleep" as a single decision made at one instant**, when it is really a
 condition that has to be re-evaluated as the conversation and the clock move.
+
+### F11 — chart 5's reconciliation can run backwards
+
+Chart 5 shows the hub pushing a change and the node acknowledging it. What it
+does not show is the beacon that arrives *first*, carrying the node's state from
+before the change.
+
+The hub deliberately publishes what the node reports rather than what was asked
+for, because the two legitimately diverge: the node refuses auto mode without a
+clock or a usable schedule, and a button press flips it back. That is right. But
+it could not distinguish *"the node chose this"* from *"our change has not
+arrived yet"*. Observed live:
+
+```
+17:40:02.263  Beacon arrives — reports the node's PRE-push state (AUTO)
+17:40:02.286  'Auto Mode' >> ON            <- the request is discarded
+17:40:04.332  ScheduleConfig sent (mode=INTERACTIVE)
+17:40:07.679  acknowledged
+```
+
+The command was not lost — the node did go interactive. This was the **UI**
+lying, until the next beacon: on the configured `checkin_interval: 6h`, six
+hours of showing the wrong mode for a blind.
+
+`schedule_pending()` is exactly the missing distinction. A button press changes
+no version, so the case the correction was written for still wins.
+
+### F12 — the address filter has one exemption, and it was a hole
+
+`CMD_CLIENTCONFIG` skips the address filter by design: a fresh node has
+`cfgAddress` 0 and cannot match the hub's `destaddress`, so the MAC check inside
+its handler is the gate instead.
+
+But the msgid check sits *after* the address filter precisely so that overheard
+frames cannot advance `rx_message_id_`. CLIENTCONFIG walked straight past that
+protection. Caught on node 2 while watching an unrelated test:
+
+```
+Dest Adreess: 17 / Config Address: 18
+   Message ID check
+Rejected message ID: 2, ignoring, my MsgID: 3
+```
+
+Harmless only because 2 < 3. Reversed, node 2 would have ratcheted its counter
+onto node 1's sequence and rejected every subsequent real command until its next
+login — from nothing more than overhearing another node being provisioned.
+
+CLIENTCONFIG now skips the msgid check like `CMD_LOGIN`. Nothing is lost: the
+MAC check is strictly stronger than an address match.
+
+### F13 — a diagnostic that disagreed with reality
+
+The RTC mode marker added for the boot forensics reported `prev_mode=INTERACTIVE`
+for a node that was demonstrably running a schedule. `setSchedule()` assigned
+`g_config.autoMode` directly instead of going through `setAutoMode()`, which is
+what keeps the marker in step — and the schedule push is the path auto mode is
+actually entered by, so the marker was wrong for essentially every auto-mode
+node.
+
+Same shape as the firmware-version field (see the activity log): **a diagnostic
+that can quietly disagree with reality is worse than not having one**, because
+it is trusted. Both are now derived from a single owner rather than maintained
+in parallel.
