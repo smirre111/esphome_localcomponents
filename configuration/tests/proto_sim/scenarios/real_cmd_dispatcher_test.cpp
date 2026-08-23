@@ -1254,3 +1254,107 @@ TEST_F(RealNodeFixture, ClearedVersionMakesTheHubRePushAndReArmAutoMode) {
         << "the hub's push must be able to put the node back into auto mode";
     EXPECT_EQ(sys.getSchedVersion(), 0x1234u);
 }
+
+// ---------------------------------------------------------------------------
+// TimeSync / ScheduleConfig arrival order.
+//
+// The hub sends these as two frames ~1.25 s apart and nothing guarantees the
+// order — or that both arrive. Observed live: the schedule landed while the
+// TimeSync was still missing, so the I8 guard correctly refused auto mode, and
+// the node then stayed interactive FOREVER because nothing asked again. Every
+// trial looked like a broken scheduler when configuration was in fact fine.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t mode) {
+    static ScheduleEntry e1;
+    schedule_entry__init(&e1);
+    e1.minuteofday = 450;
+    e1.daymask     = sched::DAY_ALL;
+    e1.action      = SCHED_ACTION__SCHED_OPEN;
+    static ScheduleEntry *entries[1];
+    entries[0] = &e1;
+
+    ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
+    sc.version   = version;
+    sc.mode      = (NodeMode) mode;
+    sc.n_entries = 1;
+    sc.entries   = entries;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = msgid;
+    op.header   = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+    op.schedule = &sc;
+
+    size_t len = lora_client_operation_message__get_packed_size(&op);
+    std::vector<uint8_t> out(len);
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+bool drain_for_sleep(CmdDispatcher &d) {
+    bool found = false;
+    CmdDispatcher::tx_command_t c{};
+    while (xQueueReceive(d.sysCmdQueueNew, &c, 0) == pdTRUE)
+        if (c.cmd == (blinds_syscmd_base_t) BlindsSysCmd::SYSCMD_SLEEP) found = true;
+    return found;
+}
+
+} // namespace
+
+TEST_F(RealNodeFixture, ScheduleBeforeTimeSyncStillEntersAutoMode) {
+    // The order that broke it live. The schedule cannot start auto mode on its
+    // own (no clock yet), so the TimeSync that follows must do it.
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    auto sched_frame = pack_schedule_op(/*msgid=*/700, 0xAAAA, NODE_MODE__MODE_AUTO);
+    disp.onReceiveNew(sched_frame.data(), static_cast<int>(sched_frame.size()));
+    ASSERT_TRUE(sys.getAutoMode()) << "the schedule itself must still be stored";
+
+    // Now the clock arrives.
+    auto ts = pack_timesync_op(/*msgid=*/701, 1787000000ULL, 7200);
+    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
+
+    EXPECT_TRUE(CmdDispatcher::isClockValid());
+    EXPECT_TRUE(drain_for_sleep(disp))
+        << "whichever of TimeSync/Schedule arrives LAST must start auto mode — "
+           "otherwise a lost or reordered TimeSync leaves the node interactive "
+           "forever with nothing to re-trigger it";
+}
+
+TEST_F(RealNodeFixture, TimeSyncBeforeScheduleAlsoEntersAutoMode) {
+    // The intended order, which must keep working.
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    auto ts = pack_timesync_op(/*msgid=*/710, 1787000000ULL, 7200);
+    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
+    (void) drain_for_sleep(disp);   // no schedule yet, so nothing to start
+
+    auto sched_frame = pack_schedule_op(/*msgid=*/711, 0xBBBB, NODE_MODE__MODE_AUTO);
+    disp.onReceiveNew(sched_frame.data(), static_cast<int>(sched_frame.size()));
+
+    EXPECT_TRUE(drain_for_sleep(disp))
+        << "the schedule must start auto mode when the clock is already valid";
+}
+
+TEST_F(RealNodeFixture, TimeSyncAloneDoesNotStartAutoModeWithoutASchedule) {
+    // The guard must not over-trigger: a clock with no usable schedule is still
+    // a node that has nothing to sleep towards.
+    sys.setSchedule(0, /*mode=*/0, 0, 0, 0, 0, 1800, nullptr, 0);
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    auto ts = pack_timesync_op(/*msgid=*/720, 1787000000ULL, 7200);
+    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
+
+    EXPECT_FALSE(drain_for_sleep(disp))
+        << "no schedule means nothing to sleep towards";
+}

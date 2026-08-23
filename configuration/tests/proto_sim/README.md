@@ -60,6 +60,17 @@ Expected output: **78/78 tests passing in ~2 s** (phases 1–3 + the auto-mode P
 schema tests, both sides). The hub's `lora_client.cpp` and the node's
 `CmdDispatcher.cpp` run as REAL production code under the harness.
 
+> **ALWAYS `cmake --build` before `ctest`.** ctest runs whatever binaries are
+> already there — it does NOT rebuild, and it reports a cheerful pass on a
+> binary that no longer matches the source. This bit twice in one session: once
+> when a compile error left stale binaries passing 138/138, and once when a
+> mutation-test edit was restored in the source but never rebuilt, so the
+> "failure" was a mutant that no longer existed. If a result surprises you,
+> rebuild first and check the build output separately.
+>
+> The same applies to `idf.py flash` after editing: the node source and the
+> harness's `node_stage/` copy are separate, and only a build refreshes the copy.
+>
 > **Run this before starting each phase of [auto-mode-plan.md](../../docs/auto-mode-plan.md).**
 > The suite had rotted to non-building between v1.0.9 and 2026-08-21 because
 > nothing ran it routinely; while broken it provided zero coverage but looked

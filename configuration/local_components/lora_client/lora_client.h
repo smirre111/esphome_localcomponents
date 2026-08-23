@@ -151,6 +151,15 @@ namespace esphome
       uint8_t       sched_entry_count_{0};
       uint32_t      sched_version_{0};
       bool          sched_dirty_{true};
+      // A schedule push is a SINGLE unbursted frame (it is too long for the
+      // 88 ms burst slot), so a lost one used to be lost for good: no schedule
+      // means the node never enters auto mode, never sleeps, never wakes, never
+      // beacons — and the beacon is what would have triggered a re-push.
+      // Retransmit until the node's CommandAck confirms delivery.
+      uint32_t      sched_push_msgid_{0};
+      uint8_t       sched_push_retries_{0};
+      static constexpr uint8_t  kSchedMaxRetries   = 3;
+      static constexpr uint32_t kSchedRetryMs      = 5000;
       virtual void send_remote_config();
       uint32_t incrTxMessageId();
       void setRxMessageId(uint32_t msg_id);

@@ -933,6 +933,27 @@ namespace esphome
           // can the node authenticate an encrypted downlink.
           this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
 
+          // F1: push the schedule here TOO, not only from handle_beacon_().
+          //
+          // The beacon is a single unbursted, unacknowledged frame. When it was
+          // the ONLY trigger for the schedule push, losing it blocked automatic
+          // mode permanently: no schedule -> node never sleeps -> never wakes ->
+          // never beacons again -> hub never re-pushes. Observed live twice, as
+          // a hub log with "Login acknowledged" and "TimeSync sent" but no
+          // "Beacon:" line and no push.
+          //
+          // The node is demonstrably listening at this point (it just acked the
+          // login), so this is a second, independent path for the initial push.
+          // The beacon remains the steady-state trigger — it carries the node's
+          // APPLIED version, which is what makes reconciliation self-healing.
+          if (this->schedule_pending())
+          {
+            ESP_LOGI(TAG, "[%s] Schedule pending at login (node=0x%08x hub=0x%08x) — pushing",
+                     this->get_name().c_str(), (unsigned) this->node_sched_version_,
+                     (unsigned) this->schedule_version());
+            this->set_timeout("schedule_push", 2000, [this]() { this->send_schedule_config(); });
+          }
+
           // Resume-path config-sync guarantee: if this session was recovered via
           // the base-nonce RESUME path (BaseNonceExchange + NVS-restored counters
           // after a hub reboot) rather than a fresh send_login(), the node never
@@ -1139,6 +1160,23 @@ namespace esphome
 
     void LORAListener::handle_command_ack_(uint32_t ack_msg_id)
     {
+      // A schedule push is acked by the node; that is the only positive
+      // confirmation the hub gets that the schedule actually landed.
+      if (this->sched_push_msgid_ != 0 && ack_msg_id == this->sched_push_msgid_)
+      {
+        ESP_LOGI(TAG, "[%s] ScheduleConfig acknowledged (version=0x%08x)",
+                 this->get_name().c_str(), (unsigned) this->schedule_version());
+        this->cancel_timeout("schedule_retry");
+        this->sched_push_msgid_  = 0;
+        this->sched_push_retries_ = 0;
+        // The node now holds our version; reflect that without waiting for its
+        // next beacon, so "Schedule Pending" clears promptly in Home Assistant.
+        this->node_sched_version_ = this->schedule_version();
+        if (this->schedule_pending_bsensor_ != nullptr)
+          this->schedule_pending_bsensor_->publish_state(false);
+        return;
+      }
+
       if (!this->op_awaiting_ack_)
         return;
       // Accept an ack for any msgid in the current command's transmit range
@@ -1491,6 +1529,23 @@ namespace esphome
       {
         this->parent_->send(buf, len);
         free(buf);
+        // Arm the retransmit.  The node acks a schedule push (unlike TimeSync);
+        // that ack is what cancels this.
+        this->sched_push_msgid_ = header.msgid;
+        this->set_timeout("schedule_retry", kSchedRetryMs, [this]() {
+          if (this->sched_push_retries_ >= kSchedMaxRetries)
+          {
+            ESP_LOGE(TAG, "[%s] ScheduleConfig not acknowledged after %u attempts — "
+                          "node will stay interactive until its next beacon",
+                     this->get_name().c_str(), (unsigned) kSchedMaxRetries);
+            return;
+          }
+          this->sched_push_retries_++;
+          ESP_LOGW(TAG, "[%s] ScheduleConfig not acknowledged — resending (%u/%u)",
+                   this->get_name().c_str(), (unsigned) this->sched_push_retries_,
+                   (unsigned) kSchedMaxRetries);
+          this->send_schedule_config();
+        });
         ESP_LOGI(TAG, "[%s] ScheduleConfig sent (version=0x%08x mode=%s entries=%u %u B msgid=%u)",
                  this->get_name().c_str(), (unsigned) sc.version,
                  this->auto_mode_ ? "AUTO" : "INTERACTIVE",
