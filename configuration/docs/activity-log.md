@@ -16,6 +16,62 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-23 (afternoon) — the node was asleep during its own handshake
+
+Found while verifying the boot-forensics fix, from the very first wake the
+new `BOOT reason=` line was captured on:
+
+```
+Device not registered yet, going to register mode
+Sending REGISTER response
+Entering deep sleep — state persisted            <- 30 ms later
+Auto mode: sleeping 600 s until next scheduled wake
+```
+
+Auto mode queued its sleep the instant `shouldRunAutoMode()` was satisfied —
+about 3 s after boot, while the hub defers its LoginMsg to ~4 s after REGISTER.
+**The handshake could never complete.** The hub logged `Login not acknowledged`
+up to 24 times per cycle against a sleeping node; the node looped every 600 s
+carrying a stale schedule with no path by which it could ever be told about a
+new one. From outside this looked like a radio or crypto fault, which is where
+the previous sessions went hunting.
+
+The same shape appears twice more: TimeSync arrives ~1.25 s before
+ScheduleConfig, so sleeping on TimeSync alone missed the schedule push **and all
+three of its retransmits**. F2's retransmits could never have helped, because
+the node was not listening — so F1's "lost beacon" was most likely this all
+along: not a frame lost in the air, but a receiver that had already slept.
+
+**Fix:** the sleep is now a quiet timer rather than an event. Every downlink that
+could start auto mode refreshes it, so the node stays awake exactly as long as
+the hub is still talking to it. If the hub never answers it still fires, so this
+cannot become a battery leak; a button press cancels it outright.
+
+The generalisable lesson: *"the condition for sleeping is true"* and *"we have
+finished talking"* are different questions, and the sequence charts only ever
+modelled the first.
+
+**Second bug, same log.** `schedVersion` was reloaded through cJSON's
+`valueint` — an `int`, saturated at `INT_MAX`. It is a CRC32, so every value
+with the top bit set (half of them) was corrupted on reload: written
+2553691755, read back 2147483647. The node therefore reported a version the hub
+could never match, so the hub re-pushed the whole schedule on **every** beacon
+and "Schedule Pending" never cleared. 32-bit fields now read via `valuedouble`.
+
+Also: the RTC mode marker is synced on config load, which `loadConfiguration`
+bypassed — a node restored from `config.txt` reported INTERACTIVE in its boot
+forensics while actually running auto mode.
+
+**Testing.** 171/171. Three existing tests that asserted the old immediate-sleep
+behaviour now assert the deferred one (the F5 invariant they were written for is
+unchanged); four new tests cover the window, refresh-not-stack, button cancel,
+and re-check on fire. Mutation-verified: restoring the immediate sleep fails
+five.
+
+**Hardware (v1.0.16):** the node now stays awake 28 s instead of 3 s, completes
+the handshake, and receives the current schedule. Node commit `723a596`, hub
+commit `602b62c`.
+
 ### 2026-08-23 — Boot forensics: the restart that undid the schedule
 
 **Symptom.** A node executed its scheduled CLOSE correctly (`Position: 0%`),

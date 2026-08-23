@@ -211,6 +211,8 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F5 | `enterDeepsleep()` from the RX task crashes the node | Fixed — queued via `SYSCMD_SLEEP` |
 | F6 | `config.txt` read truncated at 256 B, silently reverting every setting | Fixed — sized from the file, always terminated |
 | F7 | A restart after a scheduled event drove the blind FULL_UP, undoing the schedule | Fixed — reference move now gated on RTC RAM actually having been lost |
+| F8 | The node slept ~3 s after REGISTER, before the hub's deferred LoginMsg could arrive — the handshake could never complete | **Fixed — sleep deferred behind a quiet window** |
+| F9 | `schedVersion` (a CRC32) was reloaded through cJSON's `valueint` and saturated at `INT_MAX`, so half of all versions were corrupted on every restart | Fixed — 32-bit fields read via `valuedouble` |
 
 ### F7 — the restart that undid the schedule
 
@@ -249,3 +251,43 @@ feature.
 The beacon stays the *steady-state* trigger — it is the only thing carrying the
 node's applied version, which is what makes reconciliation self-healing. This
 adds a second, independent path for the initial push.
+
+### F8 — the node slept in the middle of its own handshake
+
+This is the one that invalidates the optimistic reading of chart 1, and it very
+likely explains F1 as well.
+
+Auto mode queued its sleep the *instant* `shouldRunAutoMode()` was satisfied.
+On the register path that is about 3 s after boot, while the hub defers its
+LoginMsg to ~4 s after REGISTER. Captured on serial:
+
+```
+Device not registered yet, going to register mode
+Sending REGISTER response
+Entering deep sleep — state persisted            <- 30 ms later
+Auto mode: sleeping 600 s until next scheduled wake
+```
+
+The handshake could never complete. The hub logged `Login not acknowledged`
+up to 24 times per cycle against a node that was asleep, and since the schedule
+push rides on that session, the node was stuck with a stale schedule and **no
+path by which it could ever be told about a new one**. From the outside this
+looked exactly like a radio or crypto problem, which is where the previous
+sessions went hunting.
+
+The same shape appears twice more in the charts above. In chart 1, TimeSync is
+sent ~1.25 s before ScheduleConfig — and sleeping on TimeSync alone would miss
+the schedule push *and all three of its retransmits*. **F2's retransmits could
+never have helped**, because the node was not listening. So the "lost beacon"
+diagnosis in F1 was probably measuring this instead: not a frame lost in the
+air, but a receiver that had already gone to sleep.
+
+**Fix: the sleep is a quiet timer, not an event.** Every downlink that could
+start auto mode refreshes it, so the node stays awake exactly as long as the hub
+is still talking to it, and sleeps once the conversation stops. If the hub never
+answers, it still fires, so this cannot become a battery leak. A button press
+cancels it outright.
+
+The lesson generalises past this bug: **"the condition for sleeping is true" and
+"we are finished talking" are different questions**, and the charts only ever
+modelled the first one.
