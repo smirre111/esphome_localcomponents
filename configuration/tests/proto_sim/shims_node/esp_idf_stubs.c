@@ -249,3 +249,10 @@ int proto_sim_timer_armed_count(void) {
 void proto_sim_timer_reset(void) {
     memset(g_timers, 0, sizeof(g_timers));
 }
+
+// ---- esp_app_desc ----
+// The node reads the running image's version string to fill the beacon's
+// fwversion field. There is no image here, so hand back a fixed one.
+#include "esp_app_desc.h"
+static const esp_app_desc_t s_app_desc = { "9.8.7", "proto_sim" };
+const esp_app_desc_t *esp_app_get_description(void) { return &s_app_desc; }

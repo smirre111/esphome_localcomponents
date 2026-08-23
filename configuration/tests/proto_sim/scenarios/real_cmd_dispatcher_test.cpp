@@ -582,17 +582,15 @@ TEST_F(RealNodeFixture, BeaconCarriesClockOnlyWhenValid) {
     EXPECT_TRUE(CmdDispatcher::isClockValid());
 }
 
-TEST_F(RealNodeFixture, FirmwareVersionMatchesProjectVersion) {
-    // kFirmwareVersion is hand-maintained alongside PROJECT_VER in the
-    // top-level CMakeLists.txt. Encoding is major*10000 + minor*100 + patch.
-    // This test is the enforcement: a version bump fails here until BOTH are
-    // updated, so the hub's capability gate can never report a version the node
-    // is not actually running.
-    // If this fails, the two have drifted and the hub's capability gate is
-    // reporting a version the node is not actually running.
-    EXPECT_EQ(CmdDispatcher::kFirmwareVersion, 10014u)
-        << "kFirmwareVersion is out of sync with PROJECT_VER (1.0.14)";
-}
+// The test that used to live here asserted kFirmwareVersion == 10014 and
+// described itself as the enforcement that "a version bump fails here until
+// BOTH are updated". It could not do that: both the constant and the expected
+// value were hardcoded, so they could only ever be changed together, and the
+// test passed happily while the constant sat at 1.0.14 for three releases.
+//
+// A guard that requires the thing it guards to be edited in lockstep is not a
+// guard. The version is now read from the running image, and the tests for that
+// live further down (see the FirmwareVersion suite).
 
 // ---------------------------------------------------------------------------
 // P2b — resume-first wake.
@@ -1447,6 +1445,56 @@ TEST_F(RealNodeFixture, ButtonPressCancelsAPendingAutoSleep) {
 // next_occurrence() then reports the event AFTER it, skipping the entry
 // outright. Observed live: woken 15:27:23 for a 15:28:00 CLOSE, still awake at
 // 15:28:03, slept until 15:36, blind never moved.
+// ---------------------------------------------------------------------------
+// Firmware version in the wake beacon.
+//
+// This was a hand-maintained constant with a "KEEP IN SYNC with PROJECT_VER"
+// comment on it, and it did not stay in sync: a node running 1.0.17 announced
+// 10014 in every beacon. A field whose only job is to tell the hub which
+// firmware a node is running is worse than useless when it can quietly lie —
+// this project has already lost a session to not knowing what was on a node.
+// It is now derived from the running image.
+// ---------------------------------------------------------------------------
+
+TEST(FirmwareVersion, ParsesDottedVersions) {
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("1.0.17"), 10017u);
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("1.0.14"), 10014u);
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("2.10.3"), 21003u);
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("v1.0.17"), 10017u);
+}
+
+TEST(FirmwareVersion, OrdersAsTheHubExpects) {
+    // The hub compares with >= to gate capabilities, so the encoding has to be
+    // monotonic across a minor rollover — the reason for the 100/10000 bases.
+    EXPECT_LT(CmdDispatcher::parseFirmwareVersion("1.0.99"),
+              CmdDispatcher::parseFirmwareVersion("1.1.0"));
+    EXPECT_LT(CmdDispatcher::parseFirmwareVersion("1.99.0"),
+              CmdDispatcher::parseFirmwareVersion("2.0.0"));
+}
+
+TEST(FirmwareVersion, StopsAtASuffixRatherThanFoldingItIn) {
+    // A build that appends "-dirty" or "-rc1" must not have those digits
+    // silently absorbed into the patch number.
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("1.0.17-dirty"), 10017u);
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("1.0.17-rc2"), 10017u);
+}
+
+TEST(FirmwareVersion, ReportsZeroRatherThanAMisleadingNumber) {
+    // "Unknown" is honest; a wrong version is what caused the problem.
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion(nullptr), 0u);
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion(""), 0u);
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("not-a-version"), 0u);
+    // Out of range: 100 in any field would carry into the next one.
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("1.100.0"), 0u);
+    EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("1.0.100"), 0u);
+}
+
+TEST(FirmwareVersion, ComesFromTheRunningImageNotAConstant) {
+    // The shim pins the image to 9.8.7. If this ever returns a number that
+    // looks like a real release, the value has been hard-coded again.
+    EXPECT_EQ(CmdDispatcher::firmwareVersion(), 90807u);
+}
+
 TEST_F(RealNodeFixture, AnEntryThatFallsDueWhileAwakeIsStillExecuted) {
     // NOTE: the harness has no settimeofday shim, so glibc's fails without root
     // and the node clock is real wall time. The schedule below is therefore
