@@ -16,6 +16,56 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-23 — Boot forensics: the restart that undid the schedule
+
+**Symptom.** A node executed its scheduled CLOSE correctly (`Position: 0%`),
+restarted about a minute later, and the boot path drove the blind fully open
+again. The beacon reported `reason=BOOT`, which lumps POWERON, SW, EXT and USB
+together — not enough to tell a power event from a reset line being pulled, so
+the cause was being guessed at. The supply had recently been checked, so the
+sag hypothesis was dropped and the boot-reason mechanism used instead.
+
+**Two RTC_NOINIT markers.** RTC_NOINIT survives deep sleep and soft resets and
+is garbage only after a true power loss, so it answers what the reset reason
+cannot: did RTC RAM survive, and did the previous run actually reach
+`esp_deep_sleep_start()`? The sleep marker is armed in the instruction *before*
+that call, so seeing it without `ESP_RST_DEEPSLEEP` means the node reset while
+going to sleep rather than waking from it. A second marker carries auto vs
+interactive across the reset — `config.txt` cannot, because the boot policy
+rewrites the mode before any diagnostic reads it. Every boot now logs
+`BOOT reason=… causes=… rtc_ram=… prev=… prev_mode=…`.
+
+**The actual bug.** The `MOTCMD_FULL_UP` reference move exists to rebuild a
+position after RTC RAM is lost, but was gated on `powerOnBoot` — true for every
+reset that is not a deep-sleep wake, including `esp_restart`, panic and the
+watchdogs, all of which keep RTC RAM and a perfectly good position. Moving the
+blind there is not a harmless default: it destroys what the schedule just
+established. Now gated on the marker.
+
+**Measured, and counterintuitive.** On this ESP32 an EN-pin reset — any serial
+monitor or debugger asserting DTR/RTS — reports `ESP_RST_POWERON` and **does**
+clear RTC RAM. It is not `ESP_RST_EXT` and it is a genuine cold boot, so the
+reference move is correct there. The consequence for testing is larger than the
+firmware fix: **attaching or reattaching a serial monitor mid-test is itself a
+reboot**, so a node that appears to restart spontaneously during an observed
+event may be reacting to the observer. This is a live candidate for the original
+symptom. Verification therefore uses one continuously-open port with no
+reconnects.
+
+**A bug the hardware caught in the fix.** The first build logged
+`rtc_ram=LOST prev=cold` and then *skipped* the reference move — the exact
+inverse of the bug. `g_sleep_marker` is overwritten early in `app_main()`, so
+reading the live variable later always saw "running". The boot-time value is now
+latched, and a test pins the ordering.
+
+**Testing.** Decisions live in `BlindsESP/main/include/BootPolicy.h`,
+dependency-free like `Scheduler.h`, so the harness compiles the shipped code:
+12 new tests, **167/167** total, mutation-verified (restoring the unconditional
+move fails two).
+
+Node `PROJECT_VER` → **1.0.15**, flashed to node 2 and copied to
+`https_hosted/`. Node commit `ff7fa34`, hub commit `3d07563`.
+
 ### 2026-08-22 (evening) — auto mode proven on hardware; four real bugs found
 
 **Automatic mode works.** Node 2 slept and woke itself for a scheduled event:

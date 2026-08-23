@@ -210,6 +210,33 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F4 | Node uplinks between REGISTER and LOGIN are dropped (counters not yet aligned) | By design; beacon deliberately sent after `CMD_LOGIN` |
 | F5 | `enterDeepsleep()` from the RX task crashes the node | Fixed — queued via `SYSCMD_SLEEP` |
 | F6 | `config.txt` read truncated at 256 B, silently reverting every setting | Fixed — sized from the file, always terminated |
+| F7 | A restart after a scheduled event drove the blind FULL_UP, undoing the schedule | Fixed — reference move now gated on RTC RAM actually having been lost |
+
+### F7 — the restart that undid the schedule
+
+Not visible in any of the charts above, because it happens *between* them: the
+node executes its event correctly, restarts, and re-enters chart 1. Chart 1's
+cold-boot path then issues a FULL_UP reference move — correct when the position
+is genuinely unknown, destructive when it is not.
+
+The move was gated on `powerOnBoot`, which is true for **every** reset that is
+not a deep-sleep wake. `esp_restart`, a panic and the watchdogs all preserve RTC
+RAM, and therefore preserve a valid position, yet all took the move. The gate is
+now the RTC_NOINIT marker, which answers the question the reset reason only
+approximates: *did RTC RAM survive?*
+
+**Measured, and counterintuitive enough to record:** on this ESP32 an EN-pin
+reset — a debugger or serial monitor asserting DTR/RTS — reports
+`ESP_RST_POWERON` and **does** clear RTC RAM. It is a real cold boot, so the
+reference move is right there. It also means **attaching a serial monitor
+mid-test is itself a reboot**: a node that appears to restart spontaneously
+during an observed event may be reacting to the observer. Capture with one
+continuously-open port and never reconnect mid-run.
+
+Every boot now logs `BOOT reason=… causes=… rtc_ram=… prev=… prev_mode=…`, so
+this class of question is read off the log rather than reasoned about. `prev`
+distinguishes a clean wake from a reset that happened *while entering* sleep,
+because the marker is armed in the instruction before `esp_deep_sleep_start()`.
 
 ### The recommended fix for F1
 
