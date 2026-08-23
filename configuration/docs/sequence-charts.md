@@ -213,6 +213,7 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F7 | A restart after a scheduled event drove the blind FULL_UP, undoing the schedule | Fixed — reference move now gated on RTC RAM actually having been lost |
 | F8 | The node slept ~3 s after REGISTER, before the hub's deferred LoginMsg could arrive — the handshake could never complete | **Fixed — sleep deferred behind a quiet window** |
 | F9 | `schedVersion` (a CRC32) was reloaded through cJSON's `valueint` and saturated at `INT_MAX`, so half of all versions were corrupted on every restart | Fixed — 32-bit fields read via `valuedouble` |
+| F10 | An event was skipped outright if the hub kept the node awake past its scheduled time | Fixed — the quiet window re-runs `runDueScheduleEntry()` |
 
 ### F7 — the restart that undid the schedule
 
@@ -291,3 +292,44 @@ cancels it outright.
 The lesson generalises past this bug: **"the condition for sleeping is true" and
 "we are finished talking" are different questions**, and the charts only ever
 modelled the first one.
+
+### F10 — chart 3 assumes the node is asleep when its event arrives
+
+Chart 3 draws the wake and the execution as one step. In the code they are two,
+and nothing connects them.
+
+The node wakes `beacon_lead` (30 s) *before* the event, so at that moment
+`runDueScheduleEntry()` correctly finds nothing due. The sleep that follows is
+computed as `next_event − lead`, which clamps to `now + 1 s` for an imminent
+event — so the node naps for a second, wakes, and *then* executes. That is the
+only path by which a scheduled entry ever runs on time.
+
+Break the nap and the entry is skipped. Every downlink refreshes the quiet
+window (F8), so a hub that is still talking holds the node awake past the event.
+By the time it sleeps, `next_occurrence()` has already moved past the entry.
+Observed live, twice in one run:
+
+```
+woken 15:27:23 for a 15:28:00 CLOSE, still awake at 15:28:03
+  → "sleeping, next event 15:36:00"        (blind never moved)
+woken 15:35:24 → "executed due entry"      (the 15:28 CLOSE, 7 min late,
+                                            rescued by the catch-up window)
+awake through 15:36:00
+  → "sleeping, next event 2026-08-24 15:28:00"   (the OPEN skipped a whole day)
+```
+
+The events were not lost — catch-up served one of them seven minutes late — but
+"the schedule works" and "the schedule runs on time" were different claims, and
+only the first was true.
+
+**This also re-explains the original symptom.** The very first scheduled CLOSE
+that appeared to execute "about a minute late" was almost certainly catch-up on
+the *following* wake, not the scheduled execution.
+
+**Fix:** the quiet window re-runs `runDueScheduleEntry()` before computing the
+next wake, so anything that fell due while we were awake runs now rather than a
+wake later.
+
+The pattern behind F8 and F10 is the same one: **the node treats "time to
+sleep" as a single decision made at one instant**, when it is really a
+condition that has to be re-evaluated as the conversation and the clock move.

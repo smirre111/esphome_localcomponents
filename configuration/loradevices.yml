@@ -136,10 +136,10 @@ lora_client:
     # into auto mode AND a wake out of deep sleep with the RTC markers already
     # valid — which is the case the boot forensics were added to read.
     schedule:
-      - time: "15:28:00"
+      - time: "16:02:00"
         days: daily
         action: close
-      - time: "15:36:00"
+      - time: "16:09:00"
         days: daily
         action: open
 

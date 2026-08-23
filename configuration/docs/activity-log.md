@@ -16,6 +16,55 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-23 (late afternoon) — events were running late, or not at all
+
+Chart 3 draws the wake and the execution as one step. In the code they are two,
+and nothing connected them.
+
+The node wakes `beacon_lead` (30 s) BEFORE its event, so `runDueScheduleEntry()`
+at boot correctly finds nothing due. The sleep that follows is computed as
+`next_event − lead`, which clamps to `now + 1 s` for an imminent event — the
+node naps a second, wakes, and *then* executes. That nap was the only path by
+which an entry ever ran on time.
+
+Break the nap and the entry is skipped. Every downlink refreshes the quiet
+window added earlier today, so a hub that is still talking holds the node awake
+past the event; by the time it sleeps, `next_occurrence()` has moved past the
+entry. Captured live, twice in one run:
+
+```
+woken 15:27:23 for a 15:28:00 CLOSE, still awake at 15:28:03
+  -> "sleeping, next event 15:36:00"          blind never moved
+woken 15:35:24 -> "executed due entry"        the 15:28 CLOSE, 7 min late,
+                                              rescued by the catch-up window
+awake through 15:36:00
+  -> "sleeping, next event 2026-08-24 15:28:00"   the OPEN skipped a whole day
+```
+
+So the events were never lost — catch-up served one of them seven minutes late —
+but *"the schedule works"* and *"the schedule runs on time"* were different
+claims and only the first was ever true. **This also re-explains the original
+symptom of this whole investigation:** the first scheduled CLOSE that appeared
+to fire "about a minute late" was catch-up on the following wake, not the
+scheduled execution.
+
+**Fix:** the quiet-window callback re-runs `runDueScheduleEntry()` before
+computing the next wake. Queued before the sleep, so `taskDeepSleep` drains the
+motor command first — the boot path's ordering.
+
+The pattern behind both of today's sleep bugs is one thing: the node treated
+*"time to sleep"* as a single decision made at one instant, when it is a
+condition that has to be re-evaluated as the conversation and the clock move.
+
+**Testing.** 172/172, mutation-verified. Two harness constraints found and now
+commented in the test: there is no `settimeofday` shim, so glibc's fails without
+root and the node clock is real wall time (schedules must be built relative to
+now, not from a pinned epoch); and the interactive override is a file-level
+static shared across the whole binary, which an earlier test leaves set to
+"interactive forever".
+
+Node `PROJECT_VER` -> **1.0.17**. Node commit `48f1737`, hub commit `db39dcc`.
+
 ### 2026-08-23 (afternoon) — the node was asleep during its own handshake
 
 Found while verifying the boot-forensics fix, from the very first wake the
