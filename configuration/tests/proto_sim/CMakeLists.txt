@@ -206,6 +206,16 @@ if(EXISTS ${BLINDS_ESP_MAIN}/Scheduler.cpp)
     gtest_discover_tests(scheduler_test)
 endif()
 
+# Same rule for the boot policy: BootPolicy.h is header-only and
+# dependency-free precisely so the reset classification and the
+# reference-move decision are covered here rather than only on hardware.
+if(EXISTS ${BLINDS_ESP_MAIN}/include/BootPolicy.h)
+    add_executable(boot_policy_test scenarios/boot_policy_test.cpp)
+    target_include_directories(boot_policy_test PRIVATE ${BLINDS_ESP_MAIN}/include)
+    target_link_libraries(boot_policy_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(boot_policy_test)
+endif()
+
 if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # Quoted-include searches the dir of the FILE doing the include first
     # (no compiler flag overrides that). We copy the production source +
