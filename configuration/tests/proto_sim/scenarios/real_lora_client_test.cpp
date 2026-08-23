@@ -20,6 +20,7 @@
 #include <psa/crypto.h>
 
 #include <gtest/gtest.h>
+#include "esphome/components/switch/switch.h"
 
 using esphome::lora_tracker::LORAClient;
 using esphome::lora_tracker::LORATracker;
@@ -763,6 +764,82 @@ struct BeaconRig {
 };
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// The HA auto-mode switch must not be reverted by a stale beacon.
+//
+// The beacon carries the mode the node was in when it woke. If our mode change
+// has not reached it yet, that is simply out of date — and publishing it
+// overwrites the request with the state the user just changed away from.
+//
+// Observed live: auto mode switched OFF while the node slept; the next beacon
+// arrived 2 s BEFORE the push carrying INTERACTIVE went out, and the switch
+// snapped back to ON. The change was still delivered and the node did go
+// interactive, so the command was not lost — but the UI showed the wrong mode
+// until the following beacon, which on the configured 6 h check-in is six
+// hours of lying about what the blind is doing.
+//
+// schedule_pending() is exactly "the node is not on our version yet", which
+// separates an undelivered change from a node that legitimately chose a
+// different mode (a button press changes no version, so it still wins).
+// ---------------------------------------------------------------------------
+
+TEST(RealLoraClient, StaleBeaconDoesNotRevertARequestedModeChange) {
+    constexpr std::time_t kHubEpoch = 1787000000;
+    BeaconRig rig;
+    rig.start(kHubEpoch);
+    ASSERT_NE(rig.base, 0u);
+
+    esphome::switch_::Switch sw;
+    rig.rol.set_auto_mode_switch(&sw);
+
+    // The user switches auto mode OFF while the node is asleep; HA now shows
+    // OFF. This marks the schedule dirty, so the node is behind our version.
+    rig.rol.set_auto_mode(false);
+    sw.publish_state(false);
+    ASSERT_TRUE(rig.rol.schedule_pending())
+        << "precondition: the change is undelivered";
+
+    // The node wakes and beacons the mode AND version it had BEFORE our change.
+    auto b = make_beacon(kHubEpoch, /*clock_valid=*/true);
+    b.beacon.mode         = proto_sim::NodeMode::MODE_AUTO;
+    b.beacon.schedVersion = 0;              // never received our push
+    send_encrypted_uplink(rig.rol, rig.base, /*msgid=*/2, 18, 2, b);
+
+    EXPECT_FALSE(sw.state)
+        << "a beacon predating our change must not flip the switch back to the "
+           "state the user just changed away from";
+}
+
+TEST(RealLoraClient, BeaconStillCorrectsTheSwitchOnceTheNodeIsInSync) {
+    // The case the correction exists for, which must keep working: the node is
+    // on our version and reports a mode we did not ask for — a button press at
+    // the blind, or auto mode refused for want of a clock. That is the node's
+    // real state and HA must show it.
+    constexpr std::time_t kHubEpoch = 1787000000;
+    BeaconRig rig;
+    rig.start(kHubEpoch);
+
+    esphome::switch_::Switch sw;
+    sw.publish_state(true);                 // HA shows AUTO
+    rig.rol.set_auto_mode_switch(&sw);
+
+    // "In sync" means the BEACON reports our version — handle_beacon_ takes
+    // node_sched_version_ from the beacon, which is the node telling us where
+    // it actually is.
+    auto b = make_beacon(kHubEpoch, /*clock_valid=*/true);
+    b.beacon.mode         = proto_sim::NodeMode::MODE_INTERACTIVE;  // button press
+    b.beacon.schedVersion = rig.rol.schedule_version();
+    send_encrypted_uplink(rig.rol, rig.base, /*msgid=*/2, 18, 2, b);
+
+    ASSERT_TRUE(rig.rol.clock_offset_valid_)
+        << "precondition: the beacon must actually have been processed";
+    ASSERT_FALSE(rig.rol.schedule_pending())
+        << "precondition: the node reported our version, so nothing is pending";
+    EXPECT_FALSE(sw.state)
+        << "an in-sync node reporting INTERACTIVE is telling us its real state; "
+           "HA must not keep showing AUTO for a blind that is not in auto mode";
+}
 
 TEST(RealLoraClient, BeaconClockOffsetIsNodeMinusHub) {
     constexpr std::time_t kHubEpoch = 1787000000;

@@ -1623,7 +1623,25 @@ namespace esphome
       // press flips it back to interactive on its own. Publishing what the node
       // reports — rather than what was asked for — is what stops the HA toggle
       // from lying about a blind that is actually still interactive.
-      if (this->auto_mode_switch_ != nullptr)
+      //
+      // But ONLY once the node is actually on our version. Until then its
+      // reported mode is simply out of date — it is telling us what it was
+      // doing before our change reached it — and publishing that overwrites the
+      // request with the very state the user just changed away from.
+      //
+      // Observed live: switching auto mode OFF while the node slept, the next
+      // beacon arrived 2 s before the push carrying INTERACTIVE went out, and
+      // the switch snapped back to ON. The change was still delivered and the
+      // node did go interactive, so this was the UI lying rather than the
+      // command being lost — but it lies until the NEXT beacon, which on the
+      // configured 6 h check-in means six hours of showing the wrong mode.
+      //
+      // schedule_pending() is exactly "the node is not on our version yet", so
+      // it separates the two cases that matter. A button press does NOT set it
+      // (the override is local to the node and changes no version), so the
+      // button still correctly wins here — which is the case this correction
+      // was written for.
+      if (this->auto_mode_switch_ != nullptr && !this->schedule_pending())
       {
         const bool node_is_auto = (b->mode == NODE_MODE__MODE_AUTO);
         if (this->auto_mode_switch_->state != node_is_auto)
@@ -1632,6 +1650,13 @@ namespace esphome
                    this->get_name().c_str(), node_is_auto ? "AUTO" : "INTERACTIVE");
           this->auto_mode_switch_->publish_state(node_is_auto);
         }
+      }
+      else if (this->auto_mode_switch_ != nullptr)
+      {
+        ESP_LOGD(TAG, "[%s] Beacon reports %s but our change is still undelivered "
+                      "— leaving the switch as requested",
+                 this->get_name().c_str(),
+                 (b->mode == NODE_MODE__MODE_AUTO) ? "AUTO" : "INTERACTIVE");
       }
 
       if (this->schedule_pending_bsensor_ != nullptr)
