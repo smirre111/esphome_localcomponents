@@ -1078,6 +1078,24 @@ TEST_F(RealNodeFixture, NoOverrideMeansNoSuspension) {
 // These pin WHEN sleep is requested, and — more usefully — when it must not be.
 // ---------------------------------------------------------------------------
 
+namespace {
+bool drain_for_sleep(CmdDispatcher &d) {
+    bool found = false;
+    CmdDispatcher::tx_command_t c{};
+    while (xQueueReceive(d.sysCmdQueueNew, &c, 0) == pdTRUE)
+        if (c.cmd == (blinds_syscmd_base_t) BlindsSysCmd::SYSCMD_SLEEP) found = true;
+    return found;
+}
+
+// Entering auto mode arms a quiet-window timer rather than sleeping on the
+// spot, so a test that wants the sleep has to let that window elapse.
+bool drain_for_sleep_after_quiet_window(CmdDispatcher &d) {
+    if (drain_for_sleep(d)) return true;   // should not happen; caller asserts
+    proto_sim_timer_fire_all();
+    return drain_for_sleep(d);
+}
+}  // namespace
+
 TEST_F(RealNodeFixture, ApplyingAScheduleDoesNotSleepImmediately) {
     // Direct regression for the crash: entering deep sleep from the RX task
     // right after applying a schedule reset the node. Auto mode takes effect at
@@ -1123,13 +1141,10 @@ TEST_F(RealNodeFixture, ApplyingAScheduleDoesNotSleepImmediately) {
     // It must still ENTER auto mode, just via the queue: SYSCMD_SLEEP is
     // handled by processSysCommand's own task, the same context the nightly
     // CMD_SLEEP has always used.
-    bool queued_sleep = false;
-    CmdDispatcher::tx_command_t sys_cmd{};
-    while (xQueueReceive(disp.sysCmdQueueNew, &sys_cmd, 0) == pdTRUE) {
-        if (sys_cmd.cmd == (blinds_syscmd_base_t) BlindsSysCmd::SYSCMD_SLEEP)
-            queued_sleep = true;
-    }
-    EXPECT_TRUE(queued_sleep)
+    EXPECT_FALSE(drain_for_sleep(disp))
+        << "the sleep must be deferred behind the quiet window so our "
+           "CommandAck is actually transmitted and the hub can follow up";
+    EXPECT_TRUE(drain_for_sleep_after_quiet_window(disp))
         << "a schedule that switches the node INTO auto mode must queue a "
            "sleep — otherwise auto mode never actually sleeps and the whole "
            "battery saving is lost";
@@ -1298,14 +1313,6 @@ std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t
     return out;
 }
 
-bool drain_for_sleep(CmdDispatcher &d) {
-    bool found = false;
-    CmdDispatcher::tx_command_t c{};
-    while (xQueueReceive(d.sysCmdQueueNew, &c, 0) == pdTRUE)
-        if (c.cmd == (blinds_syscmd_base_t) BlindsSysCmd::SYSCMD_SLEEP) found = true;
-    return found;
-}
-
 } // namespace
 
 TEST_F(RealNodeFixture, ScheduleBeforeTimeSyncStillEntersAutoMode) {
@@ -1323,7 +1330,11 @@ TEST_F(RealNodeFixture, ScheduleBeforeTimeSyncStillEntersAutoMode) {
     disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
 
     EXPECT_TRUE(CmdDispatcher::isClockValid());
-    EXPECT_TRUE(drain_for_sleep(disp))
+    EXPECT_FALSE(drain_for_sleep(disp))
+        << "the TimeSync must not sleep the node on the spot: the hub's "
+           "ScheduleConfig follows ~1.25 s later, and sleeping here would miss "
+           "it and every one of its retransmits";
+    EXPECT_TRUE(drain_for_sleep_after_quiet_window(disp))
         << "whichever of TimeSync/Schedule arrives LAST must start auto mode — "
            "otherwise a lost or reordered TimeSync leaves the node interactive "
            "forever with nothing to re-trigger it";
@@ -1341,7 +1352,7 @@ TEST_F(RealNodeFixture, TimeSyncBeforeScheduleAlsoEntersAutoMode) {
     auto sched_frame = pack_schedule_op(/*msgid=*/711, 0xBBBB, NODE_MODE__MODE_AUTO);
     disp.onReceiveNew(sched_frame.data(), static_cast<int>(sched_frame.size()));
 
-    EXPECT_TRUE(drain_for_sleep(disp))
+    EXPECT_TRUE(drain_for_sleep_after_quiet_window(disp))
         << "the schedule must start auto mode when the clock is already valid";
 }
 
@@ -1357,4 +1368,89 @@ TEST_F(RealNodeFixture, TimeSyncAloneDoesNotStartAutoModeWithoutASchedule) {
 
     EXPECT_FALSE(drain_for_sleep(disp))
         << "no schedule means nothing to sleep towards";
+}
+
+// ---------------------------------------------------------------------------
+// Deferred auto-sleep.
+//
+// Regression for the failure that made the node look like a radio problem: it
+// woke, sent its REGISTER, and queued a sleep ~3 s later — while the hub defers
+// its LoginMsg by ~4 s. The handshake could never complete. The hub logged
+// "Login not acknowledged" up to 24 times per cycle, the node looped every
+// 600 s carrying a stale schedule, and there was no path by which it could ever
+// be told about a new one. Captured live on 2026-08-23:
+//
+//   Device not registered yet, going to register mode
+//   Sending REGISTER response
+//   Entering deep sleep — state persisted        <- 30 ms later
+//   Auto mode: sleeping 600 s until next scheduled wake
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, AutoSleepWaitsForTheQuietWindow) {
+    give_clock(disp, 730, 1787000000ULL, 0);
+    auto sched = pack_schedule_op(/*msgid=*/731, 0xC0DE, NODE_MODE__MODE_AUTO);
+    disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()));
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    disp.armAutoSleep();
+    EXPECT_FALSE(drain_for_sleep(disp))
+        << "arming must not sleep the node immediately — that is the bug: on the "
+           "register path the hub's LoginMsg has not even been sent yet";
+
+    proto_sim_timer_fire_all();
+    EXPECT_TRUE(drain_for_sleep(disp))
+        << "once the hub goes quiet the node must actually sleep, or auto mode "
+           "costs the whole battery saving it exists for";
+}
+
+TEST_F(RealNodeFixture, EachRefreshRestartsOneTimerRatherThanStacking) {
+    give_clock(disp, 740, 1787000000ULL, 0);
+    auto sched = pack_schedule_op(/*msgid=*/741, 0xC0DF, NODE_MODE__MODE_AUTO);
+    disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()));
+
+    // Measured relative to one arm, not to an absolute count: other timers
+    // (the interactive-return timer, the register retry) may also be armed, and
+    // the invariant under test is only that REFRESHING does not add more.
+    disp.armAutoSleep();
+    const int after_one = proto_sim_timer_armed_count();
+    disp.armAutoSleep();
+    disp.armAutoSleep();
+    EXPECT_EQ(proto_sim_timer_armed_count(), after_one)
+        << "every downlink refreshes the window, so repeated arming must restart "
+           "ONE timer; stacking them would sleep the node on the first expiry "
+           "while the hub was still talking to it";
+}
+
+TEST_F(RealNodeFixture, ButtonPressCancelsAPendingAutoSleep) {
+    give_clock(disp, 750, 1787000000ULL, 0);
+    auto sched = pack_schedule_op(/*msgid=*/751, 0xC0E0, NODE_MODE__MODE_AUTO);
+    disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()));
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    disp.armAutoSleep();
+    disp.enterInteractiveMode();   // person at the blind
+
+    proto_sim_timer_fire_all();
+    EXPECT_FALSE(drain_for_sleep(disp))
+        << "a sleep armed seconds before a button press must not still fire — "
+           "the blind would go unresponsive in the person's hands";
+}
+
+TEST_F(RealNodeFixture, AutoSleepRechecksTheConditionWhenItFires) {
+    give_clock(disp, 760, 1787000000ULL, 0);
+    auto sched = pack_schedule_op(/*msgid=*/761, 0xC0E1, NODE_MODE__MODE_AUTO);
+    disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()));
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    disp.armAutoSleep();
+    // The hub switches the node back to interactive during the quiet window.
+    sys.setAutoMode(false);
+
+    proto_sim_timer_fire_all();
+    EXPECT_FALSE(drain_for_sleep(disp))
+        << "the timer must re-check rather than trust a condition evaluated "
+           "before the mode changed";
 }
