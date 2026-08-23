@@ -56,7 +56,7 @@ cmake --build build\proto_sim --config Debug
 ctest --test-dir build\proto_sim -C Debug --output-on-failure
 ```
 
-Expected output: **78/78 tests passing in ~2 s** (phases 1–3 + the auto-mode P0
+Expected output: **176/176 tests passing in ~9 s** (phases 1–3 + the auto-mode P0
 schema tests, both sides). The hub's `lora_client.cpp` and the node's
 `CmdDispatcher.cpp` run as REAL production code under the harness.
 
@@ -77,6 +77,24 @@ schema tests, both sides). The hub's `lora_client.cpp` and the node's
 > like a test suite. `sim/messages.h` and `sim/wire_codec.cpp` mirror the proto
 > BY HAND — the `schema_drift_*` gates catch a stale generated stub, but they
 > cannot catch a stale mirror struct. Add proto fields in all three places.
+
+### Two harness constraints that will bite you
+
+**There is no `settimeofday` shim.** glibc's fails without root, so the node
+clock under test is REAL WALL TIME and cannot be stepped. `give_clock()` sets
+`s_clock_valid` (which is what `shouldRunAutoMode()` actually checks) but does
+not move the clock. Any test involving schedule timing must build its entries
+RELATIVE TO NOW, not from a pinned epoch — a schedule pinned to a fixed date
+silently falls outside the catch-up window and the test passes for the wrong
+reason.
+
+**Several pieces of node state are file-level statics shared by every test in
+the binary** — `s_interactive_until`, `s_last_exec_epoch`, the cached firmware
+version. `RTC_DATA_ATTR` is a no-op on the host, so they persist across
+fixtures. One existing test leaves the interactive override set to "interactive
+forever", which suppresses auto mode in every test defined after it. If a test
+needs auto mode active, replace the override with a finite deadline and wait it
+out rather than assuming a clean slate.
 
 System dependencies on WSL/Linux: `libprotobuf-c-dev`, `libmbedtls-dev`,
 both standard on Ubuntu 24.04.
