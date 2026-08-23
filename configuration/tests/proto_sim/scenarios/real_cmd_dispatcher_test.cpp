@@ -1386,6 +1386,55 @@ TEST_F(RealNodeFixture, TimeSyncAloneDoesNotStartAutoModeWithoutASchedule) {
 //   Auto mode: sleeping 600 s until next scheduled wake
 // ---------------------------------------------------------------------------
 
+// post_event_window must actually do something.
+//
+// It is configured in YAML, fed into the schedule CRC, pushed over the air,
+// persisted on the node and echoed back in the beacon — and its only consumer
+// was that beacon field. The quiet window used a hard-coded constant, so
+// setting post_event_window had no effect on anything the node did.
+TEST_F(RealNodeFixture, QuietWindowComesFromPostEventWindow) {
+    sched::Entry e = sched_entry(450, sched::DAY_ALL);
+    // 45 s window, comfortably above the floor.
+    sys.setSchedule(1, /*mode=*/1, /*interactiveTimeout=*/1800, /*checkin=*/600,
+                    /*beaconLead=*/30, /*postEventWindow=*/45,
+                    /*catchup=*/1800, &e, 1);
+
+    EXPECT_EQ(disp.autoSleepQuietMs(), 45000u)
+        << "a configured post_event_window must be what the node actually waits";
+}
+
+TEST_F(RealNodeFixture, AZeroPostEventWindowNeverYieldsAnUnusableWindow) {
+    // A zero window would sleep the node the instant it stopped transmitting,
+    // so it must never take effect. TWO mechanisms enforce that — setSchedule()
+    // ignores a zero push (there is no meaningful "zero listening window"), and
+    // the floor clamps anything too short — so no single mutation will fail
+    // this test. It is here to state the property, not to pin one line.
+    //
+    // An earlier version of this test claimed to cover a fallback branch for
+    // the zero case. It could not: Config defaults postEventWindow_s to 20 and
+    // setSchedule ignores zeroes, so the branch was unreachable and the test
+    // passed only because the default happened to equal the constant it
+    // asserted. The branch has been deleted.
+    sched::Entry e = sched_entry(450, sched::DAY_ALL);
+    sys.setSchedule(1, 1, 1800, 600, 30, /*postEventWindow=*/0, 1800, &e, 1);
+
+    EXPECT_GE(disp.autoSleepQuietMs(), CmdDispatcher::kAutoSleepQuietMinMs)
+        << "a zero push must never leave the node with a window too short to "
+           "survive the hub's inter-frame gaps";
+}
+
+TEST_F(RealNodeFixture, QuietWindowIsFlooredBelowTheHubsInterFrameGaps) {
+    sched::Entry e = sched_entry(450, sched::DAY_ALL);
+    // 2 s is shorter than the hub's schedule-push retransmit interval (5 s), so
+    // the node would sleep between two frames of a conversation in progress —
+    // reintroducing F8 from YAML.
+    sys.setSchedule(1, 1, 1800, 600, 30, /*postEventWindow=*/2, 1800, &e, 1);
+
+    EXPECT_EQ(disp.autoSleepQuietMs(), CmdDispatcher::kAutoSleepQuietMinMs)
+        << "a window shorter than the hub's inter-frame gaps must be clamped, "
+           "not honoured — honouring it makes the node unreachable";
+}
+
 TEST_F(RealNodeFixture, AutoSleepWaitsForTheQuietWindow) {
     give_clock(disp, 730, 1787000000ULL, 0);
     auto sched = pack_schedule_op(/*msgid=*/731, 0xC0DE, NODE_MODE__MODE_AUTO);
