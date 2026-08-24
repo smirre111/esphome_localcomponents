@@ -1562,6 +1562,50 @@ TEST(FirmwareVersion, ComesFromTheRunningImageNotAConstant) {
 //
 // Asserted through behaviour rather than the counter: what matters is that the
 // hub can still talk to us afterwards.
+// The boot path must gate the resume on isProvisioned(), not getRegistered().
+//
+// getRegistered() is set ONLY by the CLIENTCONFIG / COVERCONFIG handlers, which
+// the hub sends only when a node's config is unsynced THAT boot. A node the hub
+// already knows registers and receives a bare LoginMsg:
+//
+//     Registered with LORA server
+//     LoginMsg sent (request_register=0)      <- no config push, so no flag
+//
+// so the flag stays false for the life of the RTC domain. It guarded the
+// beacon-first resume, which therefore never ran: every wake did a full
+// REGISTER -> config -> login handshake. Observed on node 2 as a REGISTER on
+// every 10-minute check-in, and "Device not registered yet" logged on a wake
+// with rtc_ram=VALID.
+//
+// This pins the predicate, not main.cpp's branch (main.cpp is not compiled by
+// the harness) — but the predicate is the whole of the bug: the two disagree
+// for exactly the node that has been provisioned and not re-pushed.
+TEST_F(RealNodeFixture, ProvisionedNodeIsRecognisedWithoutAConfigPush) {
+    // The fixture sets an address, as a provisioned node has from config.txt,
+    // WITHOUT any CLIENTCONFIG/COVERCONFIG having arrived this boot.
+    ASSERT_NE(sys.getConfigAddress(), 0)
+        << "precondition: the node has a persisted address";
+
+    EXPECT_TRUE(disp.isProvisioned())
+        << "a node with a persisted address is provisioned — this is what "
+           "'the hub can address us' actually means, and it is what the boot "
+           "path must gate the beacon-first resume on";
+}
+
+TEST(RealCmdDispatcherFresh, UnprovisionedNodeIsNotMistakenForProvisioned) {
+    // The other side of the predicate: address 0 means the hub cannot reach us,
+    // so the node must register rather than try to resume.
+    MotorCtrl     mot;
+    SystemCtrl    sys;
+    LoraInterface lif;
+    portMUX_TYPE  motorMux{};
+    portMUX_TYPE  buttonMux{};
+    CmdDispatcher disp{&mot, &sys, &lif, motorMux, buttonMux};
+
+    ASSERT_EQ(sys.getConfigAddress(), 0) << "precondition: fresh node";
+    EXPECT_FALSE(disp.isProvisioned());
+}
+
 TEST_F(RealNodeFixture, ForeignClientConfigDoesNotWedgeOurLink) {
     give_clock(disp, /*msgid=*/50, 1787000000ULL, 0);
 
