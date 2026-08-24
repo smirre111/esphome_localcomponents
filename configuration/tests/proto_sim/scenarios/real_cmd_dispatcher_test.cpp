@@ -7,6 +7,7 @@
 // directly and inspect the resulting state + TX buffers.
 
 #include <gtest/gtest.h>
+#include "nvs.h"
 #include <chrono>
 #include <thread>
 
@@ -1392,6 +1393,70 @@ TEST_F(RealNodeFixture, TimeSyncAloneDoesNotStartAutoModeWithoutASchedule) {
 // persisted on the node and echoed back in the beacon — and its only consumer
 // was that beacon field. The quiet window used a hard-coded constant, so
 // setting post_event_window had no effect on anything the node did.
+// ---------------------------------------------------------------------------
+// F14 — a node that wants auto mode but has no clock must keep asking.
+//
+// TimeSync is a single unbursted, unacknowledged frame, and the hub sends it
+// only on the login-ack and beacon paths. An AWAKE node does neither, so losing
+// that one frame left the node sitting interactive with nothing to re-trigger
+// it. Observed live: CMD_LOGIN and CMD SCHEDULE both arrived, TimeSync did not,
+// and the node stayed awake 25 minutes repeating
+// "Auto mode is on but the clock is not valid yet".
+//
+// The node now re-sends its wake beacon, which the hub already answers with a
+// TimeSync — reusing that path rather than retransmitting TimeSync blindly.
+// ---------------------------------------------------------------------------
+
+namespace {
+int drain_beacons(CmdDispatcher &d) {
+    int n = 0;
+    CmdDispatcher::tx_command_t c{};
+    while (xQueueReceive(d.txCmdQueueNew, &c, 0) == pdTRUE)
+        if (c.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_BEACON) ++n;
+    return n;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, NoClockMakesTheNodeAskAgain) {
+    // Auto mode configured, but no TimeSync has arrived.
+    sched::Entry e = sched_entry(450, sched::DAY_ALL);
+    sys.setSchedule(1, /*mode=*/1, 1800, 600, 30, 20, 1800, &e, 1);
+
+    ASSERT_FALSE(CmdDispatcher::isClockValid())
+        << "precondition: no clock yet";
+    ASSERT_FALSE(disp.shouldRunAutoMode())
+        << "I8: a node that cannot evaluate its schedule must stay interactive";
+
+    (void) drain_beacons(disp);
+    proto_sim_timer_fire_all();
+
+    EXPECT_GT(drain_beacons(disp), 0)
+        << "the node must re-send its wake beacon to ask for a TimeSync — "
+           "otherwise one lost frame strands it in interactive mode with "
+           "nothing to re-trigger it";
+}
+
+TEST_F(RealNodeFixture, AClockStopsTheAsking) {
+    sched::Entry e = sched_entry(450, sched::DAY_ALL);
+    sys.setSchedule(1, /*mode=*/1, 1800, 600, 30, 20, 1800, &e, 1);
+    ASSERT_FALSE(disp.shouldRunAutoMode());   // arms the retry
+
+    // The TimeSync we were asking for.
+    give_clock(disp, /*msgid=*/900, 1787000000ULL, 0);
+    ASSERT_TRUE(CmdDispatcher::isClockValid());
+
+    (void) drain_beacons(disp);
+    proto_sim_timer_fire_all();
+
+    // NOTE: two things enforce this — the TimeSync handler cancels the timer,
+    // and clockRetryCb re-checks isClockValid() and self-cancels if it fires
+    // anyway. So removing the handler-side cancel does NOT fail this test; it
+    // only costs one extra firing. The behaviour is what is asserted here.
+    EXPECT_EQ(drain_beacons(disp), 0)
+        << "once the clock is established the node must stop asking — a retry "
+           "that never stops is just a slower kind of stuck";
+}
+
 TEST_F(RealNodeFixture, QuietWindowComesFromPostEventWindow) {
     sched::Entry e = sched_entry(450, sched::DAY_ALL);
     // 45 s window, comfortably above the floor.
@@ -1580,6 +1645,22 @@ TEST(FirmwareVersion, ComesFromTheRunningImageNotAConstant) {
 // This pins the predicate, not main.cpp's branch (main.cpp is not compiled by
 // the harness) — but the predicate is the whole of the bug: the two disagree
 // for exactly the node that has been provisioned and not re-pushed.
+// NOTE: there is deliberately no unit test here for persistHubAddr_ tracking
+// the hub (the F-5 persistence fix). Three attempts at one all passed under
+// mutation — the save/load round trip still restored hub=1 with the fix
+// reverted — so shipping one would have claimed coverage that does not exist.
+//
+// Two harness properties defeat it, both worth knowing before trying again:
+//   * the node NVS shim is process-global, so an earlier test's blob is loaded
+//     unless proto_sim_nvs_reset() is called first; and
+//   * get_base_nonce() returns true for any EXISTING peer entry, even one whose
+//     nonce is 0 — so "we have a nonce" is satisfied by a session that cannot
+//     decrypt anything.
+//
+// The fix is verified on hardware instead, where the evidence is unambiguous:
+// the node restored `hub=255 base_nonce=0x20fc0cdd tx=390(+64)` identically on
+// every boot and the hub answered `psa_aead_decrypt failed: -149`.
+
 TEST_F(RealNodeFixture, ProvisionedNodeIsRecognisedWithoutAConfigPush) {
     // The fixture sets an address, as a provisioned node has from config.txt,
     // WITHOUT any CLIENTCONFIG/COVERCONFIG having arrived this boot.
