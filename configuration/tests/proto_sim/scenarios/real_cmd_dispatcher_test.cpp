@@ -85,7 +85,6 @@ struct RealNodeFixture : public ::testing::Test {
         // Production CmdDispatcher::onReceiveNew expects the node to know
         // its own address (CLIENTCONFIG path was already exercised).
         sys.setAddress(kNodeAddr, kSubnet);
-        sys.setRegistered();
 
         // Pin the simulated factory MAC so any code reading
         // esp_read_mac() sees this node's identity.
@@ -365,7 +364,6 @@ TEST(RealCmdDispatcherFresh, FreshNodeAcceptsClientConfigByMac) {
            "CLIENTCONFIG whose MAC matches its factory MAC and apply the "
            "hub-assigned address. The CLIENTCONFIG exception to the "
            "destAddress check is exactly what makes this work.";
-    EXPECT_TRUE(sys.getRegistered());
 }
 
 TEST_F(RealNodeFixture, CmdClientConfigAppliesAddressOnlyForMatchingMac) {

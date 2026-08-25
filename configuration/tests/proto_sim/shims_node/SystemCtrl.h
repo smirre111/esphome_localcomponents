@@ -29,8 +29,9 @@ public:
         if (interval_s != 0) battery_interval_s_ = interval_s;
     }
     uint32_t getConfigBatteryInterval() const      { return battery_interval_s_; }
-    void setRegistered()                           { registered_ = true; }
-    bool getRegistered() const                     { return registered_; }
+    // setRegistered()/getRegistered() removed from production and therefore
+    // from this shim: the flag was write-only once the beacon-first resume was
+    // correctly gated on isProvisioned(). See SystemCtrl.h.
 
     // LittleFS persistence — no-ops on host (test inspects the in-RAM
     // setters directly).
@@ -111,7 +112,6 @@ public:
 
 private:
     uint8_t   addr_{0}, subnt_{0};
-    bool      registered_{false};
     std::string hostname_;
     uint64_t  sleep_s_{0};
     uint32_t  open_s_{0}, close_s_{0};
