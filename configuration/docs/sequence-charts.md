@@ -217,6 +217,8 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F11 | A beacon predating a mode change reverted the HA switch to the state the user just left | Fixed — correction gated on `schedule_pending()` |
 | F12 | A `CLIENTCONFIG` for another node could ratchet our replay counter onto its sequence | Fixed — CLIENTCONFIG exempt from the msgid check, gated by MAC |
 | F13 | The RTC mode marker said INTERACTIVE for nodes running a schedule | Fixed — `setSchedule()` goes through `setAutoMode()` |
+| F14 | TimeSync had no retry; losing that one frame stranded a node in interactive mode | Fixed — the node re-sends its wake beacon while it lacks a clock |
+| F15 | Chart 2's beacon-first resume had never once executed | Fixed — three stacked defects, see below |
 
 ### F7 — the restart that undid the schedule
 
@@ -399,3 +401,75 @@ Same shape as the firmware-version field (see the activity log): **a diagnostic
 that can quietly disagree with reality is worse than not having one**, because
 it is trusted. Both are now derived from a single owner rather than maintained
 in parallel.
+
+### F15 — chart 2 had never run
+
+Chart 2 documents the resume-first wake as working, with a well-designed failure
+branch. It had never executed. Three defects were stacked, each hiding the next,
+and only fixing one at a time revealed the following one.
+
+**1. The branch was unreachable.** It was gated on `getRegistered()`, which is
+set ONLY by the CLIENTCONFIG and COVERCONFIG handlers — messages the hub sends
+only when a node's config is unsynced *that boot*. A node the hub already knows
+gets a bare LoginMsg:
+
+```
+Registered with LORA server
+LoginMsg sent (request_register=0)      <- no config push, so no flag
+```
+
+so the flag stayed false for the life of the RTC domain and every wake fell
+through to a full REGISTER. Now gated on `isProvisioned()`
+(`getConfigAddress() != 0`), the persisted signal.
+
+**2. The persisted session was stale and wrongly keyed.** `persistHubAddr_`
+defaulted to `0xFF` and was assigned in exactly one place — from a blob just
+loaded — so it was never set from the hub address learned at login, where the
+live nonce is filed. Saves looked up `get_base_nonce(255)`, found an ancient
+broadcast-keyed entry and rewrote it forever:
+
+```
+F-5: restored state hub=255 base_nonce=0x20fc0cdd tx=390(+64) rx=0
+```
+
+against a live session of `base_nonce=0xfd987e7d` under peer 1. The resume
+beacon was therefore encrypted with a nonce the hub had never held, at msgid 455
+against a hub counter of 11:
+
+```
+Received packet with length 60
+psa_aead_decrypt failed: -149
+AES-GCM decryption/authentication failed
+```
+
+**3. Verified working.** After both fixes, on a real check-in wake:
+
+```
+F-5: restored state hub=1 base_nonce=0x3eeb5af7 tx=8(+64) rx=3
+Deep-sleep wake with valid session — resuming (beacon-first)
+CMD TIMESYNC: 2026-08-24 21:18:30 — drift correction +0 s
+P2b: session resumed OK — skipped REGISTER handshake
+```
+
+The restored nonce matches the session established at the previous login, the
+hub decrypts the beacon, and the REGISTER handshake is skipped — roughly 4 s of
+radio saved on every wake of a battery node.
+
+**The lesson is about the charts themselves.** Chart 2 was reviewed and declared
+conforming. It was conforming — as a description of code that could not run. A
+sequence chart validates the design, never that the path is reached; only the
+device says that.
+
+### F14 — TimeSync inherits F1's shape
+
+The schedule push got retransmit-until-ack (F2). TimeSync never did, and it is
+sent only on the login-ack and beacon paths — neither of which an AWAKE node
+travels. Losing that single frame left a node configured for auto mode sitting
+interactive with nothing to re-trigger it. Observed: `CMD_LOGIN` and
+`CMD SCHEDULE` both arrived, TimeSync did not, and the node stayed awake for 25
+minutes repeating *"Auto mode is on but the clock is not valid yet"* until a
+manual reset.
+
+Fixed by having the node **ask again** — re-sending its wake beacon on a 60 s
+timer while it lacks a clock — rather than the hub retransmitting blindly.
+Nothing goes on air that the node does not currently need.
