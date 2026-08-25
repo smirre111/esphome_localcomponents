@@ -219,6 +219,7 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F13 | The RTC mode marker said INTERACTIVE for nodes running a schedule | Fixed — `setSchedule()` goes through `setAutoMode()` |
 | F14 | TimeSync had no retry; losing that one frame stranded a node in interactive mode | Fixed — the node re-sends its wake beacon while it lacks a clock |
 | F15 | Chart 2's beacon-first resume had never once executed | Fixed — three stacked defects, see below |
+| F16 | The deep-sleep drain-wait inferred "motor finished" from queue depth alone | Fixed — `checkQueuesIdle()` asks `MotorCtrl::isBusy()` |
 
 ### F7 — the restart that undid the schedule
 
@@ -473,3 +474,39 @@ manual reset.
 Fixed by having the node **ask again** — re-sending its wake beacon on a 60 s
 timer while it lacks a clock — rather than the hub retransmitting blindly.
 Nothing goes on air that the node does not currently need.
+
+### F16 — the drain-wait was right by accident
+
+Chart 3 ends with *"drains queues, then sleeps"*, and that is what
+`checkQueuesIdle()` did: it counted `uxQueueMessagesWaiting` on five queues and
+nothing else. Verified on hardware, it *did* hold the node awake through a full
+36 s close:
+
+```
+39538  sleep requested
+39708  FSM is BUSY / Still tasks in queues: MotCmd 1
+       ... MotCmd 1 held for the whole move ...
+       Motor stop -> "No tasks in queues, entering deep sleep"
+```
+
+But only because MotorCtrl leaves the command in `motCmdQueueNew` for the
+duration. That is a property of the current queue discipline, not a guarantee.
+Dequeue earlier and track state in the FSM — a perfectly ordinary refactor — and
+the node would deep-sleep mid-travel, leaving the blind half closed and its
+stored position wrong. Nothing in the code said "don't do that".
+
+The signal already existed and was simply not consulted. The FSM's own
+start/end-of-operation transitions are `IDLE -> non-IDLE` and back, and those
+are exactly the transitions that acquire and release `motorLock`
+(`ESP_PM_NO_LIGHT_SLEEP`). So `m_blindsCurState != BLINDS_IDLE` is true
+precisely while the power-management lock is held.
+
+`MotorCtrl::isBusy()` exposes that, and `checkQueuesIdle()` now asks it.
+Deliberately NOT a new busy flag: there is already a `motorBusyFlag` member with
+every use commented out, and a second source of truth is exactly how the
+firmware-version field (F-fw) and the RTC mode marker (F13) went wrong.
+
+**The recurring shape, now three times over:** something that looks like a
+guarantee but is a coincidence — the drain-wait here, the "drift guard" that
+compared two hardcoded constants, and the `catchup == 0` early return that the
+window arithmetic already handled. Worth checking for deliberately.
