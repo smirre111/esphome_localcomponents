@@ -256,3 +256,8 @@ void proto_sim_timer_reset(void) {
 #include "esp_app_desc.h"
 static const esp_app_desc_t s_app_desc = { "9.8.7", "proto_sim" };
 const esp_app_desc_t *esp_app_get_description(void) { return &s_app_desc; }
+
+// ---- EXT1 pin mask ----
+static uint64_t g_ext1_status = 0;
+uint64_t esp_sleep_get_ext1_wakeup_status(void) { return g_ext1_status; }
+void proto_sim_set_ext1_status(uint64_t pins) { g_ext1_status = pins; }

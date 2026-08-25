@@ -518,8 +518,15 @@ TEST_F(RealNodeFixture, WakeReasonFromTimerIsCheckin) {
 }
 
 TEST_F(RealNodeFixture, WakeReasonFromExt1IsButton) {
+    // Now requires a BUTTON pin in the EXT1 mask, not merely an EXT1 wake:
+    // the mask also carries the LoRa DIO lines (F18). This test previously
+    // set only the cause bit and so encoded the assumption that any EXT1 wake
+    // is a press — which is exactly the bug.
     proto_sim_set_wakeup_causes(BIT(ESP_SLEEP_WAKEUP_EXT1));
+    proto_sim_set_ext1_status(1ULL << ctrlButtonUpPin);
     EXPECT_EQ(CmdDispatcher::classifyWakeReason(), WAKE_REASON__WAKE_BUTTON);
+    proto_sim_set_wakeup_causes(0);
+    proto_sim_set_ext1_status(0);
 }
 
 TEST_F(RealNodeFixture, WakeReasonPrefersSleepCauseOverResetReason) {
@@ -1453,6 +1460,46 @@ TEST_F(RealNodeFixture, DeepSleepWaitsForTheMotorEvenWithEmptyQueues) {
     mot.set_busy(false);
     EXPECT_TRUE(disp.checkQueuesIdle())
         << "and once the motor is idle and the queues are empty, sleep";
+}
+
+// ---------------------------------------------------------------------------
+// F18 — EXT1 is not synonymous with "a button was pressed".
+//
+// The deep-sleep wake mask contains the three buttons AND the LoRa DIO0/DIO1
+// lines. classifyWakeReason() returned WAKE_BUTTON for any EXT1 wake without
+// looking at which pin fired — and WAKE_BUTTON makes main.cpp suspend automatic
+// mode for the whole interactive_timeout (5 min here, 30 min on node 1) and
+// keep the node awake. A single radio interrupt would therefore stop the
+// schedule with nobody having touched the blind.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, AButtonPinMakesItAButtonWake) {
+    proto_sim_set_wakeup_causes(BIT(ESP_SLEEP_WAKEUP_EXT1));
+    proto_sim_set_ext1_status(1ULL << ctrlButtonDownPin);
+
+    EXPECT_EQ(CmdDispatcher::classifyWakeReason(), WAKE_REASON__WAKE_BUTTON)
+        << "a real press must still flip the node to interactive";
+
+    proto_sim_set_wakeup_causes(0);
+    proto_sim_set_ext1_status(0);
+}
+
+TEST_F(RealNodeFixture, ARadioPinIsNotAButtonWake) {
+    // EXT1 fired, but from a LoRa DIO line rather than a button.
+    proto_sim_set_wakeup_causes(BIT(ESP_SLEEP_WAKEUP_EXT1));
+    // GPIO26 is the LoRa DIO0 on this board variant; the value matters less
+    // than it not being one of the button pins (34/35/36).
+    proto_sim_set_ext1_status(1ULL << 26);
+
+    EXPECT_NE(CmdDispatcher::classifyWakeReason(), WAKE_REASON__WAKE_BUTTON)
+        << "a radio interrupt reported as a button press suspends automatic "
+           "mode for the full interactive_timeout with nobody at the blind";
+    EXPECT_EQ(CmdDispatcher::classifyWakeReason(),
+              WAKE_REASON__WAKE_TIMER_CHECKIN)
+        << "it is an ordinary check-in: beacon, listen, sleep again";
+
+    proto_sim_set_wakeup_causes(0);
+    proto_sim_set_ext1_status(0);
 }
 
 TEST_F(RealNodeFixture, NoClockMakesTheNodeAskAgain) {

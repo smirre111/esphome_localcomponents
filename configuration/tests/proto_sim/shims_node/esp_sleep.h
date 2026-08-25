@@ -29,11 +29,18 @@ typedef enum {
 
 uint32_t esp_sleep_get_wakeup_causes(void);
 
+// Which EXT1 pins actually caused the wake. The node's EXT1 mask contains the
+// three buttons AND the LoRa DIO lines, so the classifier must distinguish
+// them — see classifyWakeReason().
+uint64_t esp_sleep_get_ext1_wakeup_status(void);
+
 // ---- harness control (not part of the ESP-IDF API) ----
 // Set the bitmask a subsequent esp_sleep_get_wakeup_causes() will report, e.g.
 // proto_sim_set_wakeup_causes(BIT(ESP_SLEEP_WAKEUP_TIMER)). Zero (the default)
 // models a fresh boot rather than a deep-sleep wake.
 void proto_sim_set_wakeup_causes(uint32_t causes);
+// Set the EXT1 pin mask a subsequent esp_sleep_get_ext1_wakeup_status() reports.
+void proto_sim_set_ext1_status(uint64_t pins);
 
 #ifdef __cplusplus
 }
