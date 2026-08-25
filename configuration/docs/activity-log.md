@@ -16,6 +16,54 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-25 — D4 verified; the beacon stops lying
+
+**D4 button override, verified on hardware** — the last item outstanding from
+the original auto-mode requirements:
+
+```
+07:10:10  BOOT reason=DEEPSLEEP causes=0x08 (EXT1) prev_mode=AUTO
+          Button wake — suspending automatic mode
+          Interactive mode for 300 s (auto mode suspended, not disabled)
+          Beacon: reason=BUTTON        HA switch stayed ON throughout
+07:15:13  Auto mode: sleeping 600 s    t=301 s against a configured 300 s
+```
+
+Every property holds: EXT1 classified as a button, mode suspended rather than
+disabled, the pending auto-sleep cancelled, and an unattended return to auto.
+
+**F17 — the beacon reported zeros for state the node already knew.** `v=0.00
+pos=0.00` in every beacon, all session, while the blind was at 100% on a healthy
+battery. Position was restored into `m_Position` but the beacon reads
+`state_.position_`; voltage lived in a plain member reset by every wake despite
+its comment calling it an "LKG cache". Fixed and confirmed live: **`v=14.04
+pos=1.00`**.
+
+This also retires a misdiagnosis: the hub's 0.0 V reading had briefly been taken
+for a failing supply on node 2. It was a reporting bug throughout.
+
+**Everything from the original requirements is now verified on hardware:**
+scheduled events on time, boot default interactive, HA mode switching, catch-up
+window, D4 override, beacon-first resume, OTA over the LoRa trigger, telemetry.
+
+**Two things left open and named rather than quietly carried:**
+
+* **F18** — `classifyWakeReason()` calls ANY EXT1 wake a button press, and the
+  wake mask includes the LoRa DIO pins. Harmless while the radio sleeps
+  properly, but a latent false positive that would suspend the schedule
+  unprompted.
+* **The "plausible but wrong" sweep.** Four such fields found this session, all
+  by accident. Worth auditing deliberately rather than waiting for the fifth.
+
+Also worth stating plainly: **three fixes this session are deliberately without
+unit tests** — the `persistHubAddr_` keying, the clock-retry cancel path, and
+this position restore. In each case the test I wrote passed under mutation
+(process-global NVS shim, a self-cancelling callback, and MotorCtrl not being
+compiled by the harness at all), so it would have claimed coverage that did not
+exist. Each is recorded in the test file and verified on hardware instead.
+
+190/190. Node `76a1442` (v1.0.26), hub `f747b03`.
+
 ### 2026-08-25 (morning) — OTA confirmed working; the drain-wait made explicit
 
 **HTTPS-OTA over the LoRa trigger works.** This had been an open question since

@@ -220,6 +220,8 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F14 | TimeSync had no retry; losing that one frame stranded a node in interactive mode | Fixed — the node re-sends its wake beacon while it lacks a clock |
 | F15 | Chart 2's beacon-first resume had never once executed | Fixed — three stacked defects, see below |
 | F16 | The deep-sleep drain-wait inferred "motor finished" from queue depth alone | Fixed — `checkQueuesIdle()` asks `MotorCtrl::isBusy()` |
+| F17 | The wake beacon reported `v=0.00 pos=0.00` for state the node already knew | Fixed — position published into `state_`, voltage RTC-backed |
+| F18 | `classifyWakeReason()` calls ANY EXT1 wake a button press, and the mask includes the LoRa DIO pins | **OPEN** — latent false positive |
 
 ### F7 — the restart that undid the schedule
 
@@ -510,3 +512,36 @@ firmware-version field (F-fw) and the RTC mode marker (F13) went wrong.
 guarantee but is a coincidence — the drain-wait here, the "drift guard" that
 compared two hardcoded constants, and the `catchup == 0` early return that the
 window arithmetic already handled. Worth checking for deliberately.
+
+### F17 — two fields that were plausible and wrong
+
+Every beacon carried `v=0.00 pos=0.00` while the blind sat at 100% on a healthy
+14 V battery. Both were sampled from state a deep-sleep wake had not restored:
+
+* **position** — `restorePosition()` sets `m_Position` from RTC, but the beacon
+  reports `motCtrl->getState().position_`, a *different* variable written only
+  by `updatePosition()` as the FSM runs. Two variables for one fact, and the
+  beacon read the un-restored one.
+* **voltage** — `lastBatteryVoltage_` was a plain member reset on every wake,
+  while the beacon goes out within seconds and the next sample is up to
+  `batteryInterval` (900 s) away. Its own comment called it an "LKG cache"; it
+  did not survive the one event that clears it.
+
+Not cosmetic: the hub published 0.0 V for node 2 for an entire session, and that
+reading was briefly mistaken for a failing supply. Confirmed fixed on hardware —
+`v=14.04 pos=1.00`.
+
+**That is the fourth field of this kind** (firmware version, RTC mode marker,
+and both of these). The shape is always the same: a value maintained in parallel
+with the thing it describes, which drifts and is then trusted.
+
+### F18 — any EXT1 wake is called a button press (OPEN)
+
+`classifyWakeReason()` returns `WAKE_BUTTON` whenever the EXT1 bit is set,
+without consulting `esp_sleep_get_ext1_wakeup_status()` to see which pin fired.
+The EXT1 mask contains the three buttons **and LoRa DIO0/DIO1**.
+
+Harmless in practice today, because the SX1278 is put in sleep mode before deep
+sleep and its DIO lines should not assert. But if they ever do, the node reports
+`reason=BUTTON`, suspends automatic mode for `interactive_timeout`, and stays
+awake — with nobody having touched the blind. The fix is to check the pin mask.
