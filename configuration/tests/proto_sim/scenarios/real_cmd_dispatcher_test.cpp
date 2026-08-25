@@ -1417,6 +1417,36 @@ int drain_beacons(CmdDispatcher &d) {
 }
 }  // namespace
 
+// The deep-sleep drain-wait must not sleep while the motor is still running.
+//
+// checkQueuesIdle() only counted queue depth. It happened to hold the node
+// awake through a move because MotorCtrl leaves the command in motCmdQueueNew
+// for the duration — a property of the current queue discipline, not a
+// guarantee. Dequeue earlier and track state in the FSM (a perfectly reasonable
+// refactor) and the node would deep-sleep mid-travel, leaving the blind half
+// closed and its stored position wrong. The invariant is now asked for
+// explicitly.
+TEST_F(RealNodeFixture, DeepSleepWaitsForTheMotorEvenWithEmptyQueues) {
+    // Drain everything: by the old check, this is "idle".
+    CmdDispatcher::tx_command_t c{};
+    while (xQueueReceive(disp.rxCmdQueueNew, &c, 0) == pdTRUE) {}
+    while (xQueueReceive(disp.txCmdQueueNew, &c, 0) == pdTRUE) {}
+    while (xQueueReceive(disp.sysCmdQueueNew, &c, 0) == pdTRUE) {}
+    MotorCmd_t m{};
+    while (xQueueReceive(mot.motCmdQueueNew, &m, 0) == pdTRUE) {}
+    while (xQueueReceive(mot.motorCmdQueueNew, &m, 0) == pdTRUE) {}
+
+    mot.set_busy(true);
+    EXPECT_FALSE(disp.checkQueuesIdle())
+        << "empty queues with the motor still running must NOT count as idle — "
+           "sleeping here stops the blind mid-travel and records the wrong "
+           "position";
+
+    mot.set_busy(false);
+    EXPECT_TRUE(disp.checkQueuesIdle())
+        << "and once the motor is idle and the queues are empty, sleep";
+}
+
 TEST_F(RealNodeFixture, NoClockMakesTheNodeAskAgain) {
     // Auto mode configured, but no TimeSync has arrived.
     sched::Entry e = sched_entry(450, sched::DAY_ALL);

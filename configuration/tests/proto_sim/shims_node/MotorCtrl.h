@@ -43,6 +43,11 @@ public:
     QueueHandle_t motorBatteryQueue;
     QueueHandle_t motCmdQueueNew;
 
+    // Mirrors the production accessor: true while a movement is in progress.
+    // Tests drive it directly, since the harness has no FSM.
+    bool isBusy() const { return busy_; }
+    void set_busy(bool b) { busy_ = b; }
+
     // Test inspection.
     float target_position() const { return target_position_; }
     bool  geometry_set()    const { return geometry_set_; }
@@ -55,6 +60,7 @@ public:
     uint32_t close_slack_s() const { return close_slack_s_; }
 
 private:
+    bool  busy_{false};
     State state_;
     float target_position_{0.0f};
     bool  geometry_set_{false};
