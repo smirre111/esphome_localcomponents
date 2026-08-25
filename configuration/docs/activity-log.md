@@ -16,6 +16,56 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-25 (morning) — OTA confirmed working; the drain-wait made explicit
+
+**HTTPS-OTA over the LoRa trigger works.** This had been an open question since
+the notes recorded that nodes could not reach `schmidteinander.local:8070`.
+Verified end to end on node 1, 33 seconds from button press to a rebooted node:
+
+```
+06:58:42  OTA sysop burst sent over LoRa
+          node 1 goes silent — WiFi up, fetching the image
+06:59:15  Beacon: reason=BOOT fw=10025      (was 10024)
+```
+
+Two earlier attempts were **inconclusive and reported as such**: node 1 was
+already on the hosted version, so a successful OTA would have installed the same
+image and proved nothing. Hosting a deliberately different build is what made
+the test decisive — and that only works because the beacon's firmware version is
+now derived from the running image (fixed yesterday). With the old hardcoded
+constant both images would have reported 10014 and this could not have been
+measured at all.
+
+**F16 — the deep-sleep drain-wait was right by accident.** `checkQueuesIdle()`
+counted queue depth and nothing else. It *did* hold the node awake through a
+full 36 s close, but only because MotorCtrl leaves the command in
+`motCmdQueueNew` for the duration — a property of the current queue discipline,
+not a guarantee. Dequeue earlier and track state in the FSM, an ordinary
+refactor, and the node would deep-sleep mid-travel with the blind half closed
+and its stored position wrong.
+
+The authoritative signal already existed and was simply not consulted: the FSM's
+`IDLE -> non-IDLE` and `non-IDLE -> IDLE` transitions are the same ones that
+acquire and release `motorLock` (`ESP_PM_NO_LIGHT_SLEEP`), so
+`m_blindsCurState != BLINDS_IDLE` is true exactly while the PM lock is held.
+`MotorCtrl::isBusy()` exposes it. Deliberately not a new flag — there is already
+a `motorBusyFlag` with every use commented out, and a second source of truth is
+precisely how the firmware-version field and the RTC mode marker went wrong.
+
+**Two corrections to my own earlier reasoning, both from the user:**
+
+* an interactive node is awake and reachable but SILENT unless it has something
+  to say. I had read silence as "asleep" more than once. Silence is not absence.
+* the movement guarantee is not purely incidental — there IS a PM lock. What was
+  accurate is that `checkQueuesIdle()` consulted neither it nor the FSM.
+
+**The recurring shape, now four times over:** something that looks like a
+guarantee but is a coincidence — this drain-wait, the "drift guard" comparing
+two hardcoded constants, the redundant `catchup == 0` return, and the
+unreachable quiet-window fallback. Worth checking for deliberately.
+
+190/190. Node `135d084` (v1.0.25, both nodes), hub `871e54f`.
+
 ### 2026-08-24 (evening) — the resume path had never run
 
 **Verified working for the first time**, on a real check-in wake:
