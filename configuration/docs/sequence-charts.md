@@ -221,7 +221,7 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F15 | Chart 2's beacon-first resume had never once executed | Fixed — three stacked defects, see below |
 | F16 | The deep-sleep drain-wait inferred "motor finished" from queue depth alone | Fixed — `checkQueuesIdle()` asks `MotorCtrl::isBusy()` |
 | F17 | The wake beacon reported `v=0.00 pos=0.00` for state the node already knew | Fixed — position published into `state_`, voltage RTC-backed |
-| F18 | `classifyWakeReason()` calls ANY EXT1 wake a button press, and the mask includes the LoRa DIO pins | **OPEN** — latent false positive |
+| F18 | `classifyWakeReason()` called ANY EXT1 wake a button press, and the mask includes the LoRa DIO pins | Fixed — the pin mask is consulted |
 
 ### F7 — the restart that undid the schedule
 
@@ -545,3 +545,40 @@ Harmless in practice today, because the SX1278 is put in sleep mode before deep
 sleep and its DIO lines should not assert. But if they ever do, the node reports
 `reason=BUTTON`, suspends automatic mode for `interactive_timeout`, and stays
 awake — with nobody having touched the blind. The fix is to check the pin mask.
+
+---
+
+## The "plausible but wrong" pattern
+
+Seven instances now, and they all have the same shape: **a value maintained in
+parallel with the thing it describes.** It drifts, and because it looks
+authoritative it is trusted. Four were found by accident while chasing something
+else; three by looking on purpose.
+
+| Value | Described | Failure |
+|---|---|---|
+| `kFirmwareVersion` | `PROJECT_VER` | Reported 1.0.14 for three releases. Its "drift guard" test compared two hardcoded constants and could never fail |
+| RTC mode marker | the running mode | Said INTERACTIVE for every auto-mode node, because `setSchedule()` bypassed `setAutoMode()` |
+| `state_.position_` | `m_Position` | Beacon reported `pos=0.00` for a blind at 100% |
+| `lastBatteryVoltage_` | the battery | Beacon reported `v=0.00` for a healthy 14 V cell; briefly mistaken for a failing supply |
+| `registerd_lora` | "is provisioned" | Set only by a config push, so false for every node the hub already knew — silently disabled the beacon-first resume for that feature's entire life |
+| `timeSyncDone` / `timeSyncTime` | TimeSync state | Never read or written by anything |
+| `motorBusyFlag` | the motor FSM | Every use commented out; a dormant second answer to what `isBusy()` now reports |
+
+Three lessons worth keeping:
+
+1. **A guard that requires the thing it guards to be edited in lockstep is not a
+   guard.** It converts a silent bug into a silent bug with a green tick.
+2. **Derive, don't mirror.** The firmware version now comes from the running
+   image; `isBusy()` from the FSM; the mode from one owner. None of those can
+   drift.
+3. **Delete rather than document.** Write-only state under a confident name is
+   what misleads the next reader — a comment saying "don't trust this" does not
+   help nearly as much as its absence.
+
+A fourth, about the tests: **three fixes in this work ship deliberately without
+unit tests**, because the tests written for them passed under mutation (a
+process-global NVS shim, a self-cancelling callback, and `MotorCtrl.cpp` not
+being compiled by the harness). Each is recorded where the test would have been.
+A test that cannot fail belongs to the same family as everything in the table
+above.
