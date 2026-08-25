@@ -1426,6 +1426,14 @@ int drain_beacons(CmdDispatcher &d) {
 // refactor) and the node would deep-sleep mid-travel, leaving the blind half
 // closed and its stored position wrong. The invariant is now asked for
 // explicitly.
+// NOTE: there is deliberately no test here for restorePosition() publishing
+// into state_ (the variable the wake beacon reports). MotorCtrl.cpp is not
+// compiled by the harness — MotorCtrl is a shim — so any such test would assert
+// the shim's behaviour, survive every mutation of the real code, and claim
+// coverage it does not have. The shim mirrors production so that OTHER tests
+// are not misled; the fix itself is verified on hardware, where the beacon goes
+// from pos=0.00 to the real position on a wake.
+
 TEST_F(RealNodeFixture, DeepSleepWaitsForTheMotorEvenWithEmptyQueues) {
     // Drain everything: by the old check, this is "idle".
     CmdDispatcher::tx_command_t c{};

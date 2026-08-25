@@ -23,7 +23,10 @@ public:
     float getPosition() const                       { return state_.position_; }
     State getState() const                          { return state_; }
     int   getLastMotorCurrentAdcRaw() const         { return 0; }
-    void  restorePosition()                         {}
+    // Mirrors production: the restored position must also land in state_,
+    // which is what the wake beacon reads.
+    void  restorePosition()                         { state_.position_ = restore_to_; }
+    void  set_restore_value(float p)                { restore_to_ = p; }
     void  setRollGeometry(float axle, float thick, float height) {
         axle_  = axle;
         thick_ = thick;
@@ -61,6 +64,7 @@ public:
 
 private:
     bool  busy_{false};
+    float restore_to_{0.0f};
     State state_;
     float target_position_{0.0f};
     bool  geometry_set_{false};
