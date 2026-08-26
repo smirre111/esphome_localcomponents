@@ -8,8 +8,26 @@ Written after a night in which automatic mode failed three times for three
 flows first turns that into one structural question instead.
 
 **Notation:** `msgid` is the unified counter used for both replay protection and
-AES-GCM nonce derivation. `↯` marks a frame that is single-shot (not bursted)
-and unacknowledged — i.e. lost silently if it collides.
+AES-GCM nonce derivation. `↯` marks a frame that is **unacknowledged** — lost
+silently if it collides.
+
+**It does NOT mean unbursted, and the link is asymmetric.** Every hub→node
+message, TimeSync and ScheduleConfig included, is transmitted as **17 copies**
+over one ~1.5 s round at 88 ms spacing (`LORATracker::send`, `txSlotsPerRound`),
+with `burstIndex`/`burstCount` re-stamped per copy. It has to be: the node's
+receiver is *windowed*, not continuous — `periodicRxCallback` opens an RX window
+every `rxIntervalMs` (500 ms, 3 per round) — so a burst spanning a full round is
+what guarantees a copy lands inside a window.
+
+Node→hub uplinks are the opposite: `sendPacketBytes()` is called **once** per
+message, with no burst loop on the node side at all. That is correct, because
+the hub is mains-powered and listens continuously (`lora_receive(0)`).
+
+So an earlier reading of this notation — that TimeSync was a lone frame — was
+wrong. **The genuinely single-shot frames are the node's uplinks**, above all
+the wake beacon. That asymmetry is why losing a beacon has been so much more
+damaging than losing a downlink throughout this work, and why F14 re-sends the
+beacon at the application layer rather than bursting it.
 
 ---
 
