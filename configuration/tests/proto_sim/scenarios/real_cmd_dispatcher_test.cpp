@@ -1907,7 +1907,12 @@ int drain_closes(CmdDispatcher &d) {
 TEST_F(RealNodeFixture, CatchupZeroNeverReplaysAMissedEntry) {
     // catchup_window == 0 is documented as "never replay a miss". A node that
     // was off overnight must not slam the blind on the morning it comes back.
-    if (arm_missed_entry(disp, sys, /*minutes_ago=*/2, /*catchup=*/0) == 0xFFFF)
+    //
+    // 10 minutes, comfortably outside the fixed kDueGraceS (120 s) window that
+    // is always searched. This used to say 2 minutes, which passed only because
+    // the window is exclusive at its start — a one-second margin, i.e. an
+    // accidental pass.
+    if (arm_missed_entry(disp, sys, /*minutes_ago=*/10, /*catchup=*/0) == 0xFFFF)
         GTEST_SKIP() << "would wrap past midnight UTC";
     ASSERT_TRUE(disp.shouldRunAutoMode());
     (void) drain_closes(disp);
@@ -1948,6 +1953,35 @@ TEST_F(RealNodeFixture, AnEntryInsideTheCatchupWindowIsReplayedExactlyOnce) {
            "the blind again on every wake for the whole catch-up window";
     EXPECT_EQ(drain_closes(disp), 0);
 }
+
+// ORDERING NOTE: this test must come AFTER the two above. s_last_exec_epoch is
+// a file-level static shared by every test in the binary, and an entry is
+// skipped when `due <= s_last_exec_epoch`. This test executes the most recent
+// entry of the group (1 minute ago), so running it earlier would block the
+// older entries the other tests rely on. Defined last so each execution uses a
+// strictly later epoch than the one before.
+// catchup_window == 0 must NOT disable the schedule itself.
+//
+// runDueScheduleEntry() is the only thing that executes an entry, and it used
+// to `return false` outright when catchup was 0 — so setting "never replay a
+// missed event" silently turned automatic mode into a no-op. Observed live on
+// node 1: it woke on time for its 21:45 close, beaconed either side of the
+// event, and never moved the blind.
+//
+// An entry falling due NOW is not a missed event. It must run whatever
+// catchup_window says.
+TEST_F(RealNodeFixture, CatchupZeroStillRunsAnEntryThatIsDueNow) {
+    if (arm_missed_entry(disp, sys, /*minutes_ago=*/1, /*catchup=*/0) == 0xFFFF)
+        GTEST_SKIP() << "would wrap past midnight UTC";
+    ASSERT_TRUE(disp.shouldRunAutoMode());
+    (void) drain_closes(disp);
+
+    EXPECT_TRUE(disp.runDueScheduleEntry())
+        << "catchup_window 0 means 'do not replay a MISS', not 'never run the "
+           "schedule' — this is what left the blind untouched all night";
+    EXPECT_EQ(drain_closes(disp), 1);
+}
+
 
 TEST_F(RealNodeFixture, AutoSleepRechecksTheConditionWhenItFires) {
     give_clock(disp, 760, 1787000000ULL, 0);
