@@ -613,7 +613,11 @@ TEST_F(RealNodeFixture, BeaconCarriesClockOnlyWhenValid) {
 TEST_F(RealNodeFixture, ResumeFallbackFiresRegisterWhenNothingDecrypts) {
     proto_sim_timer_reset();
     disp.armResumeFallback();
-    ASSERT_EQ(proto_sim_timer_armed_count(), 1) << "fallback must be armed";
+    // TWO timers now: the 12 s REGISTER fallback and the beacon retry ladder
+    // that runs inside it (re-send the cheap single frame before escalating to
+    // a full handshake). This used to assert 1.
+    ASSERT_EQ(proto_sim_timer_armed_count(), 2)
+        << "the REGISTER fallback and the beacon retry ladder must both be armed";
 
     // Drain anything already queued so the assertion below is unambiguous.
     CmdDispatcher::tx_command_t drain{};
@@ -623,11 +627,18 @@ TEST_F(RealNodeFixture, ResumeFallbackFiresRegisterWhenNothingDecrypts) {
     // proves the session. Time passes.
     proto_sim_timer_fire_all();
 
+    // The queue may now hold a re-beacon as well as the REGISTER, and
+    // fire_all() gives no ordering guarantee — so scan for the invariant rather
+    // than asserting which command happens to be first.
+    bool registered = false;
     CmdDispatcher::tx_command_t cmd{};
-    ASSERT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdTRUE)
+    while (xQueueReceive(disp.txCmdQueueNew, &cmd, 0) == pdTRUE)
+        if (cmd.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_REGISTER)
+            registered = true;
+
+    EXPECT_TRUE(registered)
         << "a resume that was never proven MUST fall back to REGISTER — "
            "otherwise the node is silent until its next wake";
-    EXPECT_EQ(cmd.cmd, (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_REGISTER);
 }
 
 TEST_F(RealNodeFixture, ResumeFallbackDoesNotRegisterOnceSessionIsProven) {
@@ -1498,6 +1509,72 @@ TEST_F(RealNodeFixture, ARadioPinIsNotAButtonWake) {
 
     proto_sim_set_wakeup_causes(0);
     proto_sim_set_ext1_status(0);
+}
+
+// ---------------------------------------------------------------------------
+// The beacon retry ladder.
+//
+// The link is asymmetric: every hub->node message is bursted 17x across a full
+// round (the node's receiver is windowed), while a node uplink is sent ONCE. The
+// wake beacon is therefore the least protected frame in the system — and it is
+// the one the exchange hangs on, since the hub answers it with TimeSync and, if
+// the version differs, the schedule.
+//
+// Losing it used to cost a full REGISTER -> ClientConfig -> login handshake,
+// because armResumeFallback() was the only recovery. Re-sending the beacon
+// costs one frame. The hub always answers a beacon, so a decrypted downlink is
+// a reliable implicit ACK.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, AnUnansweredBeaconIsResent) {
+    (void) drain_beacons(disp);
+    disp.armResumeFallback();      // "beacon sent, expecting a reply"
+    (void) drain_beacons(disp);    // ignore anything armResumeFallback queued
+
+    // No decrypted downlink arrives; the ack timer expires.
+    proto_sim_timer_fire_all();
+
+    EXPECT_GT(drain_beacons(disp), 0)
+        << "an unanswered beacon must be re-sent — it is a single unbursted "
+           "frame, and the alternative is a full REGISTER handshake";
+}
+
+TEST_F(RealNodeFixture, AnAnsweredBeaconIsNotResent) {
+    (void) drain_beacons(disp);
+    disp.armResumeFallback();
+    (void) drain_beacons(disp);
+
+    // A decrypted downlink IS the acknowledgement.
+    disp.noteSessionProven();
+    proto_sim_timer_fire_all();
+
+    // NOTE: two things enforce this — noteSessionProven() cancels the timer,
+    // and beaconRetryCb re-checks session_proven_ and self-cancels if it fires
+    // anyway. So removing the handler-side cancel does NOT fail this test; it
+    // only costs one extra timer expiry. The behaviour is what is asserted.
+    EXPECT_EQ(drain_beacons(disp), 0)
+        << "the hub answered, so re-sending would be pure airtime — and on a "
+           "shared channel that is airtime taken from the other node";
+}
+
+TEST_F(RealNodeFixture, BeaconRetriesAreBounded) {
+    (void) drain_beacons(disp);
+    disp.armResumeFallback();
+    (void) drain_beacons(disp);
+
+    // Fire well past the ladder's length. Each expiry re-arms, so this walks
+    // the whole ladder and then some.
+    int total = 0;
+    for (int i = 0; i < 6; i++) {
+        proto_sim_timer_fire_all();
+        total += drain_beacons(disp);
+    }
+
+    EXPECT_LE(total, CmdDispatcher::kMaxBeaconRetries)
+        << "the ladder must stop and hand over to the REGISTER fallback — an "
+           "unbounded retry against a hub that cannot answer (its own clock "
+           "invalid, so it sends no TimeSync) would beacon forever";
+    EXPECT_GT(total, 0) << "but it must retry at least once";
 }
 
 TEST_F(RealNodeFixture, NoClockMakesTheNodeAskAgain) {
