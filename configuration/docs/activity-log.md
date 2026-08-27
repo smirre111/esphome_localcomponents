@@ -16,6 +16,73 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-08-27 — the production config runs, both nodes, both events
+
+**First fully successful overnight run.** Both nodes executed both scheduled
+events, on the second, and the blinds actually moved.
+
+```
+21:44:36  wake (beacon_lead), resume OK, TimeSync +0 s drift
+21:45:01  nothing due -> sleeping 1 s              (nap-to-event)
+21:45:07  Executing schedule entry 0 (action=1)
+21:45:07  Command MOTCMD_FULL_DOWN / Call: Motor down
+21:45:11  ADC 279  position 0.807952
+21:45:16  ADC 242  position 0.633002
+21:45:21  ADC 187  position 0.475151
+21:45:49  Motor still running - deferring deep sleep
+03:45:57  Beacon: fw=10028 v=14.03 pos=0.00        (confirmed closed, 6 h later)
+06:00:04  Executing schedule entry 1 (action=0)    (open, on the second)
+```
+
+Six fixes from this work visible in one cycle: the catchup fix let it execute at
+all; the 1 s nap put it on the exact second; `Motor still running` is the
+`checkQueuesIdle` fix holding the node awake through the movement; the resume
+path skipped the handshake; the telemetry reports real values; and drift was
++0 s across a 6 h sleep.
+
+**The morning wake also validated the beacon ladder before it was even
+deployed.** At 05:59:38 node 2 resumed, got no answer, and paid the full price:
+
+```
+05:59:51  P2b: no decrypted downlink within 12000 ms — falling back to REGISTER
+```
+
+That is exactly the loss v1.0.29 addresses — two cheap re-beacons at 4 s and 8 s
+before escalating. Not a theoretical collision fix; a loss that happened on its
+own, unprompted.
+
+**Deployed v1.0.29** to both nodes: node 2 by serial, node 1 by OTA over LoRa
+(`fw=10028 -> 10029` in 53 s, second successful OTA of this work).
+
+**Three of my own errors, all the same shape — trusting a query's form over what
+it matched:**
+
+* `sed -n '/21:46:/,$p'` never started (no line matched 21:46), printed nothing,
+  and I read empty output as evidence both nodes were silent. They were not:
+  node 1 had four clean wakes overnight.
+* The hub log carries only `HH:MM:SS` with **no date**, so a `21:4[4-6]` filter
+  silently mixed two days. I nearly reported node 1 running two firmware
+  versions 0.4 s apart.
+* A waiter grepping `2026-08-27 06:0` matched the *text* `next event
+  2026-08-27 06:00:00` inside a log line rather than a timestamp, and fired two
+  minutes early. Anchor to `^` for timestamps.
+
+And one worse: I killed what I took to be a duplicate hub-watcher process, but
+`Start-Process` produces a launcher/child pair — so I killed the real watcher and
+blinded myself to node 1 for eleven hours, then built a theory about node 1
+being hung. Check `ParentProcessId` before concluding "duplicate".
+
+**Two observations for later, neither a fault:**
+
+* Node 1 reads **11.1 V** against node 2's **14.0 V**. Worth watching now that
+  node 1 sleeps and wakes on schedule rather than sitting awake.
+* Battery voltage appears to be populated mainly by the end-of-move measurement,
+  so after any cold boot HA shows 0.0 V until the blind next moves. The
+  RTC-backed cache survives deep sleep, correctly not a power-on — but sampling
+  once at boot would close the gap.
+
+196/196. Both nodes on v1.0.29.
+
 ### 2026-08-25 — D4 verified; the beacon stops lying
 
 **D4 button override, verified on hardware** — the last item outstanding from
