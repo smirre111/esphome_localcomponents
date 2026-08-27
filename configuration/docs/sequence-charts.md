@@ -240,6 +240,7 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F16 | The deep-sleep drain-wait inferred "motor finished" from queue depth alone | Fixed — `checkQueuesIdle()` asks `MotorCtrl::isBusy()` |
 | F17 | The wake beacon reported `v=0.00 pos=0.00` for state the node already knew | Fixed — position published into `state_`, voltage RTC-backed |
 | F18 | `classifyWakeReason()` called ANY EXT1 wake a button press, and the mask includes the LoRa DIO pins | Fixed — the pin mask is consulted |
+| F19 | The nightly `CMD_SLEEP` tears down the hub's session and schedules a login from `sleep_duration`, which is meaningless for an auto-mode node | **OPEN** — verified end to end from the logs |
 
 ### F7 — the restart that undid the schedule
 
@@ -600,3 +601,90 @@ process-global NVS shim, a self-cancelling callback, and `MotorCtrl.cpp` not
 being compiled by the harness). Each is recorded where the test would have been.
 A test that cannot fail belongs to the same family as everything in the table
 above.
+
+---
+
+## 6. The nightly sleep — and why it breaks auto mode (F19)
+
+None of the charts above modelled the 23:00 `on_sleep_start` automation, which
+is why this went unnoticed. It behaves completely differently in the two modes.
+
+### Interactive mode — the mechanism is correct
+
+```mermaid
+sequenceDiagram
+    participant H as Hub
+    participant N as Node (awake, interactive)
+    Note over H: 23:00 on_time trigger
+    H->>H: enterSleep(): stamp last_sleep_epoch_,<br/>clear login_acked_ + nonce
+    H->>N: CMD_SLEEP
+    N->>N: sleeps sleep_duration (6 h)
+    H->>H: login_startup armed for<br/>sleep_duration + 5 s + addr x 3 s
+    Note over N: wakes ~05:00
+    H->>N: LoginMsg (node is genuinely awake)
+    N->>H: ack — session re-established
+```
+
+An interactive node really does sleep for `sleep_duration`, so
+`last_sleep_epoch_ + sleep_duration` predicts its wake correctly and the login
+fallback lands while it is listening. **Nothing is wrong here.**
+
+### Automatic mode — every assumption fails
+
+```mermaid
+sequenceDiagram
+    participant H as Hub
+    participant N as Node (ASLEEP, auto)
+    Note over H: 23:00 on_time trigger
+    H->>H: enterSleep(): stamps a sleep that<br/>never happened, discards the session
+    H-xN: CMD_SLEEP — node is asleep, never receives it
+    H->>H: login_startup armed for 05:00:56 / 05:00:59
+    Note over N: wakes 03:45 on ITS schedule,<br/>re-establishes a session
+    Note over H: 05:01 timer fires anyway
+    H->>H: send_login(): resets counters, MINTS A NEW NONCE
+    H-xN: LoginMsg x9 — node asleep until 05:59:30
+    Note over N: 05:59:30 wakes, resumes with the 03:45 session
+    N->>H: encrypted beacon
+    H->>H: psa_aead_decrypt failed: -149
+    Note over N: no TimeSync -> 12 s fallback -> full REGISTER
+```
+
+**Verified end to end, not inferred:**
+
+| Step | Evidence |
+|---|---|
+| `SleepAction::play()` calls `enterSleep()` with no mode check | code |
+| `enterSleep()` clears `login_acked_` + `pending_login_nonce_` and stamps `last_sleep_epoch_` BEFORE transmitting | code |
+| It arms `login_startup` at `sleep_duration + 5 s + addr x 3 s` | code |
+| 23:00 + 21600 + 5 + 51/54 s = 05:00:56 / 05:00:59 | arithmetic |
+| Observed login retries at 05:01:02 / 05:01:05 | hub log |
+| `send_login()` resets frame counters and mints a new nonce | code |
+| Node 2's 05:59 beacon ARRIVES and fails to decrypt | `psa_aead_decrypt failed: -149`, 05:59:39.798 |
+| Node falls back to REGISTER | node serial, 05:59:51 |
+
+The beacon was **not lost and not collided with** — it arrived and could not be
+decrypted. That distinction is what separates this from every earlier uplink
+failure in this document, and it is why the beacon retry ladder (F-beacon)
+cannot help: re-sending a frame encrypted with a nonce the hub has discarded
+fails identically, three times instead of once.
+
+**The model is wrong even if the frame were delivered.** An auto-mode node
+receiving `CMD_SLEEP` computes its sleep from `computeSleepSeconds()` — the
+schedule — not from `sleep_duration`. So `last_sleep_epoch_ + sleep_duration`
+can never describe an auto-mode node.
+
+### Wrong turns worth recording
+
+Three hypotheses were advanced before the right one, and all three were checked
+and discarded:
+
+* **Beacon collision.** Refuted by the data: at 21:45 the two nodes beaconed
+  0.6 s apart and BOTH succeeded; at 06:00 they were 15 s apart and one failed.
+* **Hub reboot.** Refuted: hub uptime 1.56 days, no restart.
+* **The 03:45 contact scheduled the 05:01 login.** Wrong —
+  `schedule_startup_login_()` only runs at hub setup; `enterSleep()` arms its
+  own fallback. Right mechanism, wrong intermediate step, asserted with more
+  confidence than the evidence supported.
+
+The answer came from arithmetic on the config (23:00 + 6 h), not from the code
+reading.
