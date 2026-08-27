@@ -1199,6 +1199,37 @@ namespace esphome
 
     void LORAListener::enterSleep()
     {
+      // The nightly sleep is an INTERACTIVE-mode mechanism, and applying it to
+      // an auto-mode node is not merely wasted airtime — it actively breaks the
+      // session. Everything below runs unconditionally and BEFORE the frame is
+      // transmitted:
+      //
+      //   * last_sleep_epoch_ is stamped, recording a sleep that never happened
+      //     (an auto-mode node is usually already asleep and never receives the
+      //     command at all);
+      //   * login_acked_ and pending_login_nonce_ are cleared, discarding a
+      //     session the node still holds;
+      //   * a login fallback is armed at sleep_duration + margin + stagger,
+      //     which for an auto-mode node predicts a wake that will not happen.
+      //
+      // Observed 2026-08-27: the 23:00 sleep armed a login for 05:00:56/05:00:59
+      // (23:00 + 21600 + 5 + addr x 3). It fired at 05:01 against two sleeping
+      // nodes, send_login() minted a fresh nonce, and when node 2 actually woke
+      // at 05:59:30 its resume beacon ARRIVED and could not be decrypted —
+      // psa_aead_decrypt failed: -149 — costing a full REGISTER handshake.
+      //
+      // An auto-mode node derives its own wake from the schedule, so there is
+      // nothing here the hub can usefully say. The node ignores the command too
+      // (belt and braces), but not sending it is what protects the session.
+      if (this->auto_mode_)
+      {
+        ESP_LOGI("LORAListener",
+                 "Device %s is in automatic mode — skipping the nightly sleep "
+                 "(it schedules its own; sending would discard the session)",
+                 this->address_str());
+        return;
+      }
+
       ESP_LOGI("LORAListener", "Device %s entering sleep mode", this->address_str());
 
       // Persist the sleep timestamp before incrTxMessageId() triggers save_state_(),

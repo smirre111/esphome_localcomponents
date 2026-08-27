@@ -410,6 +410,26 @@ TEST_F(RealNodeFixture, CmdClientConfigAppliesAddressOnlyForMatchingMac) {
 
 namespace {
 
+// sysop is a plain ClientOperation enum field on the operation message, not a
+// nested message — see blinds.proto field 11.
+std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what) {
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr               = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = msgid;
+    op.header         = &hdr;
+
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.sysop    = what;
+
+    size_t len = lora_client_operation_message__get_packed_size(&op);
+    std::vector<uint8_t> out(len);
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
 std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
                                       int32_t utcoffset, uint64_t dstnext = 0) {
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -1575,6 +1595,51 @@ TEST_F(RealNodeFixture, BeaconRetriesAreBounded) {
            "unbounded retry against a hub that cannot answer (its own clock "
            "invalid, so it sends no TimeSync) would beacon forever";
     EXPECT_GT(total, 0) << "but it must retry at least once";
+}
+
+// ---------------------------------------------------------------------------
+// F19 — the nightly CMD_SLEEP belongs to interactive mode only.
+//
+// It exists to put an AWAKE node down for sleep_duration. An auto-mode node
+// derives its wake from the schedule, so obeying it would replace a
+// schedule-derived wake with a fixed-duration one.
+//
+// The node-side ignore is belt and braces (the hub no longer sends it to an
+// auto-mode node), but it matters for a node whose mode the hub has stale
+// knowledge of — exactly the divergence that caused the damage.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, AutoModeIgnoresTheNightlySleepCommand) {
+    sched::Entry e = sched_entry(450, sched::DAY_ALL);
+    sys.setSchedule(1, /*mode=*/1, 1800, 21600, 30, 20, 1800, &e, 1);
+    ASSERT_TRUE(sys.getAutoMode()) << "precondition: node is in auto mode";
+
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    auto frame = pack_sysop_op(/*msgid=*/860, CLIENT_OPERATION__CMD_SLEEP);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    EXPECT_FALSE(drain_for_sleep(disp))
+        << "an auto-mode node must keep its schedule-derived wake — obeying a "
+           "fixed sleep_duration puts its next wake where the hub guesses "
+           "rather than where the schedule says";
+}
+
+TEST_F(RealNodeFixture, InteractiveModeStillObeysTheNightlySleep) {
+    // The case the command exists for must keep working.
+    sys.setAutoMode(false);
+    ASSERT_FALSE(sys.getAutoMode()) << "precondition: node is interactive";
+
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    auto frame = pack_sysop_op(/*msgid=*/861, CLIENT_OPERATION__CMD_SLEEP);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    EXPECT_TRUE(drain_for_sleep(disp))
+        << "an interactive node has no schedule to sleep towards — the nightly "
+           "sleep is the only thing that puts it down for the night";
 }
 
 TEST_F(RealNodeFixture, NoClockMakesTheNodeAskAgain) {
