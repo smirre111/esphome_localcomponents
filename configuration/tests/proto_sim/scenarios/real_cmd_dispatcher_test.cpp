@@ -2060,6 +2060,22 @@ namespace {
 // Returns the entry's minute-of-day.
 uint16_t arm_missed_entry(CmdDispatcher &d, SystemCtrl &s,
                           int minutes_ago, uint32_t catchup) {
+    // Clear the interactive override FIRST, before the entry is computed.
+    //
+    // This dance costs 1.2 s of real time, and the entry's age is measured
+    // against a 120 s grace window. Computing the entry before the sleep made
+    // a 1-minute-old entry 61..120 s old at arming and up to 121 s old at use —
+    // so the test failed whenever the sleep straddled a minute boundary, about
+    // 2% of runs. Caught in a full-suite run that passed 3/3 in isolation.
+    sched::Entry placeholder = sched_entry(0, sched::DAY_ALL, sched::ACTION_CLOSE);
+    s.setSchedule(/*version=*/0xCA7C, /*mode=*/1, /*interactiveTimeout=*/1,
+                  /*checkin=*/600, /*beaconLead=*/30, /*postEventWindow=*/20,
+                  catchup, &placeholder, 1);
+    give_clock(d, /*msgid=*/800, static_cast<uint64_t>(time(nullptr)), 0);
+    d.enterInteractiveMode();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+    // NOW compute the entry, so its age is what the test intends.
     const uint64_t now_s = static_cast<uint64_t>(time(nullptr));
     const int now_minute = static_cast<int>((now_s / 60) % 1440);
     const int entry_minute = now_minute - minutes_ago;
@@ -2070,9 +2086,7 @@ uint16_t arm_missed_entry(CmdDispatcher &d, SystemCtrl &s,
     s.setSchedule(/*version=*/0xCA7C, /*mode=*/1, /*interactiveTimeout=*/1,
                   /*checkin=*/600, /*beaconLead=*/30, /*postEventWindow=*/20,
                   catchup, &e, 1);
-    give_clock(d, /*msgid=*/800, now_s, 0);
-    d.enterInteractiveMode();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    give_clock(d, /*msgid=*/801, now_s, 0);
     return static_cast<uint16_t>(entry_minute);
 }
 
