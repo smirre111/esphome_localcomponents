@@ -216,6 +216,18 @@ if(EXISTS ${BLINDS_ESP_MAIN}/include/BootPolicy.h)
     gtest_discover_tests(boot_policy_test)
 endif()
 
+# AutoModePolicy.h is header-only and dependency-free for the same reason
+# BootPolicy.h is: the arithmetic that decides when a battery node wakes and
+# whether it acts is verified here rather than on a roof.
+if(EXISTS ${BLINDS_ESP_MAIN}/include/AutoModePolicy.h)
+    add_executable(auto_mode_policy_test
+        scenarios/auto_mode_policy_test.cpp
+        ${BLINDS_ESP_MAIN}/Scheduler.cpp)
+    target_include_directories(auto_mode_policy_test PRIVATE ${BLINDS_ESP_MAIN}/include)
+    target_link_libraries(auto_mode_policy_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(auto_mode_policy_test)
+endif()
+
 if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # Quoted-include searches the dir of the FILE doing the include first
     # (no compiler flag overrides that). We copy the production source +
