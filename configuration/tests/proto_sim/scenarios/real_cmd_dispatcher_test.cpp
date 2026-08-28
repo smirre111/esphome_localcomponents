@@ -7,6 +7,7 @@
 // directly and inspect the resulting state + TX buffers.
 
 #include <gtest/gtest.h>
+#include <iostream>
 #include "nvs.h"
 #include <chrono>
 #include <thread>
@@ -40,7 +41,15 @@ using proto_sim::build_header_aad;
 
 namespace {
 
-constexpr uint8_t kHubAddr = 0xFF;
+// The hub is peer 1 in production ("CMD_LOGIN from peer 1"), NOT 0xFF.
+//
+// This was 0xFF, which is also the broadcast address AND the value
+// persistHubAddr_ defaults to. That collision made a whole class of bug
+// structurally invisible here: "we used the 0xFF default instead of the hub's
+// real address" cannot fail in a fixture whose hub address IS 0xFF. Three
+// attempts to unit-test the persistHubAddr_ fix all passed under mutation for
+// exactly this reason, and the bug had to be caught on hardware instead.
+constexpr uint8_t kHubAddr = 0x01;
 constexpr uint8_t kNodeAddr = 18;
 constexpr uint8_t kSubnet = 2;
 constexpr uint64_t kNodeMac = 0xE08CFE5F9EC4ULL;
@@ -1870,21 +1879,51 @@ TEST(FirmwareVersion, ComesFromTheRunningImageNotAConstant) {
 // This pins the predicate, not main.cpp's branch (main.cpp is not compiled by
 // the harness) — but the predicate is the whole of the bug: the two disagree
 // for exactly the node that has been provisioned and not re-pushed.
-// NOTE: there is deliberately no unit test here for persistHubAddr_ tracking
-// the hub (the F-5 persistence fix). Three attempts at one all passed under
-// mutation — the save/load round trip still restored hub=1 with the fix
-// reverted — so shipping one would have claimed coverage that does not exist.
+// A session established by login must survive a save/load round trip.
 //
-// Two harness properties defeat it, both worth knowing before trying again:
-//   * the node NVS shim is process-global, so an earlier test's blob is loaded
-//     unless proto_sim_nvs_reset() is called first; and
-//   * get_base_nonce() returns true for any EXISTING peer entry, even one whose
-//     nonce is 0 — so "we have a nonce" is satisfied by a session that cannot
-//     decrypt anything.
+// persistHubAddr_ defaulted to 0xFF and was only ever assigned from a blob the
+// node had just loaded, so it stayed 255 while the live nonce was filed under
+// the hub's real address. savePersistentState() looked up get_base_nonce(255)
+// and — because a peer entry is created valid with base_nonce 0 — got a
+// "session" that could not decrypt anything, so it saved that instead.
 //
-// The fix is verified on hardware instead, where the evidence is unambiguous:
-// the node restored `hub=255 base_nonce=0x20fc0cdd tx=390(+64)` identically on
-// every boot and the hub answered `psa_aead_decrypt failed: -149`.
+// The node then restored identical stale state on every boot:
+//     F-5: restored state hub=255 base_nonce=0x20fc0cdd tx=390(+64) rx=0
+// and its resume beacon used a nonce the hub had never held.
+//
+// This test was written during that fix and REMOVED, because it passed under
+// mutation: the zero-nonce peer satisfied get_base_nonce() either way. Now that
+// a zero nonce is correctly reported as "no session", it discriminates.
+TEST(RealCmdDispatcherPersist, ASessionFromLoginSurvivesSaveAndLoad) {
+    MotorCtrl mot; SystemCtrl sys; LoraInterface lif;
+    portMUX_TYPE mmux{}, bmux{};
+
+    // The node NVS shim is process-global; without this the load below can pick
+    // up a blob an earlier test saved.
+    proto_sim_nvs_reset();
+
+    {
+        CmdDispatcher d{&mot, &sys, &lif, mmux, bmux};
+        sys.setAddress(kNodeAddr, kSubnet);
+        ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
+
+        auto login = pack_login_op(/*msgid=*/1, /*nonce=*/0xA1B2C3D4);
+        d.onReceiveNew(login.data(), static_cast<int>(login.size()));
+        d.savePersistentState();
+    }
+
+    CmdDispatcher d2{&mot, &sys, &lif, mmux, bmux};
+    d2.loadPersistentState();
+
+    EXPECT_EQ(d2.destAddress, static_cast<uint32_t>(kHubAddr))
+        << "the restored session must point at the HUB — with the wrong peer "
+           "key it restored hub=255 (broadcast)";
+    EXPECT_TRUE(d2.hasValidPersistentState())
+        << "the login's session must actually have been written";
+    EXPECT_TRUE(d2.canResumeSession())
+        << "and the restored session must be usable, or the beacon-first "
+           "resume encrypts with a nonce the hub has never held";
+}
 
 TEST_F(RealNodeFixture, ProvisionedNodeIsRecognisedWithoutAConfigPush) {
     // The fixture sets an address, as a provisioned node has from config.txt,
