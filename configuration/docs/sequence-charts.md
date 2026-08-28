@@ -53,7 +53,8 @@ sequenceDiagram
     H->>N: TimeSync ↯ (login-ack path, +750 ms)
     H->>N: ScheduleConfig ↯ (beacon path, +2000 ms)
     N->>H: CommandAck{schedule msgid}
-    Note over N: clock valid AND schedule loaded<br/>⇒ queue SYSCMD_SLEEP
+    Note over N: clock valid AND schedule loaded<br/>⇒ armAutoSleep() — a QUIET TIMER
+    Note over N: every further downlink refreshes it;<br/>sleeps once the hub stops talking
 ```
 
 ### Review
@@ -92,17 +93,19 @@ sequenceDiagram
     participant N as Node
     participant H as Hub
     Note over N: deep-sleep wake; counters<br/>continue from NVS (no reset)
-    N->>N: armResumeFallback() — 12 s
+    N->>N: armResumeFallback() — 12 s<br/>+ armBeaconRetry() ladder inside it
     N->>H: NodeWakeBeacon ↯ (encrypted, session resumed)
     alt hub still holds the base nonce
         H->>N: TimeSync (encrypted)
         N->>N: decrypt OK ⇒ noteSessionProven()<br/>fallback cancelled
         H->>N: ScheduleConfig (only if version differs)
-    else hub rebooted — no nonce
-        H->>N: BaseNonceExchange (PLAINTEXT)
-        Note over N: plaintext does NOT prove the session
-        N->>N: fallback fires ⇒ full REGISTER
+    else no decrypted downlink
+        Note over N: t=4 s  no ack ⇒ re-beacon (+jitter)
+        Note over N: t=8 s  no ack ⇒ re-beacon (+jitter)
+        Note over N: t=12 s still nothing ⇒ full REGISTER
     end
+    Note over N,H: A hub that REBOOTED answers with a PLAINTEXT<br/>BaseNonceExchange, which does NOT prove the session —<br/>so the fallback still fires and re-registers, by design.
+    Note over N,H: A hub that DISCARDED the session (F19) cannot be<br/>recovered by re-beaconing at all: the frame arrives and<br/>fails to decrypt, so the ladder just fails three times.
 ```
 
 ### Review
@@ -132,10 +135,12 @@ sequenceDiagram
     opt version differs
         H->>N: ScheduleConfig
     end
-    Note over N: at the event: runDueScheduleEntry()<br/>latest missed within catchup_window
+    Note over N: woken beacon_lead EARLY, so nothing is due yet;<br/>sleep clamps to now+1 s and it naps to the event
+    Note over N: at the event: runDueScheduleEntry()<br/>latest miss within max(catchup_window, 120 s grace)
     N->>N: motor command queued
     N->>H: CoverPosition
-    Note over N: queue SYSCMD_SLEEP →<br/>sysCmd task → enterDeepsleep()<br/>drains queues, then sleeps
+    Note over N: armAutoSleep() quiet window;<br/>on expiry runDueScheduleEntry() runs AGAIN, so an<br/>entry that fell due while the hub talked still fires
+    Note over N: enterDeepsleep() waits for queues idle<br/>AND motCtrl->isBusy() == false, then sleeps
 ```
 
 ### Review
@@ -167,11 +172,13 @@ sequenceDiagram
     participant U as Person
     participant N as Node
     U->>N: button (EXT1 wake, or while awake)
+    Note over N: EXT1 alone is NOT a press — the pin mask also<br/>carries LoRa DIO0/1, so the firing pin is checked (F18)
     N->>N: enterInteractiveMode()<br/>deadline = now + interactive_timeout
     Note over N: hub's configured mode is NOT changed
     N->>N: motor command
     Note over N: every further press restarts the window
-    N->>N: timer expires ⇒ shouldRunAutoMode()<br/>⇒ queue SYSCMD_SLEEP
+    N->>N: timer expires ⇒ shouldRunAutoMode()<br/>⇒ armAutoSleep() quiet window
+    Note over N: the nightly CMD_SLEEP is IGNORED in auto mode (F19)
 ```
 
 ### Review
@@ -222,7 +229,7 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 
 | # | Finding | Status |
 |---|---|---|
-| F1 | Schedule push only happens in `handle_beacon_()`, so a lost beacon permanently blocks auto mode | **OPEN — the root cause of tonight's failures** |
+| F1 | Schedule push only happened in `handle_beacon_()`, so a lost beacon permanently blocked auto mode | Fixed — also pushed on the login-ack path (`lora_client.cpp:936`) |
 | F2 | Schedule push was single-shot with no retry | Fixed — retransmit until `CommandAck` |
 | F3 | TimeSync/Schedule arrival order raced; whichever came second never re-evaluated auto mode | Fixed — both handlers re-check |
 | F4 | Node uplinks between REGISTER and LOGIN are dropped (counters not yet aligned) | By design; beacon deliberately sent after `CMD_LOGIN` |
@@ -240,7 +247,7 @@ retransmits up to 3 times at 5 s until the node's `CommandAck` arrives.
 | F16 | The deep-sleep drain-wait inferred "motor finished" from queue depth alone | Fixed — `checkQueuesIdle()` asks `MotorCtrl::isBusy()` |
 | F17 | The wake beacon reported `v=0.00 pos=0.00` for state the node already knew | Fixed — position published into `state_`, voltage RTC-backed |
 | F18 | `classifyWakeReason()` called ANY EXT1 wake a button press, and the mask includes the LoRa DIO pins | Fixed — the pin mask is consulted |
-| F19 | The nightly `CMD_SLEEP` tears down the hub's session and schedules a login from `sleep_duration`, which is meaningless for an auto-mode node | **OPEN** — verified end to end from the logs |
+| F19 | The nightly `CMD_SLEEP` tore down the hub's session and scheduled a login from `sleep_duration`, meaningless for an auto-mode node | Fixed both sides — hub skips it for auto nodes, node ignores it |
 
 ### F7 — the restart that undid the schedule
 
@@ -268,7 +275,7 @@ this class of question is read off the log rather than reasoned about. `prev`
 distinguishes a clean wake from a reset that happened *while entering* sleep,
 because the marker is armed in the instruction before `esp_deep_sleep_start()`.
 
-### The recommended fix for F1
+### The fix for F1 (implemented)
 
 **Push the schedule on the login-ack path as well as the beacon path.** TimeSync
 already goes out there, so the mechanism exists and the node is demonstrably
@@ -554,16 +561,22 @@ reading was briefly mistaken for a failing supply. Confirmed fixed on hardware �
 and both of these). The shape is always the same: a value maintained in parallel
 with the thing it describes, which drifts and is then trusted.
 
-### F18 — any EXT1 wake is called a button press (OPEN)
+### F18 — any EXT1 wake was called a button press (FIXED)
 
-`classifyWakeReason()` returns `WAKE_BUTTON` whenever the EXT1 bit is set,
+`classifyWakeReason()` returned `WAKE_BUTTON` whenever the EXT1 bit was set,
 without consulting `esp_sleep_get_ext1_wakeup_status()` to see which pin fired.
 The EXT1 mask contains the three buttons **and LoRa DIO0/DIO1**.
 
 Harmless in practice today, because the SX1278 is put in sleep mode before deep
 sleep and its DIO lines should not assert. But if they ever do, the node reports
 `reason=BUTTON`, suspends automatic mode for `interactive_timeout`, and stays
-awake — with nobody having touched the blind. The fix is to check the pin mask.
+awake — with nobody having touched the blind.
+
+**Fixed:** the pin mask is now checked. A button pin gives `WAKE_BUTTON`; any
+other EXT1 source is treated as an ordinary check-in and automatic mode is left
+alone. The pre-existing test set only the cause bit and so encoded the very
+assumption that was wrong; it now sets a button pin, with a companion test for
+the radio-pin case.
 
 ---
 
