@@ -226,6 +226,10 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     set(NODE_STAGE ${CMAKE_BINARY_DIR}/node_stage)
     file(MAKE_DIRECTORY ${NODE_STAGE})
     configure_file(${BLINDS_ESP_MAIN}/CmdDispatcher.cpp ${NODE_STAGE}/CmdDispatcher.cpp COPYONLY)
+    # SessionManager: the session state extracted out of CmdDispatcher. Staged
+    # alongside so the harness compiles the REAL class, not a shim.
+    configure_file(${BLINDS_ESP_MAIN}/SessionManager.cpp ${NODE_STAGE}/SessionManager.cpp COPYONLY)
+    configure_file(${BLINDS_ESP_MAIN}/include/SessionManager.h ${NODE_STAGE}/SessionManager.h COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/comm_utils.c      ${NODE_STAGE}/comm_utils.c      COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/include/comm_utils.h ${NODE_STAGE}/comm_utils.h   COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/include/CmdDispatcher.h ${NODE_STAGE}/CmdDispatcher.h COPYONLY)
@@ -238,6 +242,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
 
     add_library(real_cmd_dispatcher STATIC
         ${NODE_STAGE}/CmdDispatcher.cpp
+        ${NODE_STAGE}/SessionManager.cpp
         ${NODE_STAGE}/comm_utils.c
         ${BLINDS_ESP_MAIN}/Scheduler.cpp
         ${NODE_SHIM_DIR}/esp_idf_stubs.c
@@ -255,6 +260,18 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     target_compile_options(real_cmd_dispatcher PRIVATE
         -Wno-sign-compare -Wno-format -Wno-unused-function -Wno-unused-variable
         -Wno-unused-but-set-variable -Wno-format-extra-args -Wno-unused-parameter)
+
+    # SessionManager is deliberately constructible on its own — no motor, no
+    # radio, no mutexes — so its tests link only the class and the NVS shim.
+    add_executable(session_manager_test
+        scenarios/session_manager_test.cpp
+        ${NODE_STAGE}/SessionManager.cpp
+        ${NODE_SHIM_DIR}/esp_idf_stubs.c
+    )
+    target_include_directories(session_manager_test
+        BEFORE PRIVATE ${NODE_STAGE} ${NODE_SHIM_DIR})
+    target_link_libraries(session_manager_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(session_manager_test)
 
     add_executable(real_cmd_dispatcher_test scenarios/real_cmd_dispatcher_test.cpp)
     target_link_libraries(real_cmd_dispatcher_test
