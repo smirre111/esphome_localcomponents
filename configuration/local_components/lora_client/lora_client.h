@@ -20,6 +20,7 @@
 // blinds.pb-c.h: this header is pulled in by every loracover platform, and the
 // stub header is large and C-linkage. Only a pointer to it is needed.
 struct NodeWakeBeacon;
+struct LoraClientResponseMessage;   // set_response phases take it by pointer
 
 namespace esphome
 {
@@ -303,6 +304,16 @@ namespace esphome
 
       // P2: record a wake beacon and publish the derived clock offset.
       void handle_beacon_(const ::NodeWakeBeacon *b);
+
+      // Phases of set_response(), which was a single 250-line body at CCN 61 —
+      // the hub mirror of the node's onReceiveNew (70 -> 15). The ORDER in
+      // set_response is load-bearing: REGISTER must bypass the address and
+      // replay filters, so it is tested before admit_frame_().
+      void handle_register_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
+      bool admit_frame_(::LoraClientResponseMessage *rcv_message);
+      void handle_encrypted_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
+      void dispatch_payload_(::LoraClientResponseMessage *msg);
+      void confirm_session_();
 
       // Login scheduling helpers
       bool     is_node_awake_() const;

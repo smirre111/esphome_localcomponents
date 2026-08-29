@@ -160,6 +160,50 @@ static bool s_encrypt_payload_gcm(const uint8_t *nonce, const uint8_t *aad, size
   return true;
 }
 
+// Decrypt counterpart of s_encrypt_payload_gcm above.
+//
+// This lived as a lambda inside set_response, so the two halves of the same
+// operation sat in different scopes — the same split the AAD builder had, and
+// a large part of why set_response was CCN 61.
+//
+// The key parameter is accepted for symmetry with the encrypt side but unused:
+// the key lives in the pre-imported PSA slot s_aes_gcm_key_id.
+static bool s_decrypt_payload_gcm(const uint8_t * /*key*/, const uint8_t *nonce,
+                                  const uint8_t *aad, size_t aad_len,
+                                  const uint8_t *cipher, size_t cipher_len,
+                                  const uint8_t *tag, size_t tag_len,
+                                  uint8_t *plain_out)
+{
+  if (!nonce || !cipher || !tag || !plain_out)
+    return false;
+  if (s_aes_gcm_key_id == PSA_KEY_ID_NULL && !s_init_psa_gcm_key())
+    return false;
+
+  // PSA psa_aead_decrypt() expects ciphertext || tag concatenated.
+  size_t   ct_len = cipher_len + tag_len;
+  uint8_t *ct_buf = static_cast<uint8_t *>(malloc(ct_len));
+  if (!ct_buf)
+    return false;
+  memcpy(ct_buf,              cipher, cipher_len);
+  memcpy(ct_buf + cipher_len, tag,    tag_len);
+
+  size_t       plain_len = 0;
+  psa_status_t status    = psa_aead_decrypt(
+      s_aes_gcm_key_id, LORA_GCM_ALG,
+      nonce,  kAesGcmIvBytes,
+      aad,    aad_len,
+      ct_buf, ct_len,
+      plain_out, cipher_len, &plain_len);
+  free(ct_buf);
+
+  if (status != PSA_SUCCESS)
+    // Literal tag, not TAG: these crypto helpers sit outside the
+    // esphome::lora_tracker namespace where TAG is declared. The encrypt twin
+    // above does the same.
+    ESP_LOGE("lora_client", "psa_aead_decrypt failed: %d", (int)status);
+  return status == PSA_SUCCESS;
+}
+
 // Pack a downlink operation, encrypting it into an EncryptedPayload-wrapped
 // LoraClientOperationMessage when a session (base nonce) exists for the dest
 // node.  Falls back to a plaintext pack otherwise (e.g. pre-login bootstrap:
@@ -604,72 +648,14 @@ namespace esphome
 
     // }
 
-    void LORAListener::set_response(uint8_t *data, size_t len)
+    // A REGISTER is accepted before ANY address or msgid filter, so a node
+    // whose address has just changed can still get through.
+    //
+    // TAKES OWNERSHIP: it frees the message before dispatching the raw bytes
+    // onward, because the child nodes re-parse those bytes independently.
+    void LORAListener::handle_register_(LoraClientResponseMessage *rcv_message,
+                                        uint8_t *data, size_t len)
     {
-      LoraClientResponseMessage *rcv_message;
-
-      rcv_message = lora_client_response_message__unpack(NULL, len, data);
-
-      if (rcv_message == NULL)
-      {
-        ESP_LOGE(TAG, "Could not read protobuf");
-        return;
-      }
-
-      // --- Encryption support helpers ---
-      // s_base_nonce_map is file-scope so send_base_nonce_exchange() can also
-      // access it.  The AES-GCM frame counter is NOT a separate counter — it is
-      // exactly the LoraHeader.msgid value cast to uint64_t.  One unified counter
-      // serves both replay protection and nonce derivation.
-
-      auto u32_to_be = [](uint32_t value, uint8_t *bytes) {
-        for (int i = 3; i >= 0; --i)
-        {
-          bytes[i] = static_cast<uint8_t>(value & 0xFF);
-          value >>= 8;
-        }
-      };
-
-      // PSA AES-GCM decrypt — mirrors decrypt_payload_gcm() in BlindsESP CmdDispatcher.cpp.
-      // The key parameter is accepted for API symmetry but is not used (the key is
-      // held in the pre-imported PSA slot s_aes_gcm_key_id).
-      auto decrypt_payload_gcm = [&](const uint8_t * /*key*/, const uint8_t *nonce,
-                                     const uint8_t *aad, size_t aad_len,
-                                     const uint8_t *cipher, size_t cipher_len,
-                                     const uint8_t *tag,   size_t tag_len,
-                                     uint8_t *plain_out) -> bool {
-        if (!nonce || !cipher || !tag || !plain_out)
-          return false;
-        if (s_aes_gcm_key_id == PSA_KEY_ID_NULL && !s_init_psa_gcm_key())
-          return false;
-
-        // PSA psa_aead_decrypt() expects ciphertext || tag concatenated.
-        size_t   ct_len = cipher_len + tag_len;
-        uint8_t *ct_buf = static_cast<uint8_t *>(malloc(ct_len));
-        if (!ct_buf)
-          return false;
-        memcpy(ct_buf,              cipher, cipher_len);
-        memcpy(ct_buf + cipher_len, tag,    tag_len);
-
-        size_t       plain_len = 0;
-        psa_status_t status    = psa_aead_decrypt(
-            s_aes_gcm_key_id, LORA_GCM_ALG,
-            nonce,  kAesGcmIvBytes,
-            aad,    aad_len,
-            ct_buf, ct_len,
-            plain_out, cipher_len, &plain_len);
-        free(ct_buf);
-
-        if (status != PSA_SUCCESS)
-          ESP_LOGE(TAG, "psa_aead_decrypt failed: %d", (int)status);
-        return status == PSA_SUCCESS;
-      };
-
-
-      // Registering a new device is allowed in all cases — checked before any
-      // address or msgId filter so even a node whose address has changed gets through.
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
-      {
         ClientRegister *reg = rcv_message->register_;
         ESP_LOGI(TAG, "Received register command for MAC address: %d", reg->mac_addr);
         ESP_LOGI(TAG, "This clients' MAC address: %d", this->address_uint64_);
@@ -739,13 +725,15 @@ namespace esphome
         this->set_timeout("login_startup", login_delay_ms, [this]() {
           this->do_login_and_arm_retry_();
         });
-        return;
-      }
+    }
 
-
-
-
-
+    // Should this frame be acted on? Registration gate, cross-talk address
+    // filter, then the bounded replay window — in that order.
+    //
+    // Does NOT own the message: the caller's RAII holder frees it either way,
+    // which is why the manual free at each rejection is gone.
+    bool LORAListener::admit_frame_(LoraClientResponseMessage *rcv_message)
+    {
       if (rcv_message->header) {
         ESP_LOGI(TAG, "Received message with ID %d from address %d", rcv_message->header->msgid, rcv_message->header->senderaddress);
         ESP_LOGI(TAG, "My message ID: %d", this->frame_counter_.rx_message_id);
@@ -757,8 +745,7 @@ namespace esphome
       if (this->registered_ == false)
       {
         ESP_LOGE(TAG, "%s, Not registered yet, ignoring message", this->get_name().c_str());
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
+        return false;
       }
 
       if (!(rcv_message->header) || (rcv_message->header->senderaddress != this->short_address_))
@@ -768,26 +755,8 @@ namespace esphome
         // OTHER node reaching here is normal and expected.  Drop it at debug —
         // this used to be logged at ERROR and fired on every peer frame.
         ESP_LOGD(TAG, "%s, uplink from another node (addr mismatch) — dropping", this->get_name().c_str());
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
+        return false;
       }
-
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN)
-      {
-        // We ignore the prand form the client and send him a new one, to avoid replay attacks. 
-        //The client has to use the prand we send him in the login response for all further communication, so it will be forced to use the new prand.
-        // LoginMsg *login = rcv_message->login;
-        // ESP_LOGI(TAG, "%s, Received login command with prand: %d", this->get_name().c_str(), login->prand);
-
-
-        // this->frame_counter_.tx_message_id = login->prand;
-        // this->frame_counter_.rx_message_id = login->prand;
-
-        this->send_login();
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
-      }
-
 
       // The message ID is checked only after login
       if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
@@ -811,15 +780,95 @@ namespace esphome
         else
         {
           ESP_LOGE(TAG, "%s, duplicate or old message ID: %d, ignoring. My MsgID: %d",this->get_name().c_str(), (rcv_message->header? rcv_message->header->msgid : 0), this->frame_counter_.rx_message_id);
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
-          return;
+          return false;
         }
       }
 
+      return true;
+    }
 
-      // Distriute to registered nodes
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED && rcv_message->encrypted)
+    // A successful decrypt proves the node holds the matching base nonce, so
+    // the encrypted session is confirmed both ways. Everything the hub defers
+    // until it can encrypt downlink safely hangs off this one moment: the
+    // TimeSync push, the schedule push, and the resume-path config re-login.
+    //
+    // Deliberately NOT triggered by a plaintext frame bumping the msgid — that
+    // does not prove the node holds the session key, and treating it as proof
+    // once left a node that missed the LoginMsg unable to decrypt commands.
+    void LORAListener::confirm_session_()
+    {
+      this->session_confirmed_ = true;
+      if (!this->login_acked_)
       {
+        this->login_acked_         = true;
+        this->login_retry_count_   = 0;
+        this->pending_login_nonce_ = 0;
+        this->cancel_timeout("login_retry");
+        ESP_LOGI(TAG, "[%s] Login acknowledged by node (encrypted session confirmed)",
+                 this->get_name().c_str());
+
+        // P1: seed the node's wall clock.  Deferred rather than sent inline so
+        // this frame's processing finishes first and the TimeSync does not
+        // pile straight onto the just-completed login exchange — the node is
+        // awake and listening for a while yet.  Only now (session_confirmed_)
+        // can the node authenticate an encrypted downlink.
+        this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
+
+        // F1: push the schedule here TOO, not only from handle_beacon_().
+        //
+        // The beacon is a single unbursted, unacknowledged frame. When it was
+        // the ONLY trigger for the schedule push, losing it blocked automatic
+        // mode permanently: no schedule -> node never sleeps -> never wakes ->
+        // never beacons again -> hub never re-pushes. Observed live twice, as
+        // a hub log with "Login acknowledged" and "TimeSync sent" but no
+        // "Beacon:" line and no push.
+        //
+        // The node is demonstrably listening at this point (it just acked the
+        // login), so this is a second, independent path for the initial push.
+        // The beacon remains the steady-state trigger — it carries the node's
+        // APPLIED version, which is what makes reconciliation self-healing.
+        if (this->schedule_pending())
+        {
+          ESP_LOGI(TAG, "[%s] Schedule pending at login (node=0x%08x hub=0x%08x) — pushing",
+                   this->get_name().c_str(), (unsigned) this->node_sched_version_,
+                   (unsigned) this->schedule_version());
+          this->set_timeout("schedule_push", 2000, [this]() { this->send_schedule_config(); });
+        }
+
+        // Resume-path config-sync guarantee: if this session was recovered via
+        // the base-nonce RESUME path (BaseNonceExchange + NVS-restored counters
+        // after a hub reboot) rather than a fresh send_login(), the node never
+        // saw a request_register flag — so config changes flashed into the hub
+        // this boot would not reach an awake node until its modeled wake.  When
+        // config is still unsynced this boot, schedule a fresh login now:
+        // send_login() sets request_register = !config_synced_, so a node that
+        // supports it responds with a REGISTER and flows through the normal
+        // config-push path.  Deferred (not inline) so this frame finishes first.
+        // Loop-safe: this whole block runs once per session (guarded by the
+        // enclosing !login_acked_), and send_login() does not clear login_acked_,
+        // so a node that ignores the flag (older firmware) simply re-acks without
+        // re-entering here.  Re-checked in the lambda in case a REGISTER already
+        // synced config in the meantime.
+        if (!this->config_synced_)
+        {
+          ESP_LOGI(TAG, "[%s] Session resumed without config sync this boot — scheduling re-login to push config",
+                   this->get_name().c_str());
+          this->set_timeout("config_sync_relogin", 500, [this]() {
+            if (!this->config_synced_)
+              this->send_login();
+          });
+        }
+      }
+    }
+
+    // The encrypted uplink path: derive the IV, authenticate, unpack the inner
+    // payload, confirm the session, then forward to the child nodes with the
+    // plaintext outer header re-attached (loracover needs it for addressing).
+    //
+    // Does NOT own the message — see admit_frame_.
+    void LORAListener::handle_encrypted_(LoraClientResponseMessage *rcv_message,
+                                         uint8_t *data, size_t len)
+    {
         EncryptedPayload *enc = rcv_message->encrypted;
         ESP_LOGI(TAG, "Received encrypted payload ciphertext=%d bytes", (int)enc->ciphertext.len);
 
@@ -838,7 +887,6 @@ namespace esphome
         {
           ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning", sender);
           this->send_base_nonce_exchange();
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
         }
 
@@ -850,7 +898,6 @@ namespace esphome
         if (!s_derive_gcm_nonce(sender, frame_counter, iv))
         {
           ESP_LOGE(TAG, "Failed to derive GCM nonce for peer %u", sender);
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
         }
 
@@ -859,7 +906,6 @@ namespace esphome
         if (!s_build_header_aad(rcv_message->header, aad, &aad_len))
         {
           ESP_LOGE(TAG, "Failed to build AAD for encrypted response");
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
         }
 
@@ -868,11 +914,10 @@ namespace esphome
         if (!plaintext)
         {
           ESP_LOGE(TAG, "Memory allocation failed for plaintext");
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
         }
 
-        if (!decrypt_payload_gcm(nullptr,        // key unused — PSA slot used instead
+        if (!s_decrypt_payload_gcm(nullptr,        // key unused — PSA slot used instead
                                  iv,
                                  aad,
                                  aad_len,
@@ -884,75 +929,13 @@ namespace esphome
         {
           ESP_LOGE(TAG, "AES-GCM decryption/authentication failed");
           free(plaintext);
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
         }
 
         // A successful decrypt proves the node holds the matching base nonce —
         // the encrypted session is confirmed both ways.  Only now do we treat
         // login as acknowledged and allow the hub to encrypt downlink commands.
-        this->session_confirmed_ = true;
-        if (!this->login_acked_)
-        {
-          this->login_acked_         = true;
-          this->login_retry_count_   = 0;
-          this->pending_login_nonce_ = 0;
-          this->cancel_timeout("login_retry");
-          ESP_LOGI(TAG, "[%s] Login acknowledged by node (encrypted session confirmed)",
-                   this->get_name().c_str());
-
-          // P1: seed the node's wall clock.  Deferred rather than sent inline so
-          // this frame's processing finishes first and the TimeSync does not
-          // pile straight onto the just-completed login exchange — the node is
-          // awake and listening for a while yet.  Only now (session_confirmed_)
-          // can the node authenticate an encrypted downlink.
-          this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
-
-          // F1: push the schedule here TOO, not only from handle_beacon_().
-          //
-          // The beacon is a single unbursted, unacknowledged frame. When it was
-          // the ONLY trigger for the schedule push, losing it blocked automatic
-          // mode permanently: no schedule -> node never sleeps -> never wakes ->
-          // never beacons again -> hub never re-pushes. Observed live twice, as
-          // a hub log with "Login acknowledged" and "TimeSync sent" but no
-          // "Beacon:" line and no push.
-          //
-          // The node is demonstrably listening at this point (it just acked the
-          // login), so this is a second, independent path for the initial push.
-          // The beacon remains the steady-state trigger — it carries the node's
-          // APPLIED version, which is what makes reconciliation self-healing.
-          if (this->schedule_pending())
-          {
-            ESP_LOGI(TAG, "[%s] Schedule pending at login (node=0x%08x hub=0x%08x) — pushing",
-                     this->get_name().c_str(), (unsigned) this->node_sched_version_,
-                     (unsigned) this->schedule_version());
-            this->set_timeout("schedule_push", 2000, [this]() { this->send_schedule_config(); });
-          }
-
-          // Resume-path config-sync guarantee: if this session was recovered via
-          // the base-nonce RESUME path (BaseNonceExchange + NVS-restored counters
-          // after a hub reboot) rather than a fresh send_login(), the node never
-          // saw a request_register flag — so config changes flashed into the hub
-          // this boot would not reach an awake node until its modeled wake.  When
-          // config is still unsynced this boot, schedule a fresh login now:
-          // send_login() sets request_register = !config_synced_, so a node that
-          // supports it responds with a REGISTER and flows through the normal
-          // config-push path.  Deferred (not inline) so this frame finishes first.
-          // Loop-safe: this whole block runs once per session (guarded by the
-          // enclosing !login_acked_), and send_login() does not clear login_acked_,
-          // so a node that ignores the flag (older firmware) simply re-acks without
-          // re-entering here.  Re-checked in the lambda in case a REGISTER already
-          // synced config in the meantime.
-          if (!this->config_synced_)
-          {
-            ESP_LOGI(TAG, "[%s] Session resumed without config sync this boot — scheduling re-login to push config",
-                     this->get_name().c_str());
-            this->set_timeout("config_sync_relogin", 500, [this]() {
-              if (!this->config_synced_)
-                this->send_login();
-            });
-          }
-        }
+        this->confirm_session_();
 
         // The inner is now payload-only (no header).  Unpack it, resolve the F-4
         // ack/position state machine, then RE-ATTACH the plaintext outer header
@@ -984,25 +967,78 @@ namespace esphome
           inner->header = nullptr; // detach borrowed header before free (rcv_message owns it)
           lora_client_response_message__free_unpacked(inner, NULL);
         }
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
+        return;
+    }
+
+    // ACK / POSITION / BEACON, for both the encrypted and the plaintext path.
+    //
+    // These were two separate ladders. They were compared line by line before
+    // merging — identical, including the `op_awaiting_ack_` guard that lets a
+    // position report count as delivery confirmation. If the plaintext path
+    // should ever accept LESS than the encrypted one (a defensible security
+    // position), split them again deliberately rather than by drift.
+    void LORAListener::dispatch_payload_(LoraClientResponseMessage *msg)
+    {
+      if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && msg->ack)
+        this->handle_command_ack_(msg->ack->ack_msg_id);
+      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
+               this->op_awaiting_ack_)
+        this->handle_command_ack_(this->op_last_msgid_); // position confirms delivery
+      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && msg->beacon)
+        this->handle_beacon_(msg->beacon);
+    }
+
+    void LORAListener::set_response(uint8_t *data, size_t len)
+    {
+      LoraClientResponseMessage *rcv_message =
+          lora_client_response_message__unpack(NULL, len, data);
+      if (rcv_message == NULL)
+      {
+        ESP_LOGE(TAG, "Could not read protobuf");
         return;
       }
 
-      // F-4: inspect plaintext responses for a CommandAck / position update.
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && rcv_message->ack)
-        this->handle_command_ack_(rcv_message->ack->ack_msg_id);
-      else if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
-               this->op_awaiting_ack_)
-        this->handle_command_ack_(this->op_last_msgid_);
-      else if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON &&
-               rcv_message->beacon)
-        this->handle_beacon_(rcv_message->beacon);
-
-      for (int i = 0; i < this->nodes_.size(); i++)
+      // Ownership for the rest of the function. Before this, every early exit
+      // freed by hand — a dozen sites, each one an edit away from a leak.
+      struct Owned
       {
-        this->nodes_[i]->set_response(data, len);
+        LoraClientResponseMessage *p;
+        ~Owned() { if (p) lora_client_response_message__free_unpacked(p, NULL); }
+        LoraClientResponseMessage *release() { auto *t = p; p = nullptr; return t; }
+      } owned{rcv_message};
+
+      // REGISTER first: it must bypass the address and replay filters below, so
+      // the order of these two tests is load-bearing. handle_register_ takes
+      // ownership, hence the release().
+      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
+      {
+        owned.release();
+        this->handle_register_(rcv_message, data, len);
+        return;
       }
-      lora_client_response_message__free_unpacked(rcv_message, NULL);
+
+      if (!this->admit_frame_(rcv_message))
+        return;
+
+      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN)
+      {
+        // The node's prand is deliberately ignored: send_login() mints a fresh
+        // one, so a replayed login cannot pin the counters.
+        this->send_login();
+        return;
+      }
+
+      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED &&
+          rcv_message->encrypted)
+      {
+        this->handle_encrypted_(rcv_message, data, len);
+        return;
+      }
+
+      // Plaintext path.
+      this->dispatch_payload_(rcv_message);
+      for (size_t i = 0; i < this->nodes_.size(); i++)
+        this->nodes_[i]->set_response(data, len);
     }
 
     // ---------------------------------------------------------------------------
