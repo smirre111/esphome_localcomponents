@@ -310,6 +310,13 @@ namespace esphome
 
     void LORAListener::setup()
     {
+      // The compiled YAML seed has already been applied by now (codegen emits
+      // add_schedule_entry() into main.cpp's setup(), which runs before
+      // App.setup()). Restoring here therefore OVERWRITES the seed with whatever
+      // was last entered in Home Assistant — which is the point: without it an
+      // HA-entered schedule would silently revert on every hub reboot.
+      this->restore_schedule_();
+
       auto restore = this->restore_state_();
       if (restore.has_value())
       {
@@ -1520,6 +1527,94 @@ namespace esphome
     // ------------------------------------------------------------------------
     // P4: schedule push
     // ------------------------------------------------------------------------
+    // ---- Home Assistant schedule editing ----------------------------------
+    //
+    // Slot-addressed rather than append-only: HA edits one field of one slot,
+    // so the entity needs a stable index. add_schedule_entry() below keeps its
+    // append semantics for the YAML seed.
+
+    void LORAListener::set_slot_minute(uint8_t slot, uint16_t minute_of_day)
+    {
+      if (slot >= kMaxScheduleEntries) return;
+      this->sched_entries_[slot].minute_of_day = minute_of_day;
+      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
+      this->sched_dirty_ = true;
+      this->save_schedule_();
+    }
+
+    void LORAListener::set_slot_days(uint8_t slot, uint8_t day_mask)
+    {
+      if (slot >= kMaxScheduleEntries) return;
+      this->sched_entries_[slot].day_mask = day_mask;
+      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
+      this->sched_dirty_ = true;
+      this->save_schedule_();
+    }
+
+    void LORAListener::set_slot_action(uint8_t slot, uint8_t action)
+    {
+      if (slot >= kMaxScheduleEntries) return;
+      this->sched_entries_[slot].action = action;
+      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
+      this->sched_dirty_ = true;
+      this->save_schedule_();
+    }
+
+    void LORAListener::set_slot_position(uint8_t slot, uint8_t position_pct)
+    {
+      if (slot >= kMaxScheduleEntries) return;
+      this->sched_entries_[slot].position_pct = position_pct;
+      this->sched_dirty_ = true;
+      this->save_schedule_();
+    }
+
+    void LORAListener::set_slot_enabled(uint8_t slot, bool on)
+    {
+      if (slot >= kMaxScheduleEntries) return;
+      this->sched_entries_[slot].enabled = on;
+      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
+      this->sched_dirty_ = true;
+      this->save_schedule_();
+    }
+
+    // Persist the whole slot table.
+    //
+    // Without this an HA-entered schedule would be silently reverted to the
+    // compiled YAML on the next hub reboot — the same failure the Auto Mode
+    // switch already had, and with no error anywhere to explain it.
+    void LORAListener::save_schedule_()
+    {
+      SchedPersist blob{};
+      blob.version = kSchedPersistVersion;
+      blob.count   = this->sched_entry_count_;
+      for (uint8_t i = 0; i < kMaxScheduleEntries; i++)
+        blob.entries[i] = this->sched_entries_[i];
+      if (!this->sched_pref_.save(&blob))
+        ESP_LOGW(TAG, "[%s] Could not persist schedule", this->get_name().c_str());
+    }
+
+    void LORAListener::restore_schedule_()
+    {
+      // Discriminated from the LORAClientRestoreState preference on the same
+      // entity — without the version argument both would key to one slot.
+      this->sched_pref_ = this->make_entity_preference<SchedPersist>(kSchedPersistVersion);
+      SchedPersist blob{};
+      if (!this->sched_pref_.load(&blob) || blob.version != kSchedPersistVersion)
+      {
+        ESP_LOGI(TAG, "[%s] No stored schedule — using the YAML seed",
+                 this->get_name().c_str());
+        return;
+      }
+      this->sched_entry_count_ = (blob.count <= kMaxScheduleEntries) ? blob.count
+                                                                    : kMaxScheduleEntries;
+      for (uint8_t i = 0; i < kMaxScheduleEntries; i++)
+        this->sched_entries_[i] = blob.entries[i];
+      this->sched_restored_ = true;
+      this->sched_dirty_    = true;
+      ESP_LOGI(TAG, "[%s] Restored %u schedule slots from flash (YAML seed ignored)",
+               this->get_name().c_str(), (unsigned) this->sched_entry_count_);
+    }
+
     void LORAListener::add_schedule_entry(uint16_t minute_of_day, uint8_t day_mask,
                                           uint8_t action, uint8_t position_pct)
     {
@@ -1529,11 +1624,21 @@ namespace esphome
                  this->get_name().c_str(), (unsigned) kMaxScheduleEntries);
         return;
       }
+      // First-boot seed only.
+      //
+      // ORDER: codegen emits these calls into main.cpp's setup(), which runs
+      // BEFORE App.setup() and therefore before restore_schedule_(). So the seed
+      // lands first and a persisted schedule then overwrites it — that is what
+      // makes stored values win, not this guard. The guard only covers a
+      // hypothetical runtime caller after restore has run.
+      if (this->sched_restored_)
+        return;
       SchedEntryCfg &e = this->sched_entries_[this->sched_entry_count_++];
       e.minute_of_day  = minute_of_day;
       e.day_mask       = day_mask;
       e.action         = action;
       e.position_pct   = position_pct;
+      e.enabled        = true;   // YAML only lists entries it wants active
       this->sched_dirty_ = true;
     }
 
@@ -1579,6 +1684,10 @@ namespace esphome
       for (uint8_t i = 0; i < this->sched_entry_count_; i++)
       {
         const SchedEntryCfg &e = this->sched_entries_[i];
+        // `enabled` MUST feed the CRC: switching a slot off changes what the
+        // node should act on, and a version that did not move would leave the
+        // node running the old schedule with no indication anything had changed.
+        feed(e.enabled ? 1u : 0u);
         feed(e.minute_of_day);
         feed(e.day_mask);
         feed(e.action);
@@ -1621,14 +1730,22 @@ namespace esphome
 
       ScheduleEntry  entries[kMaxScheduleEntries];
       ScheduleEntry *entry_ptrs[kMaxScheduleEntries];
+      // Only ENABLED slots go on the wire, compacted. The node treats every
+      // entry it receives as active (it has no enabled flag of its own), and a
+      // disabled slot must not cost airtime — each entry is ~7 B in a frame
+      // whose 17-copy burst already fills half its round.
+      uint8_t n = 0;
       for (uint8_t i = 0; i < this->sched_entry_count_; i++)
       {
-        schedule_entry__init(&entries[i]);
-        entries[i].minuteofday = this->sched_entries_[i].minute_of_day;
-        entries[i].daymask     = this->sched_entries_[i].day_mask;
-        entries[i].action      = static_cast<SchedAction>(this->sched_entries_[i].action);
-        entries[i].positionpct = this->sched_entries_[i].position_pct;
-        entry_ptrs[i]          = &entries[i];
+        if (!this->sched_entries_[i].enabled)
+          continue;
+        schedule_entry__init(&entries[n]);
+        entries[n].minuteofday = this->sched_entries_[i].minute_of_day;
+        entries[n].daymask     = this->sched_entries_[i].day_mask;
+        entries[n].action      = static_cast<SchedAction>(this->sched_entries_[i].action);
+        entries[n].positionpct = this->sched_entries_[i].position_pct;
+        entry_ptrs[n]          = &entries[n];
+        n++;
       }
 
       ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
@@ -1640,8 +1757,8 @@ namespace esphome
       sc.beaconlead_s         = this->beacon_lead_;
       sc.posteventwindow_s    = this->post_event_window_;
       sc.catchupwindow_s      = this->catchup_window_;
-      sc.n_entries            = this->sched_entry_count_;
-      sc.entries              = this->sched_entry_count_ ? entry_ptrs : nullptr;
+      sc.n_entries            = n;   // enabled slots only, not the table size
+      sc.entries              = n ? entry_ptrs : nullptr;
 
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
       op_message.schedule = &sc;

@@ -67,7 +67,11 @@ public:
     // keyed by the entity name if this Component also inherits from
     // EntityBase. lora_client.cpp's LORAListener calls this from
     // restore_state_().
-    template <typename T> ESPPreferenceObject make_entity_preference();
+    // `version` mirrors real ESPHome's make_entity_preference<T>(uint32_t) and
+    // acts as a discriminator: without it, two preference objects on the SAME
+    // entity key to the same slot and silently overwrite each other. LORAListener
+    // keeps two (restore state + schedule), so this matters.
+    template <typename T> ESPPreferenceObject make_entity_preference(uint32_t version = 0);
 };
 
 } // namespace esphome
@@ -111,7 +115,7 @@ inline void Component::cancel_interval(const std::string& name) {
 }
 
 template <typename T>
-ESPPreferenceObject Component::make_entity_preference() {
+ESPPreferenceObject Component::make_entity_preference(uint32_t version) {
     // Try to fish the entity name out of EntityBase via dynamic_cast.
     auto* eb = dynamic_cast<EntityBase*>(this);
     std::string key = eb ? eb->get_name() : std::string{};
@@ -119,6 +123,11 @@ ESPPreferenceObject Component::make_entity_preference() {
         char buf[64];
         std::snprintf(buf, sizeof(buf), "comp@%p", (void*)this);
         key = buf;
+    }
+    if (version != 0) {
+        char vb[32];
+        std::snprintf(vb, sizeof(vb), "#v%u", (unsigned) version);
+        key += vb;
     }
     return ESPPreferenceObject(shim_hooks::nvs_slot_for(key));
 }

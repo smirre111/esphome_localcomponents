@@ -261,6 +261,25 @@ sensor:
 
 
 switch:
+  # Per-slot enable, so a seasonal entry can be paused without losing its time
+  # and days. Disabled slots are omitted from the pushed frame entirely.
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 0
+    name: "Rol2 Slot 1 Enabled"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 1
+    name: "Rol2 Slot 2 Enabled"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 2
+    name: "Rol2 Slot 3 Enabled"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 3
+    name: "Rol2 Slot 4 Enabled"
+
   # P4b: automatic-mode control. The switch expresses INTENT — the node still
   # refuses auto mode without a valid clock and a usable schedule, and a button
   # press at the blind flips it back to interactive. The published state is
@@ -298,12 +317,74 @@ binary_sensor:
     name: "RollladenWohnzimmer2 Schedule Pending"
     id: rol_2_schedule_pending
 
+# ---- Schedule editing from Home Assistant (node 2 first) --------------------
+#
+# Four slots. The `schedule:` list above each client is now a FIRST-BOOT SEED:
+# once a slot has been edited in HA the hub persists it and the seed is ignored,
+# so an existing schedule is not silently discarded by adding this.
+#
+# A sleeping node picks an edit up at its next wake (up to checkin_interval) —
+# watch the `Schedule Pending` binary sensor for that window.
+#
+# Rolled out on node 2 only for now: it is the bench unit, and node 1 is still
+# on older firmware.
+datetime:
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 0
+    name: "Rol2 Slot 1 Time"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 1
+    name: "Rol2 Slot 2 Time"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 2
+    name: "Rol2 Slot 3 Time"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 3
+    name: "Rol2 Slot 4 Time"
 
-
-
-
-
-
-
-
+select:
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 0
+    type: action
+    name: "Rol2 Slot 1 Action"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 0
+    type: days
+    name: "Rol2 Slot 1 Days"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 1
+    type: action
+    name: "Rol2 Slot 2 Action"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 1
+    type: days
+    name: "Rol2 Slot 2 Days"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 2
+    type: action
+    name: "Rol2 Slot 3 Action"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 2
+    type: days
+    name: "Rol2 Slot 3 Days"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 3
+    type: action
+    name: "Rol2 Slot 4 Action"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 3
+    type: days
+    name: "Rol2 Slot 4 Days"
 

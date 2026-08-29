@@ -112,8 +112,19 @@ namespace esphome
         uint8_t  day_mask;      // bit0 = MON .. bit6 = SUN
         uint8_t  action;        // SchedAction
         uint8_t  position_pct;
+        bool     enabled;       // a slot can be switched off without losing it
       };
       static constexpr uint8_t kMaxScheduleEntries = 8;
+
+      // Persisted slot table. Versioned like LORAClientRestoreState so a layout
+      // change discards the old blob instead of misreading it.
+      static constexpr uint8_t kSchedPersistVersion = 1;
+      struct SchedPersist
+      {
+        uint8_t       version;
+        uint8_t       count;
+        SchedEntryCfg entries[kMaxScheduleEntries];
+      } __attribute__((packed));
 
       void set_auto_mode_default(bool on) { this->auto_mode_ = on; this->sched_dirty_ = true; }
       void set_interactive_timeout(uint32_t s) { this->interactive_timeout_ = s; this->sched_dirty_ = true; }
@@ -121,6 +132,28 @@ namespace esphome
       void set_beacon_lead(uint32_t s)         { this->beacon_lead_ = s;         this->sched_dirty_ = true; }
       void set_post_event_window(uint32_t s)   { this->post_event_window_ = s;   this->sched_dirty_ = true; }
       void set_catchup_window(uint32_t s)      { this->catchup_window_ = s;      this->sched_dirty_ = true; }
+      // ---- Home Assistant schedule editing -------------------------------
+      //
+      // The YAML schedule is a FIRST-BOOT SEED. Once a slot has been persisted
+      // (by an HA edit) the stored value wins, so adding this feature does not
+      // silently discard a schedule that is already in service.
+      //
+      // Every setter marks sched_dirty_, which recomputes schedule_version();
+      // the node then sees a version mismatch in its next beacon and the hub
+      // pushes. No protocol change — the same path a YAML edit already took.
+      //
+      // A sleeping node does not learn of an edit until it next wakes, up to
+      // checkin_interval_. The `Schedule Pending` binary sensor already shows
+      // exactly that window.
+      void set_slot_minute(uint8_t slot, uint16_t minute_of_day);
+      void set_slot_days(uint8_t slot, uint8_t day_mask);
+      void set_slot_action(uint8_t slot, uint8_t action);
+      void set_slot_position(uint8_t slot, uint8_t position_pct);
+      void set_slot_enabled(uint8_t slot, bool on);
+      const SchedEntryCfg &slot(uint8_t slot) const { return this->sched_entries_[slot]; }
+      void save_schedule_();
+      void restore_schedule_();
+
       void add_schedule_entry(uint16_t minute_of_day, uint8_t day_mask,
                               uint8_t action, uint8_t position_pct);
       // Set the node's mode at runtime (HA switch). Marks the schedule dirty so
@@ -156,6 +189,10 @@ namespace esphome
       uint32_t      catchup_window_{1800};
       SchedEntryCfg sched_entries_[kMaxScheduleEntries]{};
       uint8_t       sched_entry_count_{0};
+      // Set once a persisted schedule has been restored, so the YAML seed
+      // stops overwriting it.
+      bool          sched_restored_{false};
+      ESPPreferenceObject sched_pref_;
       uint32_t      sched_version_{0};
       bool          sched_dirty_{true};
       // A schedule push is a SINGLE unbursted frame (it is too long for the
