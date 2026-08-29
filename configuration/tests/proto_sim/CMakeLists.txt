@@ -101,6 +101,32 @@ if(PROTOC_C_EXECUTABLE)
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_stub_drift.cmake)
         set_tests_properties(schema_drift_hub_vs_esphome PROPERTIES
             LABELS "schema_drift")
+
+        # Gate 3: the same proto must also regenerate the NODE's committed
+        # stubs. Six copies of these stubs used to exist across the two repos,
+        # kept in step by hand, and only the ESPHome one was ever checked — a
+        # node-side copy could drift while the whole suite stayed green. Three
+        # copies have since been deleted as redundant; this gate covers the one
+        # that genuinely must remain, because it lives in the other repo and is
+        # what the firmware actually links.
+        #
+        # Drift here is not a build error: mismatched stubs compile and link
+        # cleanly on both sides and fail only on the air, as a decode error on
+        # a field neither end agrees about.
+        set(NODE_STUB_C_DIR ${HUB_PROTO_DIR}/../components/blinds/src)
+        set(NODE_STUB_H_DIR ${HUB_PROTO_DIR}/../components/blinds/include)
+        if(EXISTS ${NODE_STUB_C_DIR}/blinds.pb-c.c)
+            add_test(NAME schema_drift_hub_vs_node
+                     COMMAND ${CMAKE_COMMAND}
+                             -DPROTOC_C=${PROTOC_C_EXECUTABLE}
+                             -DPROTO_DIR=${HUB_PROTO_DIR}
+                             -DCOMPARE_C_AGAINST=${NODE_STUB_C_DIR}
+                             -DCOMPARE_H_AGAINST=${NODE_STUB_H_DIR}
+                             -DOUT_DIR=${CMAKE_BINARY_DIR}/stub_regen_node
+                             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_stub_drift.cmake)
+            set_tests_properties(schema_drift_hub_vs_node PROPERTIES
+                LABELS "schema_drift")
+        endif()
     endif()
 endif()
 
