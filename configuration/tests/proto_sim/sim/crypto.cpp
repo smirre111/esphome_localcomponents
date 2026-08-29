@@ -1,5 +1,7 @@
 #include "sim/crypto.h"
 
+#include "FrameCrypto.h"
+
 #include <mbedtls/gcm.h>
 #include <mbedtls/sha256.h>
 
@@ -43,18 +45,20 @@ const uint8_t* aes_gcm_key() {
     return key;
 }
 
+// These delegate to the production header rather than re-deriving the layout.
+//
+// The sim is what the tests use to BUILD frames, so a sim that agreed with the
+// hub while both differed from the node would leave the suite green and fail
+// only on the air. An independent "reference implementation" here is not extra
+// assurance — it is a second thing that can be wrong in the same way.
 void derive_gcm_iv(uint32_t base_nonce, uint64_t frame_counter, uint8_t iv_out[12]) {
-    u32_be(base_nonce, iv_out);
-    u64_be(frame_counter, iv_out + 4);
+    framecrypto::deriveIv(base_nonce, frame_counter, iv_out);
 }
 
 void build_header_aad(uint32_t dest_addr, uint32_t dest_subnet,
                       uint32_t sender_addr, uint32_t msg_id,
                       uint8_t aad_out[kHeaderAadLen]) {
-    u32_be(dest_addr,       aad_out);
-    u32_be(dest_subnet,     aad_out +  4);
-    u32_be(sender_addr,     aad_out +  8);
-    u32_be(msg_id,          aad_out + 12);
+    framecrypto::buildAad(dest_addr, dest_subnet, sender_addr, msg_id, aad_out);
 }
 
 GcmResult aes_gcm_encrypt(const uint8_t iv[12], const uint8_t* aad, size_t aad_len,

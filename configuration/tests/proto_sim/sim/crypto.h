@@ -1,5 +1,7 @@
 #pragma once
 
+#include "FrameCrypto.h"
+
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -25,7 +27,7 @@ const uint8_t* aes_gcm_key();
 // the two directions can never reuse an IV under the shared per-peer base
 // nonce. Must match kDownlinkNonceFlag in BOTH lora_client.cpp and
 // CmdDispatcher.cpp. Uplink (node -> hub) uses the bare msgid.
-constexpr uint64_t kDownlinkNonceFlag = (1ULL << 63);
+constexpr uint64_t kDownlinkNonceFlag = framecrypto::kDownlinkFlag;
 
 // 12-byte IV = base_nonce[4 BE] || frame_counter[8 BE].
 // For a downlink frame the caller must pass `msgid | kDownlinkNonceFlag`;

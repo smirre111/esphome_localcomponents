@@ -49,9 +49,18 @@ add_library(proto_sim STATIC
     sim/node_model.cpp
     ${BLINDSPROTO_DIR}/blinds.pb-c.c
 )
+# FrameCrypto.h: the sim builds the frames the tests assert against, so it must
+# use the SAME wire-format code as production rather than its own reference
+# implementation — otherwise sim and hub can be wrong together and stay green.
+set(BLINDS_ESP_INCLUDE /mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/include)
+if(NOT EXISTS ${BLINDS_ESP_INCLUDE}/FrameCrypto.h)
+    set(BLINDS_ESP_INCLUDE C:/Development/PlatformIO/PlatformIO/BlindsESP/main/include)
+endif()
+
 target_include_directories(proto_sim PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${BLINDSPROTO_DIR}
+    ${BLINDS_ESP_INCLUDE}
     ${PROTOBUF_C_INCLUDE_DIRS}
 )
 # mbedcrypto carries AES-GCM and SHA-256.
@@ -129,6 +138,7 @@ if(PROTOC_C_EXECUTABLE)
         endif()
     endif()
 endif()
+
 
 add_scenario(register_test)
 add_scenario(login_test)
@@ -216,6 +226,27 @@ set(BLINDS_ESP_MAIN /mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main)
 if(NOT EXISTS ${BLINDS_ESP_MAIN})
     # Fallback for native Windows path lookups during config probing.
     set(BLINDS_ESP_MAIN C:/Development/PlatformIO/PlatformIO/BlindsESP/main)
+endif()
+
+# Gate 4: the AEAD wire format. FrameCrypto.h is the source of truth on the node;
+# the hub carries a vendored copy because the ESPHome build compiles only
+# local_components/ and cannot reach into the BlindsESP tree.
+#
+# Same reasoning as the protobuf stubs: a mismatch compiles and links cleanly on
+# both sides and fails only on the air. Before this header was shared, the AAD/IV
+# layout was written out FOUR separate times — including twice inside
+# lora_client.cpp, once for encrypting and once for decrypting.
+set(FRAMECRYPTO_SRC ${BLINDS_ESP_MAIN}/include/FrameCrypto.h)
+set(FRAMECRYPTO_VENDORED
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/FrameCrypto.h)
+if(EXISTS ${FRAMECRYPTO_SRC} AND EXISTS ${FRAMECRYPTO_VENDORED})
+    add_test(NAME wire_format_drift_hub_vs_node
+             COMMAND ${CMAKE_COMMAND}
+                     -DSOURCE_HEADER=${FRAMECRYPTO_SRC}
+                     -DVENDORED_HEADER=${FRAMECRYPTO_VENDORED}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
+    set_tests_properties(wire_format_drift_hub_vs_node PROPERTIES
+        LABELS "schema_drift")
 endif()
 set(NODE_SHIM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shims_node)
 

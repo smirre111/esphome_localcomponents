@@ -1,4 +1,7 @@
 #include "esphome/components/lora_client/lora_client.h"
+// Shared with the node firmware — the AEAD wire format now lives in exactly
+// one place. See the banner in FrameCrypto.h.
+#include "esphome/components/lora_client/FrameCrypto.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
 
 #include "esphome/core/log.h"
@@ -103,15 +106,14 @@ static void s_u64_be(uint64_t v, uint8_t *b)
   for (int i = 7; i >= 0; --i) { b[i] = static_cast<uint8_t>(v & 0xFF); v >>= 8; }
 }
 
+// Layout lives in the shared FrameCrypto.h — see the banner in that file.
+// This is now the ONLY AAD builder in the hub: set_response used to define a
+// second one as a lambda, so the encrypt and decrypt paths each had their own.
 static bool s_build_header_aad(const LoraHeader *h, uint8_t *aad, size_t *aad_len)
 {
   if (!h || !aad || !aad_len) return false;
-  s_u32_be(h->destaddress,   aad);
-  s_u32_be(h->destsubnet,    aad + 4);
-  s_u32_be(h->senderaddress, aad + 8);
-  s_u32_be(h->msgid,         aad + 12);
-  // encrypted header field removed — AAD is the 16-byte 4-field header.
-  *aad_len = 16;
+  framecrypto::buildAad(h->destaddress, h->destsubnet, h->senderaddress, h->msgid, aad);
+  *aad_len = framecrypto::kAadBytes;
   return true;
 }
 
@@ -120,9 +122,9 @@ static bool s_derive_gcm_nonce(uint32_t peer_address, uint64_t frame_counter, ui
 {
   auto it = s_base_nonce_map.find(peer_address);
   if (it == s_base_nonce_map.end()) return false;
-  s_u32_be(it->second, nonce_out);
-  s_u64_be(frame_counter, nonce_out + 4);
-  return true;
+  // deriveIv() also refuses a zero base nonce, which the hub did not check —
+  // a stored zero would have produced a usable-looking IV.
+  return framecrypto::deriveIv(it->second, frame_counter, nonce_out);
 }
 
 static bool s_encrypt_payload_gcm(const uint8_t *nonce, const uint8_t *aad, size_t aad_len,
@@ -628,33 +630,6 @@ namespace esphome
         }
       };
 
-      auto build_header_aad = [&](const LoraHeader *header, uint8_t *aad_out, size_t *aad_len) -> bool {
-        if (!header || !aad_out || !aad_len)
-          return false;
-        u32_to_be(header->destaddress, aad_out);
-        u32_to_be(header->destsubnet, aad_out + 4);
-        u32_to_be(header->senderaddress, aad_out + 8);
-        u32_to_be(header->msgid, aad_out + 12);
-        // encrypted header field removed — AAD is the 16-byte 4-field header.
-        *aad_len = 16;
-        return true;
-      };
-
-      auto derive_gcm_nonce = [&](uint32_t peer_address, uint64_t frame_counter, uint8_t nonce_out[12]) -> bool {
-        auto it = s_base_nonce_map.find(peer_address);
-        if (it == s_base_nonce_map.end())
-          return false;
-        uint32_t base_nonce = it->second;
-        u32_to_be(base_nonce, nonce_out);
-        // append 8-byte frame counter BE
-        for (int i = 7; i >= 0; --i)
-        {
-          nonce_out[4 + i] = static_cast<uint8_t>(frame_counter & 0xFF);
-          frame_counter >>= 8;
-        }
-        return true;
-      };
-
       // PSA AES-GCM decrypt — mirrors decrypt_payload_gcm() in BlindsESP CmdDispatcher.cpp.
       // The key parameter is accepted for API symmetry but is not used (the key is
       // held in the pre-imported PSA slot s_aes_gcm_key_id).
@@ -872,7 +847,7 @@ namespace esphome
         // msgid/nonce the GCM tag verification below fails, so the old explicit
         // IV memcmp is redundant.
         uint8_t iv[12];
-        if (!derive_gcm_nonce(sender, frame_counter, iv))
+        if (!s_derive_gcm_nonce(sender, frame_counter, iv))
         {
           ESP_LOGE(TAG, "Failed to derive GCM nonce for peer %u", sender);
           lora_client_response_message__free_unpacked(rcv_message, NULL);
@@ -881,7 +856,7 @@ namespace esphome
 
         uint8_t aad[20];
         size_t aad_len = 0;
-        if (!build_header_aad(rcv_message->header, aad, &aad_len))
+        if (!s_build_header_aad(rcv_message->header, aad, &aad_len))
         {
           ESP_LOGE(TAG, "Failed to build AAD for encrypted response");
           lora_client_response_message__free_unpacked(rcv_message, NULL);
