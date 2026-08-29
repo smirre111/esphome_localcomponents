@@ -254,6 +254,18 @@ if(EXISTS ${BLINDS_ESP_MAIN}/include/AutoModePolicy.h)
     gtest_discover_tests(auto_mode_policy_test)
 endif()
 
+# MotorPolicy.h is the motor FSM's decisions, extracted so they can be tested
+# without a motor. It includes common.h, which pulls esp_log.h and driver/gpio.h,
+# so this one also needs the ESP-IDF shims — unlike the other policy headers.
+if(EXISTS ${BLINDS_ESP_MAIN}/include/MotorPolicy.h)
+    add_executable(motor_policy_test scenarios/motor_policy_test.cpp)
+    target_include_directories(motor_policy_test PRIVATE
+        ${BLINDS_ESP_MAIN}/include
+        ${NODE_SHIM_DIR})
+    target_link_libraries(motor_policy_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(motor_policy_test)
+endif()
+
 # FrameCrypto.h is header-only and dependency-free (no PSA) so the AEAD wire
 # format — AAD layout, IV derivation, direction bit — is pinned byte for byte
 # here. Every mistake in it produces the same opaque psa_aead_decrypt: -149.
