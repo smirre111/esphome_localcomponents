@@ -1,0 +1,25 @@
+# Secrets — never commit. The tracked file is secrets.yaml.example (placeholders
+# only); the real one is local and must stay that way. This repo is PUBLIC.
+secrets.yaml
+**/secrets.yaml
+!secrets.yaml.example
+!**/secrets.yaml.example
+
+# ESPHome build output
+.esphome/
+**/.esphome/
+
+# Local tooling / editor state
+.claude/
+**/.claude/
+.agents/
+**/.agents/
+*.code-workspace
+
+# Python
+__pycache__/
+*.pyc
+
+# Host test harness build dirs
+tests/**/build/
+tests/**/cmake-build*/
