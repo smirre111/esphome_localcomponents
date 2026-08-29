@@ -228,6 +228,16 @@ if(EXISTS ${BLINDS_ESP_MAIN}/include/AutoModePolicy.h)
     gtest_discover_tests(auto_mode_policy_test)
 endif()
 
+# FrameCrypto.h is header-only and dependency-free (no PSA) so the AEAD wire
+# format — AAD layout, IV derivation, direction bit — is pinned byte for byte
+# here. Every mistake in it produces the same opaque psa_aead_decrypt: -149.
+if(EXISTS ${BLINDS_ESP_MAIN}/include/FrameCrypto.h)
+    add_executable(frame_crypto_test scenarios/frame_crypto_test.cpp)
+    target_include_directories(frame_crypto_test PRIVATE ${BLINDS_ESP_MAIN}/include)
+    target_link_libraries(frame_crypto_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(frame_crypto_test)
+endif()
+
 if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # Quoted-include searches the dir of the FILE doing the include first
     # (no compiler flag overrides that). We copy the production source +
