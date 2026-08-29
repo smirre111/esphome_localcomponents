@@ -118,11 +118,25 @@ namespace esphome
 
       // Persisted slot table. Versioned like LORAClientRestoreState so a layout
       // change discards the old blob instead of misreading it.
-      static constexpr uint8_t kSchedPersistVersion = 1;
+      // v2 added auto_mode. Bumping discards any v1 blob, which costs nothing:
+      // v1 was never deployed.
+      static constexpr uint8_t kSchedPersistVersion = 2;
       struct SchedPersist
       {
         uint8_t       version;
         uint8_t       count;
+        // The user's INTENT, not the switch's displayed state.
+        //
+        // The beacon handler corrects the switch to whatever the node actually
+        // reports; auto_mode_ is what was asked for. Persisting the switch
+        // would persist the display — a value reality overwrites — so intent is
+        // what belongs here.
+        //
+        // It lives in this blob rather than in a separate preference because it
+        // already feeds schedule_version(): it is part of the same config unit,
+        // and one blob makes it impossible for the schedule to survive a reboot
+        // while the mode that executes it does not.
+        bool          auto_mode;
         SchedEntryCfg entries[kMaxScheduleEntries];
       } __attribute__((packed));
 

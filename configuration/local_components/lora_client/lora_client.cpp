@@ -1585,8 +1585,9 @@ namespace esphome
     void LORAListener::save_schedule_()
     {
       SchedPersist blob{};
-      blob.version = kSchedPersistVersion;
-      blob.count   = this->sched_entry_count_;
+      blob.version   = kSchedPersistVersion;
+      blob.count     = this->sched_entry_count_;
+      blob.auto_mode = this->auto_mode_;
       for (uint8_t i = 0; i < kMaxScheduleEntries; i++)
         blob.entries[i] = this->sched_entries_[i];
       if (!this->sched_pref_.save(&blob))
@@ -1609,10 +1610,17 @@ namespace esphome
                                                                     : kMaxScheduleEntries;
       for (uint8_t i = 0; i < kMaxScheduleEntries; i++)
         this->sched_entries_[i] = blob.entries[i];
+
+      // Assigned directly, NOT via set_auto_mode(): that would try to send a
+      // mode sysop, and at boot there is no session to send it on. The push
+      // happens anyway — sched_dirty_ below moves the version, so the node
+      // picks the mode up with the schedule at its next beacon.
+      this->auto_mode_ = blob.auto_mode;
       this->sched_restored_ = true;
       this->sched_dirty_    = true;
-      ESP_LOGI(TAG, "[%s] Restored %u schedule slots from flash (YAML seed ignored)",
-               this->get_name().c_str(), (unsigned) this->sched_entry_count_);
+      ESP_LOGI(TAG, "[%s] Restored %u schedule slots + mode=%s from flash (YAML seed ignored)",
+               this->get_name().c_str(), (unsigned) this->sched_entry_count_,
+               this->auto_mode_ ? "AUTO" : "INTERACTIVE");
     }
 
     void LORAListener::add_schedule_entry(uint16_t minute_of_day, uint8_t day_mask,
@@ -1648,6 +1656,15 @@ namespace esphome
         return;
       this->auto_mode_   = on;
       this->sched_dirty_ = true;
+      // Persist the intent. Without this a hub reboot reverted the mode to the
+      // compiled YAML default with no error anywhere — observed on node 1,
+      // which was silently put back into AUTO and was therefore asleep and
+      // unreachable when an OTA was triggered at it.
+      //
+      // set_auto_mode_default() (the YAML seed) deliberately does NOT persist:
+      // it writes auto_mode_ directly and runs before setup(), so it seeds and
+      // restore_schedule_() then overrides it.
+      this->save_schedule_();
       ESP_LOGI(TAG, "[%s] Mode set to %s — will push at next beacon",
                this->get_name().c_str(), on ? "AUTO" : "INTERACTIVE");
       // An awake node can be switched immediately; a sleeping one picks it up
