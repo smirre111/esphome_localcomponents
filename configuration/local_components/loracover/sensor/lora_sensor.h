@@ -19,6 +19,8 @@ namespace esphome
       // void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
       //                          esp_ble_gattc_cb_param_t *param) override;
       void set_response(uint8_t *data, size_t len) override;
+      void publish_battery_(float voltage);
+      void publish_link_rssi_();
 
       void dump_config() override;
       void set_battery(sensor::Sensor *battery) { battery_ = battery; }

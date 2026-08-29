@@ -33,95 +33,41 @@ namespace esphome
     }
 
 
-    // void LoraCov::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
-    // {
-    //   switch (event)
-    //   {
-    //   case ESP_GATTC_OPEN_EVT:
-    //   {
-    //     if (param->open.status == ESP_GATT_OK)
-    //     {
-    //       this->registered_ = false;
-    //     }
-    //     break;
-    //   }
-    //   case ESP_GATTC_DISCONNECT_EVT:
-    //   {
-    //     this->registered_ = false;
-    //     this->node_state = espbt::ClientState::IDLE;
-    //     if (this->battery_ != nullptr)
-    //       this->battery_->publish_state(NAN);
-    //     if (this->illuminance_ != nullptr)
-    //       this->illuminance_->publish_state(NAN);
-    //     break;
-    //   }
-    //   case ESP_GATTC_SEARCH_CMPL_EVT:
-    //   {
-    //     auto *chr = this->parent_->get_characteristic(LORA_COVER_SERVICE_UUID, LORA_COVER_CHARACTERISTIC_UUID);
-    //     if (chr == nullptr)
-    //     {
-    //       if (this->parent_->get_characteristic(LORA_COVER_TUYA_SERVICE_UUID, LORA_COVER_TUYA_CHARACTERISTIC_UUID) != nullptr)
-    //       {
-    //         ESP_LOGE(TAG, "[%s] Detected a Tuya LORA_COVER which is not supported, sorry.",
-    //                  this->parent_->address_str().c_str());
-    //       }
-    //       else
-    //       {
-    //         ESP_LOGE(TAG, "[%s] No control service found at device, not an LORA_COVER..?",
-    //                  this->parent_->address_str().c_str());
-    //       }
-    //       break;
-    //     }
-    //     this->char_handle_ = chr->handle;
-    //     break;
-    //   }
-    //   case ESP_GATTC_REG_FOR_NOTIFY_EVT:
-    //   {
-    //     this->node_state = espbt::ClientState::ESTABLISHED;
-    //     this->update();
-    //     break;
-    //   }
-    //   case ESP_GATTC_NOTIFY_EVT:
-    //   {
-    //     if (param->notify.handle != this->char_handle_)
-    //       break;
-    //     this->decoder_->decode(param->notify.value, param->notify.value_len);
+    // The BLE GATT event handler this component was forked from lived here,
+    // commented out — ~90 lines of esp_ble_gattc_* against a decoder/encoder
+    // that this LoRa component never had. Removed; git has it if the original
+    // Tuya cover is ever needed as a reference.
 
-    //     if (this->battery_ != nullptr && this->decoder_->has_battery_level() &&
-    //         millis() - this->last_battery_update_ > 10000)
-    //     {
-    //       this->battery_->publish_state(this->decoder_->battery_level_);
-    //       this->last_battery_update_ = millis();
-    //     }
 
-    //     if (this->illuminance_ != nullptr && this->decoder_->has_light_level())
-    //     {
-    //       this->illuminance_->publish_state(this->decoder_->light_level_);
-    //     }
+    // Battery percentage from pack voltage.
+    //
+    // Three cells in series, 3.2 V empty to 4.2 V full. STATE and POSITION
+    // frames both carry a voltage and both published it, so this formula and
+    // the two publish_state calls were written out twice — with the cell
+    // figures inlined as 3.2*3 and 4.2*3 in both copies.
+    static constexpr int   kCellCount  = 3;
+    static constexpr float kCellEmptyV = 3.2f;
+    static constexpr float kCellFullV  = 4.2f;
 
-    //     if (this->current_sensor_ > 0)
-    //     {
-    //       if (this->illuminance_ != nullptr)
-    //       {
-    //         auto *packet = this->encoder_->get_light_level_request();
-    //         auto status = esp_ble_gattc_write_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-    //                                                this->char_handle_, packet->length, packet->data,
-    //                                                ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-    //         if (status)
-    //         {
-    //           ESP_LOGW(TAG, "[%s] esp_ble_gattc_write_char failed, status=%d", this->parent_->address_str().c_str(),
-    //                    status);
-    //         }
-    //       }
-    //       this->current_sensor_ = 0;
-    //     }
-    //     break;
-    //   }
-    //   default:
-    //     break;
-    //   }
-    // }
+    void LoraCover::publish_battery_(float voltage)
+    {
+      const float empty_v = kCellEmptyV * kCellCount;
+      const float full_v  = kCellFullV * kCellCount;
+      float battery_level = (voltage - empty_v) / (full_v - empty_v) * 100.0f;
+      battery_level = std::clamp(battery_level, 0.0f, 100.0f);
 
+      if (this->battery_ != nullptr)
+        this->battery_->publish_state(battery_level);
+      if (this->voltage_ != nullptr)
+        this->voltage_->publish_state(voltage);
+    }
+
+    // F-11: hub-side link RSSI for the packet just received.
+    void LoraCover::publish_link_rssi_()
+    {
+      if (this->rssi_ != nullptr && this->parent_ != nullptr && this->parent_->parent_ != nullptr)
+        this->rssi_->publish_state(this->parent_->parent_->get_last_rssi());
+    }
 
     void LoraCover::set_response(uint8_t *data, size_t len)
     {
@@ -166,55 +112,18 @@ namespace esphome
 
       if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE)
       {
-        ClientBattery *status = rcv_message->state;
-
-        float voltage = status->voltage;
-        float battery_level = (voltage - 3.2*3) / (4.2*3 - 3.2*3) * 100.0;
-        battery_level = std::clamp(battery_level, 0.0f, 100.0f);
-
-        if (this->battery_ != nullptr)
-        {
-          this->battery_->publish_state(battery_level);
-
-        }
-        if (this->voltage_ != nullptr)
-        {
-          this->voltage_->publish_state(voltage);
-        }
-        // F-11: publish hub-side link RSSI for this packet.
-        if (this->rssi_ != nullptr && this->parent_ != nullptr && this->parent_->parent_ != nullptr)
-        {
-          this->rssi_->publish_state(this->parent_->parent_->get_last_rssi());
-        }
+        this->publish_battery_(rcv_message->state->voltage);
+        this->publish_link_rssi_();
       }
 
       if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION)
       {
         CoverPosition *position = rcv_message->position;
-
-        float voltage = position->voltage;
-        float battery_level = (voltage - 3.2*3) / (4.2*3 - 3.2*3) * 100.0;
-        battery_level = std::clamp(battery_level, 0.0f, 100.0f);
-
-        if (this->battery_ != nullptr)
-        {
-          this->battery_->publish_state(battery_level);
-
-        }
-        if (this->voltage_ != nullptr)
-        {
-          this->voltage_->publish_state(voltage);
-        }
+        this->publish_battery_(position->voltage);
         // F-11: motor current rides in the position frame (raw ADC counts).
         if (this->motor_current_ != nullptr)
-        {
           this->motor_current_->publish_state(position->current);
-        }
-        // F-11: publish hub-side link RSSI for this packet.
-        if (this->rssi_ != nullptr && this->parent_ != nullptr && this->parent_->parent_ != nullptr)
-        {
-          this->rssi_->publish_state(this->parent_->parent_->get_last_rssi());
-        }
+        this->publish_link_rssi_();
       }
       lora_client_response_message__free_unpacked(rcv_message, NULL);
     }

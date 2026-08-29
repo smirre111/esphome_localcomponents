@@ -39,6 +39,12 @@ namespace esphome
     // 17/18, broadcast is 0xFF and subnet 0xFE, so 0x01 is free.  (Nodes learn
     // the hub address dynamically from the received senderAddress, so this can
     // change hub-side without a node change.)
+    //
+    // Six `TODO: Use unique address` comments used to sit at the call sites —
+    // four inside commented-out code, two on live lines, and not on all four
+    // live uses — so they read as unfinished work rather than a decision.
+    // There is exactly one hub; if a second ever shares the air this becomes
+    // per-hub state. Until then it is deliberate.
     static constexpr uint8_t kHubAddress = 0x01;
 
     class LORATracker;

@@ -586,7 +586,7 @@ namespace esphome
     //   BlndOperationMessage op_message BLND_OPERATION_MESSAGE__INIT;
     //   op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
     //   op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-    //   op_message.senderaddress = 0x12345678; // TODO: Use unique address
+    //   op_message.senderaddress = 0x12345678;
     //   op_message.msgid = 0;                  // Incrementing message ID
     //   op_message.cmd_case = BLND_OPERATION_MESSAGE__CMD_ADDR;
 
@@ -621,7 +621,7 @@ namespace esphome
     //  BlndOperationMessage op_message BLND_OPERATION_MESSAGE__INIT;
     //   op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
     //   op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-    //   op_message.senderaddress = 0x12345678; // TODO: Use unique address
+    //   op_message.senderaddress = 0x12345678;
     //   op_message.msgid = 0;                  // Incrementing message ID
     //   op_message.cmd_case = BLND_OPERATION_MESSAGE__CMD_SLEEP;
 
@@ -1256,11 +1256,11 @@ namespace esphome
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
       // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-      // op_message.senderaddress = 0x12345678; // TODO: Use unique address
+      // op_message.senderaddress = 0x12345678;
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress = this->short_address_;
       header.destsubnet = this->subnet_address_;
-      header.senderaddress = kHubAddress; // TODO: Use unique address
+      header.senderaddress = kHubAddress;
       header.msgid = this->incrTxMessageId(); // Incrementing message ID
       op_message.header = &header;
 
@@ -1778,13 +1778,13 @@ namespace esphome
 
       // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
       // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-      // op_message.senderaddress = 0x12345678; // TODO: Use unique address
+      // op_message.senderaddress = 0x12345678;
 
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress = this->short_address_;
       header.destsubnet = this->subnet_address_;
-      header.senderaddress = kHubAddress; // TODO: Use unique address
+      header.senderaddress = kHubAddress;
       header.msgid = this->incrTxMessageId(); //++(this->frame_counter_.tx_message_id); // Incrementing message ID
       op_message.header = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
