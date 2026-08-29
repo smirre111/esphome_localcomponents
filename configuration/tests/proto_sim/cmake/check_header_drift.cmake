@@ -4,7 +4,10 @@
 # before `#pragma once`. That lets the vendored copy carry a provenance banner
 # ("DO NOT EDIT HERE") while still being byte-identical where it matters.
 #
-# Run from CTest with SOURCE_HEADER / VENDORED_HEADER set.
+# The alignment marker is configurable (ALIGN_ON) because a .cpp has no
+# `#pragma once` — for those, align on the first #include instead.
+#
+# Run from CTest with SOURCE_HEADER / VENDORED_HEADER [/ ALIGN_ON] set.
 
 foreach(f ${SOURCE_HEADER} ${VENDORED_HEADER})
     if(NOT EXISTS ${f})
@@ -15,11 +18,15 @@ endforeach()
 file(READ ${SOURCE_HEADER}   src)
 file(READ ${VENDORED_HEADER} ven)
 
-# Keep from `#pragma once` onward. Anything before it is provenance commentary.
-string(FIND "${src}" "#pragma once" src_pos)
-string(FIND "${ven}" "#pragma once" ven_pos)
+if(NOT DEFINED ALIGN_ON)
+    set(ALIGN_ON "#pragma once")
+endif()
+
+# Keep from the marker onward. Anything before it is provenance commentary.
+string(FIND "${src}" "${ALIGN_ON}" src_pos)
+string(FIND "${ven}" "${ALIGN_ON}" ven_pos)
 if(src_pos EQUAL -1 OR ven_pos EQUAL -1)
-    message(FATAL_ERROR "no '#pragma once' found — cannot align the two headers")
+    message(FATAL_ERROR "marker '${ALIGN_ON}' not found — cannot align the two files")
 endif()
 string(SUBSTRING "${src}" ${src_pos} -1 src_body)
 string(SUBSTRING "${ven}" ${ven_pos} -1 ven_body)

@@ -2,6 +2,7 @@
 // Shared with the node firmware — the AEAD wire format now lives in exactly
 // one place. See the banner in FrameCrypto.h.
 #include "esphome/components/lora_client/FrameCrypto.h"
+#include "esphome/components/lora_client/Scheduler.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
 
 #include "esphome/core/log.h"
@@ -454,15 +455,79 @@ namespace esphome
     // Sleep-window helpers
     // ---------------------------------------------------------------------------
 
-    bool LORAListener::is_node_awake_() const
+    // When will this node next be listening?
+    //
+    // Returns 0 if the hub cannot tell, which every caller must treat as
+    // "assume awake" — being wrong in that direction costs one burst, whereas
+    // wrongly believing a node is asleep would stall the link.
+    //
+    // Two different sleeps, and using the wrong one is the bug this fixes:
+    //
+    //   INTERACTIVE — the hub sends CMD_SLEEP and the node sleeps for a fixed
+    //       sleep_duration_. last_sleep_epoch_ + sleep_duration_ is exact.
+    //
+    //   AUTOMATIC — the node ignores CMD_SLEEP entirely and derives its own
+    //       wake from the schedule (next event minus beacon_lead_) or from
+    //       checkin_interval_, whichever comes first. sleep_duration_ does not
+    //       describe it at all, so the old model reported such a node awake
+    //       almost immediately and the login retry bursted into silence.
+    //
+    // The schedule arithmetic deliberately uses the NODE'S OWN sched::
+    // next_occurrence(), vendored rather than re-implemented — a second
+    // implementation would drift and the hub would transmit into silence with
+    // confidence, which is the failure being fixed here.
+    uint32_t LORAListener::next_wake_epoch_() const
     {
       if (this->last_sleep_epoch_ == 0)
-        return true; // Never slept or unknown — assume awake.
+        return 0;                       // never slept, or we never saw it sleep
       if (this->time == nullptr || !this->time->now().is_valid())
-        return true; // No valid clock — assume awake (best-effort).
-      auto now     = static_cast<uint32_t>(this->time->now().timestamp);
-      auto wake_at = this->last_sleep_epoch_ + static_cast<uint32_t>(this->sleep_duration_);
-      return now >= wake_at;
+        return 0;                       // no clock — cannot predict
+
+      if (!this->auto_mode_)
+        return this->last_sleep_epoch_ + static_cast<uint32_t>(this->sleep_duration_);
+
+      // Automatic mode: the earlier of the next scheduled event (minus the
+      // beacon lead) and the periodic check-in.
+      uint64_t wake = 0;
+
+      sched::Entry entries[LORAListener::kMaxScheduleEntries];
+      int count = 0;
+      for (uint8_t i = 0; i < this->sched_entry_count_; i++)
+      {
+        sched::Entry e;
+        e.minuteOfDay = this->sched_entries_[i].minute_of_day;
+        e.dayMask     = this->sched_entries_[i].day_mask;
+        e.action      = this->sched_entries_[i].action;
+        e.positionPct = this->sched_entries_[i].position_pct;
+        e.enabled     = true;           // the hub only stores entries it wants active
+        entries[count++] = e;
+      }
+
+      const uint64_t now_utc = static_cast<uint64_t>(this->time->now().timestamp);
+      if (count > 0)
+      {
+        const uint64_t next_event =
+            sched::next_occurrence(entries, count, now_utc,
+                                   esphome::ESPTime::timezone_offset());
+        if (next_event != 0)
+          wake = (next_event > this->beacon_lead_) ? (next_event - this->beacon_lead_)
+                                                   : now_utc;
+      }
+      if (this->checkin_interval_ != 0)
+      {
+        const uint64_t checkin = this->last_sleep_epoch_ + this->checkin_interval_;
+        if (wake == 0 || checkin < wake)
+          wake = checkin;
+      }
+      return static_cast<uint32_t>(wake);   // 0 if neither is configured
+    }
+
+    bool LORAListener::is_node_awake_() const
+    {
+      const uint32_t wake_at = this->next_wake_epoch_();
+      if (wake_at == 0)
+        return true;                    // cannot tell — assume awake
+      return static_cast<uint32_t>(this->time->now().timestamp) >= wake_at;
     }
 
     uint32_t LORAListener::ms_until_node_awake_() const
@@ -470,7 +535,9 @@ namespace esphome
       if (this->is_node_awake_())
         return 0;
       auto now     = static_cast<uint32_t>(this->time->now().timestamp);
-      auto wake_at = this->last_sleep_epoch_ + static_cast<uint32_t>(this->sleep_duration_);
+      auto wake_at = this->next_wake_epoch_();
+      if (wake_at == 0 || wake_at <= now)
+        return 0;
       // Convert remaining seconds to ms, capped at uint32_t max (~49 days).
       return static_cast<uint32_t>(
           std::min<uint64_t>(static_cast<uint64_t>(wake_at - now) * 1000ULL,
@@ -559,6 +626,20 @@ namespace esphome
       uint64_t delay = static_cast<uint64_t>(kLoginRetryBaseMs) << shift;
       if (delay > kLoginRetryIntervalMs)
         delay = kLoginRetryIntervalMs;
+      // Never retry earlier than the node can hear it. A sleeping node cannot
+      // answer, so a burst sent before its wake is pure airtime and hub TX
+      // energy — 68 such retries were observed in one log before this gate.
+      //
+      // The delay is stretched, not replaced: the backoff still governs how
+      // often we try once the node IS awake.
+      const uint32_t until_awake = this->ms_until_node_awake_();
+      if (until_awake > delay)
+      {
+        ESP_LOGD(TAG, "[%s] Login retry deferred %u s — node asleep until then",
+                 this->get_name().c_str(), until_awake / 1000);
+        delay = until_awake;
+      }
+
       this->set_timeout("login_retry", static_cast<uint32_t>(delay), [this]()
       {
         if (this->login_acked_)

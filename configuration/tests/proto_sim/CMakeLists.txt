@@ -166,6 +166,9 @@ set(SHIM_DIR        ${CMAKE_CURRENT_SOURCE_DIR}/shims)
 # linked via proto_sim.
 add_library(real_lora_client STATIC
     ${LORA_CLIENT_DIR}/lora_client.cpp
+    # The hub predicts an auto-mode node's wake with the NODE'S own scheduler,
+    # vendored rather than re-implemented — see Scheduler.h's banner.
+    ${LORA_CLIENT_DIR}/Scheduler.cpp
     ${SHIM_DIR}/esphome/core/component.cpp
     ${SHIM_DIR}/esphome/components/lora_tracker/lora_tracker.cpp
     ${SHIM_DIR}/esp_random.c
@@ -247,6 +250,35 @@ if(EXISTS ${FRAMECRYPTO_SRC} AND EXISTS ${FRAMECRYPTO_VENDORED})
                      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
     set_tests_properties(wire_format_drift_hub_vs_node PROPERTIES
         LABELS "schema_drift")
+endif()
+
+# Gate 5: the scheduler. The hub predicts an auto-mode node's next wake so it
+# does not burst LoginMsg into a sleeping node — and that prediction must use
+# the NODE'S own next_occurrence(), or the hub transmits into silence with
+# confidence. Both the header and the .cpp are vendored, so both are gated.
+# The .cpp aligns on its first #include, having no `#pragma once`.
+set(SCHED_SRC_H   ${BLINDS_ESP_MAIN}/include/Scheduler.h)
+set(SCHED_SRC_C   ${BLINDS_ESP_MAIN}/Scheduler.cpp)
+set(SCHED_VEND_H  ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/Scheduler.h)
+set(SCHED_VEND_C  ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/Scheduler.cpp)
+if(EXISTS ${SCHED_SRC_H} AND EXISTS ${SCHED_VEND_H})
+    add_test(NAME scheduler_drift_hub_vs_node
+             COMMAND ${CMAKE_COMMAND}
+                     -DSOURCE_HEADER=${SCHED_SRC_H}
+                     -DVENDORED_HEADER=${SCHED_VEND_H}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
+    set_tests_properties(scheduler_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
+endif()
+if(EXISTS ${SCHED_SRC_C} AND EXISTS ${SCHED_VEND_C})
+    add_test(NAME scheduler_impl_drift_hub_vs_node
+             COMMAND ${CMAKE_COMMAND}
+                     -DSOURCE_HEADER=${SCHED_SRC_C}
+                     -DVENDORED_HEADER=${SCHED_VEND_C}
+                     # QUOTED: an unquoted # starts a CMake comment, which
+                     # silently truncated this argument and everything after it.
+                     "-DALIGN_ON=#include"
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
+    set_tests_properties(scheduler_impl_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
 endif()
 set(NODE_SHIM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shims_node)
 

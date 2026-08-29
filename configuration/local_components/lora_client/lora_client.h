@@ -322,6 +322,10 @@ namespace esphome
       void confirm_session_();
 
       // Login scheduling helpers
+      // Epoch of the node's next wake, or 0 if the hub cannot tell.
+      // Understands BOTH sleeps: the interactive fixed sleep_duration_, and
+      // automatic mode's schedule-derived wake. See the definition.
+      uint32_t next_wake_epoch_() const;
       bool     is_node_awake_() const;
       uint32_t ms_until_node_awake_() const;
       void     schedule_startup_login_();
