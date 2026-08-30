@@ -195,6 +195,30 @@ button:
     id: rol_2_trigger_ota_button
     # type: trigger_ota
 
+  # --- Clock-drift characterisation (bench only) ---------------------------
+  # Puts both ends into test mode: the node holds continuous RX, the hub emits
+  # a burst every 15 s as a regular ruler. The node then regresses the arrival
+  # times of the 17 copies against their known 88235 us spacing; the slope is
+  # the relative drift. Result appears in the node's serial log as
+  # "DriftTest result: +N ppm over M bursts".
+  #
+  # Continuous RX costs ~11 mA against the ~1.2 mA interactive average, so this
+  # is NOT something to leave running. Both ends stop themselves after 5 min,
+  # and the node's timeout is independent of the hub — if the hub goes away
+  # mid-test the node still exits.
+  - platform: template
+    name: "Drift Test Start (node 2)"
+    id: rol_2_drift_start
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->start_drift_test(300, 15000);'
+  - platform: template
+    name: "Drift Test Stop (node 2)"
+    id: rol_2_drift_stop
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->stop_drift_test();'
+
 sensor:
   - platform: uptime
     name: '${devicename} Uptime'

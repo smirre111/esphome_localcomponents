@@ -1786,6 +1786,94 @@ namespace esphome
       return this->node_sched_version_ != this->schedule_version();
     }
 
+    // -----------------------------------------------------------------------
+    // Drift test (bench only)
+    //
+    // The hub half of the test exists because a drift fit needs a RULER: a
+    // burst emitted on a known, regular grid. In normal interactive operation
+    // the hub only transmits when it has something to say, so the node would
+    // get a fit at unpredictable intervals or not at all.
+    //
+    // Cost note: each grid frame is a full 17-copy burst (~330 ms of airtime).
+    // At the default 15 s grid that is ~2 % occupancy, which is why the grid is
+    // seconds rather than milliseconds.
+    // -----------------------------------------------------------------------
+    void LORAListener::start_drift_test(uint32_t duration_s, uint32_t grid_ms)
+    {
+      if (grid_ms < 5000)
+      {
+        ESP_LOGW(TAG, "[%s] drift grid %u ms is too tight for a 17-copy burst "
+                      "(~330 ms airtime); clamping to 5000 ms",
+                 this->get_name().c_str(), (unsigned) grid_ms);
+        grid_ms = 5000;
+      }
+      this->drift_test_active_     = true;
+      this->drift_test_duration_s_ = duration_s;
+      this->drift_test_grid_ms_    = grid_ms;
+
+      ESP_LOGI(TAG, "[%s] drift test START: %u s, grid %u ms",
+               this->get_name().c_str(), (unsigned) duration_s, (unsigned) grid_ms);
+
+      this->send_drift_test_(true);
+      this->set_interval("drift_grid", grid_ms, [this]() {
+        if (!this->drift_test_active_)
+          return;
+        this->send_drift_test_(true);   // each grid frame re-arms the node
+      });
+
+      // The hub stops itself too, so a forgotten test does not burn airtime.
+      this->set_timeout("drift_end", (uint32_t) duration_s * 1000,
+                        [this]() { this->stop_drift_test(); });
+    }
+
+    void LORAListener::stop_drift_test()
+    {
+      if (!this->drift_test_active_)
+        return;
+      this->drift_test_active_ = false;
+      this->cancel_interval("drift_grid");
+      this->cancel_timeout("drift_end");
+      // Best-effort: the node does not depend on this arriving -- its own
+      // deadline is the thing that guarantees it leaves continuous RX.
+      this->send_drift_test_(false);
+      ESP_LOGI(TAG, "[%s] drift test STOP", this->get_name().c_str());
+    }
+
+    void LORAListener::send_drift_test_(bool enable)
+    {
+      if (this->parent_ == nullptr)
+        return;
+
+      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = this->incrTxMessageId();
+      // Bursted, unlike the schedule push: the burst is not redundancy here,
+      // it IS the measurement. Copy i leaves at a known i * 88235 us, and the
+      // node regresses its arrival times against that.
+      header.burstindex    = 0;
+      header.burstcount    = 0;
+      op_message.header    = &header;
+
+      DriftTest dt = DRIFT_TEST__INIT;
+      dt.enable       = enable;
+      dt.durations    = this->drift_test_duration_s_;
+      dt.gridperiodms = this->drift_test_grid_ms_;
+
+      op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST;
+      op_message.drifttest = &dt;
+
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      {
+        this->parent_->send(buf, len);
+        free(buf);
+      }
+    }
+
     void LORAListener::send_schedule_config()
     {
       if (this->parent_ == nullptr)

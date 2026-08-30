@@ -192,6 +192,28 @@ namespace esphome
       bool schedule_pending();
       void send_schedule_config();
 
+      // --- Drift test (bench only) --------------------------------------
+      // Puts BOTH ends into test mode: the node holds continuous RX, and the
+      // hub emits a burst every grid_ms so there is a regular ruler to measure
+      // against. Without the hub half the node would only get a fit whenever
+      // the hub happened to have traffic, which in interactive mode is rare
+      // and irregular.
+      //
+      // The grid frame IS the DriftTest message, re-sent. That makes the test
+      // self-limiting: each one re-arms the node deadline, so if the hub stops
+      // or this component reboots, the node exits on its own.
+      void start_drift_test(uint32_t duration_s = 300, uint32_t grid_ms = 15000);
+      void stop_drift_test();
+      bool drift_test_active() const { return this->drift_test_active_; }
+
+     protected:
+      void send_drift_test_(bool enable);
+      bool     drift_test_active_{false};
+      uint32_t drift_test_duration_s_{0};
+      uint32_t drift_test_grid_ms_{0};
+
+     public:
+
       // ---- P2: wake beacon ----
       // Latest values reported by the node, for logging and HA diagnostics.
       // clock_offset_s_ is node_epoch - hub_epoch: positive means the node runs

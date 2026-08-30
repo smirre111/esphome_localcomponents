@@ -27,6 +27,7 @@ typedef struct ScheduleEntry ScheduleEntry;
 typedef struct ScheduleConfig ScheduleConfig;
 typedef struct NodeWakeBeacon NodeWakeBeacon;
 typedef struct LoraHeader LoraHeader;
+typedef struct DriftTest DriftTest;
 typedef struct LoraClientOperationMessage LoraClientOperationMessage;
 typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
@@ -453,6 +454,34 @@ struct  LoraHeader
     , 0, 0, 0, 0, 0, 0 }
 
 
+/*
+ * Bench tool: characterise node-vs-hub clock drift (see DriftEstimator.h).
+ * Switched over the air rather than compiled in, so a test can be started and
+ * stopped from Home Assistant without reflashing — and, more importantly, so
+ * the node can END it by itself.
+ * While active the node holds the radio in CONTINUOUS RX to hear most of each
+ * 17-copy burst, which costs ~11 mA against a ~1.2 mA interactive average. If
+ * the "off" command were lost and the node had no timeout, that would flatten
+ * the pack. Hence durationS is mandatory in practice and the node caps it.
+ */
+struct  DriftTest
+{
+  ProtobufCMessage base;
+  protobuf_c_boolean enable;
+  /*
+   * node auto-exits after this; 0 = node default
+   */
+  uint32_t durations;
+  /*
+   * hub burst cadence while active; 0 = hub default
+   */
+  uint32_t gridperiodms;
+};
+#define DRIFT_TEST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&drift_test__descriptor) \
+    , 0, 0, 0 }
+
+
 typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET = 0,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION = 10,
@@ -463,6 +492,7 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE = 15,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC = 16,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE = 17,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST = 18,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
@@ -476,6 +506,12 @@ struct  LoraClientOperationMessage
     BaseNonceExchange *basenonce;
     ClientConfig *clientconfig;
     CoverConfig *coverconfig;
+    /*
+     * Bench-only drift test. A node that does not know this field ignores
+     * it (proto3 unknown-field behaviour), so it is safe to ship to a hub
+     * ahead of the nodes.
+     */
+    DriftTest *drifttest;
     /*
      * When this field is present the message is encrypted (AEAD blob); the
      * structured fields above are absent.  Field 9 keeps a 1-byte tag.
@@ -817,6 +853,25 @@ LoraHeader *
 void   lora_header__free_unpacked
                      (LoraHeader *message,
                       ProtobufCAllocator *allocator);
+/* DriftTest methods */
+void   drift_test__init
+                     (DriftTest         *message);
+size_t drift_test__get_packed_size
+                     (const DriftTest   *message);
+size_t drift_test__pack
+                     (const DriftTest   *message,
+                      uint8_t             *out);
+size_t drift_test__pack_to_buffer
+                     (const DriftTest   *message,
+                      ProtobufCBuffer     *buffer);
+DriftTest *
+       drift_test__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   drift_test__free_unpacked
+                     (DriftTest *message,
+                      ProtobufCAllocator *allocator);
 /* LoraClientOperationMessage methods */
 void   lora_client_operation_message__init
                      (LoraClientOperationMessage         *message);
@@ -969,6 +1024,9 @@ typedef void (*NodeWakeBeacon_Closure)
 typedef void (*LoraHeader_Closure)
                  (const LoraHeader *message,
                   void *closure_data);
+typedef void (*DriftTest_Closure)
+                 (const DriftTest *message,
+                  void *closure_data);
 typedef void (*LoraClientOperationMessage_Closure)
                  (const LoraClientOperationMessage *message,
                   void *closure_data);
@@ -1012,6 +1070,7 @@ extern const ProtobufCMessageDescriptor schedule_entry__descriptor;
 extern const ProtobufCMessageDescriptor schedule_config__descriptor;
 extern const ProtobufCMessageDescriptor node_wake_beacon__descriptor;
 extern const ProtobufCMessageDescriptor lora_header__descriptor;
+extern const ProtobufCMessageDescriptor drift_test__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_operation_message__descriptor;
 extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;

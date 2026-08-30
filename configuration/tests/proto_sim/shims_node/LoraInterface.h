@@ -59,7 +59,15 @@ public:
         return out;
     }
 
+    // Drift test: the real class switches the radio between windowed rxSingle
+    // and continuous RX. Nothing here drives a radio, but the sim asserts on
+    // the flag — a test can then prove the node LEAVES continuous RX, which is
+    // the property that keeps a bench test from flattening the pack.
+    void setContinuousRx(bool on) { continuous_rx_ = on; }
+    bool continuousRx() const { return continuous_rx_; }
+
 private:
+    bool                     continuous_rx_{false};
     rx_buffer_t              pool_[POOL_SIZE];
     std::vector<rx_buffer_t*> free_;
 };

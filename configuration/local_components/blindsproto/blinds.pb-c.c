@@ -547,6 +547,51 @@ void   lora_header__free_unpacked
   assert(message->base.descriptor == &lora_header__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   drift_test__init
+                     (DriftTest         *message)
+{
+  static const DriftTest init_value = DRIFT_TEST__INIT;
+  *message = init_value;
+}
+size_t drift_test__get_packed_size
+                     (const DriftTest *message)
+{
+  assert(message->base.descriptor == &drift_test__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t drift_test__pack
+                     (const DriftTest *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &drift_test__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t drift_test__pack_to_buffer
+                     (const DriftTest *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &drift_test__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+DriftTest *
+       drift_test__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (DriftTest *)
+     protobuf_c_message_unpack (&drift_test__descriptor,
+                                allocator, len, data);
+}
+void   drift_test__free_unpacked
+                     (DriftTest *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &drift_test__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   lora_client_operation_message__init
                      (LoraClientOperationMessage         *message)
 {
@@ -1846,7 +1891,71 @@ const ProtobufCMessageDescriptor lora_header__descriptor =
   (ProtobufCMessageInit) lora_header__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[10] =
+static const ProtobufCFieldDescriptor drift_test__field_descriptors[3] =
+{
+  {
+    "enable",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(DriftTest, enable),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "durationS",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(DriftTest, durations),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "gridPeriodMs",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(DriftTest, gridperiodms),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned drift_test__field_indices_by_name[] = {
+  1,   /* field[1] = durationS */
+  0,   /* field[0] = enable */
+  2,   /* field[2] = gridPeriodMs */
+};
+static const ProtobufCIntRange drift_test__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 3 }
+};
+const ProtobufCMessageDescriptor drift_test__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "DriftTest",
+  "DriftTest",
+  "DriftTest",
+  "",
+  sizeof(DriftTest),
+  3,
+  drift_test__field_descriptors,
+  drift_test__field_indices_by_name,
+  1,  drift_test__number_ranges,
+  (ProtobufCMessageInit) drift_test__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[11] =
 {
   {
     "header",
@@ -1968,11 +2077,24 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "drifttest",
+    18,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, drifttest),
+    &drift_test__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   7,   /* field[7] = basenonce */
   4,   /* field[4] = clientconfig */
   5,   /* field[5] = coverconfig */
+  10,   /* field[10] = drifttest */
   1,   /* field[1] = encrypted */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
@@ -1985,7 +2107,7 @@ static const ProtobufCIntRange lora_client_operation_message__number_ranges[2 + 
 {
   { 1, 0 },
   { 9, 1 },
-  { 0, 10 }
+  { 0, 11 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -1995,7 +2117,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  10,
+  11,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
   2,  lora_client_operation_message__number_ranges,

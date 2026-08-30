@@ -160,3 +160,31 @@ TEST(DriftEstimator, AccumulatorIgnoresInvalidFits) {
     EXPECT_TRUE(acc.ready());
     EXPECT_NEAR(acc.mean_ppm(), 20, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Drift-test duration policy — the node decides, not the hub
+// ---------------------------------------------------------------------------
+
+TEST(DriftTestDuration, ZeroMeansTheNodeDefault) {
+    EXPECT_EQ(testDurationS(0), kTestDefaultS);
+}
+
+TEST(DriftTestDuration, AReasonableRequestIsHonoured) {
+    EXPECT_EQ(testDurationS(60), 60u);
+    EXPECT_EQ(testDurationS(kTestMaxS), kTestMaxS);
+}
+
+TEST(DriftTestDuration, AnAbsurdRequestIsCapped) {
+    // A test holds the radio in continuous RX at ~11 mA against a ~1.2 mA
+    // interactive average. If a buggy or replayed hub frame could ask for
+    // "forever", the pack would be flat before anyone noticed — so the ceiling
+    // is the nodes, and it is not negotiable.
+    EXPECT_EQ(testDurationS(kTestMaxS + 1), kTestMaxS);
+    EXPECT_EQ(testDurationS(86400), kTestMaxS);
+    EXPECT_EQ(testDurationS(0xFFFFFFFFu), kTestMaxS);
+}
+
+TEST(DriftTestDuration, TheCapIsShorterThanAnyPlausibleSleep) {
+    // Sanity: the ceiling has to be small next to the battery it protects.
+    EXPECT_LE(kTestMaxS, 3600u) << "an hour of continuous RX is already too much";
+}
