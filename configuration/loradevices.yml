@@ -438,9 +438,13 @@ text:
     name: "Rol2 Schedule"
     status:
       name: "Rol2 Schedule Status"
-    # The syntax, visible in HA. ESPHome cannot attach a description to an
-    # entity, so the help has to be a value. Full reference:
-    # docs/schedule-text-syntax.md
-    help:
-      name: "Rol2 Schedule Syntax"
+    # No `help:` entity here on purpose. A text_sensor carrying help text is
+    # capped at 255 characters and spends an entity on something that is not
+    # device state — and HA showed it as unavailable, most likely because a
+    # READ-ONLY entity marked entity_category: config is semantically wrong
+    # (config = changes settings, diagnostic = read-only info).
+    #
+    # The syntax lives in docs/schedule-text-syntax.md, and the Lovelace card
+    # at the end of that file puts it beside the field in the dashboard —
+    # unlimited length, formatted, zero entities.
 

@@ -26,14 +26,6 @@ namespace esphome
       if (this->status_ != nullptr)
         this->status_->publish_state("ok");
 
-      // Home Assistant caps a state string at 255 characters, so this is a
-      // reminder rather than the manual — the full grammar, the error list and
-      // the reasons for the limits are in docs/schedule-text-syntax.md.
-      if (this->help_ != nullptr)
-        this->help_->publish_state(
-            "HH:MM <days> <action>; ...  |  days: daily weekdays weekend "
-            "mon..sun or mon,thu  |  action: open close stop position:0-100  |  "
-            "max 8, empty clears");
     }
 
     void ScheduleText::control(const std::string &value)

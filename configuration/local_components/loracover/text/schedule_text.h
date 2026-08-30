@@ -23,11 +23,6 @@ namespace esphome
     public:
       void set_lora_parent(esphome::lora_tracker::LORAListener *parent) { this->parent_ = parent; }
       void set_status(text_sensor::TextSensor *s) { this->status_ = s; }
-      // Read-only entity whose STATE is the syntax reminder. ESPHome cannot
-      // attach a description to an entity, so the help has to be a value to be
-      // visible in Home Assistant at all — otherwise the syntax lives only in
-      // a doc file the person editing the field is not looking at.
-      void set_help(text_sensor::TextSensor *s) { this->help_ = s; }
 
       void setup() override;
       void dump_config() override;
@@ -38,7 +33,6 @@ namespace esphome
 
       esphome::lora_tracker::LORAListener *parent_{nullptr};
       text_sensor::TextSensor *status_{nullptr};
-      text_sensor::TextSensor *help_{nullptr};
     };
 
   } // namespace loracov

@@ -128,3 +128,62 @@ The honest trade-off is the last row but one: a picker cannot be mistyped, and
 that was the entity version's main argument. The text format answers it by
 refusing bad input outright and naming the problem, rather than applying part
 of it.
+
+---
+
+## Putting this in the Home Assistant dashboard
+
+ESPHome cannot attach a description to an entity, so there is no way to make
+the syntax appear *on* the text field itself. The right place is a **markdown
+card** beside it: unlimited length, formatted, and it costs no entities.
+
+An earlier attempt published the syntax as a `text_sensor` state. It is not
+recommended — Home Assistant caps a state at 255 characters, so it could only
+ever be a reminder, and a read-only entity marked `entity_category: config` is
+semantically wrong (`config` means it changes settings; `diagnostic` means
+read-only). HA showed it as unavailable.
+
+Add this to a dashboard, next to the schedule entities:
+
+```yaml
+type: vertical-stack
+cards:
+  - type: entities
+    title: Rollladen Wohnzimmer 2 — schedule
+    entities:
+      - entity: text.rol2_schedule
+        name: Schedule
+      - entity: sensor.rol2_schedule_status
+        name: Status
+      - entity: binary_sensor.rollladenwohnzimmer2_schedule_pending
+        name: Waiting for node
+      - entity: switch.rollladenwohnzimmer2_auto_mode
+        name: Automatic mode
+
+  - type: markdown
+    content: |
+      **`HH:MM  <days>  <action>`**, entries separated by `;`
+
+      | field | accepts |
+      |---|---|
+      | days | `daily`, `weekdays`, `weekend`, or a list like `mon,thu` |
+      | action | `open`, `close`, `stop`, `position:0-100` |
+
+      ```
+      06:00 daily open; 21:45 daily close
+      08:00 mon,thu position:65; 12:00 sat stop
+      ```
+
+      Max 8 entries. An empty value clears the schedule.
+
+      A bad line changes **nothing** — Status shows the reason and names the
+      offending token. The field always shows what the hub actually holds, so
+      a rejected edit reverts and a tolerated one normalises
+      (`6:0 D Open` → `06:00 daily open`).
+
+      Edits reach a sleeping node at its next wake — up to the check-in
+      interval. *Waiting for node* is ON until then.
+```
+
+Entity IDs depend on your device name; check them in
+**Developer tools → States** if they differ.
