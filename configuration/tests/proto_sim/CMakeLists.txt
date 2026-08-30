@@ -340,6 +340,16 @@ if(EXISTS ${BLINDS_ESP_MAIN}/include/MotorPolicy.h)
     gtest_discover_tests(motor_policy_test)
 endif()
 
+# DriftEstimator.h fits node-vs-hub clock drift from burst arrival times. The
+# signal is ~28 us against ~10 us of interrupt jitter, so the fit matters more
+# than the idea — hence a host test with realistic jitter injected.
+if(EXISTS ${BLINDS_ESP_MAIN}/include/DriftEstimator.h)
+    add_executable(drift_estimator_test scenarios/drift_estimator_test.cpp)
+    target_include_directories(drift_estimator_test PRIVATE ${BLINDS_ESP_MAIN}/include)
+    target_link_libraries(drift_estimator_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(drift_estimator_test)
+endif()
+
 # ScheduleText.h is the compact schedule format. A parser is the one place a
 # typo becomes silent data loss, so it is dependency-free and tested here — the
 # entity version of schedule editing could not be mistyped, and this format only
