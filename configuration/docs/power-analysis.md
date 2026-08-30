@@ -56,40 +56,53 @@ This is the whole finding. Everything below is arithmetic on top of it.
 
 ---
 
-## 3. Energy model — assumed currents
+## 3. Energy — anchored on a measurement
 
-Because the currents are unmeasured, here is the sensitivity rather than a
-single number. The node enables automatic light sleep
-(`esp_pm_configure(..., light_sleep_enable = true)`), so the "awake" figure is
-an average that depends heavily on how effective that is with the LoRa RX timer
-firing every 500 ms.
+**Measured (Reinhold, meter on the node): interactive mode averages 1.2 mA in
+total, including LoRa RX.** That is 28.8 mAh/day.
 
-| awake / deep-sleep | auto mAh/day | interactive mAh/day | ratio |
-|---|---|---|---|
-| 80 mA / 20 µA | 5.7 | 1440 | 255× |
-| 80 mA / 200 µA | 10.0 | 1441 | 145× |
-| 25 mA / 20 µA | 2.1 | 450 | 215× |
-| 25 mA / 200 µA | 6.4 | 451 | 70× |
-| 10 mA / 20 µA | 1.1 | 180 | 160× |
+### What it implies about the awake current
 
-Illustrative life on a 2000 mAh pack (**the real pack capacity is unknown**):
+Interactive is 64 800 s awake + 21 600 s deep sleep. Solving for the awake
+current across plausible sleep currents:
 
-| assumption | automatic | interactive |
-|---|---|---|
-| 80 mA / 20 µA | ~354 days | **1.4 days** |
-| 25 mA / 20 µA | ~954 days | **4.4 days** |
-| 25 mA / 200 µA | ~312 days | **4.4 days** |
+| assume deep sleep | => awake current |
+|---|---|
+| 20 µA | 1.59 mA |
+| 200 µA | 1.53 mA |
+| 1000 µA | 1.27 mA |
 
-Note what changes and what does not. In automatic mode the **deep-sleep leakage
-dominates** — going from 20 µA to 200 µA roughly triples consumption, while the
-awake current barely matters. In interactive mode the opposite holds: sleep
-current is irrelevant and awake current is everything.
+**The awake current is only ~1.3–1.6 mA.** Automatic light sleep
+(`esp_pm_configure(..., light_sleep_enable = true)`) is working very well: the
+CPU spends almost all of its "awake" time in light sleep between the 500 ms
+LoRa RX windows.
 
-**So the two modes need opposite optimisations.** Shortening the ~28 s wake
-would help automatic mode very little; reducing board leakage would help a lot.
+> An earlier version of this document modelled 25–80 mA awake. That was wrong
+> by a factor of ~20, and it inflated the conclusion below. The measurement
+> replaced it.
 
----
+### What that does to the auto-vs-interactive comparison
 
+Because being awake is cheap, the 278× duty-cycle ratio does **not** become a
+278× energy ratio. Auto mode's consumption is dominated by the deep-sleep
+current, which is still **unmeasured**:
+
+| deep sleep | auto mA | auto mAh/day | interactive mAh/day | auto advantage |
+|---|---|---|---|---|
+| 20 µA | 0.101 | 2.4 | 28.8 | **11.9×** |
+| 50 µA | 0.131 | 3.1 | 28.8 | 9.2× |
+| 200 µA | 0.280 | 6.7 | 28.8 | 4.3× |
+| 500 µA | 0.580 | 13.9 | 28.8 | 2.1× |
+| 1000 µA | 1.078 | 25.9 | 28.8 | **1.1×** |
+
+(auto wake modelled at 30 mA average — a wake does real radio work, unlike
+interactive idle. The column is insensitive to this: at 20 µA sleep, changing
+the wake current from 10 to 80 mA moves auto from 0.05 to 0.24 mA, still far
+below interactive.)
+
+**So the honest answer is a range, 1.1× to 12×, and one measurement decides
+where in it we sit.** If the board leaks ~1 mA in deep sleep, automatic mode is
+barely cheaper than interactive despite being asleep 99.7 % of the time.
 ## 4. Empirical cross-check
 
 Node 2's own beacon telemetry, automatic mode:
@@ -135,18 +148,29 @@ Until at least (1) and (3) exist, treat §3 as ratios only.
 
 ---
 
-## 6. Conclusions that hold regardless of the missing measurements
+## 6. Conclusions
 
-* **Automatic mode is not slightly better, it is a different regime** — 0.27 %
-  duty versus 75 %. No plausible current assumption closes a 278× gap in awake
-  time.
-* **Interactive mode is a days-scale battery budget**, not a months-scale one.
-  It is fine as a temporary state — a button press, a maintenance window, an OTA
-  — and expensive as a resting state.
-* **That makes the auto-mode persistence fix a power fix**, not only a
-  correctness one. Before it, a hub reboot could silently leave a node in the
-  wrong mode; if that direction had been interactive, the node would have gone
-  from a months-scale to a days-scale budget with nothing to indicate it.
-* **In automatic mode, chase leakage, not awake time.** Halving the 28 s wake
-  saves ~1 mAh/day at 80 mA; halving deep-sleep leakage from 200 µA to 100 µA
-  saves ~2.4 mAh/day. The wake is already short enough that it is not the target.
+* **Automatic mode is cheaper, but by between 1.1× and 12× — not by the 278×
+  the duty cycle suggests.** Being awake costs only ~1.5 mA because light sleep
+  is effective, so the awake fraction is not the whole story.
+* **Deep-sleep current is now the ONLY thing that matters**, and it is the one
+  number nobody has measured. It decides whether auto mode is a 12× win or a
+  rounding error. Measuring it is minutes of work with a µA-capable meter and
+  is worth more than any further modelling.
+* **Shortening the wake is not worth doing.** At 233 s/day and ~30 mA, the
+  entire awake budget is ~1.9 mAh/day. Halving it saves under 1 mAh/day against
+  an interactive baseline of 28.8.
+* **Interactive mode is ~29 mAh/day.** Whether that is acceptable depends on the
+  pack, which is also unmeasured — on 3000 mAh it is about 100 days.
+* The auto-mode persistence fix still matters, but for correctness rather than
+  as a dramatic power saving: a node silently left interactive costs somewhere
+  between a little and a lot more, depending on that same sleep current.
+
+### Where this document was wrong
+
+The first version assumed 25–80 mA awake and 20–200 µA sleep, and concluded a
+~278× advantage and a "months versus days" difference. The awake figure was out
+by ~20×. Interactive mode is not days-scale; it is ~100 days on a 3000 mAh pack.
+The duty-cycle measurement was right; the energy conclusion drawn from it was
+not, because it rested on an unmeasured current that turned out to be far lower
+than assumed.
