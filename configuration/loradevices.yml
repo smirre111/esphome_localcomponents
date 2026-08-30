@@ -388,3 +388,22 @@ select:
     type: days
     name: "Rol2 Slot 4 Days"
 
+# Target position, only meaningful when a slot's action is `position`.
+number:
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 0
+    name: "Rol2 Slot 1 Position"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 1
+    name: "Rol2 Slot 2 Position"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 2
+    name: "Rol2 Slot 3 Position"
+  - platform: loracover
+    lora_client_id: rol_2
+    slot: 3
+    name: "Rol2 Slot 4 Position"
+

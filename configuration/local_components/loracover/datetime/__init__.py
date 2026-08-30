@@ -2,7 +2,7 @@ import esphome.codegen as cg
 from esphome.components import datetime
 from esphome.components import lora_client
 import esphome.config_validation as cv
-from esphome.const import ENTITY_CATEGORY_CONFIG
+from esphome.const import CONF_ENTITY_CATEGORY, ENTITY_CATEGORY_CONFIG
 
 # One editable time per schedule slot.
 #
@@ -29,6 +29,16 @@ CONFIG_SCHEMA = (
             # Which slot this entity edits. Stable index, because HA edits one
             # field of one slot at a time.
             cv.Required(CONF_SLOT): cv.int_range(min=0, max=7),
+            # Default this to `config` so HA files the times alongside the
+            # selects and switches. Without it they default to no category and
+            # land under Controls, splitting one logical schedule across two
+            # panels — which is exactly what happened on the first deploy.
+            #
+            # time_schema() takes no entity_category argument (unlike
+            # select_schema), so it is set here instead.
+            cv.Optional(
+                CONF_ENTITY_CATEGORY, default=ENTITY_CATEGORY_CONFIG
+            ): cv.entity_category,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
