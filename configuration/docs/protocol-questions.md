@@ -10,6 +10,65 @@ have seen. **(4) is cheap and worth doing**, but needs care about resolution.
 
 ---
 
+## Correction: drift needs no absolute time (Reinhold, 2026-08-30)
+
+Sections 1, 4 and 5 below argued that sub-second time on the wire was the
+prerequisite for everything. **That conflated absolute synchronisation with
+drift measurement, and only the former needs it.**
+
+Drift is a *rate*. To measure it the node needs two things, neither of which is
+an absolute timestamp:
+
+1. **RX events timestamped on its own oscillator** — `esp_timer_get_time()` in
+   the DIO0 ISR, 1 µs resolution. This is the only code change required, and the
+   ISR currently captures nothing.
+2. **The hub's nominal cadence**, so it knows what the interval *should* have
+   been. That is already on the wire: `burstIndex` identifies the copy and the
+   spacing is a fixed 88 ms.
+
+**And the hub's cadence turns out to be clean enough to use as a reference.**
+`sendPacketBytes()` performs no CAD and no backoff — it goes straight to
+`lora_beginPacket()` — and the burst loop paces itself with
+`vTaskDelayUntil(&xLastWakeTime, xFrequency)`, an absolute-time delay that
+corrects for execution time rather than accumulating it. So the 17 copies are a
+deterministic 88 ms pulse train referenced to the hub's tick.
+
+(The random 29–290 ms CSMA backoff that would have wrecked this applies to the
+**node's** transmissions, not the hub's bursts. The hub deliberately drops to RX
+between copies precisely so the node's CAD can find a clear channel.)
+
+### What precision that gives
+
+| baseline | drift @20 ppm | vs ~10 µs IRQ jitter |
+|---|---|---|
+| one burst (16 × 88 ms) | 28 µs | 3:1 — marginal |
+| 1 minute | 1.2 ms | 120:1 |
+| 10 minutes | 12 ms | 1200:1 |
+| 6 hours | 432 ms | 43000:1 |
+
+A one-minute baseline already resolves drift to ~1 % of its value. **So yes —
+ms-accurate (in fact µs-accurate) relative drift is measurable with one line in
+the ISR and no protocol change at all.**
+
+### What this changes below
+
+* **§1** — an RxDone timestamp is *not* pointless today. It is pointless for
+  setting the absolute clock (the wire carries whole seconds), but it is exactly
+  what a drift measurement needs. Those are different uses of the same signal.
+* **§4** — the drift test mode needs no protocol change and no day-long run.
+  Timestamp at the IRQ, compare against `burstIndex × 88 ms`, and accumulate
+  across wakes. Minutes, not a day.
+* **§5** — scheduled RX windows need *phase* agreement, not absolute time. A
+  received burst already establishes phase: copy *i* arrived, so copy 0 was at
+  `t − i×88 ms`, and the round boundary follows. The scheme is therefore **not**
+  blocked on a millisecond epoch field either. What it needs is the same ISR
+  timestamp plus a drift estimate to size the guard band.
+
+What absolute sub-second time *would* still buy is a node whose wall clock is
+accurate to better than a second — which matters for logging and for executing
+a schedule entry at the right second, but not for either of the above.
+---
+
 ## 1. Is the TimeSync offset taken from an RX interrupt?
 
 **No.** The chain is:
