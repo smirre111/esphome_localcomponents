@@ -438,4 +438,9 @@ text:
     name: "Rol2 Schedule"
     status:
       name: "Rol2 Schedule Status"
+    # The syntax, visible in HA. ESPHome cannot attach a description to an
+    # entity, so the help has to be a value. Full reference:
+    # docs/schedule-text-syntax.md
+    help:
+      name: "Rol2 Schedule Syntax"
 

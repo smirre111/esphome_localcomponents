@@ -12,6 +12,7 @@ AUTO_LOAD = ["loracover", "blindsproto", "text_sensor"]
 DEPENDENCIES = ["lora_tracker", "lora_client"]
 
 CONF_STATUS = "status"
+CONF_HELP = "help"
 
 loracov_ns = cg.esphome_ns.namespace("loracov")
 ScheduleText = loracov_ns.class_("ScheduleText", text.Text, cg.Component)
@@ -31,6 +32,13 @@ CONFIG_SCHEMA = (
                 entity_category=ENTITY_CATEGORY_CONFIG,
                 icon="mdi:alert-circle-outline",
             ),
+            # The syntax, as a value HA can display. ESPHome has no way to
+            # attach a description to an entity, so a text_sensor is the only
+            # route to getting the help in front of whoever edits the field.
+            cv.Optional(CONF_HELP): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_CONFIG,
+                icon="mdi:help-circle-outline",
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -46,3 +54,6 @@ async def to_code(config):
     if CONF_STATUS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_STATUS])
         cg.add(var.set_status(sens))
+    if CONF_HELP in config:
+        helper = await text_sensor.new_text_sensor(config[CONF_HELP])
+        cg.add(var.set_help(helper))
