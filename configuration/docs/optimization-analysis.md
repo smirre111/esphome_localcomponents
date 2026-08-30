@@ -62,6 +62,9 @@ understanding before touching anything.
 The real lever on downlink airtime is the scheduled-window scheme in
 `protocol-questions.md` §5, which lets the window and the burst shrink together
 — and which is blocked on sub-second time sync, not on the burst count.
+
+---
+
 ## 3. Protocol: bursts sent to nodes that cannot hear them
 
 Observed in the hub log: **68 × `Login not acknowledged — retry n/24`**. Each of
@@ -151,7 +154,8 @@ Two measurement traps worth fixing before trusting any further numbers:
 ## Recommended order
 
 1. **Log which `burstIndex` the node accepts** (§2). One line, no protocol
-   change, and it is the prerequisite for the single biggest airtime saving.
+   change — but as CONFIRMATION of the 33 %-per-window model, not as a prelude
+   to cutting the burst. The burst is tuned to the RX window, not padded.
 2. **Teach the wake model about automatic mode, then gate login retries on it**
    (§3). Removes 68-observed wasted bursts and lands logins when the node is
    actually listening.
