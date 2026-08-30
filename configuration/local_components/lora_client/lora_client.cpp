@@ -1582,6 +1582,66 @@ namespace esphome
     // Without this an HA-entered schedule would be silently reverted to the
     // compiled YAML on the next hub reboot — the same failure the Auto Mode
     // switch already had, and with no error anywhere to explain it.
+    // ---- compact text form -------------------------------------------------
+
+    bool LORAListener::set_schedule_text(const char *text, char *err, size_t err_len)
+    {
+      const auto r = scheduletext::parse(text);
+      if (!r.ok)
+      {
+        if (err != nullptr && err_len > 0)
+        {
+          size_t i = 0;
+          for (; r.error[i] != 0 && i < err_len - 1; i++) err[i] = r.error[i];
+          err[i] = 0;
+        }
+        ESP_LOGW(TAG, "[%s] Schedule text rejected: %s — schedule unchanged",
+                 this->get_name().c_str(), r.error);
+        return false;   // parse() guarantees r.count == 0 here
+      }
+
+      // Whole-table replace. Slots beyond the new count are cleared rather than
+      // left behind, or removing an entry from the text would leave it running.
+      for (uint8_t i = 0; i < kMaxScheduleEntries; i++)
+      {
+        if (i < r.count)
+        {
+          this->sched_entries_[i].minute_of_day = r.entries[i].minuteOfDay;
+          this->sched_entries_[i].day_mask      = r.entries[i].dayMask;
+          this->sched_entries_[i].action        = r.entries[i].action;
+          this->sched_entries_[i].position_pct  = r.entries[i].positionPct;
+          this->sched_entries_[i].enabled       = true;
+        }
+        else
+        {
+          this->sched_entries_[i] = SchedEntryCfg{};
+        }
+      }
+      this->sched_entry_count_ = r.count;
+      this->sched_dirty_       = true;
+      this->save_schedule_();
+      if (err != nullptr && err_len > 0) err[0] = 0;
+      ESP_LOGI(TAG, "[%s] Schedule set from text: %u entries — will push at next beacon",
+               this->get_name().c_str(), (unsigned) r.count);
+      return true;
+    }
+
+    void LORAListener::schedule_text(char *out, size_t out_len) const
+    {
+      scheduletext::Entry e[kMaxScheduleEntries];
+      uint8_t n = 0;
+      for (uint8_t i = 0; i < this->sched_entry_count_; i++)
+      {
+        if (!this->sched_entries_[i].enabled) continue;
+        e[n].minuteOfDay = this->sched_entries_[i].minute_of_day;
+        e[n].dayMask     = this->sched_entries_[i].day_mask;
+        e[n].action      = this->sched_entries_[i].action;
+        e[n].positionPct = this->sched_entries_[i].position_pct;
+        n++;
+      }
+      scheduletext::format(e, n, out, out_len);
+    }
+
     void LORAListener::save_schedule_()
     {
       SchedPersist blob{};

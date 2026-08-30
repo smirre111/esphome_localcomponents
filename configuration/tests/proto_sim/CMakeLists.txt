@@ -239,6 +239,17 @@ endif()
 # both sides and fails only on the air. Before this header was shared, the AAD/IV
 # layout was written out FOUR separate times — including twice inside
 # lora_client.cpp, once for encrypting and once for decrypting.
+set(SCHEDTEXT_SRC  ${BLINDS_ESP_MAIN}/include/ScheduleText.h)
+set(SCHEDTEXT_VEND ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/ScheduleText.h)
+if(EXISTS ${SCHEDTEXT_SRC} AND EXISTS ${SCHEDTEXT_VEND})
+    add_test(NAME scheduletext_drift_hub_vs_node
+             COMMAND ${CMAKE_COMMAND}
+                     -DSOURCE_HEADER=${SCHEDTEXT_SRC}
+                     -DVENDORED_HEADER=${SCHEDTEXT_VEND}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
+    set_tests_properties(scheduletext_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
+endif()
+
 set(FRAMECRYPTO_SRC ${BLINDS_ESP_MAIN}/include/FrameCrypto.h)
 set(FRAMECRYPTO_VENDORED
     ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/FrameCrypto.h)
@@ -327,6 +338,17 @@ if(EXISTS ${BLINDS_ESP_MAIN}/include/MotorPolicy.h)
         ${NODE_SHIM_DIR})
     target_link_libraries(motor_policy_test PRIVATE GTest::gtest GTest::gtest_main)
     gtest_discover_tests(motor_policy_test)
+endif()
+
+# ScheduleText.h is the compact schedule format. A parser is the one place a
+# typo becomes silent data loss, so it is dependency-free and tested here — the
+# entity version of schedule editing could not be mistyped, and this format only
+# beats it if bad input is rejected with a reason rather than half-applied.
+if(EXISTS ${BLINDS_ESP_MAIN}/include/ScheduleText.h)
+    add_executable(schedule_text_test scenarios/schedule_text_test.cpp)
+    target_include_directories(schedule_text_test PRIVATE ${BLINDS_ESP_MAIN}/include)
+    target_link_libraries(schedule_text_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(schedule_text_test)
 endif()
 
 # FrameCrypto.h is header-only and dependency-free (no PSA) so the AEAD wire

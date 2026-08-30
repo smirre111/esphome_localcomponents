@@ -58,7 +58,7 @@ namespace esphome
         return;
       const auto &e = this->parent_->slot(this->slot_);
       if (this->kind_ == SlotSelectKind::ACTION)
-        this->publish_state(e.action == 1 ? "close" : (e.action == 2 ? "position" : "open"));
+        this->publish_state(e.action == 1 ? "close" : (e.action == 3 ? "position" : "open"));
       else
         this->publish_state(option_for_mask(e.day_mask));
     }
@@ -71,7 +71,10 @@ namespace esphome
 
       if (this->kind_ == SlotSelectKind::ACTION)
       {
-        const uint8_t action = (value == "close") ? 1 : (value == "position" ? 2 : 0);
+        // SchedAction is 0=OPEN 1=CLOSE 2=STOP 3=POSITION — NOT dense. Mapping
+        // "position" to 2 wrote STOP, so a scheduled position move would have
+        // halted the blind wherever it was.
+        const uint8_t action = (value == "close") ? 1 : (value == "position" ? 3 : 0);
         this->parent_->set_slot_action(this->slot_, action);
       }
       else

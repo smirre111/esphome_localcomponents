@@ -19,6 +19,8 @@
 // Generated protobuf-c type, declared here rather than including
 // blinds.pb-c.h: this header is pulled in by every loracover platform, and the
 // stub header is large and C-linkage. Only a pointer to it is needed.
+#include "esphome/components/lora_client/ScheduleText.h"
+
 struct NodeWakeBeacon;
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
 
@@ -165,6 +167,16 @@ namespace esphome
       void set_slot_position(uint8_t slot, uint8_t position_pct);
       void set_slot_enabled(uint8_t slot, bool on);
       const SchedEntryCfg &slot(uint8_t slot) const { return this->sched_entries_[slot]; }
+      // ---- compact text form ---------------------------------------------
+      //
+      // Applies a whole schedule from one string (see ScheduleText.h). Returns
+      // false and fills `err` when the text is rejected — in which case NOTHING
+      // is applied, because a partially applied schedule is a schedule nobody
+      // asked for.
+      bool set_schedule_text(const char *text, char *err, size_t err_len);
+      // The canonical rendering of what is actually stored, for read-back.
+      void schedule_text(char *out, size_t out_len) const;
+
       void save_schedule_();
       void restore_schedule_();
 

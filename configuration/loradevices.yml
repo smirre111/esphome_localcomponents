@@ -261,24 +261,25 @@ sensor:
 
 
 switch:
-  # Per-slot enable, so a seasonal entry can be paused without losing its time
-  # and days. Disabled slots are omitted from the pushed frame entirely.
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 0
-    name: "Rol2 Slot 1 Enabled"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 1
-    name: "Rol2 Slot 2 Enabled"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 2
-    name: "Rol2 Slot 3 Enabled"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 3
-    name: "Rol2 Slot 4 Enabled"
+  # Per-slot enable switches — part of the SLOT-ENTITY UI, commented out with
+  # the rest of it. In the text format a slot is removed by deleting it from
+  # the line, so there is nothing to enable or disable.
+  # - platform: loracover
+  #   lora_client_id: rol_2
+  #   slot: 0
+  #   name: "Rol2 Slot 1 Enabled"
+  # - platform: loracover
+  #   lora_client_id: rol_2
+  #   slot: 1
+  #   name: "Rol2 Slot 2 Enabled"
+  # - platform: loracover
+  #   lora_client_id: rol_2
+  #   slot: 2
+  #   name: "Rol2 Slot 3 Enabled"
+  # - platform: loracover
+  #   lora_client_id: rol_2
+  #   slot: 3
+  #   name: "Rol2 Slot 4 Enabled"
 
   # P4b: automatic-mode control. The switch expresses INTENT — the node still
   # refuses auto mode without a valid clock and a usable schedule, and a button
@@ -328,82 +329,113 @@ binary_sensor:
 #
 # Rolled out on node 2 only for now: it is the bench unit, and node 1 is still
 # on older firmware.
-datetime:
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 0
-    name: "Rol2 Slot 1 Time"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 1
-    name: "Rol2 Slot 2 Time"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 2
-    name: "Rol2 Slot 3 Time"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 3
-    name: "Rol2 Slot 4 Time"
+# --- SLOT-ENTITY SCHEDULE UI (kept for comparison; superseded by `text:`) ---
+# Twenty entities per node to express what one line of text says. Left here
+# so the two can be judged side by side — re-enable by uncommenting and
+# commenting out the text: block below.
+# datetime:
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 0
+#     name: "Rol2 Slot 1 Time"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 1
+#     name: "Rol2 Slot 2 Time"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 2
+#     name: "Rol2 Slot 3 Time"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 3
+#     name: "Rol2 Slot 4 Time"
+#
+# --- SLOT-ENTITY SCHEDULE UI (kept for comparison; superseded by `text:`) ---
+# Twenty entities per node to express what one line of text says. Left here
+# so the two can be judged side by side — re-enable by uncommenting and
+# commenting out the text: block below.
+# select:
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 0
+#     type: action
+#     name: "Rol2 Slot 1 Action"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 0
+#     type: days
+#     name: "Rol2 Slot 1 Days"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 1
+#     type: action
+#     name: "Rol2 Slot 2 Action"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 1
+#     type: days
+#     name: "Rol2 Slot 2 Days"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 2
+#     type: action
+#     name: "Rol2 Slot 3 Action"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 2
+#     type: days
+#     name: "Rol2 Slot 3 Days"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 3
+#     type: action
+#     name: "Rol2 Slot 4 Action"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 3
+#     type: days
+#     name: "Rol2 Slot 4 Days"
+#
+# # Target position, only meaningful when a slot's action is `position`.
+# --- SLOT-ENTITY SCHEDULE UI (kept for comparison; superseded by `text:`) ---
+# Twenty entities per node to express what one line of text says. Left here
+# so the two can be judged side by side — re-enable by uncommenting and
+# commenting out the text: block below.
+# number:
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 0
+#     name: "Rol2 Slot 1 Position"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 1
+#     name: "Rol2 Slot 2 Position"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 2
+#     name: "Rol2 Slot 3 Position"
+#   - platform: loracover
+#     lora_client_id: rol_2
+#     slot: 3
+#     name: "Rol2 Slot 4 Position"
+#
+#
 
-select:
+# ---- Schedule as one editable line (the alternative being trialled) ---------
+#
+#   06:00 daily open; 21:45 daily close; 12:00 sat position:40
+#
+# Two entities instead of twenty. Days accept arbitrary lists (mon,thu) which
+# the select could not express, and position is part of the syntax rather than
+# a separate control that was missing entirely in the first version.
+#
+# A rejected edit changes nothing and the status entity says why; the text box
+# always shows the canonical form of what the hub actually holds.
+text:
   - platform: loracover
     lora_client_id: rol_2
-    slot: 0
-    type: action
-    name: "Rol2 Slot 1 Action"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 0
-    type: days
-    name: "Rol2 Slot 1 Days"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 1
-    type: action
-    name: "Rol2 Slot 2 Action"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 1
-    type: days
-    name: "Rol2 Slot 2 Days"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 2
-    type: action
-    name: "Rol2 Slot 3 Action"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 2
-    type: days
-    name: "Rol2 Slot 3 Days"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 3
-    type: action
-    name: "Rol2 Slot 4 Action"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 3
-    type: days
-    name: "Rol2 Slot 4 Days"
-
-# Target position, only meaningful when a slot's action is `position`.
-number:
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 0
-    name: "Rol2 Slot 1 Position"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 1
-    name: "Rol2 Slot 2 Position"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 2
-    name: "Rol2 Slot 3 Position"
-  - platform: loracover
-    lora_client_id: rol_2
-    slot: 3
-    name: "Rol2 Slot 4 Position"
+    name: "Rol2 Schedule"
+    status:
+      name: "Rol2 Schedule Status"
 
