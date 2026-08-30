@@ -160,44 +160,55 @@ millisecond work in §1 is even needed.
 The idea is sound and the arithmetic supports it — but it is blocked on §1, not
 on hardware.
 
-**Today:** the node opens 3 RX windows per 1500 ms round (`rxSlotsPerRound = 3`,
-`rxIntervalMs = 500`), and the hub sends 17 copies at 88 ms spacing to guarantee
-one lands in a window. Neither side knows *when* the other will be listening, so
-both brute-force it.
+**Today:** the node opens an RX window every `rxIntervalMs` = 500 ms, three per
+1500 ms round. The window DURATION is not 500 ms — that is the interval. The
+radio is put in single-receive with a symbol timeout:
 
-**With synchronised clocks** both ends can agree on an instant. The node opens
-one narrow window; the hub transmits only into it.
+```cpp
+int symTimeout = int(30.0f / 0.26f);   // ~115 symbols
+lora_setSymbolTimeout(symTimeout);
+lora_rxSingle();
+```
 
-| scheme | node RX duty per round |
+At SF7/BW500 a symbol is 0.256 ms, so the window is **~29 ms**.
+
+| scheme | RX duty per round |
 |---|---|
-| today: 3 × 500 ms | 100 % |
-| 1 × 500 ms | 33 % |
-| 1 × 200 ms | 13 % |
-| 1 × 100 ms | 6.7 % |
-| 1 × 50 ms | 3.3 % |
+| today: 3 × 29.4 ms | **5.9 %** |
+| 1 × 29.4 ms (synchronised) | **2.0 %** |
 
-And the hub's burst could drop from 17 copies to 2–3 for margin, cutting
-downlink airtime by ~5×.
+**So synchronising buys ~3×, not the order of magnitude an earlier version of
+this document claimed.** That version read `rxIntervalMs` as the window width
+and concluded 100 % duty — wrong by a factor of 17. Note the consequence: a
+"1 × 100 ms window" would be 6.7 % duty, i.e. WORSE than today.
 
-**What sets the window width is time since last sync:**
+The node is already doing the efficient thing — `rxSingle` with a symbol
+timeout, a window only a little longer than a preamble. The remaining saving is
+only in dropping the two redundant windows.
 
-| since sync | drift @20 ppm | @50 ppm |
-|---|---|---|
-| 1.5 s | 0.03 ms | 0.08 ms |
-| 1 min | 1.2 ms | 3 ms |
-| 10 min | 12 ms | 30 ms |
-| 1 h | 72 ms | 180 ms |
-| 6 h | 432 ms | 1080 ms |
+### The burst count is coupled to the window, and is NOT over-provisioned
 
-So a 100 ms window is comfortable if the two ends re-sync at least every
-~10 minutes, which in interactive mode they can do essentially for free — every
-frame exchanged is an opportunity to re-sync.
+With copies every 88 ms and a 29 ms window, a window catches a packet *start*
+with probability ≈ 29.4/88 = 33 %. Three windows per round give
+**1.00 expected catches per round.**
 
-**The blocker:** the wire carries whole seconds, so the *sync error alone* is up
-to 1000 ms — an order of magnitude worse than the drift the scheme must
-tolerate. **A hub RTC does not fix this.** A better hub clock reduces the hub's
-own error; it does nothing about a protocol that cannot express milliseconds.
+That is the design working as intended, not waste. `txSlotsPerRound = 17` is
+tuned to this window scheme — cutting it without widening the window or
+synchronising would drop the catch rate below one and start losing downlinks.
+`optimization-analysis.md` previously recommended reducing it on the grounds
+that it was likely over-provisioned; that recommendation was based on the same
+wrong window figure and has been corrected there.
 
+### Is it worth it?
+
+At an SX1278 RX current of ~11 mA, 5.9 % duty contributes ~0.65 mA. Dropping to
+2.0 % would save ~0.43 mA — against a **measured** 1.2 mA interactive average,
+that is roughly a third of the whole budget.
+
+So this is a genuine **interactive-mode battery** argument, not only a
+channel-occupancy one, which corrects the caution at the end of this section.
+It still does not move automatic-mode battery life, where the node is asleep
+99.7 % of the time.
 ### Suggested order
 
 1. **§1 first**: `epochMillis` + RxDone timestamping + `burstIndex` correction.

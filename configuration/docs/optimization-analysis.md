@@ -33,31 +33,35 @@ it means uplink airtime is negligible next to downlink.
 
 ---
 
-## 2. The 17× burst is the dominant cost — and it is unmeasured
+## 2. The 17× burst — CORRECTED: it is not over-provisioned
 
-Every downlink costs 17× its airtime. A full registration handshake is roughly
-five downlink bursts (ClientConfig, CoverConfig, LoginMsg, TimeSync,
-ScheduleConfig) ≈ **3.5–4 s of airtime**, and node 2's boot log shows the node
-awake **~7.4 s** for it (REGISTER at 1.15 s, schedule applied at 8.52 s).
+> The first version of this section said the 17-copy burst was probably
+> over-provisioned and could be roughly halved. **That was wrong**, and it came
+> from misreading `rxIntervalMs` (the interval BETWEEN the node's RX windows) as
+> the window duration.
 
-Is 17 the right number? **The data to answer that is already on the wire and is
-being thrown away.** `LoraHeader` carries `burstIndex` and `burstCount`, and the
-node reads them to schedule its deferred reply — but nothing records *which
-index the node actually acted on*. If the node typically decodes copy 2 or 3,
-17 is heavily over-provisioned and could drop to, say, 8 — halving downlink
-airtime and the hub's TX energy.
+The node's RX window is set by a symbol timeout, not by that interval:
+`symTimeout = 30/0.26 ≈ 115 symbols`, and at SF7/BW500 a symbol is 0.256 ms, so
+the window is **~29 ms**, opened every 500 ms — an RX duty of **5.9 %**, not the
+100 % implied before.
 
-**Cheapest useful change in this whole document:** log `burstIndex` at the node
-when a frame is accepted, and report it in the next beacon or simply in the
-serial log. One field, no protocol change, and it turns a guess into a
-measurement. Do this before touching `txSlotsPerRound`.
+With hub copies every 88 ms, a 29 ms window catches a packet *start* with
+probability ≈ 33 %, and three windows give **1.00 expected catches per round**.
 
-I am deliberately not recommending a burst reduction on the current evidence —
-the node's RX is windowed (3 × 500 ms per round), and the margin that 17 copies
-buys against a missed window is exactly what a naive reduction would spend.
+**`txSlotsPerRound = 17` is therefore tuned to the window scheme, not padded.**
+Cutting it without widening the window or synchronising the two ends would push
+the catch rate below one and start losing downlinks — the opposite of an
+optimisation.
 
----
+Logging which `burstIndex` the node accepts is **still worth doing**, but as
+*confirmation of this model* rather than as a prelude to cutting the burst. If
+the observed distribution is roughly uniform across indices, the 33 % model
+holds; if it clusters early, something else is going on and is worth
+understanding before touching anything.
 
+The real lever on downlink airtime is the scheduled-window scheme in
+`protocol-questions.md` §5, which lets the window and the burst shrink together
+— and which is blocked on sub-second time sync, not on the burst count.
 ## 3. Protocol: bursts sent to nodes that cannot hear them
 
 Observed in the hub log: **68 × `Login not acknowledged — retry n/24`**. Each of
