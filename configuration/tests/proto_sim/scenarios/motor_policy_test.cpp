@@ -391,3 +391,170 @@ TEST(MotorPolicy, MovingAndDirectionHelpersAgreeWithTheStates) {
     EXPECT_FALSE(isOpening(BLINDS_FULLY_CLOSING));
     EXPECT_FALSE(isOpening(BLINDS_STEP_DOWN));
 }
+
+// ---------------------------------------------------------------------------
+// Slat slack: a STEP must never collect it
+// ---------------------------------------------------------------------------
+
+TEST(SlatSlack, AStepDownGetsNoSealTail) {
+    // The bug this exists to prevent. A step has no target position, and the
+    // original condition read "no target" as "full close", so every step down
+    // appended the 7 s seal tail: 3000 + 7000 - 1000 = 9 s of motor for what
+    // should be a 2 s nudge. Shipped in v1.0.7; noticed in the field as "a
+    // single press runs much longer than it used to".
+    EXPECT_EQ(tailSlackMs(/*is_step=*/true, /*has_target=*/false, 0.0f, 7000), 0u);
+    EXPECT_EQ(tailSlackMs(/*is_step=*/true, /*has_target=*/true, 0.0f, 7000), 0u);
+}
+
+TEST(SlatSlack, AStepUpFromTheSealedPositionGetsNoHead) {
+    // Same class, the other direction: a step up starting from fully closed
+    // would otherwise collect the un-seal head.
+    EXPECT_EQ(headSlackMs(/*is_step=*/true, 0.0f, 7000), 0u);
+}
+
+TEST(SlatSlack, AFullCloseStillSeals) {
+    // The feature must survive the fix — this is what the slack is FOR.
+    EXPECT_EQ(tailSlackMs(false, /*has_target=*/false, 0.0f, 7000), 7000u)
+        << "a close with no target runs to the sill and must compress";
+    EXPECT_EQ(tailSlackMs(false, /*has_target=*/true, 0.0f, 7000), 7000u)
+        << "an explicit target of 0 is also a full close";
+}
+
+TEST(SlatSlack, AnIntermediateCloseDoesNotSeal) {
+    EXPECT_EQ(tailSlackMs(false, /*has_target=*/true, 0.40f, 7000), 0u)
+        << "stopping at 40% never reaches the sill";
+}
+
+TEST(SlatSlack, AFullOpenFromSealedStillUnseals) {
+    EXPECT_EQ(headSlackMs(false, 0.0f, 7000), 7000u);
+}
+
+TEST(SlatSlack, AnOpenFromMidTravelHasNothingToUnseal) {
+    EXPECT_EQ(headSlackMs(false, 0.50f, 7000), 0u);
+}
+
+TEST(SlatSlack, ZeroConfiguredSlackIsAlwaysZero) {
+    // Nodes configured without slack must be unaffected either way.
+    EXPECT_EQ(tailSlackMs(false, false, 0.0f, 0), 0u);
+    EXPECT_EQ(headSlackMs(false, 0.0f, 0), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Final position: a move that ends must always report where it ended
+// ---------------------------------------------------------------------------
+
+TEST(FinalPosition, AStepEndingNeedsItComputed) {
+    // The bug: position is integrated only while MOVING, and by the time a
+    // move ends the state is already IDLE. A step does not snap, so nothing
+    // else writes the position -- and a step shorter than the FSM block time
+    // never woke mid-move at all. The blind moved; HA was never told.
+    EXPECT_TRUE(needsFinalPosition(/*was_moving=*/true, /*now_idle=*/true,
+                                   /*snapped=*/false));
+}
+
+TEST(FinalPosition, AFullMoveSnapsInsteadAndMustNotBeRecomputed) {
+    // A full move ran the whole configured duration and is against the
+    // physical stop. The snap is more authoritative than the integrated
+    // estimate, so recomputing would REPLACE a known-good 0.0/1.0 with a
+    // drifted approximation.
+    EXPECT_FALSE(needsFinalPosition(true, true, /*snapped=*/true));
+}
+
+TEST(FinalPosition, NothingToDoWhileStillMoving) {
+    // motionTick() owns the position during the move.
+    EXPECT_FALSE(needsFinalPosition(/*was_moving=*/true, /*now_idle=*/false, false));
+}
+
+TEST(FinalPosition, NothingToDoIfItWasNeverMoving) {
+    // An IDLE->IDLE transition must not rewrite the position from a stale
+    // tickStartOfOperation belonging to some previous move.
+    EXPECT_FALSE(needsFinalPosition(/*was_moving=*/false, /*now_idle=*/true, false));
+}
+
+// ---------------------------------------------------------------------------
+// Exact stop: run time for a commanded target position
+// ---------------------------------------------------------------------------
+
+namespace {
+// Reuses the fixture geometry declared at the top of this file.
+const float kDeltaR = kFullR - kAxleR;
+float posToR(float pos) {
+    return std::sqrt(kAxleR * kAxleR + pos * kHeight * kThickness / (float) M_PI);
+}
+}  // namespace
+
+TEST(ExactStop, AFullTravelTakesTheFullDuration) {
+    EXPECT_NEAR(runMsForTarget(posToR(0.0f), posToR(1.0f), kDeltaR, kOpenMs),
+                kOpenMs, 200);
+}
+
+TEST(ExactStop, NoMovementTakesNoTime) {
+    EXPECT_EQ(runMsForTarget(posToR(0.4f), posToR(0.4f), kDeltaR, kOpenMs), 0u);
+}
+
+TEST(ExactStop, DirectionDoesNotMatter) {
+    EXPECT_EQ(runMsForTarget(posToR(0.2f), posToR(0.8f), kDeltaR, kOpenMs),
+              runMsForTarget(posToR(0.8f), posToR(0.2f), kDeltaR, kOpenMs));
+}
+
+TEST(ExactStop, RoundTripsThroughTheForwardModel) {
+    // THE property that matters: run for the computed time, integrate forward
+    // with the SAME model, and land on the target. If these two disagreed, the
+    // hardware timer and the position estimate would fight each other.
+    for (float target : {0.10f, 0.25f, 0.50f, 0.75f, 0.90f}) {
+        const float r0 = posToR(0.0f);
+        const uint32_t ms = runMsForTarget(r0, posToR(target), kDeltaR, kOpenMs);
+        const float r = radiusAfter(true, r0, kDeltaR, ms, kOpenMs, kAxleR, kFullR);
+        EXPECT_NEAR(positionForRadius(r, kAxleR, kThickness, kHeight), target, 0.005f)
+            << "target " << target;
+    }
+}
+
+TEST(ExactStop, RoundTripsFromAMidTravelStart) {
+    // Starting part-open matters: the roll radius is nonlinear in position, so
+    // the same run time buys different travel at different heights.
+    const float r0 = posToR(0.30f);
+    const uint32_t ms = runMsForTarget(r0, posToR(0.70f), kDeltaR, kOpenMs);
+    const float r = radiusAfter(true, r0, kDeltaR, ms, kOpenMs, kAxleR, kFullR);
+    EXPECT_NEAR(positionForRadius(r, kAxleR, kThickness, kHeight), 0.70f, 0.005f);
+}
+
+TEST(ExactStop, DegenerateGeometryIsRefused) {
+    // Never return a run time from a configuration that cannot be inverted.
+    EXPECT_EQ(runMsForTarget(posToR(0.0f), posToR(1.0f), 0.0f, kOpenMs), 0u);
+    EXPECT_EQ(runMsForTarget(posToR(0.0f), posToR(1.0f), kDeltaR, 0), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// A target move must never snap to an extreme
+// ---------------------------------------------------------------------------
+
+TEST(TargetSnap, ATargetMoveEndingOnTheTimerDoesNotSnap) {
+    // The regression this exists to prevent. Once runMsForTarget made the
+    // timer end PARTIAL moves too, "go to 50%" ended on the timer, hit the
+    // snap, and the node declared the blind FULLY OPEN. Reported from the
+    // bench as "I set 50% from closed and it says fully open".
+    EXPECT_FALSE(maySnapPosition(/*transition_snaps=*/true,
+                                 /*mode_target_position=*/true));
+}
+
+TEST(TargetSnap, AFullMoveStillSnaps) {
+    // The snap must survive for its real purpose: a move with no target ran
+    // the whole configured duration and is against the physical stop, which is
+    // more trustworthy than the integrated estimate.
+    EXPECT_TRUE(maySnapPosition(true, /*mode_target_position=*/false));
+}
+
+TEST(TargetSnap, NoSnapRequestedMeansNoSnap) {
+    // A step never snaps regardless.
+    EXPECT_FALSE(maySnapPosition(/*transition_snaps=*/false, false));
+    EXPECT_FALSE(maySnapPosition(false, true));
+}
+
+TEST(TargetSnap, ASuppressedSnapLeavesTheFinalPositionToBeComputed) {
+    // Belt and braces: if the snap is suppressed, needsFinalPosition must then
+    // be true so SOMETHING writes the position. Otherwise suppressing the snap
+    // would just leave a stale value — trading a wrong answer for a frozen one.
+    const bool snapping = maySnapPosition(true, /*target=*/true);
+    EXPECT_TRUE(needsFinalPosition(/*was_moving=*/true, /*now_idle=*/true, snapping));
+}
