@@ -2,7 +2,7 @@ import esphome.codegen as cg
 from esphome.components import text, text_sensor
 from esphome.components import lora_client
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, ENTITY_CATEGORY_CONFIG
+from esphome.const import CONF_ID, ENTITY_CATEGORY_CONFIG, ENTITY_CATEGORY_DIAGNOSTIC
 
 # The whole schedule in one field, as an alternative to the twenty per-slot
 # entities. Both implementations are kept so the UX can be compared; only one
@@ -27,8 +27,19 @@ CONFIG_SCHEMA = (
             # Companion read-only entity carrying "ok" or "error: ...".
             # Without it a rejected edit would silently snap back with no
             # explanation, which is the one thing this format cannot afford.
+            #
+            # DIAGNOSTIC, not CONFIG. HA's categories are semantic: config
+            # means "changes a setting", diagnostic means "read-only info".
+            # This sensor only ever reports "ok" or "error: ...", so marking
+            # it config is wrong -- and HA does not merely mis-group it, it
+            # shows the entity as UNAVAILABLE. Confirmed twice now: the same
+            # mistake on the `help` text_sensor made that one unavailable too,
+            # and it was deleted rather than diagnosed.
+            #
+            # The writable ScheduleText above stays CONFIG, correctly: typing
+            # a schedule into it does change a device setting.
             cv.Optional(CONF_STATUS): text_sensor.text_sensor_schema(
-                entity_category=ENTITY_CATEGORY_CONFIG,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
                 icon="mdi:alert-circle-outline",
             ),
         }
