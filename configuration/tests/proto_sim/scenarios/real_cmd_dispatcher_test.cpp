@@ -2231,3 +2231,57 @@ TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
     EXPECT_FALSE(lif.continuousRx())
         << "and must leave continuous RX — 11 mA otherwise";
 }
+
+// ---------------------------------------------------------------------------
+// Mode sysops must actually change the mode
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, ModeSysopsSwitchTheNodeMode) {
+    // The bug this pins down. CMD_MODE_AUTO (5) and CMD_MODE_INTERACTIVE (6)
+    // had no case in blindsSysPbToCmd(), so they fell to `default: return 0`
+    // and the node did NOTHING with them.
+    //
+    // It hid for two reasons, both of which made the system look healthy:
+    // the ack is sent regardless, so the hub logged "Tracked op acknowledged"
+    // and believed the mode had changed; and ScheduleConfig also carries mode,
+    // so any change followed by a schedule push landed anyway. It failed only
+    // for a node AWAKE and not beaconing -- exactly what this sysop is for.
+    // Observed on hardware: hub switch ON and acked, node still interactive 27
+    // minutes later.
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
+    hdr.senderaddress = kHubAddr; hdr.msgid = 1;
+    op.header = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+
+    sys.setAutoMode(false);
+    ASSERT_FALSE(sys.getAutoMode());
+
+    op.sysop = CLIENT_OPERATION__CMD_MODE_AUTO;
+    disp.handleSysop(&op, &hdr);
+    EXPECT_TRUE(sys.getAutoMode())
+        << "CMD_MODE_AUTO must switch the node to automatic mode";
+
+    op.sysop = CLIENT_OPERATION__CMD_MODE_INTERACTIVE;
+    disp.handleSysop(&op, &hdr);
+    EXPECT_FALSE(sys.getAutoMode())
+        << "CMD_MODE_INTERACTIVE must switch it back";
+}
+
+TEST_F(RealNodeFixture, AModeSysopDoesNotLeakIntoTheSystemCommandQueue) {
+    // A mode sysop has no BlindsSysCmd equivalent, so blindsSysPbToCmd()
+    // returns 0 for it. Falling through to the normal dispatch would hand that
+    // 0 to setSystemCommand() -- a command that means nothing, executed for
+    // every mode change.
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
+    hdr.senderaddress = kHubAddr; hdr.msgid = 2;
+    op.header = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.sysop = CLIENT_OPERATION__CMD_MODE_AUTO;
+
+    disp.handleSysop(&op, &hdr);
+    EXPECT_TRUE(sys.getAutoMode());   // handled, and handled only once
+}

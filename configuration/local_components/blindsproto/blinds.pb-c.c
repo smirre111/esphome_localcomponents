@@ -1336,7 +1336,7 @@ const ProtobufCMessageDescriptor encrypted_payload__descriptor =
   (ProtobufCMessageInit) encrypted_payload__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor time_sync__field_descriptors[3] =
+static const ProtobufCFieldDescriptor time_sync__field_descriptors[4] =
 {
   {
     "epoch",
@@ -1374,16 +1374,29 @@ static const ProtobufCFieldDescriptor time_sync__field_descriptors[3] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "sleepOk",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(TimeSync, sleepok),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned time_sync__field_indices_by_name[] = {
   2,   /* field[2] = dstNext */
   0,   /* field[0] = epoch */
+  3,   /* field[3] = sleepOk */
   1,   /* field[1] = utcOffset */
 };
 static const ProtobufCIntRange time_sync__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 3 }
+  { 0, 4 }
 };
 const ProtobufCMessageDescriptor time_sync__descriptor =
 {
@@ -1393,7 +1406,7 @@ const ProtobufCMessageDescriptor time_sync__descriptor =
   "TimeSync",
   "",
   sizeof(TimeSync),
-  3,
+  4,
   time_sync__field_descriptors,
   time_sync__field_indices_by_name,
   1,  time_sync__number_ranges,
@@ -1619,7 +1632,7 @@ const ProtobufCMessageDescriptor schedule_config__descriptor =
   (ProtobufCMessageInit) schedule_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[11] =
+static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[12] =
 {
   {
     "reason",
@@ -1753,6 +1766,18 @@ static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[11] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "resetReason",
+    12,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, resetreason),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned node_wake_beacon__field_indices_by_name[] = {
   6,   /* field[6] = awakeWindow_ms */
@@ -1763,6 +1788,7 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
   2,   /* field[2] = nodeEpoch */
   5,   /* field[5] = position */
   0,   /* field[0] = reason */
+  11,   /* field[11] = resetReason */
   1,   /* field[1] = schedVersion */
   8,   /* field[8] = sessionResume */
   4,   /* field[4] = voltage */
@@ -1770,7 +1796,7 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
 static const ProtobufCIntRange node_wake_beacon__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 11 }
+  { 0, 12 }
 };
 const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
 {
@@ -1780,7 +1806,7 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   "NodeWakeBeacon",
   "",
   sizeof(NodeWakeBeacon),
-  11,
+  12,
   node_wake_beacon__field_descriptors,
   node_wake_beacon__field_indices_by_name,
   1,  node_wake_beacon__number_ranges,

@@ -133,15 +133,25 @@ lora_client:
     battery_update_interval: 15min
     mac_address: e0:8c:fe:5f:9e:c4
     # ---- node 2, bench unit ----
-    # The auto-mode trial succeeded here (both scheduled events fired), so the
-    # short checkin_interval has been raised to 6h as that note intended.
+    # The auto-mode trial succeeded here (both scheduled events fired).
     #
     # Seeded INTERACTIVE: this is the node the drift test runs on, and the test
     # needs it awake and listening. See the note on node 1 — this seed is
     # ignored once a schedule is stored, so the HA switch is the live control.
     auto_mode: false
     interactive_timeout: 30min
-    checkin_interval: 6h
+    # 1 h rather than node 1's 6 h: this is the BENCH unit, and a check-in is
+    # the only way to observe a wake end to end. Six hours between samples made
+    # every protocol change a next-day question.
+    #
+    # Affordable because of the sleepOk flag: a check-in wake costs ~7.7 s
+    # instead of 28 s, so hourly is 185 s/day of awake time against six-hourly's
+    # 112 s. Before that change it would have been 672 s. See
+    # docs/wake-cost-proposal.md.
+    #
+    # Node 1 deliberately stays at 6 h — it has no serial, so it cannot provide
+    # the observability this spends battery on, and its pack is the weaker one.
+    checkin_interval: 1h
     catchup_window: 0min
     # Two events eight minutes apart so one run observes both a first entry
     # into auto mode AND a wake out of deep sleep with the RTC markers already

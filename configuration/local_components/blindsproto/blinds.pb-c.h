@@ -299,10 +299,26 @@ struct  TimeSync
    * epoch of next DST transition, 0 = unknown
    */
   uint64_t dstnext;
+  /*
+   * "I have nothing further for you — you may sleep."
+   * Without this the node cannot tell "the hub is finished" from "the hub is
+   * slow", so it waits out a fixed 20 s of silence before sleeping. Measured:
+   * a check-in wake costs 28.1 s, of which the real work finishes at 4.7 s.
+   * 73% of every wake is the node proving a negative.
+   * The hub already knows the answer — it has a per-node queue — so it can
+   * just say so. This is LoRaWAN's FPending bit inverted: there a set bit
+   * means "stay awake, more coming"; here it means "done, you may go".
+   * Deliberately NOT a "moreData" flag with the opposite sense. proto3 omits
+   * default values, so a hub that predates this field — or one that forgets
+   * to set it — sends false, which must mean "keep waiting", i.e. exactly
+   * today's behaviour. The safe default has to be the one that costs power,
+   * never the one that drops a command.
+   */
+  protobuf_c_boolean sleepok;
 };
 #define TIME_SYNC__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&time_sync__descriptor) \
-    , 0, 0, 0 }
+    , 0, 0, 0, 0 }
 
 
 /*
@@ -425,10 +441,22 @@ struct  NodeWakeBeacon
    * capability gate for the hub
    */
   uint32_t fwversion;
+  /*
+   * esp_reset_reason() from the boot that produced this beacon.
+   * A node in the field is otherwise undiagnosable: three separate incidents
+   * (a cold boot that lost RTC RAM, a run of OTA reboots, and a node that
+   * simply stopped answering) all needed the reset cause and none of them
+   * could be answered without physically attaching a serial cable. WakeReason
+   * above says why the node WOKE; this says why it BOOTED, which is a
+   * different question and the one that matters when RTC state was lost.
+   * Raw esp_reset_reason_t so the hub does not have to track an enum the IDF
+   * owns: 1=POWERON 3=SW 4=INT_WDT 5=TASK_WDT 6=WDT 7=DEEPSLEEP 8=BROWNOUT.
+   */
+  uint32_t resetreason;
 };
 #define NODE_WAKE_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
-    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0 }
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  LoraHeader

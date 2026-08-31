@@ -308,8 +308,14 @@ namespace esphome
                     this->short_address_, this->subnet_address_, this->sleep_duration_);
     }
 
+    uint8_t LORAListener::s_next_login_slot_ = 0;
+
     void LORAListener::setup()
     {
+      // Claim a stagger slot in declaration order. setup() runs once per
+      // listener, in YAML order, so slots are stable across reboots.
+      this->login_slot_ = s_next_login_slot_++;
+
       // The compiled YAML seed has already been applied by now (codegen emits
       // add_schedule_entry() into main.cpp's setup(), which runs before
       // App.setup()). Restoring here therefore OVERWRITES the seed with whatever
@@ -407,7 +413,10 @@ namespace esphome
           // No time component configured — fall back to a fixed delay for radio
           // initialisation + per-node stagger (no sleep-window check possible).
           static constexpr uint32_t LOGIN_STAGGER_MS = 3000;
-          uint32_t stagger_ms = static_cast<uint32_t>(this->short_address_) * LOGIN_STAGGER_MS;
+          // Slot, not address — see the note in schedule_startup_login_().
+          // This duplicate was missed when the address-based stagger was first
+          // fixed; a second copy of a formula is a second chance to be wrong.
+          uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * LOGIN_STAGGER_MS;
           uint32_t total_ms   = 5000 + stagger_ms;
           ESP_LOGW(TAG, "[%s] No time component — login in %u s (5 s radio-init + %u s stagger, no sleep-window check)",
                    this->get_name().c_str(), total_ms / 1000, stagger_ms / 1000);
@@ -485,13 +494,21 @@ namespace esphome
     // confidence, which is the failure being fixed here.
     uint32_t LORAListener::next_wake_epoch_() const
     {
-      if (this->last_sleep_epoch_ == 0)
-        return 0;                       // never slept, or we never saw it sleep
+      // Reference for "when did this node last go down". last_sleep_epoch_ is
+      // only set when the HUB commanded the sleep; an auto-mode node sleeps on
+      // its own, so fall back to its last beacon — it sleeps within seconds of
+      // sending one. Without this the whole prediction collapses to 0 and the
+      // hub transmits at a sleeping node.
+      const uint32_t sleep_ref = (this->last_sleep_epoch_ != 0)
+                                     ? this->last_sleep_epoch_
+                                     : this->last_beacon_epoch_;
+      if (sleep_ref == 0)
+        return 0;                       // genuinely never heard from
       if (this->time == nullptr || !this->time->now().is_valid())
         return 0;                       // no clock — cannot predict
 
       if (!this->auto_mode_)
-        return this->last_sleep_epoch_ + static_cast<uint32_t>(this->sleep_duration_);
+        return sleep_ref + static_cast<uint32_t>(this->sleep_duration_);
 
       // Automatic mode: the earlier of the next scheduled event (minus the
       // beacon lead) and the periodic check-in.
@@ -522,7 +539,7 @@ namespace esphome
       }
       if (this->checkin_interval_ != 0)
       {
-        const uint64_t checkin = this->last_sleep_epoch_ + this->checkin_interval_;
+        const uint64_t checkin = (uint64_t) sleep_ref + this->checkin_interval_;
         if (wake == 0 || checkin < wake)
           wake = checkin;
       }
@@ -556,13 +573,20 @@ namespace esphome
       this->cancel_timeout("login_startup");
       this->cancel_timeout("login_retry");
 
-      // Per-node stagger: address × LOGIN_STAGGER_MS.
+      // Per-node stagger: SLOT × LOGIN_STAGGER_MS, slot being this node's
+      // index in declaration order (see login_slot_).
+      //
       // Prevents simultaneous login transmissions when all nodes happen to be
-      // awake at hub reboot.  3 s gives enough headroom for a full challenge +
+      // awake at hub reboot. 3 s gives enough headroom for a full challenge +
       // response exchange even at SF12 (~2.5 s airtime per packet).
+      //
+      // This used to multiply by short_address_, which gave the right 3 s
+      // SEPARATION but an absurd absolute OFFSET: addresses 17 and 18 meant
+      // 51 s and 54 s of silence after every hub restart, delaying recovery
+      // for both nodes by nearly a minute.
       static constexpr uint32_t LOGIN_STAGGER_MS  = 3000;
       static constexpr uint32_t NODE_BOOT_MARGIN_MS = 5000;
-      uint32_t stagger_ms = static_cast<uint32_t>(this->short_address_) * LOGIN_STAGGER_MS;
+      uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * LOGIN_STAGGER_MS;
 
       uint32_t delay_ms = this->ms_until_node_awake_();
       if (delay_ms == 0)
@@ -1372,11 +1396,13 @@ namespace esphome
       // NODE_BOOT_MARGIN_MS gives the node time to complete its boot sequence and
       // send REGISTER, which cancels this timer (REGISTER-path is the primary path).
       // This timer is only the fallback for lost REGISTER packets.
-      // LOGIN_STAGGER_MS per address unit prevents simultaneous login transmissions
-      // when multiple nodes wake from sleep at roughly the same time.
+      // LOGIN_STAGGER_MS per SLOT prevents simultaneous login transmissions when
+      // multiple nodes wake from sleep at roughly the same time. Slot, not
+      // address — this is the site that produced the "51 s stagger" and
+      // "54 s stagger" seen in the hub log for addresses 17 and 18.
       static constexpr uint32_t NODE_BOOT_MARGIN_MS = 5000;
       static constexpr uint32_t LOGIN_STAGGER_MS    = 3000;
-      uint32_t stagger_ms = static_cast<uint32_t>(this->short_address_) * LOGIN_STAGGER_MS;
+      uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * LOGIN_STAGGER_MS;
       uint32_t wake_ms = static_cast<uint32_t>(
           std::min<uint64_t>(this->sleep_duration_ * 1000ULL,
                              static_cast<uint64_t>(0xFFFFFFFFu)));
@@ -2073,7 +2099,33 @@ namespace esphome
     // P2: a node announced a wake.  Everything here is observation — the beacon
     // does not (yet) change what the hub sends, so shipping it ahead of the
     // scheduler is behaviour-neutral apart from the clock-offset sensor.
-    void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
+    // esp_reset_reason_t as a name. The node sends the raw IDF value so the hub
+// does not have to track an enum the IDF owns; this is purely for the log.
+//
+// It matters because a field node has no serial cable, and "why did it boot"
+// has had to be GUESSED three separate times: a cold boot that lost RTC RAM, a
+// run of OTA restarts, and a node that stopped answering entirely. POWERON on a
+// node that should have deep-slept means something reset it; BROWNOUT on a node
+// with a low pack means the pack.
+static const char *s_reset_reason_name(uint32_t r)
+{
+  switch (r)
+  {
+  case 1:  return "POWERON";
+  case 2:  return "EXT";
+  case 3:  return "SW";
+  case 4:  return "PANIC";
+  case 5:  return "INT_WDT";
+  case 6:  return "TASK_WDT";
+  case 7:  return "WDT";
+  case 8:  return "DEEPSLEEP";
+  case 9:  return "BROWNOUT";
+  case 10: return "SDIO";
+  default: return "?";
+  }
+}
+
+void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
     {
       if (b == nullptr)
         return;
@@ -2088,6 +2140,12 @@ namespace esphome
       this->node_fw_version_     = b->fwversion;
       this->node_session_resume_ = b->sessionresume;
 
+      // Reference point for predicting the next check-in — see
+      // last_beacon_epoch_. The node beacons on every wake, so this is the
+      // most recent moment it was provably awake.
+      if (this->time != nullptr && this->time->now().is_valid())
+        this->last_beacon_epoch_ = static_cast<uint32_t>(this->time->now().timestamp);
+
       // Clock drift: the whole reason TimeSync shipped a phase early.  The node
       // stamps its own epoch into the beacon; comparing against ours turns drift
       // into a Home Assistant number instead of something only a serial cable
@@ -2099,8 +2157,9 @@ namespace esphome
         const int64_t offset_s  = static_cast<int64_t>(b->nodeepoch) - hub_epoch;
         this->clock_offset_valid_ = true;
         this->clock_offset_s_     = static_cast<int32_t>(offset_s);
-        ESP_LOGI(TAG, "[%s] Beacon: reason=%s clock_offset=%+lld s fw=%u resume=%d v=%.2f pos=%.2f",
-                 this->get_name().c_str(), reason, (long long) offset_s,
+ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock_offset=%+lld s fw=%u resume=%d v=%.2f pos=%.2f",
+                 this->get_name().c_str(), reason,
+                 s_reset_reason_name(b->resetreason), (long long) offset_s,
                  (unsigned) b->fwversion, (int) b->sessionresume,
                  b->voltage, b->position);
         for (auto *node : this->nodes_)
@@ -2111,8 +2170,9 @@ namespace esphome
         // A node with no clock is the I8 case: it will refuse to sleep against a
         // schedule until TimeSync reaches it.  Worth an explicit log line rather
         // than silently publishing nothing.
-        ESP_LOGI(TAG, "[%s] Beacon: reason=%s clock=INVALID fw=%u resume=%d — TimeSync pending",
+ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d — TimeSync pending",
                  this->get_name().c_str(), reason,
+                 s_reset_reason_name(b->resetreason),
                  (unsigned) b->fwversion, (int) b->sessionresume);
       }
 
@@ -2222,6 +2282,23 @@ namespace esphome
       ts.epoch     = epoch;
       ts.utcoffset = utcoffset;
       ts.dstnext   = 0;   // not yet computed; the node treats 0 as "unknown"
+
+      // TIER 1: tell the node whether it may sleep immediately.
+      //
+      // The node otherwise waits out a fixed 20 s of hub silence, because
+      // silence is its only evidence that nothing more is coming. That wait is
+      // 73% of a 28 s check-in wake. The hub does not have to be guessed at --
+      // it knows exactly what it still owes this node.
+      //
+      // Conservative by construction: anything that might mean more traffic
+      // leaves sleepOk false, which is precisely today's behaviour. A false
+      // negative costs one wake's power; a false POSITIVE drops a command.
+      const bool more_to_send =
+          this->schedule_pending() ||          // a ScheduleConfig push is due
+          this->sched_dirty_ ||                // an edit not yet turned into one
+          this->op_awaiting_ack_ ||            // a command awaiting its ack
+          !this->session_confirmed_;           // login still settling
+      ts.sleepok = !more_to_send;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
       op_message.timesync = &ts;
 

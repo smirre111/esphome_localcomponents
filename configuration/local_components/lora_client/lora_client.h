@@ -214,6 +214,44 @@ namespace esphome
       void build_drift_frame_(bool enable);
       static void drift_timer_cb_(void *arg);
 
+      // Login stagger slot: 0, 1, 2 ... in YAML declaration order.
+      //
+      // NOT derived from short_address_. That was the original scheme
+      // (address x 3000 ms) and with addresses 17 and 18 it produced 51 s and
+      // 54 s of dead air after every hub restart -- the SEPARATION was the
+      // intended 3 s, but the OFFSET scaled with an arbitrary address value.
+      //
+      // Nor address % N: that is a hash, and hashes collide. Addresses 17 and
+      // 25 would share a slot and transmit on top of each other -- trading a
+      // predictable delay for an intermittent collision, which is worse
+      // because it only appears once enough nodes exist.
+      //
+      // A sequential slot is collision-free by construction and costs
+      // (node_count - 1) x 3 s at worst, which is the minimum any
+      // non-overlapping schedule can achieve.
+      // When the node was last heard from (its wake beacon).
+      //
+      // Used as the reference for the periodic check-in when last_sleep_epoch_
+      // is unavailable. That field is only set when the HUB puts the node to
+      // sleep, and an automatic-mode node sleeps on its OWN initiative — so it
+      // stays 0 forever, next_wake_epoch_() returns 0, is_node_awake_() falls
+      // back to "cannot tell — assume awake", and the hub fires 17-copy login
+      // bursts at a node that is provably asleep. Observed 2026-08-31: five
+      // retries at node 2 while its own log read "sleeping 1390 s until next
+      // scheduled wake".
+      //
+      // A beacon is the right reference because the node sends one on every
+      // wake and sleeps a few seconds later, so beacon + checkin_interval is
+      // the next check-in to within the length of a wake.
+      //
+      // NOT NodeWakeBeacon.nextEventEpoch: that is the next SCHEDULED event
+      // only. Using it would have the hub defer for hours while the node was
+      // actually waking each check-in interval.
+      uint32_t last_beacon_epoch_{0};
+
+      uint8_t  login_slot_{0};
+      static uint8_t s_next_login_slot_;
+
       bool     drift_test_active_{false};
       uint32_t drift_test_duration_s_{0};
       uint32_t drift_test_grid_ms_{0};
