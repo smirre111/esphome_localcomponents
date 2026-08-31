@@ -92,11 +92,19 @@ lora_client:
     sleep_duration: 21600
     battery_update_interval: 15min
     mac_address: e0:8c:fe:5f:b7:a4
-    # P4: automatic (scheduled) mode. auto_mode stays FALSE until the schedule
-    # has been observed working — the node also refuses auto mode without a
-    # valid clock and a schedule that can actually fire, so this is belt and
-    # braces rather than the only guard.
-    auto_mode: true
+    # P4: automatic (scheduled) mode.
+    #
+    # Back to FALSE (interactive) as the seed. Auto mode has been proven in
+    # production (21:45 close and 06:00 open both fired), but a node in auto
+    # mode SLEEPS, and a sleeping node cannot be reached for an OTA or a drift
+    # test without a physical button press at the blind. Interactive is the
+    # right default while the drift work is in progress.
+    #
+    # NOTE: this is only the FIRST-BOOT seed. Once a schedule has been stored,
+    # load_schedule_() restores the persisted mode and logs "YAML seed
+    # ignored" — so changing this line does NOT flip a hub that already has
+    # AUTO in flash. Use the Auto Mode switch in HA for that.
+    auto_mode: false
     interactive_timeout: 30min
     checkin_interval: 6h
     catchup_window: 0min
@@ -124,12 +132,14 @@ lora_client:
     sleep_duration: 21600
     battery_update_interval: 15min
     mac_address: e0:8c:fe:5f:9e:c4
-    # ---- FIRST AUTO-MODE TRIAL (node 2, bench unit) ----
-    # checkin_interval is deliberately SHORT for the first cycles: if the sleep
-    # path is wrong and the node misses its event, it still wakes within
-    # 10 minutes instead of disappearing for six hours. Raise it to 6h once a
-    # full sleep -> wake -> execute cycle has been observed.
-    auto_mode: true
+    # ---- node 2, bench unit ----
+    # The auto-mode trial succeeded here (both scheduled events fired), so the
+    # short checkin_interval has been raised to 6h as that note intended.
+    #
+    # Seeded INTERACTIVE: this is the node the drift test runs on, and the test
+    # needs it awake and listening. See the note on node 1 — this seed is
+    # ignored once a schedule is stored, so the HA switch is the live control.
+    auto_mode: false
     interactive_timeout: 30min
     checkin_interval: 6h
     catchup_window: 0min
@@ -211,7 +221,13 @@ button:
     id: rol_2_drift_start
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_drift_test(300, 15000);'
+      # 1100 ms, deliberately NOT a multiple of the node's 500 ms RX interval.
+      # Commensurate periods phase-lock: a 1000 ms grid against 500 ms windows
+      # keeps a constant phase relationship, so if a frame starts landing in the
+      # node's RX-off gap it does so forever. Observed exactly that — ~300 grid
+      # frames heard, zero. Belt and braces: the node is in continuous RX by the
+      # time the grid starts, so this should not matter.
+      - lambda: 'id(rol_2)->start_drift_test(300, 1100);'
   - platform: template
     name: "Drift Test Stop (node 2)"
     id: rol_2_drift_stop

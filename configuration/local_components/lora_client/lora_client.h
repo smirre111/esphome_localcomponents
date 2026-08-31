@@ -1,5 +1,7 @@
 #pragma once
 
+#include <esp_timer.h>
+
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
@@ -207,10 +209,19 @@ namespace esphome
       bool drift_test_active() const { return this->drift_test_active_; }
 
      protected:
-      void send_drift_test_(bool enable);
+      // Builds the NEXT frame into drift_frame_, so the timer callback only
+      // transmits. Packing must not happen inside the interval being measured.
+      void build_drift_frame_(bool enable);
+      static void drift_timer_cb_(void *arg);
+
       bool     drift_test_active_{false};
       uint32_t drift_test_duration_s_{0};
       uint32_t drift_test_grid_ms_{0};
+      // esp_timer, not set_interval: ESPHome's scheduler is millisecond and
+      // tick-quantised, which is the error this whole rewrite exists to remove.
+      esp_timer_handle_t drift_timer_{nullptr};
+      uint8_t  drift_frame_[128]{};
+      size_t   drift_frame_len_{0};
 
      public:
 

@@ -49,6 +49,12 @@ public:
     void loop() override {}
 
     // Hub→node TX: emits an AirFrame{HubToNode, bytes} into the active SimRadio.
+    // Drift test: emit one copy instead of the 17-copy burst. Recorded so a
+    // test can assert it is RESTORED to 0 afterwards — leaving the hub on
+    // single copies would quietly halve downlink reliability for every node.
+    void setBurstCopies(int n) { burst_copies = n; }
+    int  burst_copies{0};
+
     void send(uint8_t* data, size_t len);
 
     void register_client(LORAClient* client);

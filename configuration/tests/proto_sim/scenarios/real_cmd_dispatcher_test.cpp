@@ -2194,3 +2194,40 @@ TEST_F(RealNodeFixture, AutoSleepRechecksTheConditionWhenItFires) {
         << "the timer must re-check rather than trust a condition evaluated "
            "before the mode changed";
 }
+
+// ---------------------------------------------------------------------------
+// Drift test: the node must always come back to the PRODUCTION power profile
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
+    // The measuring profile disables light sleep and pins the CPU at 240 MHz:
+    // ~11 mA against the ~1.2 mA interactive average. If a test ever ends
+    // without restoring production, the node quietly burns ~9x its budget and
+    // nothing says so until the battery is flat.
+    SystemCtrl::applyPowerProfile(false);
+    ASSERT_FALSE(SystemCtrl::measuringProfile());
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
+    hdr.senderaddress = kHubAddr; hdr.msgid = 1;
+    op.header = &hdr;
+
+    DriftTest dt = DRIFT_TEST__INIT;
+    dt.enable = true; dt.durations = 60; dt.gridperiodms = 1100;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST;
+    op.drifttest = &dt;
+
+    disp.handleDriftTest(&op, &hdr);
+    EXPECT_TRUE(SystemCtrl::measuringProfile())
+        << "entering the test must disable light sleep";
+    EXPECT_TRUE(disp.driftTestActive());
+
+    dt.enable = false;
+    disp.handleDriftTest(&op, &hdr);
+    EXPECT_FALSE(SystemCtrl::measuringProfile())
+        << "leaving the test MUST restore production power management";
+    EXPECT_FALSE(disp.driftTestActive());
+    EXPECT_FALSE(lif.continuousRx())
+        << "and must leave continuous RX — 11 mA otherwise";
+}

@@ -102,6 +102,18 @@ namespace esphome
       void send(uint8_t *data, size_t len);
       void sendPacketOnce(uint8_t *data, size_t len);
       void sendPacketBurst(uint8_t *data, size_t len);
+
+      // Drift test: emit ONE copy instead of txSlotsPerRound.
+      //
+      // Deliberately reuses the burst path rather than adding a second
+      // transmit route. An earlier attempt called sendPacketOnce straight from
+      // an esp_timer callback and wedged the radio: that bypasses the TxDone
+      // handling and the return to RX which live in the main loop, so the
+      // SX1278 was left in TX and every later beginPacket failed. The hub went
+      // silent until it was restarted.
+      //
+      // 0 restores the normal 17-copy burst.
+      void setBurstCopies(int n) { this->burst_copies_ = n; }
       void sendPacketBytes(uint8_t *data, size_t len);
       void sendTask(void *pvParameters);
       void register_listener(LORAListener *listener);
@@ -146,6 +158,7 @@ namespace esphome
 
       int rxSlotsPerRound{3};
       int txSlotsPerRound{17};
+      int burst_copies_{0};   // 0 = use txSlotsPerRound
       int roundDurationMs{1500};
       // Quiet window held in RX after each burst so the addressed node can send
       // its deferred reply (ACK/position) without being stepped on by the next

@@ -134,11 +134,29 @@ TEST(DriftEstimator, GapsInTheBurstAreFine) {
 // Constants and downstream use
 // ---------------------------------------------------------------------------
 
-TEST(DriftEstimator, CopySpacingIsNotRoundedTo88ms) {
-    // 1500/17 = 88235 us. Using a round 88000 would itself inject 2670 ppm of
-    // error — 130x the drift being measured.
-    EXPECT_EQ(kCopySpacingUs, 1500000 / 17);
-    EXPECT_EQ(kCopySpacingUs, 88235);
+TEST(DriftEstimator, CopySpacingMirrorsTheHubsIntegerArithmetic) {
+    // The hub does `roundDurationMs / txSlotsPerRound` in INTEGER ms:
+    // 1500/17 = 88, then delays 88 ms. The mathematically exact 88235 us is
+    // NOT what the radio does.
+    //
+    // An earlier version of this test asserted 88235 and called 88000 an
+    // error. That was backwards, and it cost three firmware revisions: the
+    // node reported -2156 and -2597 ppm for a crystal that cannot exceed
+    // about +-20 ppm, which is exactly 88000/88235 - 1 = -2663 ppm.
+    EXPECT_EQ(kCopySpacingUs, 88000);
+    EXPECT_EQ(kCopySpacingUs, (kRoundUs / 1000 / kTxSlots) * 1000);
+}
+
+TEST(DriftEstimator, AWrongSpacingConstantLooksExactlyLikeDrift) {
+    // Why the constant is dangerous: feed PERFECT copies spaced at the old
+    // 88235 us and the estimator reports a large bogus drift, because the
+    // ruler disagrees with reality. Nothing about the output says "your
+    // constant is wrong" -- it just looks like a bad crystal.
+    std::vector<Sample> v;
+    for (uint8_t i = 0; i < 17; i++) v.push_back(Sample{int64_t(i) * 88235, i});
+    const auto r = estimate(v.data(), (uint8_t) v.size());
+    ASSERT_TRUE(r.valid);
+    EXPECT_NEAR(r.ppm, 2670, 30) << "a 235 us/copy ruler error reads as ~2670 ppm";
 }
 
 TEST(DriftEstimator, DriftOverASleepSizesTheGuardBand) {
@@ -187,4 +205,156 @@ TEST(DriftTestDuration, AnAbsurdRequestIsCapped) {
 TEST(DriftTestDuration, TheCapIsShorterThanAnyPlausibleSleep) {
     // Sanity: the ceiling has to be small next to the battery it protects.
     EXPECT_LE(kTestMaxS, 3600u) << "an hour of continuous RX is already too much";
+}
+
+// ---------------------------------------------------------------------------
+// Minimum baseline — short fits are noise, not weak evidence
+// ---------------------------------------------------------------------------
+
+TEST(DriftUsable, AFullBurstIsUsable) {
+    EXPECT_TRUE(usable(estimate(burst(20).data(), 17)));
+}
+
+TEST(DriftUsable, AThreeCopyFragmentIsRejected) {
+    // Taken from a real run: burst grouping fragmented, producing 3-copy fits
+    // spanning 176 ms that read -38584 ppm while 12-copy fits of the SAME
+    // signal read about -18000. Averaging those in moves the answer away from
+    // the truth.
+    Sample s[3] = {{0, 0}, {88235, 1}, {176470, 2}};
+    const auto r = estimate(s, 3);
+    ASSERT_TRUE(r.valid) << "still a valid fit ...";
+    EXPECT_FALSE(usable(r)) << "... but not one worth averaging in";
+}
+
+TEST(DriftUsable, TheThresholdIsHalfABurst) {
+    EXPECT_EQ(kMinSpanUs, 8 * kCopySpacingUs);
+    // Exactly at the threshold is accepted; one copy short is not.
+    std::vector<Sample> at;
+    for (uint8_t i = 0; i <= 8; i++) at.push_back(Sample{int64_t(i) * kCopySpacingUs, i});
+    EXPECT_TRUE(usable(estimate(at.data(), (uint8_t) at.size())));
+    at.pop_back();
+    EXPECT_FALSE(usable(estimate(at.data(), (uint8_t) at.size())));
+}
+
+TEST(DriftUsable, AnInvalidFitIsNeverUsable) {
+    Result bad{};
+    EXPECT_FALSE(usable(bad));
+}
+
+// ---------------------------------------------------------------------------
+// Measured spacing — the diagnostic that makes the ruler checkable
+// ---------------------------------------------------------------------------
+
+TEST(MeasuredSpacing, MatchesNominalForPerfectClocks) {
+    const auto r = estimate(burst(0).data(), 17);
+    ASSERT_TRUE(r.valid);
+    EXPECT_NEAR(r.measured_spacing_us, kCopySpacingUs, 2);
+}
+
+TEST(MeasuredSpacing, RevealsAMismatchedConstant) {
+    // The case that actually happened: the hub emits at 88235 while the node
+    // believes 88000. The ppm figure is misleading, but measured_spacing_us
+    // states the truth plainly.
+    std::vector<Sample> v;
+    for (uint8_t i = 0; i < 17; i++) v.push_back(Sample{int64_t(i) * 88235, i});
+    const auto r = estimate(v.data(), (uint8_t) v.size());
+    ASSERT_TRUE(r.valid);
+    EXPECT_NEAR(r.measured_spacing_us, 88235, 2)
+        << "reports what the hub ACTUALLY did, independent of the constant";
+}
+
+TEST(MeasuredSpacing, TracksARealDrift) {
+    const auto r = estimate(burst(1000).data(), 17);   // exaggerated for clarity
+    ASSERT_TRUE(r.valid);
+    EXPECT_NEAR(r.measured_spacing_us, kCopySpacingUs + kCopySpacingUs / 1000, 2);
+}
+
+// ---------------------------------------------------------------------------
+// LongFit — the long-baseline fit that replaces per-burst estimation
+// ---------------------------------------------------------------------------
+
+namespace {
+// A timing run: `count` frames at `period_us`, node clock off by ppm, with
+// `jitter_us` of placement error on each frame.
+LongFit run(int32_t ppm, uint32_t count, int64_t period_us,
+            int32_t jitter_us = 0, unsigned seed = 1) {
+    std::srand(seed);
+    LongFit f;
+    for (uint32_t i = 0; i < count; i++) {
+        const int64_t nominal = (int64_t) i * period_us;
+        int64_t rx = (int64_t) ((double) nominal * (1.0 + ppm / 1e6));
+        if (jitter_us)
+            rx += (std::rand() % (2 * jitter_us + 1)) - jitter_us;
+        f.add(nominal, rx);
+    }
+    return f;
+}
+}  // namespace
+
+TEST(LongFit, RecoversDriftFromACleanRun) {
+    for (int32_t ppm : {-40, -20, -5, 5, 20, 40}) {
+        const auto f = run(ppm, 300, 1000000);
+        ASSERT_TRUE(f.ready());
+        EXPECT_NEAR(f.ppm(), ppm, 1) << "injected " << ppm;
+    }
+}
+
+TEST(LongFit, ALongBaselineDefeatsMillisecondJitter) {
+    // THE point of this class. 1 ms of placement error per frame -- the hub's
+    // FreeRTOS tick quantisation -- is ~700 ppm over a 1.4 s burst and wrecked
+    // every per-burst measurement taken on hardware. Over a 300 s run the same
+    // error must land within a few ppm.
+    int worst = 0;
+    for (unsigned seed = 1; seed <= 20; seed++) {
+        const auto f = run(20, 300, 1000000, 1000, seed);
+        worst = std::max(worst, std::abs(f.ppm() - 20));
+    }
+    EXPECT_LT(worst, 5) << "300 s of baseline should absorb 1 ms of per-frame jitter";
+}
+
+TEST(LongFit, AShortRunCannotResolveTheSameJitter) {
+    // The contrast that justifies the change: identical jitter, 17 frames over
+    // 1.4 s, is nowhere near good enough. This is what the old code did.
+    int worst = 0;
+    for (unsigned seed = 1; seed <= 20; seed++) {
+        const auto f = run(20, 17, 88000, 1000, seed);
+        worst = std::max(worst, std::abs(f.ppm() - 20));
+    }
+    EXPECT_GT(worst, 100) << "a 1.4 s baseline cannot resolve 20 ppm through 1 ms jitter";
+}
+
+TEST(LongFit, RefusesFewerThanThreeSamples) {
+    LongFit f;
+    f.add(0, 0);
+    f.add(1000000, 1000000);
+    EXPECT_FALSE(f.ready());
+    EXPECT_EQ(f.ppm(), 0);
+}
+
+TEST(LongFit, AllSamplesAtOneNominalIsRefused) {
+    LongFit f;
+    for (int i = 0; i < 5; i++) f.add(0, i * 1000);
+    EXPECT_EQ(f.ppm(), 0) << "zero span: no baseline to fit over";
+}
+
+TEST(LongFit, MeasuredPeriodExposesAWrongRuler) {
+    // The hub emits every 1000500 us while the node believes 1000000. The ppm
+    // figure is then wrong by 500 ppm, and measured_period_us is what says so.
+    LongFit f;
+    for (uint32_t i = 0; i < 100; i++) f.add((int64_t) i * 1000000, (int64_t) i * 1000500);
+    EXPECT_NEAR(f.ppm(), 500, 1);
+    EXPECT_NEAR(f.measured_period_us(99), 1000500, 2);
+}
+
+TEST(LongFit, SpanReportsTheRealBaseline) {
+    const auto f = run(0, 300, 1000000);
+    EXPECT_NEAR((double) f.span_us(), 299.0 * 1000000.0, 1000.0);
+}
+
+TEST(LongFit, ResetClearsEverything) {
+    auto f = run(20, 300, 1000000);
+    f.reset();
+    EXPECT_FALSE(f.ready());
+    EXPECT_EQ(f.ppm(), 0);
+    EXPECT_EQ(f.span_us(), 0);
 }

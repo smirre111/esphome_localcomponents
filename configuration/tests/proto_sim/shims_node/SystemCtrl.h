@@ -11,6 +11,13 @@
 
 class SystemCtrl {
 public:
+    // The node's two power profiles. Recorded rather than ignored so a test can
+    // assert the PRODUCTION profile is restored when a drift test ends: leaving
+    // a battery node pinned at 240 MHz with light sleep off is a regression that
+    // would otherwise only surface as a flat pack weeks later.
+    static bool &measuringProfile() { static bool m = false; return m; }
+    static void applyPowerProfile(bool measuring) { measuringProfile() = measuring; }
+
     void setAddress(uint8_t addr, uint8_t subnt) { addr_ = addr; subnt_ = subnt; }
     uint8_t getConfigAddress() const             { return addr_; }
     uint8_t getConfigSubnet()  const             { return subnt_; }

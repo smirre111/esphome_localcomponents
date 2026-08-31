@@ -1798,61 +1798,62 @@ namespace esphome
     // At the default 15 s grid that is ~2 % occupancy, which is why the grid is
     // seconds rather than milliseconds.
     // -----------------------------------------------------------------------
-    void LORAListener::start_drift_test(uint32_t duration_s, uint32_t grid_ms)
+    // -----------------------------------------------------------------------
+    // Drift test — a hardware-timed ruler
+    //
+    // WHY THIS IS NOT A BURST ANY MORE
+    //
+    // The first version reused the ordinary 17-copy burst as the ruler. That
+    // burst is paced by vTaskDelayUntil, and this hub runs
+    // CONFIG_FREERTOS_HZ=1000 — so every copy is released on a 1 ms tick
+    // boundary. Over the 1.4 s span of a burst, +-1 ms of placement error is
+    // ~700 ppm of slope error, and the node duly reported +-1500 ppm of
+    // scatter for a crystal that cannot exceed +-20 ppm. The RULER was
+    // quantised; no amount of receiver precision could fix it.
+    //
+    // So: one frame per tick, paced by esp_timer (microsecond resolution, APB
+    // derived) instead of the FreeRTOS tick, over a long baseline. The frame
+    // for the NEXT tick is built immediately after each send, so the timer
+    // callback does nothing but transmit — packing work cannot leak into the
+    // interval being measured.
+    //
+    // Frames are PLAINTEXT: encryption time varies with payload and would sit
+    // between the timer firing and the radio starting. Same payload every
+    // time, so whatever latency remains is constant and affects the offset,
+    // never the slope.
+    // -----------------------------------------------------------------------
+    void LORAListener::drift_timer_cb_(void *arg)
     {
-      if (grid_ms < 5000)
-      {
-        ESP_LOGW(TAG, "[%s] drift grid %u ms is too tight for a 17-copy burst "
-                      "(~330 ms airtime); clamping to 5000 ms",
-                 this->get_name().c_str(), (unsigned) grid_ms);
-        grid_ms = 5000;
-      }
-      this->drift_test_active_     = true;
-      this->drift_test_duration_s_ = duration_s;
-      this->drift_test_grid_ms_    = grid_ms;
-
-      ESP_LOGI(TAG, "[%s] drift test START: %u s, grid %u ms",
-               this->get_name().c_str(), (unsigned) duration_s, (unsigned) grid_ms);
-
-      this->send_drift_test_(true);
-      this->set_interval("drift_grid", grid_ms, [this]() {
-        if (!this->drift_test_active_)
-          return;
-        this->send_drift_test_(true);   // each grid frame re-arms the node
-      });
-
-      // The hub stops itself too, so a forgotten test does not burn airtime.
-      this->set_timeout("drift_end", (uint32_t) duration_s * 1000,
-                        [this]() { this->stop_drift_test(); });
-    }
-
-    void LORAListener::stop_drift_test()
-    {
-      if (!this->drift_test_active_)
-        return;
-      this->drift_test_active_ = false;
-      this->cancel_interval("drift_grid");
-      this->cancel_timeout("drift_end");
-      // Best-effort: the node does not depend on this arriving -- its own
-      // deadline is the thing that guarantees it leaves continuous RX.
-      this->send_drift_test_(false);
-      ESP_LOGI(TAG, "[%s] drift test STOP", this->get_name().c_str());
-    }
-
-    void LORAListener::send_drift_test_(bool enable)
-    {
-      if (this->parent_ == nullptr)
+      auto *self = static_cast<LORAListener *>(arg);
+      if (!self->drift_test_active_ || self->drift_frame_len_ == 0)
         return;
 
+      // Hand the PRE-BUILT frame to the normal transmit queue.
+      //
+      // NOT sendPacketOnce() straight from here. That bypasses the TxDone
+      // handling and the return-to-RX that live in the tracker main loop, and
+      // it left the SX1278 stuck in TX: every later beginPacket failed and the
+      // hub went silent until it was restarted. Observed 2026-08-31 — the node
+      // received nothing at all from the moment the test was triggered.
+      //
+      // setBurstCopies(1) makes this one frame instead of seventeen, so the
+      // proven path is reused rather than duplicated.
+      self->parent_->send(self->drift_frame_, self->drift_frame_len_);
+
+      // Build the next one now, in the 99% of the period that is idle.
+      self->build_drift_frame_(true);
+    }
+
+    void LORAListener::build_drift_frame_(bool enable)
+    {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = this->short_address_;
       header.destsubnet    = this->subnet_address_;
       header.senderaddress = kHubAddress;
+      // msgid is the ruler mark. The node indexes samples by it, so a frame
+      // lost to the air leaves a gap instead of shifting every later sample.
       header.msgid         = this->incrTxMessageId();
-      // Bursted, unlike the schedule push: the burst is not redundancy here,
-      // it IS the measurement. Copy i leaves at a known i * 88235 us, and the
-      // node regresses its arrival times against that.
       header.burstindex    = 0;
       header.burstcount    = 0;
       op_message.header    = &header;
@@ -1867,11 +1868,117 @@ namespace esphome
 
       uint8_t *buf = nullptr;
       size_t   len = 0;
+      // ENCRYPTED, like every other command.
+      //
+      // Plaintext was tried first, to keep variable-time crypto out of the
+      // timing path. It does not belong there anyway: this frame is built
+      // during the ~999 ms of idle BETWEEN ticks, so packing and encryption
+      // are already outside the interval being measured. On the node, decrypt
+      // happens after the ISR has captured the timestamp, so it cannot bias
+      // the measurement either.
+      //
+      // And plaintext simply does not work: the node rejects unencrypted
+      // commands once a session exists ("session requires encryption"), so
+      // every drift frame was silently dropped and the test never started.
+      // Exempting DriftTest would let an unauthenticated frame pin a node in
+      // ~11 mA continuous RX — a battery-drain vector on a 1.2 mA device.
       if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
       {
-        this->parent_->send(buf, len);
+        if (len <= sizeof(this->drift_frame_))
+        {
+          memcpy(this->drift_frame_, buf, len);
+          this->drift_frame_len_ = len;
+        }
         free(buf);
       }
+    }
+
+    void LORAListener::start_drift_test(uint32_t duration_s, uint32_t grid_ms)
+    {
+      if (this->parent_ == nullptr)
+        return;
+
+      // One frame per tick is ~30 ms of airtime, so the grid can be far
+      // tighter than the old 17-copy burst allowed. More frames over the same
+      // wall-clock time is more samples on the same baseline.
+      if (grid_ms < 200)
+        grid_ms = 200;
+
+      this->drift_test_active_     = true;
+      this->drift_test_duration_s_ = duration_s;
+      this->drift_test_grid_ms_    = grid_ms;
+
+      ESP_LOGI(TAG, "[%s] drift test START: %u s, hw-timed grid %u ms, plaintext single frames",
+               this->get_name().c_str(), (unsigned) duration_s, (unsigned) grid_ms);
+
+      // The START command goes out as a NORMAL 17-copy burst.
+      //
+      // The node is still in windowed RX at this point -- a ~29 ms window every
+      // 500 ms, a 5.9% duty cycle -- which is the entire reason the burst
+      // exists. A single-copy START has roughly a 6% chance of being heard, so
+      // the node never enters continuous RX, never hears anything after it, and
+      // the test silently does nothing. Observed exactly that: the node
+      // received nothing at all for eight minutes.
+      //
+      // Only the TIMING frames are single copies, and by then the node is in
+      // continuous RX and hears every one.
+      this->build_drift_frame_(true);
+      if (this->drift_frame_len_ > 0)
+        this->parent_->send(this->drift_frame_, this->drift_frame_len_);
+
+      if (this->drift_timer_ == nullptr)
+      {
+        const esp_timer_create_args_t args = {
+            .callback = &LORAListener::drift_timer_cb_,
+            .arg      = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name     = "driftgrid",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_create(&args, &this->drift_timer_);
+      }
+      esp_timer_stop(this->drift_timer_);
+
+      // Give the bursted START time to land and the node time to switch into
+      // continuous RX before the single-copy grid begins. One burst round is
+      // 1.5 s; 3 s is comfortable margin.
+      this->set_timeout("drift_grid_arm", 3000, [this, grid_ms]() {
+        if (!this->drift_test_active_)
+          return;
+        this->parent_->setBurstCopies(1);   // timing frames only
+        this->build_drift_frame_(true);
+        // Microsecond-resolution pacing — the entire point of this rewrite.
+        esp_timer_start_periodic(this->drift_timer_, (uint64_t) grid_ms * 1000ULL);
+      });
+
+      this->set_timeout("drift_end", duration_s * 1000,
+                        [this]() { this->stop_drift_test(); });
+    }
+
+    void LORAListener::stop_drift_test()
+    {
+      if (!this->drift_test_active_)
+        return;
+      this->drift_test_active_ = false;
+      if (this->drift_timer_ != nullptr)
+        esp_timer_stop(this->drift_timer_);
+      this->cancel_timeout("drift_end");
+      this->cancel_timeout("drift_grid_arm");
+
+      // Restore the 17-copy burst BEFORE sending OFF, so the OFF command is
+      // bursted like every other command. The node may already have left
+      // continuous RX on its own deadline, in which case a single copy would
+      // very likely be missed.
+      //
+      // Restoring also matters in its own right: leaving the hub on single
+      // copies would quietly halve downlink reliability for every node.
+      this->parent_->setBurstCopies(0);
+      this->build_drift_frame_(false);
+      if (this->drift_frame_len_ > 0)
+        this->parent_->send(this->drift_frame_, this->drift_frame_len_);
+      this->drift_frame_len_ = 0;
+
+      ESP_LOGI(TAG, "[%s] drift test STOP", this->get_name().c_str());
     }
 
     void LORAListener::send_schedule_config()

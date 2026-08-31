@@ -402,6 +402,10 @@ namespace esphome
       // const TickType_t xFrequency = pdMS_TO_TICKS(59); // For RX /TX config 3x RX + 17x TX in 1sec
       const TickType_t xFrequency = pdMS_TO_TICKS(this->txIntervalMs); // For RX /TX config 3x RX + 17x TX in 1.5sec
 
+      // One copy during a drift test — see setBurstCopies().
+      const int burstCopies = (this->burst_copies_ > 0) ? this->burst_copies_
+                                                        : this->txSlotsPerRound;
+
       TickType_t xLastWakeTime;
       ESP_LOGI(TAG, "Sending packed burst");
       xLastWakeTime = xTaskGetTickCount();
@@ -415,10 +419,10 @@ namespace esphome
           lora_client_operation_message__unpack(NULL, len, data);
       const bool canStamp = (burstMsg != nullptr && burstMsg->header != nullptr);
       if (canStamp)
-        burstMsg->header->burstcount = this->txSlotsPerRound;
+        burstMsg->header->burstcount = burstCopies;
 
       // for (int cnt = 0; cnt < 7; cnt++)
-      for (int cnt = 0; cnt < this->txSlotsPerRound; cnt++)
+      for (int cnt = 0; cnt < burstCopies; cnt++)
       {
         this->lora_tx_busy_ = true;
 
@@ -453,7 +457,7 @@ namespace esphome
         // reply (in the main task, where the scheduler/NVS/publish are safe)
         // during the gap.  No gap after the final copy — the caller clears
         // lora_tx_busy_ and the loop returns to RX immediately.
-        if (cnt + 1 < this->txSlotsPerRound)
+        if (cnt + 1 < burstCopies)
         {
           // Arm RX under the mutex, then drop the busy hint so the main loop can
           // read the FIFO during the gap.  The mutex (not the flag) guarantees

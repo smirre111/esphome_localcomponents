@@ -172,6 +172,9 @@ add_library(real_lora_client STATIC
     ${SHIM_DIR}/esphome/core/component.cpp
     ${SHIM_DIR}/esphome/components/lora_tracker/lora_tracker.cpp
     ${SHIM_DIR}/esp_random.c
+    # esp_timer_* — the hub paces the drift-test grid with a hardware timer
+    # rather than the FreeRTOS tick, so this target needs the stubs too.
+    ${SHIM_DIR}/esp_timer_stub.c
 )
 target_include_directories(real_lora_client
     BEFORE PUBLIC

@@ -375,8 +375,21 @@ The node is a native **ESP-IDF** project (not PlatformIO/Arduino despite the fol
 |------|-------|
 | Project root | `C:\Development\PlatformIO\PlatformIO\BlindsESP` |
 | ESP-IDF location | **`C:\Development\esp\v6_0\v6.0\esp-idf` (v6.0)** — the project's managed component `espressif/esp_sysview` requires idf ≥ 6.0, so the **5.5** install at `C:\Development\esp-idf` fails dependency resolution at CMake configure. Use 6.0. |
-| Node serial port | **COM6** (confirmed — CH340 or similar, not shown by Silicon Labs CP210x query) |
-| Hub serial port | COM9 (Silicon Labs CP210x — ESPHome hub, not the node) |
+| Node serial port | **COM6** — node 2 (FTDI `VID_0403+PID_6010`) |
+| Hub serial port | **COM9** — ESPHome hub (Silicon Labs CP210x `VID_10C4&PID_EA60`) |
+
+> ⚠️ **Do not infer which port is which from the USB chip.** The intuition
+> "CP210x = the ESP32 node, FTDI = something else" is backwards here: the
+> **CP210x is the HUB** and the **FTDI is node 2**. Enumerating the ports and
+> guessing from the adapter name has produced a confident, wrong answer
+> (2026-08-30) even though this table was already correct — a hub flashed onto
+> the node's port would be a genuinely expensive mistake. Read this row; do not
+> re-derive it. The USB VID/PIDs above are the reliable discriminator if the
+> mapping ever needs re-checking.
+>
+> Sanity check before any flash: the hub answers on HTTP
+> (`curl -s -o /dev/null -w "%{http_code}" http://192.168.178.91/`), the node
+> does not.
 
 > The default Windows `python` is 3.13, which matches the `idf6.0_py3.13_env` venv.
 > Building against the 5.5 install errors with *"no versions of espressif/esp_sysview match … requires idf (>=6.0)"*.
