@@ -28,6 +28,13 @@ recommendation I reached for had already been made and retracted by this project
 Two of those — §10 and §14 — were answered in `protocol-questions.md` and
 `optimization-analysis.md` before the plan was written. Neither was cited.
 
+**§15 records what an adversarial review of this document then broke**, and it
+contains the two findings that matter most: the node arms no GPIO light-sleep
+wake source, so the passive drift fit the plan is built on cannot work under the
+production power profile; and the guard band needs a sync frame every ~125 s,
+which makes the broadcast beacon a prerequisite rather than a follow-on and
+turns the airtime argument break-even at today's two nodes.
+
 Node paths below are relative to the BlindsESP repo; hub paths to
 `configuration/`.
 
@@ -497,6 +504,233 @@ The pattern is worth naming: **this project's design documents already contain
 more than any one of them assumes**, and a plan that does not survey them
 re-derives — and sometimes re-breaks — settled questions.
 
+## 15. What an adversarial review changed
+
+A reviewer was asked to attack the analysis above and the plan it corrects.
+Most of what it found stands. Recording both what it broke and where it
+overreached, because the second is as useful as the first.
+
+### 15.1 The finding that may kill P1 outright
+
+**Nothing in the node arms a GPIO light-sleep wake source.** `grep` for
+`gpio_wakeup_enable` and `esp_sleep_enable_gpio_wakeup` across the whole node
+tree returns **zero hits**. `pm_lock_handle_rx` is declared at `main.cpp:99`
+and externed in two places but is never created and never acquired — it is
+dead. Production runs `light_sleep_enable = true` (`SystemCtrl.cpp:444`) with
+`CONFIG_PM_ENABLE=y` and `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y`.
+
+The project has already measured the consequence, at
+`CmdDispatcher.cpp:2159-2161`:
+
+> waking from light sleep on a GPIO needs the wake source explicitly armed, so
+> with it enabled the node slept through most of a burst (**17 copies became
+> 3-6**).
+
+The reviewer read this as frame loss. It is worse than that for this design,
+and also less bad: because DIO0 is **level**-triggered (`LoraInterface.cpp:122`)
+the line stays asserted, so a frame received during light sleep is not lost —
+the packet sits in the FIFO and the ISR runs when the CPU next wakes. The
+*packet* survives.
+
+**The timestamp does not.** `esp_timer_get_time()` in the ISR then records the
+instant the CPU woke, not the instant the frame arrived. That is precisely why
+the drift test disables light sleep outright rather than holding a PM lock.
+
+So the plan's §4 premise — "the node fits drift passively from ordinary
+traffic, in the field, for free" — **is not achievable under the production
+power profile**. The options are:
+
+1. arm GPIO light-sleep wakeup, which is code that exists nowhere in the tree
+   and appears in no phase of the plan; or
+2. run the ~11 mA measuring profile permanently, which deletes the entire power
+   case.
+
+There is no third option, and "P1 costs nothing" was the reason P1 came first.
+**Arming the GPIO wake source becomes P0.5**, ahead of everything else.
+
+That the level-triggered DIO0 configuration is what keeps this from being frame
+loss rather than merely timestamp loss is load-bearing and documented nowhere
+except as a robustness note about interrupt lock-up (`LoraInterface.cpp:118-121`).
+
+### 15.2 The objection that reshapes the economics
+
+The plan's §6 guard band is
+
+```
+guard = 2 · ppm_uncertainty · t_since_sync + tx_jitter + rx_isr_jitter + margin
+```
+
+and it evaluated `t_since_sync` at **one 3 s round**, concluding drift is
+negligible. That substitution is only legal if a timing-bearing frame arrives
+every round. Nothing in this system does that — the hub transmits when it has
+traffic, a handful of times a day.
+
+At the measured 8 ppm, and before any allowance for the *uncertainty* the
+formula actually calls for:
+
+| t_since_sync | 2·8 ppm·t | fits a ±2 ms window? |
+|---|---|---|
+| 3 s | 0.05 ms | yes |
+| 2 min | 1.9 ms | marginal |
+| 10 min | 9.6 ms | no |
+| 1 h | 57.6 ms | **worse than today's 29 ms window** |
+
+**A ±2 ms window requires a sync frame every 125 s per node.** That is not a
+tuning parameter; it falls out of the arithmetic.
+
+The reviewer's conclusion — that paying for those keepalives reverses the
+airtime argument — is right in direction. Its magnitude is not: it priced a
+sync *every round*, which the guard band does not require. Priced at the
+125 s the arithmetic actually demands, ~15 ms per frame:
+
+| | today (17 copies) | timed + **unicast** sync | timed + **broadcast** sync |
+|---|---|---|---|
+| 2 nodes, 5 cmd/node/day | 2.5 s/day | 21.7 s/day | 10.9 s/day |
+| 2 nodes, 20 cmd/node/day | 10.2 s/day | 22.2 s/day | 11.4 s/day |
+| 5 nodes, 5 cmd/node/day | 6.4 s/day | 54.4 s/day | 11.2 s/day |
+| 10 nodes, 5 cmd/node/day | 12.8 s/day | 108.8 s/day | 11.5 s/day |
+
+Two conclusions, and they are the most important in this document:
+
+**A unicast keepalive is fatal.** It is 2–9× *worse* than today at every node
+count, and it scales with N — the opposite of what the mode is for.
+
+**The broadcast beacon is a prerequisite, not a follow-on.** With one shared
+sync frame the cost is flat at ~11 s/day regardless of N, and the crossover
+against today's burst is around **3–5 nodes**. The plan listed
+`wake-cost-proposal.md` Tier 3 under "what this does not solve". It belongs
+*before* the timed window, because it is the only thing that makes the timed
+window's headline claim true.
+
+And at today's **two** nodes, the airtime argument is break-even at best. The
+case for the mode there rests entirely on the node battery — which is §10's
+~2×, from an unmeasured current.
+
+One thing the reviewer missed in its own objection: window *cadence* and sync
+*cadence* are independent. The node must open a window every few seconds for
+command latency; the hub need only transmit every ~125 s for sync. Most windows
+are empty and cost 4 ms of RX. So the plan's 0.13 % receive-duty figure survives
+this objection — it is the *hub airtime* claim that does not.
+
+### 15.3 Accepted corrections
+
+- **My hub-tick inference was overstated (§2).** `pdMS_TO_TICKS(88)` yields
+  exactly 88 ms at 1000, 500, 250 **and** 125 Hz — 88 is a multiple of all four
+  tick periods. The measurement rules out 100 Hz (80 ms) and 200 Hz (85 ms) and
+  nothing else. This matters because §13's mechanism depends on the tick
+  *period*: at 500 Hz, `esphome::delay(1)` truncates to **zero ticks** and the
+  quantiser argument disappears entirely. (The reviewer said "a 2 ms quantum";
+  that is wrong in the direction that would have been harmless.) The tick rate
+  must be pinned in YAML and read back from the generated sdkconfig, not
+  inferred.
+- **The ~6 ms `ESP_LOGI` cost is unverified.** `sendPacketBurst` runs on
+  `sendTaskDispatcher`, pinned to core 1 (`lora_tracker.cpp:88-93`), not the
+  ESPHome main task. Recent ESPHome routes logs from non-main tasks through a
+  ring buffer for the main loop to drain, which would make that call a memcpy,
+  not a UART block. ESPHome is not vendored here and I could not check it. §12's
+  table asserts a cost that has not been shown. Treat it as a hypothesis that
+  P-6 tests, not a finding.
+- **My backoff range was wrong.** `29 + 29·(esp_random()%10)` is 29·(1..10) =
+  **29–290 ms**, not 29–319. Quantised at 100 Hz it is
+  {20, 50, 80, 110, 140, 170, 200, 230, 260, 290}, **mean 155 ms**. I failed to
+  apply my own §1 to my own §6.
+- **"Unbounded under load" (§4) is unearned.** All four priority-6 tasks block
+  on `portMAX_DELAY` queue receives, so they consume CPU only when a frame is in
+  flight. The sharper statement is worse for the design: the delay is
+  **correlated, not random** — those tasks run *because* a frame arrived, doing
+  protobuf, AES-GCM and NVS work, so the window that opens late is precisely the
+  one after traffic. In a design where every round carries a frame, that is
+  every window. Also, `taskMotorContol` is priority **3**, *below* `taskLoraRx`,
+  so a moving blind does not delay the window — a point in the design's favour
+  I had missed.
+- **Temperature (§11) is attached to the wrong oscillator.** The 8 ppm was
+  measured with `esp_timer`, which counts APB from the 26 MHz XTAL — an AT-cut
+  crystal with a cubic TC of a few ppm, not a tuning fork's parabola. My −22 /
+  −43 ppm figures apply only in the RTC-timekeeping regime, i.e. across sleep.
+  And `CONFIG_PM_LIGHTSLEEP_RTC_OSC_CAL_INTERVAL=100` recalibrates the 32 kHz
+  against the XTAL, tracking temperature out for light sleep. The section
+  survives only for deep sleep, where it widens a margin that already fails —
+  it changes no decision.
+- **The 11 mA has no provenance and fails a sanity check.** It appears in
+  `timing-accuracy.md:117` as a whole-node figure for the *measuring* profile —
+  240 MHz pinned, no light sleep — where the CPU alone would draw far more.
+  It is most likely the SX1278 datasheet RX current mislabelled as a node
+  measurement. My §10 arithmetic is self-consistent (radio in RX while the CPU
+  light-sleeps behind a level-triggered DIO0), but its input is unmeasured, and
+  `power-analysis.md` says at the top that no current except the 1.2 mA was
+  measured. One meter reading across an RX window settles the whole §10.
+- **I cannot conclude the nodes run interactive from the YAML.**
+  `lora_client.cpp:1707` logs "Restored ... mode=%s from flash (**YAML seed
+  ignored**)" — `auto_mode: false` in `loradevices.yml` is a first-boot seed
+  only. This cuts against my own framing: Tier 1 `sleepOk` saves awake seconds
+  on **check-in wakes**, which exist only in auto mode, while the timed window
+  helps only awake nodes. **They target different modes and are not competing
+  for the same milliamp.** "Do Tier 1 instead" was the wrong trade to offer.
+
+### 15.4 New defects found
+
+- **`lora_reset()` has no reset pulse on the node.**
+  `components/lora/lora.cpp:1327-1332` uses `vTaskDelay(pdMS_TO_TICKS(1))`
+  twice; at 100 Hz both evaluate to **zero ticks**. The SX1278 reset pulse and
+  its settling time are gone. The hub's fork of the same function uses
+  `esphome::delay(1)` and at 1000 Hz still gets a real millisecond. One line,
+  and it belongs in §3's divergence table. It is the only surviving
+  `pdMS_TO_TICKS(<10)` in the node tree.
+- **`RX_SINGLE` cannot exceed 262 ms.** `lora_setSymbolTimeout` clamps to 1023
+  (`components/lora/lora.cpp:1072`), and a symbol is 0.256 ms. So
+  `timing-accuracy.md` §5's "six hours needs ~350 ms" does not merely fail to
+  fit a 29 ms window — **it cannot be expressed in `RX_SINGLE` at any setting**.
+  Any wide-window fallback needs `RX_CONTINUOUS` plus manual timing, which is
+  different code, not a different constant.
+- **`getBurstEndUs` inherits the burst-overrun defect.**
+  `CmdDispatcher.cpp:2836-2840` predicts `remaining × 88 ms`. A 152 B
+  ScheduleConfig airs for 95.3 ms, and (per the plan's §9) it *is* bursted 17×
+  despite `burstCount = 0`, so `vTaskDelayUntil` never blocks and copies go
+  back-to-back at ~95 ms. The node under-predicts the burst end by ~7.3 ms per
+  remaining copy — up to ~117 ms from copy 0 — against a
+  `kBurstReplyMarginMs` of 40 (`LoraInterface.cpp:432`). The node transmits into
+  the tail of the hub's burst. Same site, minor: it anchors on
+  `esp_timer_get_time()` at processing time rather than the `rx_us` it already
+  holds.
+- **`symTimeout` is a magic number tied to an assumed frame length.**
+  `LoraInterface.cpp:347`: `int(30.0f/0.26f)`, commented "20 ms per packet
+  (+10 ms tolerance)". The plan's own §10 pins real airtime at 95.296 ms for
+  152 B — 3× the assumption. It happens not to matter today because the timeout
+  governs preamble detection only, but it is the same undocumented cross-repo
+  coupling as `kBurstTxIntervalMs`.
+- **The replay window makes the plan's burst-fallback rule ambiguous.**
+  `SessionManager::acceptRxId` (`SessionManager.cpp:111-121`) requires
+  `msgid > rx_id_`, and a rejected frame is dropped with **no ack**
+  (`CmdDispatcher.cpp:2693-2697`). The plan's §5 rule 4 — "an unacked single
+  shot is retried as a burst, immediately" — does not say whether the msgid is
+  reused. Reusing it means the retry is rejected before an ack can be generated,
+  so a command that executed can never be acked. Minting a new one means the
+  node executes the command twice. The hub already mints a new msgid per retry
+  (`lora_client.cpp:1277`), so **duplicate execution is reachable today** — the
+  17-copy burst simply makes retries rare. Single-shot makes them routine, which
+  turns a latent defect into an operational one. The protocol has no way to
+  express "arrived but the ack was lost", and it needs one.
+
+### 15.5 Where the reviewer overreached
+
+- It read the light-sleep problem as **frame loss**. Level-triggered DIO0 means
+  the packet survives and only the timestamp is corrupted (§15.1). That is worse
+  for P1 and better for P3 than it claimed.
+- Its airtime figure of ~864 s/day assumed a sync every round. The guard band
+  requires one every 125 s, giving ~11–22 s/day (§15.2).
+- Its arithmetic for a 500 Hz hub tick ("a 2 ms quantum") is wrong; the value
+  truncates to zero.
+- It claimed §13 "described the mechanism backwards". §13 already states that
+  `delay(1)` rounds elapsed pre-work **up to the next tick edge**, which is what
+  the reviewer then asserts as the correction.
+- Its M4 — "a 4.1 ms preamble does not fit comfortably inside a 4 ms window" —
+  is a category error. The preamble is the hub's transmission; the window is the
+  node's listening interval. They overlap, they do not nest. The weaker version
+  of the point survives: the real budget is `window ≥ 2·guard + detection
+  (~5 symbols, 1.3 ms)`, so 0.13 % is optimistic once the guard band is honest.
+
+---
+
 ## What changes in the plan
 
 | plan section | change |
@@ -514,3 +748,11 @@ re-derives — and sometimes re-breaks — settled questions.
 | §12 justification | Cite `optimization-analysis.md` §2: the scheduled-window scheme is already identified there as *the* lever on downlink airtime, blocked on sub-second sync. That is the proposal's strongest support and it was not referenced. |
 | §3, new | Collapse the byte-at-a-time FIFO fill into one SPI transaction, on both ends. It removes ~1–4 ms of **payload-dependent** pre-air latency that no time-on-air correction can undo, and it removes ~60 chances per frame for a silently-dropped register write. |
 | §3 P-6 | Promote from "publish a diagnostic" to **the experiment that decides §13**: if air-start clusters on 1 ms boundaries the quantiser account is right; if not, this analysis is wrong about the mechanism. |
+| **§11, new P0.5** | **Arm GPIO light-sleep wakeup on DIO0** before anything else. Without it the RxDone timestamp is the CPU-wake instant, not the arrival instant, and P1's passive drift fit cannot work under the production power profile (§15.1). Nothing in the node tree does this today. |
+| **§12, reversed** | The **broadcast beacon is a prerequisite, not a follow-on**. A unicast 125 s keepalive costs 2–9× today's airtime and scales with N; a broadcast one is flat at ~11 s/day. Without it the mode's headline claim is false (§15.2). |
+| **§6, corrected** | `t_since_sync` is set by **traffic**, not by the round period. A ±2 ms window needs a sync every **125 s per node**, and that keepalive — not the command traffic — is the dominant airtime term. |
+| §2 headline, again | At **two** nodes the airtime argument is break-even at best; crossover against today's burst is ~3–5 nodes. The case at N=2 rests entirely on the ~2× battery figure, whose input current is unmeasured. |
+| §3 §12 caveat | The ~6 ms `ESP_LOGI` cost is a **hypothesis**, not a finding — `sendPacketBurst` runs off the main task and ESPHome may buffer it. P-6 tests it. |
+| §9 divergence | Add `lora_reset()`: `pdMS_TO_TICKS(1)` is **zero ticks** at 100 Hz, so the node has no SX1278 reset pulse at all. |
+| §6 fallback | A wide-window fallback cannot use `RX_SINGLE` — it clamps at 262 ms. That is different code, not a different constant. |
+| §5 rule 4 | Specify msgid semantics for the burst retry. Reuse ⇒ the replay filter rejects it and no ack is ever possible; new ⇒ the node executes twice. The protocol cannot currently express "arrived, ack lost". |
