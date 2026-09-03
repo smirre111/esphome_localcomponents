@@ -35,7 +35,7 @@ window positions in it, and the hub uses the ones it needs.
 ```
   1.5 s   ── every node opens its private window ──────────  latency + normal traffic
  12–50 m  ── all nodes additionally open the beacon slot ──  clock sync (+ optional paging)
-  on demand ─ contention region ────────────────────────────  joins, recovery, unsynced nodes
+ on demand ── a full-round burst, private traffic defers ──  joins, recovery, unsynced nodes
 ```
 
 They do not nest and they do not need to align beyond sharing the same grid
@@ -154,30 +154,112 @@ works without it. Worth doing later, not needed for v1.
 
 ---
 
-## 5. The contention region — for nodes that are not synced
+## 5. Unsynced nodes — priority, not a reserved region
 
-Joining nodes, nodes recovering from a lost beacon, nodes on the internal RC
-oscillator, and nodes that have just woken from deep sleep have **no phase**, so
-they cannot be reached in a private window and cannot reply in one.
+An earlier version of this section proposed reserving ~300 ms of the round for
+contention traffic, costing 6 of the 32 slots. **That was wrong, and the
+arithmetic says so clearly.**
 
-They use today's mechanism unchanged: the node listens in 3 windows per 1.5 s,
-the hub sends 17-copy bursts, the node replies with CAD and random backoff. That
-is the contention region, and it is not a new thing to build — it is the
-existing system, kept.
+An unsynced node listens in 3 windows of 29.44 ms every 1.5 s, and a copy is
+heard only if its *start* lands inside a window. Confining copies to a narrow
+region gives very few chances per round:
 
-The one new rule: **the hub must place burst copies where they do not walk
-through a synced node's window.** A 17-copy burst spans 1.4 s and would
-otherwise cover most of a round. Options, in preference order:
+| copies × region | P(heard) per round | rounds to 99.9 % | time |
+|---|---|---|---|
+| 3 in a 300 ms region | 17.7 % | 36 | **54 s** |
+| 5 in a 400 ms region | 29.4 % | 20 | 30 s |
+| **17 across the whole round (today)** | **99.0 %** | 2 | **3 s** |
 
-1. Reserve a fixed region of the round for contention traffic (e.g. the last
-   300 ms, leaving 26 private slots instead of 32) — simple and bounded.
-2. Or place copies only in slots belonging to nodes that are themselves
-   unsynced.
+A reserved region makes acquisition ~20× slower. The 17-copy burst is spread
+across 1.4 s *precisely because* 88 ms is incommensurate with the node's 500 ms
+window interval — the copies sweep across the window. Squeezing them into
+300 ms destroys the mechanism that makes them work.
 
-Option 1 is cleaner and costs 6 slots. At a 32-node target that is worth
-deciding early, because it sets the slot count.
+### What acquisition actually needs
+
+Much less than a reservation implies. An unsynced node needs to hear **one**
+frame carrying grid coordinates; after that it knows its phase and moves to a
+private window. It does not need reliable command delivery while unsynced.
+
+And the events are rare — joins at commissioning, plus deep-sleep
+re-acquisitions at roughly 4 per node per day:
+
+```
+rounds per day                                   = 57 600
+P(a given node needs a frame in a given round)   = 3.5 / 57 600 = 6.1e-5
+P(any of 32 nodes does)                          = 1.9e-3
+bursts per day (32 nodes × 4 wakes)              = 128
+⇒ collisions with real queued traffic            = 0.23 per day
+```
+
+### The rule
+
+**When the hub has unsynced-node work it runs a normal full-round 17-copy burst,
+and defers any private-window traffic that collides with it by one round.**
+
+- no region is reserved, so all 32 slots stay available;
+- acquisition stays at 3 s rather than 54 s;
+- the cost is **a quarter of one command per day delayed by 1.5 s.**
+
+A stepped-on window costs nothing unless the hub *also* had traffic for that node
+in that exact round — and the hub, being the only downlink transmitter, knows
+when that is true. This supersedes the per-copy placement rules of
+`timed-window-mode-plan.md` §8.6 as well: the answer is not to place copies
+cleverly, it is to accept the collision and defer the loser.
 
 ---
+
+## 5b. Reception: what can and cannot be guaranteed
+
+**100 % cannot be ensured, and it is not ensured today either.** Two independent
+reasons, and it is worth being blunt about both:
+
+1. **RF is not deterministic.** 433 MHz is shared with weather stations, garage
+   remotes and alarm sensors. No scheduling scheme addresses interference or
+   fading.
+2. The 96.4 % figure in §1 is **geometry only** — it assumes every copy landing
+   in a window is decoded. Real losses sit on top of it.
+
+Reliability in this system comes from **acknowledgement and retry**, not from
+frame structure. That machinery already exists: `kOpMaxRetries = 4` at
+`kOpRetryIntervalMs = 3000`, plus the burst fallback.
+
+| per-frame success `q` | after 4 retries | + 17-copy burst fallback |
+|---|---|---|
+| 0.99 | 100 % | 100 % |
+| 0.90 | 99.999 % | 100 % |
+| 0.70 | 99.757 % | 100 % |
+| 0.50 | 96.9 % | **99.99998 %** |
+| 0.30 | 83.2 % | 99.961 % |
+
+Even a coin-flip link reaches five nines. **The frame structure's job is to make
+the first attempt cheap — 42 ms instead of 714 ms — not to make it certain.**
+
+Four layers carry it:
+
+1. the hub transmits into a known window, so the only loss is RF;
+2. every command is acked, and an unacked command retries;
+3. after K failures the hub falls back to bursting, whose statistics are
+   *independent* of the timed attempt;
+4. the node independently reverts to 3 windows after M empty ones, so it can
+   never be stranded waiting for a hub that thinks it is synced.
+
+### The one genuine regression, and the dial for it
+
+**A single copy loses time diversity.** Seventeen copies spread over 1.4 s
+survive a 200 ms burst of interference from another device; one copy at a fixed
+instant does not. Retry-as-burst covers it, but the first attempt is more
+fragile than today's.
+
+| | node duty | battery | independent attempts per round |
+|---|---|---|---|
+| 1 window | 1.96 % | 18.4 mAh/day | 1 |
+| **2 windows, 750 ms apart** | 3.93 % | 22.3 mAh/day | **2** |
+| 3 windows (today) | 5.89 % | 26.2 mAh/day | 3 |
+
+Two windows still beats today on battery and gives the hub two shots at instants
+far enough apart to be independent. Make the window count a per-node config
+value: **start at 2, drop to 1 once the link's measured `q` justifies it.**
 
 ## 6. Migration — nothing switches over at once
 
@@ -211,11 +293,11 @@ receive duty. They share one channel, and the hub knows which is which.
 | `timed-window-mode-plan.md` | change |
 |---|---|
 | §4 slot layout | 32 slots of 46.875 ms in a 1500 ms round, **not** 6 slots of 250 ms. Personal period stays 1.5 s — no multi-round superframe. |
-| §4, new | Reserve a contention region (≈300 ms, 6 slots) for burst-mode traffic, rather than spreading bursts through the frame. |
+| §4, new | **No reserved contention region.** Unsynced-node bursts use the full round and colliding private traffic defers by one round — 0.23 collisions/day (§5). |
 | §5 economics | Recompute at N=32. The broadcast beacon is now **essential**: 13 s/day shared vs 275 s/day unicast. |
 | §8.5 beacon | Promote the common beacon slot from a late optimisation to part of the core structure. It is what makes N=32 work. |
-| §8.6 mixed modes | Superseded by the contention region — a bounded region beats per-copy placement rules. |
-| §9 protocol | `GridSync` needs `slotCount` and `contentionStartUs`; the paging bitmap is optional and later. |
+| §8.6 mixed modes | Superseded: neither per-copy placement nor a reserved region. Accept the collision and defer the loser (§5). |
+| §9 protocol | `GridSync` needs `slotCount` and `windowsPerRound` (the §5b diversity dial); no contention-region fields. The paging bitmap is optional and later. |
 | §10 phases | The beacon moves from P5 into P3 — without it the node is only synced ~5 % of the time and there is no battery saving to measure. |
 
 ## 8. Numbers, in one place
