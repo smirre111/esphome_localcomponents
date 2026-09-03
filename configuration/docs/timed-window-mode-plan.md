@@ -911,7 +911,126 @@ until a DIO line is wired on the hub or a scope is attached.**
 
 ---
 
-## 12. Known defects this plan depends on fixing
+## 12. Rejected alternatives
+
+Three hardware routes to a better timestamp were considered and rejected. All
+three are recorded because each is the obvious "why didn't you just…" question,
+and one of them (`timing-accuracy.md` §6) is still open in an earlier document.
+
+The common thread: **all three are precision tools aimed at a budget the 3→1
+target already made comfortable.** At ±14.08 ms of guard, the only error term
+that is even visible is the light-sleep wake latency of §7 — everything else is
+three to six orders of magnitude below it.
+
+| term | magnitude | share of the ±14.08 ms guard |
+|---|---|---|
+| MCPWM hardware capture | 12.5 ns | 0.0000001 % |
+| plain ISR, CPU already awake | 2–5 µs | ~0.03 % |
+| ULP polling through light sleep | ~2–5 µs | ~0.03 % |
+| **light-sleep wake latency jitter** | ~±0.2 ms | **~1.4 %** |
+
+### 12.1 MCPWM capture unit — cannot run through light sleep
+
+`timing-accuracy.md` §6 lists this as "real and available (12.5 ns resolution,
+no ISR latency) … revisit only if the baseline must shrink drastically". It
+should now be closed rather than left open.
+
+MCPWM's capture timer is APB-clocked (80 MHz → the 12.5 ns). **In ESP32 light
+sleep the APB clock is stopped and the PLL is off**; only the RTC domain stays
+alive. So the capture timer is not counting and the capture logic is not
+clocked — the DIO0 edge is *not latched at all*. That is a miss, not a
+mis-timestamp. It is the same mechanism that stops `esp_timer` (TG0 LAC is also
+APB-derived), which `shims_node/esp_pm.h` already documents.
+
+ESP32 has no "CPU asleep, APB running" light-sleep variant, so using capture
+means holding the chip in WAITI idle across the whole RX window:
+
+| state | APB | capture | node current |
+|---|---|---|---|
+| active / WAITI idle | running | works | ~20 mA |
+| light sleep | **stopped** | dead | ~0.8 mA |
+| deep sleep | stopped | dead | ~10 µA |
+
+29.44 ms per 1500 ms at ~20 mA above the sleep floor is ≈ **0.39 mA** — 18.4 →
+~25.5 mAh/day against 26.2 today. That is the same arithmetic that rejected the
+PM lock in §7, and it erases the entire battery win. And once the CPU is awake
+anyway, a plain ISR is already good to a few microseconds, so capture would cost
+0.4 mA to create the problem it then solves.
+
+**Where it is genuinely free: the bench drift test.** There
+`applyPowerProfile(true)` already disables light sleep, so the node is in WAITI
+regardless — capture costs nothing extra and would drop the timestamp residual
+to essentially zero, letting the same ppm come from a much shorter baseline than
+294 s. The resource is unused: the motor is on LEDC (`MotorCtrl.cpp:75-80`), so
+both MCPWM units and all six capture channels are free.
+
+One asymmetry caps even that: **there is no hardware TX trigger on the SX1278** —
+transmission starts only on an SPI write to `RegOpMode`. Capture improves the RX
+end only; the hub's transmit instant stays software-timed either way.
+
+### 12.2 ULP coprocessor — physically cannot reach the radio
+
+Two independent blocks, either one fatal:
+
+- The ESP32 **ULP-FSM has no SPI peripheral.** The RTC domain offers RTC_GPIO,
+  RTC_I2C, ADC, touch and the temperature sensor. No SPI.
+- **Bit-banging is impossible on this board**, because none of the radio pins
+  are RTC-capable. `gpios.md` already records it: CS 19, RST 16, MISO 5,
+  MOSI 18, SCK 17 — all `NO_RTC`. (ESP32 RTC GPIOs are 0, 2, 4, 12–15, 25–27,
+  32–39.)
+
+Everything interesting on this node goes through SPI to the SX1278, so the ULP
+is locked out of all of it. Its entire reachable surface is:
+
+| pin | function | RTC |
+|---|---|---|
+| 26 / 27 | DIO0, DIO1 | RTC_GPIO7 / 17 |
+| 32, 34, 35 | buttons | RTC_GPIO9 / 4 / 5 |
+| 4 | `battSenseEn` | RTC_GPIO10 |
+| 39 (ADC1_CH3) | battery sense | RTC_GPIO3 |
+| 36 (ADC1_CH0) | motor current | RTC_GPIO0 |
+
+Motor drive (21 / 22 / 23) is `NO_RTC`, so sensing motor current without being
+able to drive the motor is useless.
+
+| candidate task | verdict |
+|---|---|
+| arm the RX window (`RegOpMode = RX_SINGLE`) | ✗ SPI |
+| read the FIFO / decode a frame | ✗ SPI, and four 16-bit registers |
+| **timestamp DIO0 through light sleep** | ✓ the only one with technical merit |
+| buttons during deep sleep | ext1 wake already does it, and the node must wake to act — no gain |
+| battery ADC during deep sleep | possible, but the CPU must wake to report it — marginal |
+| wake scheduling | the RTC timer already does it — no gain |
+
+Pricing the one that works: a tight ULP poll loop (`REG_RD` on RTC_GPIO7, mask,
+jump) is 3–6 instructions at ~8 MHz RTC_FAST → **~2–5 µs resolution**. It could
+self-schedule on the ULP timer, poll only across the 29 ms window, latch the RTC
+counter into RTC_SLOW_MEM and `WAKE` the CPU. ULP current is ~150 µA while
+running — negligible at a 1.96 % duty, ~0.15 mA if left polling continuously.
+
+That takes the phase estimate from ~±0.2 ms of wake jitter to ~±5 µs: **1.4 % of
+the budget recovered, at the cost of** ULP-FSM assembly (an 8-instruction ISA),
+RTC_SLOW_MEM that is already carrying the node's deep-sleep retention
+(`SystemCtrl.cpp:554-557`), and a failure mode nothing else in the system has.
+Not worth it.
+
+### 12.3 Wiring DIO3 for ValidHeader — the copper is not there
+
+Settled in §2: the node PCB does not bring DIO2 or DIO3 to the CPU. A respin
+would buy a length-independent reference, and §2 shows that is worth **no
+measurable accuracy** — it trades a software-correctness risk (which a host test
+discharges once) for a calibration risk. `LoraTiming.h` is the answer instead.
+
+### When to revisit any of this
+
+All three become live again **only if the window narrows**. At a ~4 ms window
+the light-sleep wake latency becomes the binding term, and then the ULP is the
+only way to get a sub-millisecond timestamp through sleep, while MCPWM capture
+is the only way to get a sub-microsecond one with the CPU awake. That is the
+design this plan deliberately moved away from — but if the airtime pressure of
+§5 ever forces the window down, start here rather than re-deriving it.
+
+## 13. Known defects this plan depends on fixing
 
 From `timed-window-node-analysis.md`, in the order they bite:
 

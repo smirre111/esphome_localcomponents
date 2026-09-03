@@ -245,6 +245,16 @@ Recorded so they are not re-tried.
   neither is needed: at 294 s of baseline the residual is already ~1 ppm.
   Revisit only if the baseline must shrink drastically.
 
+  **Closed, 2026-09-03** — see `timed-window-mode-plan.md` §12.1. The capture
+  timer is APB-clocked, and APB stops in light sleep, so the edge is never
+  latched at all. Using it means holding the chip in WAITI across the RX window,
+  which costs ~0.39 mA and erases the battery saving the window narrowing exists
+  to produce. It remains free and useful **inside this bench test**, where light
+  sleep is already disabled — that is the one place it would shorten the
+  baseline. The ULP was examined as the light-sleep-capable alternative and
+  rejected for a harder reason (§12.2): the ULP-FSM has no SPI, and none of the
+  radio pins are RTC-capable, so it cannot reach the SX1278 at all.
+
 ---
 
 ## 7. Debugging lessons
