@@ -55,7 +55,8 @@ Every instant in this document is expressed relative to **T0, the end of the
 LoRa start-frame delimiter** of the frame in question.
 
 ```
-air_start                    T0 = SFD end      ValidHeader           RxDone
+air_start                    T0 = SFD end   (ValidHeader)           RxDone
+                                              not routed        <- the only IRQ
     |                              |                |                   |
     |<-- n_pre up-chirps --><-sync-><-SFD->|<- header 8 sym ->|<- payload ... ->|
     |<---------- 12.25 sym --------------->|<--- 2048 us --->|
@@ -67,111 +68,105 @@ At SF7 / BW500 / CR4-8, `T_sym = 2^7 / 500 000 = 256.0 µs`:
 | interval | symbols | µs | depends on |
 |---|---|---|---|
 | `T_pre` — air start → **T0** | `n_pre + 4.25` = 12.25 | **3136** | preamble length only |
-| `T_hdr` — **T0** → ValidHeader | 8 (explicit header, always CR4/8) | **2048** | nothing |
+| `T_hdr` — **T0** → ValidHeader *(structural only — DIO3 is not routed)* | 8 | 2048 | nothing |
+| `T_pay(len)` — ValidHeader → RxDone | `n_sym(len) − 8` | 16 384 … 90 112 | payload length |
+| **`T_hdr + T_pay` — T0 → RxDone** | **`n_sym(len)`** | **18 432 … 92 160** | payload length |
 
-Two cautions on those rows.
+**The last row is the one the node uses**, and it is worth stating as a single
+step rather than two:
+
+```
+T0 = t_rxdone − n_sym(len)·T_sym
+```
+
+Decomposing it into `T_pay` and `T_hdr` and subtracting both is arithmetically
+identical but invites an error this document already made once: an earlier draft
+listed `T_pay` as 18 430 … 92 160 µs, which is the *combined* figure, so
+subtracting `T_hdr` on top of it double-counted the header — a fixed −2.048 ms
+bias, 15 % of the guard band, indistinguishable from a crystal error. Implement
+the one-line form.
 
 **Why `T_hdr` is 8 symbols.** The first block after the SFD is *always* 8
 symbols coded at CR 4/8, whatever CR is configured for the payload. In explicit
 mode that block carries the header (20 header bits, plus spare payload bits — at
 SF7 the block holds 4·SF = 28 bits). It survives `IH=1` because the block
-persists as a payload-carrying block, not because it was never the header. So
-`T_hdr = 8·T_sym` is independent of both payload length and configured CR. The
-SX1278 asserts ValidHeader after *decoding* that block, so the real constant is
-`2048 µs + a fixed decode delay`. **Calibrate it; do not assume 2048.**
-
-**`T_pay` is `(n_sym − 8)·T_sym`, not `n_sym·T_sym`.** An earlier draft of this
-table quoted the latter, which is SFD-end → RxDone. Implementing `T_pay` from
-those figures and then subtracting `T_hdr` as §2's fallback formula says
-double-counts the header: a fixed **−2.048 ms** bias on every phase estimate,
-15 % of the guard band, indistinguishable from a crystal error.
-| `T_pay(len)` — ValidHeader → RxDone | `n_sym(len) − 8` | **16 384 … 90 112** | payload length |
+persists as a payload-carrying block, not because it was never the header. The
+row is kept because it explains the structure and because `n_sym`'s leading `8`
+is otherwise mysterious — but nothing in the implementation needs it separately.
 
 ### Why SFD end and not air start or RxDone
 
-**It is the only instant both ends can name with a payload-independent
-constant.**
+**It is the only instant both ends can name that is independent of frame size**
+— which is what makes one grid work for a 25-byte ack and a 152-byte schedule
+push alike.
+
+The hub names it with a constant (`t_fire + d_tx_ramp + T_pre`). The node has to
+compute back from RxDone, so on the node the *reference* is size-independent
+while the *route to it* is not. That is a software-correctness burden, not a
+measurement error: `n_sym` is exact integer arithmetic on modem settings that
+never change. §2's `LoraTiming.h` and its host test are what discharge it.
 
 - Hub: `T0 = t_fire + d_tx_ramp + T_pre` — `t_fire` is the `esp_timer` reading
   taken at the single SPI write that starts transmission; `d_tx_ramp` (~220 µs)
   is a radio constant.
-- Node, **requires hardware not present today**:
-  `T0 = t_validheader − T_hdr` — 2048 µs, constant for every frame regardless of
-  size. ValidHeader is available on **DIO3 only** (`components/lora/include/lora.h:23`;
-  DIO0 offers RxDone/TxDone/CadDone, DIO1 offers RxTimeout/FhssChangeChannel/
-  CadDetected). **DIO3 is commented out on both board variants** —
-  `main/include/LoraInterface.h:85` and `:90`, the second naming GPIO 25. The
-  flag is read over SPI today (`frtosTasks.cpp:197-202`) after DIO0 fires, which
-  carries no timing information at all.
-- Node, **the actual path**: `T0 = t_rxdone − T_pay(len) − T_hdr` — requires the
-  airtime model to be exactly right, which is why the `T_pay` correction below
-  matters.
+- Node: `T0 = t_rxdone − T_pay(len) − T_hdr` = `t_rxdone − n_sym(len)·T_sym`.
+  RxDone on DIO0 is the **only** hardware timing event available — see below.
 
-**Decide this before P0, not after.** Either wire DIO3 to GPIO 25 and get a
-length-independent reference, or accept the RxDone path and price the phase
-estimate accordingly (§5). What must not happen is a plan whose headline
-requirement — one reference point named identically at both ends — is satisfied
-on paper by an instant the node cannot observe.
+### DIO2 and DIO3 are not routed — settled by the PCB
 
-### GPIO 25 is the right pin, and the design already reserved it
+ValidHeader is available on **DIO3 only** (`components/lora/include/lora.h:23`;
+DIO0 offers RxDone/TxDone/CadDone, DIO1 offers RxTimeout/FhssChangeChannel/
+CadDetected). The node's PCB does not bring DIO2 or DIO3 to the CPU. The
+commented-out `loraDio3Pin = gpio_num_t(25)` in `LoraInterface.h:90` and the
+`gpios.md` row that matches it are both aspirational; the copper is not there.
 
-The board reportedly brings DIO3 out. Checking the pin the commented-out line
-names:
+So the node computes T0 from RxDone, and there is no alternative. An earlier
+revision of this document treated that as a serious loss. **It is not**, and
+being clear about why matters, because the temptation is to spend a board
+respin on it.
 
-| requirement | GPIO 25 | evidence |
+| | ValidHeader path | RxDone path |
 |---|---|---|
-| documented as the DIO3 assignment | yes | the project's own `gpios.md`: `loraDio3Pin \| gpio_num_t(25) \| RTC_GPIO6` |
-| **RTC-capable** — must wake the CPU from light sleep, or the timestamp is the wake instant again (§7) | yes, **RTC_GPIO6** | matches the convention `setup()` applies to DIO0/DIO1 via `rtc_gpio_init` |
-| input + interrupt capable | yes | not one of the input-only 34–39 |
-| not a strapping pin | yes | strapping pins are 0, 2, 5, 12, 15 |
-| not used by SPI flash | yes | flash uses 6–11 |
-| free in this design | **yes** | the only occurrence of GPIO 25 in the whole firmware is the commented-out line itself |
-| driver support | **already present** | `lora_setInterruptMode(3, …)` writes `REG_DIO_MAPPING_1` bits 1:0, which is DIO3 on the SX127x; read-modify-write, so DIO0's runtime remapping cannot clobber it |
-| `LORA_IRQ_DIO3_VALIDHEADER` defined | yes | `components/lora/include/lora.h:23` |
-| ValidHeader flag already cleared | yes | `frtosTasks.cpp:198-203` |
+| expression | `t_vh − 2048 µs` | `t_rxdone − n_sym(len)·T_sym` |
+| error from the reference itself | one constant, calibrated | **zero** — `n_sym` is exact integer arithmetic on known modem settings |
+| error from ISR + light-sleep wake | identical | identical |
+| what can go wrong | a mis-calibrated constant | a mis-implemented formula |
 
-Its alternate functions — ADC2_CH8, DAC_1, EMAC_RXD0 — are all unused here
-(nothing in the firmware touches DAC or Ethernet, and ADC2 is irrelevant for a
-digital input). Only the `TTGO_LORA_V1` variant is problematic, and it is not
-built (`main.cpp:50` sets it to 0): there DIO0, DIO1, DIO3 and DIO4 are all
-placeholder-assigned to GPIO 33.
+The ISR and wake-latency terms are the same on both paths, and they dominate.
+ValidHeader would have bought **no measurable accuracy** — it would have traded a
+software correctness risk for a calibration risk. The formula is exact, it is
+already written in this repository
+(`tests/proto_sim/scenarios/auto_mode_proto_test.cpp:300-312`), and a host test
+already pins one of its values (95.296 ms for 152 B). That converts the risk
+into something a test catches once and forever.
 
-Four integration notes, none of them blocking:
+Three consequences to carry into implementation:
 
-- **Do not add DIO3 to the ext1 deep-sleep mask.** `SystemCtrl.cpp:369-376`
-  currently masks the three buttons plus DIO0 and DIO1. ValidHeader fires for
-  *every* frame with a good header, including frames addressed to the other
-  node and before any address filter — adding it would turn overheard traffic
-  into deep-sleep wakes.
-- **Ensure ValidHeader is cleared even when no RxDone follows.** It is cleared
-  today only on the DIO0 handler path. A frame whose header validates but which
-  never completes would leave DIO3 latched high — and per §7 a latched level
-  wake source blocks light sleep entirely.
-- **The DIO3 ISR must do nothing but timestamp.** The frame is still read on the
-  RxDone path; DIO3 exists only to name T0.
-- **`gpios.md` is not fully trustworthy.** It lists `loraDio0Pin = 27` and
-  `loraDio1Pin = 26`, while the code has DIO0 = 26 and DIO1 = 27
-  (`LoraInterface.h:88-89`) — swapped. It also calls GPIO 32 `RTC_GPIO32` when
-  it is RTC_GPIO9. The DIO3 row agrees with the header's commented line, so it
-  is corroborated; the table on its own is not evidence.
+- **`LoraTiming.h` becomes load-bearing, so it is a P-1 deliverable.** One
+  implementation of `T_sym`, `T_pre`, `T_hdr`, `n_sym(len)` shared by hub, node
+  and tests. Pin it against the two known values and against `T_pre = 3136 µs`.
+- **Pin the `PL` convention by test.** `RegRxNbBytes` gives payload bytes
+  *excluding* the CRC, and the formula's `+16·CRC` term accounts for the CRC
+  separately — so `PL = RegRxNbBytes` is right. That is exactly the kind of
+  off-by-two-bytes that would show up as a constant 0.5 ms bias and be blamed on
+  the crystal.
+- **A CRC-failed frame still yields a usable T0.** The header has its own CRC, so
+  if the header decoded, the length is trustworthy even when the payload fails.
+  This is why `noteDriftSample` is deliberately called before parsing
+  (`frtosTasks.cpp:160-165`) — the existing design already gets this right.
 
-**Verify against the schematic before cutting a track.** Everything above is
-checked against the firmware and the ESP32 pin capabilities; the physical
-DIO3 net is the one thing this repository cannot confirm.
+### If the formula risk is ever judged too high: fix the beacon's length
 
-It is also the physically meaningful instant: the demodulator has finished sync
-and the frame proper begins. Air start is not observable on either end; RxDone
-drags the payload length into every calculation.
+There is a cheaper answer than a board respin. Only the **beacon** carries the
+phase; commands do not need to update it. Padding the beacon — and only the
+beacon — to a fixed on-air size makes its `T_pay` a single compile-time
+constant, and the node's phase update becomes `t_rxdone − K`, with no runtime
+arithmetic at all.
 
-Frame sizes for reference (these are the real numbers, not the 15 ms placeholder
-the first version of this document used):
-
-| on-air bytes | time on air |
-|---|---|
-| 25 (bare ack) | 21.6 ms |
-| 45 (`GridSync` beacon) | 33.9 ms |
-| 60 (routine cover op) | 42.0 ms |
-| 152 (8-entry `ScheduleConfig`) | 95.3 ms |
+Cost: padding a 45 B beacon to 60 B takes it from 33.9 ms to 42.0 ms of air,
+about 24 % more beacon airtime — a few seconds per day at the §5 rates. That is
+a real option to hold in reserve, not a recommendation; the formula should be
+correct regardless.
 
 ---
 
@@ -276,7 +271,7 @@ scheduled `T0`, or of the node's window from where it should be.
 | hub fire jitter | ±2 ms + **1–4 ms payload-dependent bias** | **±50 µs** | prepare/fire split, §6 |
 | `d_tx_ramp` uncertainty | — | ±20 µs | radio constant, calibrated once |
 | node window-arm jitter | milliseconds under load | **±100 µs** | armed in the timer callback, §6 |
-| node phase estimate | up to 500 ms (light sleep, §7) | **±100 µs + light-sleep wake jitter** (RxDone + airtime); ±20 µs only if DIO3 is wired | §7 — and the wake jitter is unmeasured |
+| node phase estimate | up to 500 ms (light sleep, §7) | **±100 µs + light-sleep wake jitter**, RxDone only | §7 — and the wake jitter is unmeasured |
 | **fixed subtotal** | | **≈ ±0.2 ms** | |
 | **remaining for drift** | | **13.9 ms of 14.08** | |
 
@@ -392,7 +387,7 @@ Five changes make FIRE deterministic, all in the hub's fork of the driver:
 |---|---|---|---|
 | `T0 − 22 ms` | **PREPARE** | acquire `ESP_PM_NO_LIGHT_SLEEP`; set DIO mapping, symbol timeout, clear IRQ flags | no |
 | `T0 − 17 216 µs` | **ARM** | `esp_timer` callback → one polled SPI write `RegOpMode = RX_SINGLE` | **yes** |
-| `T0 + 2048 µs` | **STAMP** | ValidHeader (DIO3) or RxDone (DIO0) ISR: `esp_timer_get_time()` as the first statement, push to queue, return | **yes** |
+| `T0 + n_sym·T_sym` | **STAMP** | RxDone (DIO0) ISR: `esp_timer_get_time()` as the first statement, push to queue, return. DIO3/ValidHeader is not routed (§2). | **yes** |
 | after | **DRAIN** | FIFO read, decrypt, dispatch, release the PM lock | no |
 
 `T0 − 17 216 = −(T_pre + G) = −(3136 + 14 080) µs`.
@@ -586,10 +581,9 @@ sequenceDiagram
     HT->>A: T0-3.356ms FIRE: RegOpMode = TX
     Note over A: T0-3.136ms air start, preamble
     A-->>N: T0 — SFD end (the reference)
-    A-->>N: T0+2.048ms ValidHeader IRQ -> stamp
-    A-->>N: T0+T_pay RxDone IRQ -> stamp
+    A-->>N: T0+n_sym*T_sym — RxDone IRQ -> stamp<br/>(ValidHeader/DIO3 is not routed)
     N->>N: DRAIN: FIFO read, decrypt, dispatch,<br/>release PM lock (off timing path)
-    N->>N: phase update: T0_meas = t_validheader - 2048us<br/>err = T0_meas - T0_pred -> correct
+    N->>N: phase update: T0_meas = t_rxdone - n_sym(len)*T_sym<br/>err = T0_meas - T0_pred -> correct
     N->>N: T0_ul-20ms PREPARE: pack ack, FIFO burst-write
     N->>A: T0_ul-3.356ms FIRE (no CAD, no backoff)
     A-->>H: ack — hub is in continuous RX
@@ -606,7 +600,7 @@ sequenceDiagram
     Note over N: BURST — 3 windows/round, 17 copies
     H->>N: GridSync, bursted 17x<br/>{anchorRound, roundPeriodUs, slotIndex,<br/>slotPeriodUs, enable=false}
     Note over N: a windowed receiver catches a<br/>bursted frame with p=96.4%
-    N->>N: T0_meas from ValidHeader; grid phase known
+    N->>N: T0_meas from RxDone - airtime; grid phase known
     N->>H: beacon {timedRxReady=true, phaseErrUs, rtcSlowSrc}
     Note over H: node reports the 32 kHz crystal<br/>and a phase error inside tolerance
     H->>N: GridSync {enable=true}, bursted
@@ -840,7 +834,7 @@ change, not against nondeterministic encryption.
 
 | phase | content | gate |
 |---|---|---|
-| **P-1** | **Decide the reference point** (§2). GPIO 25 is verified free, RTC-capable and already driver-supported, so wiring DIO3 is the preferred branch. Fix the `T_pay` constant either way. | schematic confirms the DIO3 net; `LoraTiming.h` pinned by test |
+| **P-1** | **`LoraTiming.h`** — one shared, exact implementation of `T_sym`, `T_pre`, `T_hdr`, `n_sym(len)` for hub, node and tests (§2). DIO3 is not routed, so this formula *is* the reference point and nothing else can check it. | pinned by host test against 3136 µs, 42.048 ms @60 B, 95.296 ms @152 B, and the `PL = RegRxNbBytes` convention |
 | **P0** | **GPIO light-sleep wakeup on DIO0 *and* DIO1** (§7), with the wake source disarmed in step with every `gpio_intr_disable`. Calibrate the wake latency; measure its jitter under DFS. | timestamps lose their 100 ms-scale outliers, residual jitter < 1 ms, **and** light-sleep residency is unchanged |
 | **P1** | **Hub grid anchor** + per-frame TX policy (`send(buf, len, {copies, first_mark_us, copy_stride_us})`, replacing the global `setBurstCopies`). Bursts start at the addressed node's `T0`. **On air: unchanged, still 17 copies at 88 ms.** | bursts observably start on the grid; nothing regresses |
 | **P2** | **Node phase tracking.** Compute `T0_measured`, compare against the predicted grid, report `phaseErrUs` + `rtcSlowSrc` + `ppmEstimate` in the beacon. Still 3 windows. **Must filter the phase sample by slot/address first** — `noteDriftSample` is called before parsing, by design (`frtosTasks.cpp:160-165`), so node 1 currently stamps node 2's frames and `phaseErrUs` would be bimodal at 0 and ±250 ms. | `phaseErrUs` inside ±2 ms in the field, on both nodes, over days |
@@ -892,8 +886,9 @@ Bench measurements that no host test can replace:
    a GPIO toggled at FIRE versus the RF envelope, or derive it from a TxDone
    timestamp once a DIO line is wired on the hub (there is none today — the hub
    polls IRQ flags over SPI and has no GPIO ISR at all).
-2. **Node RxDone/ValidHeader ISR latency** with the PM lock held, distribution
-   not mean.
+2. **Node RxDone ISR latency**, distribution not mean — including the
+   light-sleep wake latency of §7, which is now the single largest term in the
+   node's phase estimate.
 3. **RX-on current**, to replace the unprovenanced ~11 mA that §5's battery table
    rests on.
 4. **ppm under the production power profile.** The +8 ppm figure was measured
