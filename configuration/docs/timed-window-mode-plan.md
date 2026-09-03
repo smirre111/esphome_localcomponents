@@ -25,6 +25,23 @@ windows at 500 ms, 29 ms wide):
 | 1 window, 17 copies, unsynchronised | **32.9 %** |
 | 1 window, 1 copy, synchronised | ~100 % |
 
+The closed form, because the obvious check is wrong. Copy *i* leaves at `88i`;
+a window of width *w* catches it iff `(x + 88i) mod P ∈ [0, w)` for window
+period *P*. The residues are near-uniformly spread, so the union — not the sum —
+is what counts:
+
+- **P = 500 ms** (3 windows): residues sort to gaps of 28 ms (×11) and 32 ms (×6).
+  Union = `11×28 + 6×29 = 482` → `482/500 = 96.4 %`.
+- **P = 1500 ms** (1 window): all 17 gaps exceed 29 ms, so no overlap.
+  Union = `17×29 = 493` → `493/1500 = 32.9 %`.
+
+Treating the three windows as independent gives `1 − 0.671³ = 69.8 %` and is
+**wrong by 27 points**: 88 ms against 500 ms sweeps the copies almost uniformly
+across the window period, so the windows are strongly anti-correlated. That
+anti-correlation *is* `optimization-analysis.md` §2's "tuned to the window
+scheme". Its "1.00 expected catches" is a third quantity again —
+`17 × 29/500 = 0.99` — and all three numbers are correct and consistent.
+
 Thinning the burst alone collapses reception by 3×; this is the point
 `optimization-analysis.md` §2 makes ("`txSlotsPerRound = 17` is tuned to the
 window scheme, not padded"). Synchronisation is what buys the window back —
@@ -52,16 +69,23 @@ At SF7 / BW500 / CR4-8, `T_sym = 2^7 / 500 000 = 256.0 µs`:
 | `T_pre` — air start → **T0** | `n_pre + 4.25` = 12.25 | **3136** | preamble length only |
 | `T_hdr` — **T0** → ValidHeader | 8 (explicit header, always CR4/8) | **2048** | nothing |
 
-A caution on that second row. The leading `8` in the airtime formula
-`n_sym = 8 + ceil(...)·(CR+4)` is **not** "the header" — it survives when
-`IH=1` removes the header, which is the proof. What is true is that the
-explicit header occupies the first 8 symbols after the SFD and those symbols
-are always coded at 4/8 regardless of the configured CR. So `T_hdr = 8·T_sym`
-holds, and it is independent of both payload length and CR — but the SX1278
-asserts ValidHeader after *decoding* those symbols, so the real constant is
-`2048 µs + a fixed decode delay`. **Calibrate it; do not assume 2048.** The
-same applies to `d_tx_ramp`.
-| `T_pay(len)` — ValidHeader → RxDone | `n_sym(len) − 8` | 18 430 … 92 160 | payload length |
+Two cautions on those rows.
+
+**Why `T_hdr` is 8 symbols.** The first block after the SFD is *always* 8
+symbols coded at CR 4/8, whatever CR is configured for the payload. In explicit
+mode that block carries the header (20 header bits, plus spare payload bits — at
+SF7 the block holds 4·SF = 28 bits). It survives `IH=1` because the block
+persists as a payload-carrying block, not because it was never the header. So
+`T_hdr = 8·T_sym` is independent of both payload length and configured CR. The
+SX1278 asserts ValidHeader after *decoding* that block, so the real constant is
+`2048 µs + a fixed decode delay`. **Calibrate it; do not assume 2048.**
+
+**`T_pay` is `(n_sym − 8)·T_sym`, not `n_sym·T_sym`.** An earlier draft of this
+table quoted the latter, which is SFD-end → RxDone. Implementing `T_pay` from
+those figures and then subtracting `T_hdr` as §2's fallback formula says
+double-counts the header: a fixed **−2.048 ms** bias on every phase estimate,
+15 % of the guard band, indistinguishable from a crystal error.
+| `T_pay(len)` — ValidHeader → RxDone | `n_sym(len) − 8` | **16 384 … 90 112** | payload length |
 
 ### Why SFD end and not air start or RxDone
 
@@ -71,10 +95,23 @@ constant.**
 - Hub: `T0 = t_fire + d_tx_ramp + T_pre` — `t_fire` is the `esp_timer` reading
   taken at the single SPI write that starts transmission; `d_tx_ramp` (~220 µs)
   is a radio constant.
-- Node, preferred: `T0 = t_validheader − T_hdr` — **2048 µs, constant for every
-  frame regardless of size**.
-- Node, fallback: `T0 = t_rxdone − T_pay(len) − T_hdr` — requires the airtime
-  model to be exactly right.
+- Node, **requires hardware not present today**:
+  `T0 = t_validheader − T_hdr` — 2048 µs, constant for every frame regardless of
+  size. ValidHeader is available on **DIO3 only** (`components/lora/include/lora.h:23`;
+  DIO0 offers RxDone/TxDone/CadDone, DIO1 offers RxTimeout/FhssChangeChannel/
+  CadDetected). **DIO3 is commented out on both board variants** —
+  `main/include/LoraInterface.h:85` and `:90`, the second naming GPIO 25. The
+  flag is read over SPI today (`frtosTasks.cpp:197-202`) after DIO0 fires, which
+  carries no timing information at all.
+- Node, **the actual path**: `T0 = t_rxdone − T_pay(len) − T_hdr` — requires the
+  airtime model to be exactly right, which is why the `T_pay` correction below
+  matters.
+
+**Decide this before P0, not after.** Either wire DIO3 to GPIO 25 and get a
+length-independent reference, or accept the RxDone path and price the phase
+estimate accordingly (§5). What must not happen is a plan whose headline
+requirement — one reference point named identically at both ends — is satisfied
+on paper by an instant the node cannot observe.
 
 It is also the physically meaningful instant: the demodulator has finished sync
 and the frame proper begins. Air start is not observable on either end; RxDone
@@ -101,9 +138,15 @@ the first version of this document used):
 
 **Everything reads `esp_timer_get_time()`.** It is XTAL-accurate while awake and
 RTC-disciplined across sleep, and it is the same call the DIO0 ISR already makes.
-Nothing in this design reads the FreeRTOS tick, which is 1000 Hz on the hub and
-**100 Hz on the node** — 10 ms of granularity, five times the entire fixed error
-budget below.
+
+Nothing in this design *schedules* on the FreeRTOS tick, which is 1000 Hz on the
+hub and **100 Hz on the node** — 10 ms of granularity, fifty times the fixed
+error budget below. But the tick has not been eliminated from the path: **every
+SPI register write on both ends is gated by
+`xSemaphoreTake(xSemaphore, (TickType_t)1)`** (hub `lora.cpp:158`, node
+`components/lora/lora.cpp:143, 251, 304`) and silently does nothing on timeout.
+That is a 10 ms window on the node, and the ARM write of §6 goes through it. It
+must become a bounded-and-*reported* take before P3.
 
 Window wakes come from an `esp_timer` one-shot. IDF's tickless idle converts a
 pending `esp_timer` alarm into an RTC alarm when it light-sleeps, so no separate
@@ -156,6 +199,22 @@ G = (N_symtimeout·T_sym − T_detect) / 2 = (29.44 − 1.28) / 2 = 14.08 ms
 - frame **late** by l: detection completes at `T0 − T_pre + l + T_detect`, still
   before the window closes while `l ≤ G`.
 
+Three things this rests on, two of them unverified:
+
+- **Detection stops the timeout.** A 95.3 ms `ScheduleConfig` is received today
+  inside a 29.44 ms `RX_SINGLE` window, so the SX1278 demonstrably does not abort
+  a packet already in progress. Settled empirically, worth stating.
+- **`T_detect ≈ 5 symbols` is a LoRaWAN rule of thumb, not a datasheet number.**
+  It appears nowhere in either repo, and it is the only thing setting the
+  late-side margin. It also interacts with `RegDetectionOptimize` /
+  `RegDetectThreshold`, which the driver never writes
+  (`LoraInterface.cpp:78-82`) — they sit at reset defaults, unexamined. **Bench
+  item, alongside `d_tx_ramp`.**
+- **The 29.44 ms window is an accident.** `symTimeout = int(30.0f/0.26f)`
+  (`LoraInterface.cpp:347`) was derived from a comment claiming "20 ms per
+  packet"; real frames are 42–95 ms. The guard band now depends on a number
+  chosen for a reason that was wrong. Pin it as a named constant before P3.
+
 **The window itself does not change.** Only its cadence (1/round instead of 3)
 and its phase (predicted instead of free-running).
 
@@ -171,7 +230,7 @@ scheduled `T0`, or of the node's window from where it should be.
 | hub fire jitter | ±2 ms + **1–4 ms payload-dependent bias** | **±50 µs** | prepare/fire split, §6 |
 | `d_tx_ramp` uncertainty | — | ±20 µs | radio constant, calibrated once |
 | node window-arm jitter | milliseconds under load | **±100 µs** | armed in the timer callback, §6 |
-| node phase estimate | up to 500 ms (light sleep, §7) | ±20 µs (ValidHeader) / ±100 µs (RxDone + airtime) | PM lock across the window |
+| node phase estimate | up to 500 ms (light sleep, §7) | **±100 µs + light-sleep wake jitter** (RxDone + airtime); ±20 µs only if DIO3 is wired | §7 — and the wake jitter is unmeasured |
 | **fixed subtotal** | | **≈ ±0.2 ms** | |
 | **remaining for drift** | | **13.9 ms of 14.08** | |
 
@@ -202,10 +261,31 @@ Beacon 33.9 ms, command 42.0 ms, today's burst 17 × 42.0 = 714 ms.
 | 6 nodes, resync 5.8 min | 42.9 s/day | **11.0** | 53.1 |
 | 6 nodes, resync 58 min | 42.9 s/day | **3.4** | 7.6 |
 
-A broadcast beacon wins at every rate and is flat in node count. A unicast
-beacon only wins once the resync interval is long, i.e. only once ppm is
-measured — and it scales with N. **Use a broadcast beacon; the drift estimator
-is what makes even the unicast fallback tolerable.**
+A broadcast beacon is flat in node count; a unicast one scales with N and only
+wins once the resync interval is long.
+
+**But 10 cmd/node/day is an unsourced assumption, and the win depends on it.**
+The system's own configuration argues for far less: two scheduled events per day
+per node (`loradevices.yml:98-107`, `:150-155`), a 6 h / 1 h check-in, and a
+15 min battery update. Call it 3 commands/node/day:
+
+| | today | broadcast @5.8 min | @11.6 min | @58 min |
+|---|---|---|---|---|
+| 2 nodes, 10 cmd/node/day | 14.3 s | 9.3 | 5.1 | 1.7 |
+| 2 nodes, **3 cmd/node/day** | **4.3 s** | **8.7** ✗ | **4.5** ✗ | **1.1** ✓ |
+
+At a realistic command rate the beacon only pays for itself **once ppm is
+measured** (58 min resync). So the drift estimator moves from "optimisation" to
+"what makes the airtime case true at all", and P2 is load-bearing rather than
+merely reassuring. The per-command figure (714 ms → 42 ms) is unaffected; the
+daily-total claim is assumption-bound.
+
+**And the 50 % safety factor is spent twice.** The beacon is a single-copy
+broadcast; one lost beacon doubles the time since sync and consumes exactly that
+margin. Two consecutive losses put the node outside the guard with no mechanism
+to notice before it starts missing commands. Beacon misses must be counted
+separately from window misses, and a missed beacon must trigger an immediate
+re-send.
 
 ### Battery
 
@@ -271,10 +351,42 @@ Five changes make FIRE deterministic, all in the hub's fork of the driver:
 
 `T0 − 17 216 = −(T_pre + G) = −(3136 + 14 080) µs`.
 
+**The DRAIN → PREPARE turnaround is the tightest unbudgeted interval in the
+design.** A worst-case downlink (152 B `ScheduleConfig`) ends at `T0 + 92.2 ms`;
+the uplink PREPARE must be complete by `T0_ul − 20 ms = T0 + 130 ms`. That is
+**38 ms** to read 152 bytes from the FIFO one SPI transaction per byte
+(`components/lora/lora.cpp:1397`), unpack protobuf, AES-GCM decrypt, hop three
+priority-6 tasks (`CmdDispatcher.cpp:3012`, `1589`, `1669`), then build,
+encrypt and burst-write the ack — on a CPU whose DFS floor is 40 MHz. It is not
+obviously enough and it is certainly not bounded. Either `T_ul_off` grows, or
+the ack is pre-built and only the msgid patched in. **Measure it before fixing
+`T_ul_off` at 150 ms.**
+
 The ARM must run from the `esp_timer` callback, **not** by giving a semaphore to
 `taskLoraRx` — that task is priority 5 beneath four priority-6 application tasks
 on the same core, and its latency is correlated with traffic (it is those tasks'
 protobuf/AES/NVS work that delays it).
+
+Three constraints on that callback, none of them optional:
+
+- **`ESP_TIMER_ISR` dispatch is not compiled in** —
+  `# CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD is not set`
+  (`sdkconfig:1811`). Every callback runs in `ESP_TIMER_TASK`, priority 22,
+  pinned to core 0. It is a one-line sdkconfig change to enable, but —
+- **it would not help, because the payload is illegal in an ISR.**
+  `spi_device_polling_transmit()` acquires the bus lock and can block; it is not
+  ISR-callable. `CONFIG_SPI_MASTER_ISR_IN_IRAM=y` places the *driver's own* ISR
+  in IRAM so it survives cache-disable — a different property entirely.
+- **±100 µs is a median with an unbounded tail.** The dispatch task and the
+  callback body live in flash. During an SPI-flash write the cache is disabled on
+  both cores and non-IRAM code cannot run. The node writes NVS on the RX path
+  (`SessionManager::maybePersist()`, roughly every `kPersistTxMargin = 64`
+  messages, `SessionManager.h:57`), which is a multi-millisecond stall landing on
+  the DRAIN path immediately before the next ARM.
+
+So ARM stays a priority-22 task dispatch, and the honest figure is "±100 µs
+typical, milliseconds at the p99 until the flash stalls are moved off the RX
+path".
 
 ### Node transmit (uplink)
 
@@ -356,6 +468,28 @@ taking it would mean accepting that the battery case is gone.
 
 Either way, verify the wake source or the lock is actually armed. The precedent
 for shipping one that never was is in the tree.
+
+### "Two calls" understates P0 twice over
+
+**DIO1 must be armed as well.** §8.1's empty round — 1466 of every 1500 ms — ends
+on **RxTimeout on DIO1**, and that is what runs `lora_sleep()`
+(`frtosTasks.cpp:272-274`) to return the SX1278 from post-`RX_SINGLE` STANDBY to
+SLEEP. Arm DIO0 only and, with the CPU light-sleeping through the window as the
+battery case requires, DIO1 goes unserviced until the next timer wake — leaving
+the radio in STANDBY (~1.5 mA on SX1276/78) for most of the round. That term
+alone exceeds the whole measured 1.2 mA node average. Either arm DIO1 too, or
+move the radio-sleep into the next ARM callback.
+
+**The level wake source is independent of the interrupt mask.**
+`gpio_wakeup_enable(DIO0, GPIO_INTR_HIGH_LEVEL)` stays armed across
+`gpio_intr_disable`, which the DIO0 ISR does on entry
+(`myinterrupts.cpp:36-37`) and only re-enables at the end of the handler task
+(`frtosTasks.cpp:227`). Any path that leaves an IRQ flag set — the unhandled
+branch at `frtosTasks.cpp:218-224` logs and sleeps the radio without clearing
+that flag — leaves DIO0 asserted indefinitely. Automatic light sleep then
+refuses to sleep or thrashes sleep→immediate-wake, and the node silently burns
+~20 mA. **P0's gate as written ("timestamps stop showing outliers") would not
+detect this.** The gate must include a sleep-residency check.
 
 ### Deep sleep is out of scope
 
@@ -460,6 +594,14 @@ sequenceDiagram
     end
 ```
 
+**The node's "M empty windows" test is blinded by §8.6.** A window walked
+through by another node's burst is **not** empty: it locks, receives, fails the
+address filter and discards. The node sees a busy window and a missing command —
+the one combination its miss counter cannot distinguish from success. The
+counter must therefore key on *"no frame addressed to me at my mark"*, not on
+"nothing received", and slot-aware burst scheduling has to land before the
+demotion heuristic is trusted.
+
 **The retry reuses the msgid, and must retransmit the byte-identical frame.**
 Two constraints force this:
 
@@ -508,6 +650,12 @@ been asleep or has just re-acquired knows exactly which rounds to listen in.
 Private slots then carry unicast traffic only, and the beacon is genuinely one
 transmission for all N nodes. That is what §5's broadcast column prices.
 
+**The beacon is a keepalive, not a re-acquisition mechanism.** Knowing *which
+round is n* requires the phase a desynchronised node has just lost — it can no
+more place a window in slot 0 than in its own. Recovery is via burst mode (§8.4)
+and only via burst mode. The wording above must not be read as implying
+otherwise, and §5's resync table prices maintenance, not recovery.
+
 ---
 
 ### 8.6 Mixed modes on one channel — the hub must schedule bursts too
@@ -533,13 +681,36 @@ transmitter and therefore already knows both schedules:
 timed traffic.** A burst to a node in BURST mode places its copies only in
 rounds/segments not owned by a node in TIMED mode — or, more simply, keeps them
 inside the addressed node's own slot and spreads the burst across consecutive
-rounds. With a 250 ms slot and 42 ms frames, a slot holds 4–5 copies per round,
-so a 17-copy burst spans four rounds (6 s) instead of one. That is slower than
-today's 1.5 s, and it is the price of mixed modes.
+rounds.
 
-This also means the per-frame TX policy of P1 needs a mark **and** a copy
-schedule, not just a copy count: `send(buf, len, {copies, first_mark_us,
-copy_stride_us})`.
+The usable downlink space in a slot is `[0, T_ul_off)` = 150 ms, not the full
+250 ms: the uplink slot is reserved and a BURST-mode node still replies there
+(unscheduled, via deferral and CAD). At 42 ms per copy that is
+`floor(150/42) = 3` copies per round, so a 17-copy burst spans
+**⌈17/3⌉ = 6 rounds = 9 s**, not one. That is the real price of mixed modes,
+and it is six times today's latency.
+
+Two things follow, and the second is a blocker:
+
+**The per-frame TX policy needs a copy schedule, not a copy count:**
+`send(buf, len, {copies, first_mark_us, copy_stride_us})`.
+
+**The node cannot be told the stride, and its burst-end arithmetic breaks
+badly.** `kBurstTxIntervalMs = 88` is compiled into the node
+(`CmdDispatcher.h:425`) and `getBurstEndUs` predicts
+`remaining × 88 ms` (`CmdDispatcher.cpp:2838`). Under a spread burst the real
+stride is 42 ms within a round and ~1.36 s across a round boundary. For copy 0
+of a 17-copy spread burst the node predicts a burst end 1408 ms out against a
+true ~9000 ms — so `loraRxTask` waits `wait_ms` (`LoraInterface.cpp:441-448`)
+and transmits its reply **~7.5 s early, into the middle of the hub's own
+burst**. That is precisely the collision the deferral exists to prevent,
+amplified sixfold.
+
+`GridSync` as specified in §9 carries `roundPeriodUs`, `slotPeriodUs` and
+`ulOffsetUs` and **no stride**. §8.6 is not implementable until either a
+`burstStrideUs` field is added or burst-end becomes an explicit hub-signalled
+timestamp in the header. The second is better: it removes a cross-repo compiled
+constant rather than adding one.
 
 ## 9. Protocol changes
 
@@ -594,9 +765,28 @@ retrying a command that already executed until it demotes.
 
 The proper fix is for the node to answer a replayed msgid with the **cached ack**
 rather than dropping it silently — a small change in `SessionManager` and the
-admission path. It is not required for P1–P3 but it is required before
-single-copy downlink becomes the normal case, because that is when retries stop
-being rare.
+admission path.
+
+**Two corrections to how this document first framed it.**
+
+*Double execution is not a hypothetical branch — it is what ships today.*
+`tx_tracked_op_` mints a fresh msgid and re-packs on every retransmit
+(`lora_client.cpp:1166`, called from `:1276`; the comment at `:1169` says so),
+up to `kOpMaxRetries = 4`. So if the node executes a command and its ack is
+lost, retry #1 arrives with a new, higher msgid, clears the replay filter, and
+the blind moves a second time. That is a live defect and it belongs in §12.
+Ack matching is unaffected by reuse: `handle_command_ack_` accepts any msgid in
+`[op_first_msgid_, op_last_msgid_]` (`lora_client.cpp:1307`), and with reuse both
+bounds are equal.
+
+*The hazard is narrower and sharper than "re-pack is unsafe".* AES-GCM is
+deterministic, so re-packing identical content under a reused msgid is already
+byte-identical. The real danger is that `tx_tracked_op_` re-reads `op_position_`
+and `op_operation_` at pack time (`lora_client.cpp:1180-1191`): if a user issues
+a new position while a retry is pending, a naive "reuse the msgid" patch encrypts
+**different plaintext under the same nonce** — key-stream reuse and tag forgery
+on the command channel. The frame cache is defending against a mid-retry content
+change, not against nondeterministic encryption.
 
 ---
 
@@ -604,11 +794,12 @@ being rare.
 
 | phase | content | gate |
 |---|---|---|
-| **P0** | **GPIO light-sleep wakeup on DIO0** (§7) — two calls. Then calibrate the wake latency and measure its jitter. | RxDone timestamps stop showing 100 ms-scale outliers under the production power profile, and the residual jitter is < 1 ms |
+| **P-1** | **Decide the reference point** (§2): wire DIO3 to GPIO 25, or commit to the RxDone path. Fix the `T_pay` constant either way. | a written decision, and `LoraTiming.h` pinned by test |
+| **P0** | **GPIO light-sleep wakeup on DIO0 *and* DIO1** (§7), with the wake source disarmed in step with every `gpio_intr_disable`. Calibrate the wake latency; measure its jitter under DFS. | timestamps lose their 100 ms-scale outliers, residual jitter < 1 ms, **and** light-sleep residency is unchanged |
 | **P1** | **Hub grid anchor** + per-frame TX policy (`send(buf, len, {copies, first_mark_us, copy_stride_us})`, replacing the global `setBurstCopies`). Bursts start at the addressed node's `T0`. **On air: unchanged, still 17 copies at 88 ms.** | bursts observably start on the grid; nothing regresses |
-| **P2** | **Node phase tracking.** Compute `T0_measured` from ValidHeader (or RxDone + airtime), compare against the predicted grid, report `phaseErrUs` + `rtcSlowSrc` + `ppmEstimate` in the beacon. Still 3 windows. | `phaseErrUs` stays inside ±2 ms in the field, on both nodes, over days |
+| **P2** | **Node phase tracking.** Compute `T0_measured`, compare against the predicted grid, report `phaseErrUs` + `rtcSlowSrc` + `ppmEstimate` in the beacon. Still 3 windows. **Must filter the phase sample by slot/address first** — `noteDriftSample` is called before parsing, by design (`frtosTasks.cpp:160-165`), so node 1 currently stamps node 2's frames and `phaseErrUs` would be bimodal at 0 and ±250 ms. | `phaseErrUs` inside ±2 ms in the field, on both nodes, over days |
 | **P3** | **One window.** Node opens a single predicted window per round; hub still bursts. This is the change that halves the battery, and it is reversible without touching the hub. | reception ≥ today's over a week |
-| **P4** | **Single-copy downlink** + the ack-cache fix (§9). Hub sends one copy at `T0` to a confirmed-timed node; any miss retries as a burst immediately. | command success rate unchanged over a week |
+| **P4** | **Single-copy downlink** + the ack-cache fix (§9), **node and hub**. The hub half is the larger part: `tx_tracked_op_` re-packs with a fresh msgid on every retry today (`lora_client.cpp:1166`, `:1276`) and must become pack-once / cache-the-frame / retransmit-stored. | command success rate unchanged over a week |
 | **P5** | **Common beacon slot + broadcast keepalive** (§8.5) — makes the resync cost flat in node count. Also **slot-aware burst scheduling** (§8.6), which becomes mandatory as soon as one node is TIMED and another is not — i.e. from P3 onward with more than one node. | a TIMED node's window is not walked through by another node's burst |
 | **P6** | **Timed uplink** (§6) — new transmit path, CAD and backoff dropped. | — |
 | **P7** | Determinism work (§6 items 1–5 on the hub). Buys ~10× resync interval. **Not a prerequisite** — schedule it when the beacon rate becomes the binding cost. | p99 fire residual < 200 µs |
@@ -642,7 +833,9 @@ Host tests, in the style of the existing dependency-free policy headers:
   integer number of milliseconds and that the burst copy spacing still equals the
   node's `kCopySpacingUs = 88000`.
 - **Replay/ack** — a msgid-reuse retry must produce a cached ack, not a drop, and
-  the retry must be byte-identical (nonce reuse, §8.4).
+  the retry must be byte-identical (nonce reuse, §8.4). Also assert that a
+  content change during a pending retry forces a **new** msgid rather than
+  re-encrypting under the old one.
 - **Slot-aware burst placement** — given one TIMED node and one BURST node,
   assert no burst copy overlaps the TIMED node's window. This is the §8.6
   property, and it is the one a single-node test can never catch.
@@ -660,6 +853,20 @@ Bench measurements that no host test can replace:
 4. **ppm under the production power profile.** The +8 ppm figure was measured
    with light sleep **disabled**; it says nothing about the clock this mode runs
    on.
+5. **`T_detect`** — preamble symbols actually needed to lock, at the driver's
+   reset-default detection registers.
+6. **Light-sleep wake latency under DFS.** §7 assumes it is a repeatable
+   constant. The configuration is not fixed: production scales 40–240 MHz
+   (`SystemCtrl.cpp:443`) and the motor's PM lock (`MotorCtrl.cpp:200, 446`)
+   changes the frequency mid-operation, so the PLL relock time varies with what
+   else the node is doing. **This is the assumption most likely to fail, and
+   P0's whole value rests on it.**
+
+Note that measurement 1 needs hardware the hub does not have: there is no
+`gpio_isr_handler_add` anywhere in the hub component, and `lora_endPacket(false)`
+polls `REG_IRQ_FLAGS` with `esphome::delay(2)` between reads
+(`lora_tracker/lora.cpp:477-482`). **P7's fire-residual gate is unmeasurable
+until a DIO line is wired on the hub or a scope is attached.**
 
 ---
 
@@ -678,3 +885,7 @@ From `timed-window-node-analysis.md`, in the order they bite:
 | `loradevices.yml:221` still documents an 88235 µs ruler | the exact error that cost three firmware revisions |
 | no GPIO light-sleep wake source anywhere in the node tree | P0 is exactly this; without it the phase estimate is worthless (§7) |
 | the hub's transmit scheduler is not slot-aware | a burst for one node walks through another's window 81 % of the time (§8.6) |
+| `lora_write_reg_isr` calls `xSemaphoreTakeFromISR` on a **mutex** (`components/lora/lora.cpp:197`, created `xSemaphoreCreateMutex()` at `:108`) and then `spi_device_polling_transmit` | FreeRTOS forbids mutex operations from an ISR, and the SPI call is not ISR-callable. Zero block time means a held mutex **silently skips the write** — if the ARM is built on this helper, the window simply never opens |
+| `tx_tracked_op_` mints a fresh msgid per retransmit (`lora_client.cpp:1166`, `:1276`) | a lost ack makes the blind move a second time — **live today**, not a consequence of this plan |
+| the FIFO is filled one SPI transaction per byte (`lora_tracker/lora.cpp:702-717`) | §6's "one transaction" is a driver rewrite (new `spi_transaction_t`, different CS discipline), and it appears in no phase of §10 — it is needed by P1's PREPARE, not by P7 |
+| `d_tx_ramp ≈ 220 µs` | its only provenance is a commented-out `delayMicroseconds(220)` (`lora_tracker/lora.cpp:741`) — a mode-transition comment of unknown origin promoted to "a radio constant" |

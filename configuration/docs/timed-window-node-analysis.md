@@ -396,11 +396,28 @@ happen — 60 opportunities per ordinary frame.
 This is worth fixing on its own merits, and it is a second independent reason to
 collapse the FIFO fill into one transaction.
 
-One caveat for the prepare/fire split: the node's ISR-safe variants deliberately
-do **not** take that semaphore (`components/lora/lora.cpp:197`, commented out) —
-correct for ISR context, but it means a fire dispatched from a timer ISR is
-exclusive **by design only**. Nothing else may touch the bus in the pre-mark
-window, and that has to be enforced by the schedule, not by a lock.
+**Correction (second review).** An earlier version of this section said the
+node's ISR-safe variants "deliberately do not take that semaphore". That was
+wrong — it came from grepping for `xSemaphoreTake(xSemaphore`, which matches the
+*commented-out* line 197 and misses the live one immediately below it:
+
+```
+components/lora/lora.cpp:197   // if (xSemaphoreTake(xSemaphore, (TickType_t)1) == pdTRUE)
+components/lora/lora.cpp:198   if (xSemaphoreTakeFromISR(xSemaphore, &xHigherPriorityTaskWoken) == pdTRUE)
+components/lora/lora.cpp:204       spi_device_polling_transmit(__spi, &t);
+```
+
+It does take it — and what it takes is a **mutex**
+(`xSemaphoreCreateMutex()` at `:108`). FreeRTOS forbids mutex operations from an
+ISR: `xSemaphoreTakeFromISR` on a mutex-typed handle bypasses priority
+inheritance and the paired give never disinherits. `spi_device_polling_transmit`
+is separately not ISR-callable, since it acquires the bus lock and can block.
+
+So the "ISR-safe SPI helper" is unsound twice over, and its block time is zero —
+a held mutex means the write is silently skipped with no timeout at all, a worse
+version of the `lora.cpp:158` defect below. Anything built on it inherits a
+silent-miss path. This does not remove the prepare/fire split as an approach,
+but the fire cannot be dispatched from an ISR on this codebase as it stands.
 
 ## 13. Revisiting my own claim about the +-1500 ppm — and softening it
 
