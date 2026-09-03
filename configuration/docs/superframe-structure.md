@@ -207,6 +207,54 @@ when that is true. This supersedes the per-copy placement rules of
 `timed-window-mode-plan.md` §8.6 as well: the answer is not to place copies
 cleverly, it is to accept the collision and defer the loser.
 
+### What actually travels over contention
+
+Mostly joining and syncing — but **not exclusively**, and the exceptions decide
+who benefits from this whole design.
+
+| traffic | over contention? | why |
+|---|---|---|
+| join / registration (`ClientRegister`, `ClientConfig`, login, base nonce) | yes | a new node has no phase |
+| sync acquisition (`GridSync`) | yes | that is the point |
+| recovery after lost sync | yes | phase is gone |
+| **deep-sleep wake exchange** (`NodeWakeBeacon` → `TimeSync` → `ScheduleConfig`) | **yes** | **routine communication, not bootstrap** |
+| a command for a node that happens to be unsynced | yes | the hub bursts it rather than queueing until re-sync |
+| everything else | no | private slot |
+
+So the rule is not *"contention carries bootstrap, private slots carry
+communication"*. The rule is about **phase knowledge**:
+
+> **Contention is the path for any node whose phase the hub does not know.
+> Private slots are the path for any node whose phase it does know.**
+> What flows over each is whatever that node needs at the time.
+
+### The consequence: automatic-mode nodes never leave contention
+
+This follows directly and it is the most important scoping fact in this
+document. A node in `MODE_AUTO` deep-sleeps between check-ins. On every wake it
+has **no phase** — boot alone is 919 ms and variable
+(`wake-cost-proposal.md`), and RTC drift across a 1–6 h sleep is far outside any
+window. It sends its beacon, receives `TimeSync` and possibly a schedule, and is
+asleep again seconds later. There is no point in it acquiring a slot it will use
+twice.
+
+```
+  auto node   : BURST ─────────────────────────────────► BURST   (never promotes)
+  interactive : BURST ──► SYNCING ──► TIMED ─────────────────►   (stays promoted)
+```
+
+**Timed-window mode is an interactive-mode feature.** Its battery saving
+(26.2 → 18.4 mAh/day) applies only to nodes that stay awake, because an auto
+node's receive duty is already irrelevant — it is asleep 99.7 % of the time.
+That is the same split `timed-window-node-analysis.md` §10 reaches from the
+power side: this mode helps interactive nodes, `sleepOk` (`wake-cost-proposal.md`
+Tier 1) helps auto nodes, and they are not competing for the same milliamp.
+
+**Scoping question for a 32-node target:** how many will run interactive? The
+win scales with that count, not with 32. At 4 check-ins/day/node the auto
+population also sets the contention load — 128 wake exchanges/day at 32 nodes is
+what §5's collision arithmetic is built on.
+
 ---
 
 ## 5b. Reception: what can and cannot be guaranteed
@@ -285,6 +333,11 @@ stateDiagram-v2
 
 A node in BURST costs what it costs today. A node in TIMED costs a third of the
 receive duty. They share one channel, and the hub knows which is which.
+
+Note the arrow that is missing: an **automatic-mode node has no path to TIMED**,
+because it never holds a phase long enough to use one (§5). The state machine
+above describes interactive nodes; auto nodes stay in the left-hand state for
+life, by design and at no loss.
 
 ---
 
