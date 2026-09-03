@@ -113,6 +113,52 @@ estimate accordingly (§5). What must not happen is a plan whose headline
 requirement — one reference point named identically at both ends — is satisfied
 on paper by an instant the node cannot observe.
 
+### GPIO 25 is the right pin, and the design already reserved it
+
+The board reportedly brings DIO3 out. Checking the pin the commented-out line
+names:
+
+| requirement | GPIO 25 | evidence |
+|---|---|---|
+| documented as the DIO3 assignment | yes | the project's own `gpios.md`: `loraDio3Pin \| gpio_num_t(25) \| RTC_GPIO6` |
+| **RTC-capable** — must wake the CPU from light sleep, or the timestamp is the wake instant again (§7) | yes, **RTC_GPIO6** | matches the convention `setup()` applies to DIO0/DIO1 via `rtc_gpio_init` |
+| input + interrupt capable | yes | not one of the input-only 34–39 |
+| not a strapping pin | yes | strapping pins are 0, 2, 5, 12, 15 |
+| not used by SPI flash | yes | flash uses 6–11 |
+| free in this design | **yes** | the only occurrence of GPIO 25 in the whole firmware is the commented-out line itself |
+| driver support | **already present** | `lora_setInterruptMode(3, …)` writes `REG_DIO_MAPPING_1` bits 1:0, which is DIO3 on the SX127x; read-modify-write, so DIO0's runtime remapping cannot clobber it |
+| `LORA_IRQ_DIO3_VALIDHEADER` defined | yes | `components/lora/include/lora.h:23` |
+| ValidHeader flag already cleared | yes | `frtosTasks.cpp:198-203` |
+
+Its alternate functions — ADC2_CH8, DAC_1, EMAC_RXD0 — are all unused here
+(nothing in the firmware touches DAC or Ethernet, and ADC2 is irrelevant for a
+digital input). Only the `TTGO_LORA_V1` variant is problematic, and it is not
+built (`main.cpp:50` sets it to 0): there DIO0, DIO1, DIO3 and DIO4 are all
+placeholder-assigned to GPIO 33.
+
+Four integration notes, none of them blocking:
+
+- **Do not add DIO3 to the ext1 deep-sleep mask.** `SystemCtrl.cpp:369-376`
+  currently masks the three buttons plus DIO0 and DIO1. ValidHeader fires for
+  *every* frame with a good header, including frames addressed to the other
+  node and before any address filter — adding it would turn overheard traffic
+  into deep-sleep wakes.
+- **Ensure ValidHeader is cleared even when no RxDone follows.** It is cleared
+  today only on the DIO0 handler path. A frame whose header validates but which
+  never completes would leave DIO3 latched high — and per §7 a latched level
+  wake source blocks light sleep entirely.
+- **The DIO3 ISR must do nothing but timestamp.** The frame is still read on the
+  RxDone path; DIO3 exists only to name T0.
+- **`gpios.md` is not fully trustworthy.** It lists `loraDio0Pin = 27` and
+  `loraDio1Pin = 26`, while the code has DIO0 = 26 and DIO1 = 27
+  (`LoraInterface.h:88-89`) — swapped. It also calls GPIO 32 `RTC_GPIO32` when
+  it is RTC_GPIO9. The DIO3 row agrees with the header's commented line, so it
+  is corroborated; the table on its own is not evidence.
+
+**Verify against the schematic before cutting a track.** Everything above is
+checked against the firmware and the ESP32 pin capabilities; the physical
+DIO3 net is the one thing this repository cannot confirm.
+
 It is also the physically meaningful instant: the demodulator has finished sync
 and the frame proper begins. Air start is not observable on either end; RxDone
 drags the payload length into every calculation.
@@ -794,7 +840,7 @@ change, not against nondeterministic encryption.
 
 | phase | content | gate |
 |---|---|---|
-| **P-1** | **Decide the reference point** (§2): wire DIO3 to GPIO 25, or commit to the RxDone path. Fix the `T_pay` constant either way. | a written decision, and `LoraTiming.h` pinned by test |
+| **P-1** | **Decide the reference point** (§2). GPIO 25 is verified free, RTC-capable and already driver-supported, so wiring DIO3 is the preferred branch. Fix the `T_pay` constant either way. | schematic confirms the DIO3 net; `LoraTiming.h` pinned by test |
 | **P0** | **GPIO light-sleep wakeup on DIO0 *and* DIO1** (§7), with the wake source disarmed in step with every `gpio_intr_disable`. Calibrate the wake latency; measure its jitter under DFS. | timestamps lose their 100 ms-scale outliers, residual jitter < 1 ms, **and** light-sleep residency is unchanged |
 | **P1** | **Hub grid anchor** + per-frame TX policy (`send(buf, len, {copies, first_mark_us, copy_stride_us})`, replacing the global `setBurstCopies`). Bursts start at the addressed node's `T0`. **On air: unchanged, still 17 copies at 88 ms.** | bursts observably start on the grid; nothing regresses |
 | **P2** | **Node phase tracking.** Compute `T0_measured`, compare against the predicted grid, report `phaseErrUs` + `rtcSlowSrc` + `ppmEstimate` in the beacon. Still 3 windows. **Must filter the phase sample by slot/address first** — `noteDriftSample` is called before parsing, by design (`frtosTasks.cpp:160-165`), so node 1 currently stamps node 2's frames and `phaseErrUs` would be bimodal at 0 and ±250 ms. | `phaseErrUs` inside ±2 ms in the field, on both nodes, over days |
