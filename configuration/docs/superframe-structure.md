@@ -30,6 +30,79 @@ window positions in it, and the hub uses the ones it needs.
 
 ---
 
+## 1b. The two modes are LoRaWAN Class A and Class B
+
+The framing is worth making explicit, because it is not just an analogy — it
+tells you which problems the two modes share and, more usefully, which they
+don't.
+
+| LoRaWAN | mechanism | this system |
+|---|---|---|
+| **Class A** | node uplinks whenever it wants, opens two short RX windows at *fixed offsets after its own transmission*, sleeps if they are empty | **automatic mode** |
+| **Class B** | network beacon synchronises the node; it opens ping slots at agreed instants | **interactive mode** — everything else in this document |
+| Class C | listens continuously | the hub |
+
+### The important consequence: Class A needs no clock agreement
+
+A Class A window is referenced to the node's **own** transmission, not to the
+hub's grid. The node timed that transmission itself, so there is no drift, no
+ppm estimate, no beacon, no `GridSync` — nothing from the timed-window design is
+required. That is precisely why it works for a node that has just booted with no
+phase, which is every auto-mode wake (§5).
+
+**So the auto-mode fix is a fully independent workstream.** It can be built
+first, alone, and it is the larger win for that population:
+
+| | wake duration | awake s/day at a 6 h check-in |
+|---|---|---|
+| today — wait out a fixed silence (`automode::kQuietWindowMinMs`) | 28.1 s | 112 |
+| Tier 1, `sleepOk` — hub says "nothing further" | 7.7 s | 31 |
+| **Tier 2, Class A windows** | **~3 s** | **12** |
+
+(`wake-cost-proposal.md` §5; the 28.1 s figure is measured, and 73 % of it is the
+node proving a negative.)
+
+### The anchor already exists in the firmware
+
+This is the part that makes Tier 2 cheap. `lora_endPacket(async = true)` already
+maps DIO0 to TxDone (`components/lora/lora.cpp:563`), the handler task already
+services it (`frtosTasks.cpp:205-213`), and the DIO0 ISR already takes
+`esp_timer_get_time()` as its first statement for *every* edge — TxDone
+included.
+
+**The node therefore already has a hardware-timestamped end-of-own-transmission
+event.** RX1/RX2 need no new timing mechanism at all; they need the existing
+timestamp plus two `esp_timer` one-shots. The same T0 discipline as §2 of the
+plan applies, just referenced to the node's own SFD rather than the hub's.
+
+### Where the analogy breaks
+
+- **Class A means the network can only talk right after an uplink.** An
+  auto-mode node is therefore unreachable between check-ins — up to 6 h. That is
+  already true today so it is no regression, but it is the reason interactive
+  mode exists at all, and it is not something Tier 2 can fix.
+- **Class B ping slots in LoRaWAN are derived from a hash of the device address
+  and beacon time** so that slots self-distribute. Ours are statically assigned
+  by the hub (§3), which is simpler and strictly better at a known 32-node
+  target.
+- **LoRaWAN Class B beacons carry GPS time.** Ours need no absolute time — the
+  hub's `esp_timer` is the only reference either end requires.
+- RX1/RX2 in LoRaWAN may use different data rates and frequencies. We have one
+  channel and one spreading factor, so both windows are identical.
+
+### What this means for sequencing
+
+Two workstreams, no dependency between them:
+
+```
+auto-mode nodes      : sleepOk (Tier 1) ──► Class A windows (Tier 2)
+interactive nodes    : P0 … P5 of timed-window-mode-plan.md
+```
+
+Neither blocks the other, they target different node populations, and they do
+not compete for the same milliamp. If most of a 32-node deployment runs
+automatic, the left-hand track is where the value is.
+
 ## 2. Three timescales, three purposes
 
 ```
