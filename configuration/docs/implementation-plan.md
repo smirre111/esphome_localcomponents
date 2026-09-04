@@ -24,17 +24,27 @@ Mode A is not a legacy path being replaced. It is the **acquisition and recovery
 path for B**, and the permanent fallback when anything is uncertain. Every node
 starts there and returns there.
 
-Modes B and C are **independent tracks with no dependency between them**:
+Modes B and C target different populations and do not compete for the same
+milliamp (`timed-window-node-analysis.md` §10). But they are **only partly
+independent**, and an earlier draft of this document overstated it:
 
 ```
-auto nodes        : Mode C  ──  sleepOk (Tier 1) ──► Class A windows (Tier 2)
-interactive nodes : Mode B  ──  P0 … P5
+auto nodes        : C0 ── C1  (independent, cheap, ship first)
+                    C2 ── requires B-1, B5 and hub RX timestamping  ← NOT independent
+interactive nodes : B-1 … B5
 ```
 
-They target different populations and do not compete for the same milliamp
-(`timed-window-node-analysis.md` §10). Mode C needs **no clock agreement at
-all** — its windows are referenced to the node's own transmission — so nothing
-in Mode B blocks it.
+**C0 and C1 are genuinely independent** — pure logic changes on paths that need
+no timing, delivering 28.1 s → 7.7 s per wake on their own (§5.2). Do them first
+regardless of anything else.
+
+**C2 is not.** Class A is a *two-ended* contract. The node's half exists today
+(§5.3); the hub's half does not exist at all (§5.4), and building it needs most
+of Track B plus one item Track B does not contain. §8 prices C2 accordingly.
+
+**Scoping consequence:** if the fleet skews automatic, C0+C1 is the cheap
+independent win — but C2 is not, and must not be costed as though it were the
+same size of change as C1.
 
 **Scoping note.** Mode B's benefit scales with the number of *interactive*
 nodes, not with 32. Mode C's benefit scales with the number of *automatic* ones,
@@ -98,8 +108,11 @@ One shared, dependency-free implementation of `T_sym`, `T_pre`, `T_hdr` and
 
 Pinned by test against: `T_pre = 3136 µs`, 42.048 ms @ 60 B, 95.296 ms @ 152 B,
 and the convention `PL = RegRxNbBytes` (which excludes the CRC; the formula's
-`+16·CRC` term accounts for it separately). That last one is the off-by-two-bytes
-that would appear as a constant ~0.5 ms bias and be blamed on the crystal.
+`+16·CRC` term accounts for it separately). That last one matters more than a small
+bias: because the ceil term steps in blocks of `(CR+4) = 8` symbols per 28 bits,
+a two-byte error in `PL` is worth **0 or 2.048 ms, discontinuously**, depending
+where it falls relative to a block boundary (`PL = 58, 60 → 152 symbols;
+PL = 62 → 160`). It would look like an intermittent crystal fault.
 
 Also pinned: the hub's burst copy spacing must stay **88 000 µs exactly**, and
 any grid period must be an exact integer number of milliseconds.
@@ -222,7 +235,10 @@ form:
 | 1 window, 17 copies, unsynchronised | 32.9 % |
 | 1 window, 1 copy, synchronised | ~100 % |
 
-Copy *i* leaves at `88i`; it is caught iff `(x + 88i) mod P ∈ [0, 29.44)`. At
+Copy *i* leaves at `88i`; it is caught iff `(x + 88i) mod P ∈ [0, w)` with
+`w = 29 ms` (the window rounded down — use the same `w` in the predicate, the
+union and the table, or §9's test will not reproduce these figures; at 29.44 the
+answers are 96.9 % and 33.4 %). At
 `P = 500` the residues sort to gaps of 28 ms (×11) and 32 ms (×6), so the union
 is `11×28 + 6×29 = 482` of 500 → 96.4 %. At `P = 1500` all 17 gaps exceed the
 window, so the union is `17×29 = 493` of 1500 → 32.9 %.
@@ -302,12 +318,45 @@ neighbours' windows. Counting hub frame plus node reply:
 | routine command, 60 B | −3.1 … +80.5 ms | **k+3** | **10** |
 | `ScheduleConfig`, 152 B | −3.1 … +133.7 ms | k+4 | 8 |
 
-At 3.5 commands/node/day this almost never binds. Where it does:
+The 20 ms turnaround in that table is **assumed, not measured**, and it is
+exactly §2.4's PREPARE lead — so it budgets **zero** for DRAIN (a 152-byte
+per-byte FIFO read, protobuf unpack, AES-GCM decrypt and three queue hops across
+priority-6 tasks, on a CPU scaling down to 40 MHz). The true turnaround is
+`DRAIN + build + 20 ms`. Sensitivity: the k+3 headline survives a turnaround up
+to **62.9 ms**, k+4 to 56.6 ms, but **k+2 breaks above 36.5 ms**. Measure it
+(§12).
 
-| clustered event (all 32 nodes) | time to reach every node |
-|---|---|
-| today, back-to-back bursts | **22.9 s** |
-| Mode B, 10 per round | **6.0 s** |
+**The uplink instant is deliberately left unspecified, and that is a gap.** An
+earlier design fixed `T_ul_off = 150 000 µs` and carried `ulOffsetUs` in
+`GridSync`; this document replaced it with "the node replies immediately after
+the downlink" while keeping "an uplink **observed in its slot**" as §4.6's
+promotion criterion — a slot the protocol then does not define. Making the
+uplink instant a function of node-side processing latency is also precisely what
+§2.4 exists to forbid.
+
+**Resolution:** `ulOffsetUs` is restored to `GridSync` (§6). The node replies at
+`T0_k + ulOffsetUs`, not "immediately", and §4.6's promotion test means what it
+says. The value must be ≥ the measured DRAIN + build time.
+
+**CAD is dropped in Mode B, and this document must say so.** The slot *is* the
+arbitration. If CAD were retained, the unconditional pre-CAD backoff of
+`29·(1..10)` ms — quantised to 20…290 ms at the node's 100 Hz tick
+(`LoraInterface.cpp:467`) — would make both the turnaround and "in its slot"
+impossible. Mode A keeps CAD unchanged.
+
+At 3.5 commands/node/day the servable-slot limit almost never binds. Where it
+does:
+
+| clustered event (all 32 nodes) | airtime | **elapsed** |
+|---|---|---|
+| today, back-to-back bursts | 22.9 s | **59.2 s** |
+| Mode B, 10 per round | 4.7 s | **6.0 s** |
+
+The elapsed column is the one that matters and an earlier draft quoted only
+airtime under an elapsed heading. Today a burst is `16×88 + 42.05 = 1450 ms` and
+`sendTask` then blocks a further `responseWindowMs = 400 ms`
+(`lora_tracker.cpp:310`) before dequeuing — **1850 ms per node**, 59.2 s for 32.
+The error understated Mode B's advantage by ~10×.
 
 ### 4.4 The beacon slot
 
@@ -335,17 +384,29 @@ viable at 32 nodes.**
 | unmeasured, ±20 ppm crystal spec | **11.7 min** |
 | measured to ±2 ppm | **117 min** |
 
-So a 12-minute beacon is the edge with no margin, and 50 minutes requires the
-ppm estimate working. Two softeners: ordinary traffic also refreshes the phase,
+**State the safety factor once:** the airtime table above prices **half** these
+ceilings — 5.8 min and 58 min — leaving 50 % margin for ppm uncertainty and for
+a lost beacon (which doubles the elapsed time since sync). Those two numbers,
+not the ceilings, are the operating points. Two softeners: ordinary traffic also refreshes the phase,
 so the beacon covers only the gaps; and `symTimeout` is a runtime write, so the
 window can widen while sync is stale (200 symbols → ±25.0 ms, 3.41 % duty,
 holds 20 ppm for 20.8 min — still better than today's 5.9 %).
 
 **The beacon is not optional.** With it off, a node holds phase only for
-`resyncMaxS` after each frame — at 3.5 commands/day that is ~5.6 % of the day in
-Mode B, and there is no measurable battery saving. The beacon is the mechanism
+`resyncMaxS` after each frame — at 3.5 commands/day and the ±20 ppm ceiling of
+704 s that is `3.5 × 704 / 86400` = **2.9 % of the day** in Mode B, and there is
+no measurable battery saving. (An earlier draft said 5.6 %, having summed across
+two nodes a per-node fraction; the correct figure strengthens the conclusion.) The beacon is the mechanism
 that keeps the node in the mode, so it ships **with** the one-window change, not
 after it.
+
+**The beacon needs a slot *position*, not just a period.** `beaconEveryRounds`
+says *which* rounds; nothing says *which instant within them*. And the beacon is
+not covered by §4.3's servable-slot rule, which governs unicast traffic only —
+so if it were placed at slot 0's `T0`, its 33.86 ms of air would run from −3.1 to
++30.7 and cover slot 1's window opening at +29.66, **systematically blinding the
+same node on every beacon round**. `beaconSlotIndex` is added to `GridSync` (§6),
+and the hub must leave `ceil(33.86 / 46.875) = 1` slot clear after it.
 
 Optional later: the beacon may carry a 32-bit pending-data bitmap, so a node
 with its bit clear skips its private window until the next beacon
@@ -365,7 +426,7 @@ sweep that makes the burst work:
 |---|---|---|
 | 3 in 300 ms | 17.7 % | 36 rounds — **54 s** |
 | 5 in 400 ms | 29.4 % | 20 rounds — 30 s |
-| **17 across the round (today)** | **99.0 %** | 2 rounds — **3 s** |
+| **17 across the round (today)** | **96.4 %** (§3) | 2 rounds — **3 s** |
 
 **The rule instead:** when the hub has unsynced-node work it runs a normal
 full-round burst, and defers any colliding private-window traffic by one round.
@@ -374,11 +435,27 @@ full-round burst, and defers any colliding private-window traffic by one round.
 P(a given node needs a frame in a given round)  = 3.5 / 57 600 = 6.1e-5
 P(any of 32 nodes does)                          = 1.9e-3
 bursts/day (32 nodes × 4 deep-sleep wakes)       = 128
-⇒ collisions with real queued traffic            = 0.23 per day
+× 30/32 windows a burst actually blinds           = **0.23 per day**
 ```
 
-A quarter of one command per day, deferred by 1.5 s. All 32 slots stay
-available and acquisition stays at 3 s.
+A quarter of one command per day. All 32 slots stay available and acquisition
+stays at 3 s.
+
+**But "defer by one round" is wrong, and the API cannot express deferral at
+all.** A burst occupies 1450 ms and `sendTask` then blocks a further 400 ms
+(`lora_tracker.cpp:310`) — **1850 ms against a 1500 ms round**, so a frame
+deferred to round n+1 lands inside the same burst's response window on the same
+serialised task. Deferral must be **by two rounds**, or the response window must
+go — and removing it breaks what it was added for (`lora_tracker.cpp:299-304`:
+keeping the channel clear for the addressed node's deferred reply).
+
+And downlinks reach the radio through **one FIFO queue** (`data_queue` →
+`sendTask` → `sendPacketBurst`), which blocks that task for the whole burst.
+Deferring one frame past another needs a **reordering, time-scheduled transmit
+queue on the hub**. B-1's `send(buf, len, {copies, first_mark_us, copy_stride_us})`
+places a single frame; it gives no way to say "not before round n+2, and behind
+nothing else". **That queue is the real work item behind §4.5, and it is now a
+phase of its own (§8, B1a).**
 
 **Consequence for demotion:** the node's "M empty windows" test is blinded by
 this — a window walked through by another node's burst is *not* empty. The
@@ -414,7 +491,17 @@ uplink **observed in its slot**, not a claim: a beacon saying "I am ready" is no
 evidence that the node's window is where it thinks.
 
 Demotion is immediate, promotion needs a long baseline, and no promotion within
-X minutes of a demotion.
+**10 minutes** of a demotion (an earlier draft left this as "X minutes"; the
+value matters because at `beacon_interval_s = 0` a node would otherwise flap
+several times a day — see §7).
+
+**A hub reboot must force an immediate broadcast demote.** `A` is "set once and
+never moved", so after a restart the hub holds a new anchor on a fresh
+`esp_timer` epoch while all 32 nodes still hold the old one. Rule 3 covers the
+hub's own behaviour, but each node would independently burn up to `resyncMaxS`
+(11.7 min) of missed windows before demoting — and the beacon that would
+re-anchor them is placed on a grid they no longer share. The hub must burst a
+`GridSync{enable=false}` on startup, before anything else.
 
 **Mode B is gated on `rtcSlowSrc` reporting the 32 kHz crystal.** A node on the
 internal RC oscillator (~5 %) stays in Mode A permanently, visibly in Home
@@ -433,21 +520,45 @@ exist (`kOpMaxRetries = 4` at `kOpRetryIntervalMs = 3000`):
 | 0.50 | 96.9 % | **99.99998 %** |
 | 0.30 | 83.2 % | 99.961 % |
 
-The burst fallback's statistics are *independent* of the timed attempt, which is
-what buys the last decimal places. **The frame structure's job is to make the
+The burst fallback's statistics are independent of the timed attempt **against
+interference**, which is what buys the last decimal places. They are **not**
+independent against §4.5: the hub running a full-round burst for an unsynced node
+is exactly when a timed node's window is walked through *and* when the single
+serialised TX task is blocked for 1850 ms and cannot issue the fallback. Those
+two failure modes share a cause, so the final decimal places are not there in
+that case. **The frame structure's job is to make the
 first attempt cheap — 42 ms instead of 715 ms — not certain.**
 
 **The one genuine regression:** a single copy loses the time diversity that 17
-copies gave against bursty interference. The dial:
+copies gave against bursty interference.
 
-| | duty | battery | independent attempts/round |
-|---|---|---|---|
-| 1 window | 1.96 % | 18.4 mAh/day | 1 |
-| **2 windows, 750 ms apart** | 3.93 % | 22.3 mAh/day | **2** |
-| 3 windows (Mode A) | 5.89 % | 26.2 mAh/day | 3 |
+**A second window is not available at 32 slots.** An earlier draft proposed two
+windows 750 ms apart and defaulted to it. The arithmetic forbids it:
 
-`windowsPerRound` is a per-node config value. **Start at 2**, drop to 1 once the
-measured `q` justifies it.
+```
+750 / 46.875 = 16.000 exactly
+```
+
+so every node's diversity window would sit **precisely on node (k+16)'s primary
+`T0`** — not a probabilistic overlap but an exact, systematic one across all 32
+nodes, halving the usable grid to 16 slots and contradicting §4.3 and §4.4.
+
+Nor is a different offset the fix. A window is 29.44 ms against a 46.875 ms
+pitch, so it occupies **62.8 %** of a slot; any second window overlaps *some*
+node's primary window wherever it is placed. **At 32 slots, `windowsPerRound > 1`
+and a full grid are mutually exclusive.**
+
+The honest options, none free:
+
+| option | cost |
+|---|---|
+| fewer slots (16), two windows each | halves node capacity |
+| a per-node second-window offset the hub schedules around | the hub must solve a placement problem every round |
+| **put the diversity copy in the same slot a round later** | that is simply a retry — and §4.7's table already prices retries better |
+
+**So `windowsPerRound` defaults to 1**, and time diversity comes from the retry
+ladder rather than from a second window. Keep the field in `GridSync` for a
+future smaller-N deployment, but it is not the dial this document claimed.
 
 **Retry semantics.** A burst retry must reuse the msgid **and retransmit the
 byte-identical frame**. Two constraints force it: the node's replay filter
@@ -508,11 +619,42 @@ RX1 opens at T0_uplink + D1 − (T_pre + G)
 RX2 opens at T0_uplink + D2 − (T_pre + G)
 ```
 
-`D1` and `D2` are protocol constants; the hub answers a beacon at a deferred
-+750 ms today, so `D1 ≈ 1 s` and `D2 ≈ 2 s` fit the existing behaviour without
-changing the hub's reply timing.
+`D1` and `D2` are protocol constants. **They do not fit the hub's current reply
+behaviour**, and an earlier draft of this section claimed they did — see §5.4.
 
-### 5.4 Ordering, and what it does not fix
+### 5.4 The hub has no Class A half, and this is the largest gap in the plan
+
+Class A is a two-ended contract. Everything in §5.3 is about the node. On the
+hub:
+
+- **There is no timestamp of any kind.** `esp_timer_get_time`, `micros()` and
+  `millis()` appear **zero times** in `local_components/lora_tracker/`. Uplinks
+  are noticed by a poll loop running `esphome::delay(10)` per iteration
+  (`lora_tracker.cpp:167`), so the hub's knowledge of when an uplink ended is
+  quantised to the loop period before anything else happens.
+- **The reply is scheduled at +750 ms, not +1000** —
+  `set_timeout("timesync_push", 750, …)` (`lora_client.cpp:927`, `:2189`).
+- **The reply is a 17-copy burst.** `send_timesync()` goes through
+  `parent_->send()` → `data_queue` → `sendPacketBurst`, which stamps
+  `burstcount` unconditionally (`lora_tracker.cpp:420`). Copies land at
+  `750 + 88i`.
+
+Worked through with this plan's own arm points, both windows are empty:
+
+```
+RX1 = [1000 − 17.216, +29.44] = [982.8, 1012.2]  → nearest copies 926, 1014 — both outside
+RX2 = [2000 − 17.216, +29.44] = [1982.8, 2012.2] → nearest copies 1982, 2070 — both outside
+```
+
+and the node then sleeps. Even a fortunate alignment would only be a 33.5 %
+hit (`29.44 / 88`). **Class A requires a single copy at a precisely known
+offset; a burst is the opposite construction.**
+
+So C2 needs, in addition to the node work: a **hub RX timestamp** (new, in no
+phase before this revision), single-copy TX policy (B-1), prepare/fire
+determinism (B5), and the transmit scheduler of §4.5. §8 places it accordingly.
+
+### 5.5 Ordering, and what it does not fix
 
 **Tier 1 before Tier 2.** `sleepOk` is one proto field, one hub check and one
 node branch, and it removes 73 % of the wake on its own. Tier 2 then removes most
@@ -545,12 +687,25 @@ message GridSync {
   uint32 slotPeriodUs     = 3;  //    46 875
   uint32 slotCount        = 4;  // 32
   uint32 slotIndex        = 5;  // which slot is yours
-  uint32 beaconEveryRounds= 6;  // M; beacon rounds are n mod M == 0
-  uint32 windowsPerRound  = 7;  // §4.7 diversity dial
-  uint32 guardUs          = 8;  // hub's view of the tolerance it can hit
-  uint32 resyncMaxS       = 9;  // stale after this without a frame
-  bool   enable           = 10;
+  uint32 ulOffsetUs       = 6;  // node replies at T0_k + this — §4.3
+  uint32 beaconEveryRounds= 7;  // M; beacon rounds are n mod M == 0
+  uint32 beaconSlotIndex  = 8;  // WHERE the beacon is, not just when — §4.4
+  uint32 burstStrideUs    = 9;  // 88 000; the node compiles this in today — §10
+  uint32 windowsPerRound  = 10; // §4.7; must be 1 at 32 slots
+  uint32 guardUs          = 11; // hub's view of the tolerance it can hit
+  uint32 resyncMaxS       = 12; // stale after this without a frame
+  bool   enable           = 13;
 }
+```
+
+`burstStrideUs` closes a live cross-repo coupling: the node hard-codes
+`kBurstTxIntervalMs = 88` (`CmdDispatcher.h:425`) and feeds it to `getBurstEndUs`
+(`CmdDispatcher.cpp:2836-2840`), so **any** hub-side change to copy placement —
+which B-1's `copy_stride_us` explicitly invites — silently breaks the node's
+reply deferral. §10 lists `getBurstEndUs` only for the 88-vs-95 ms overrun; this
+is the larger hazard.
+
+```proto
 ```
 
 **Mode C** — one field on the existing `TimeSync`:
@@ -564,6 +719,7 @@ message GridSync {
 ```proto
   bool   timedRxReady     = ...;  // node believes it can hold a slot
   bool   timedRxActive    = ...;  // what the node is ACTUALLY doing
+  uint32 windowsActive    = ...;  // how many windows it is ACTUALLY opening
   int32  phaseErrUs       = ...;  // last (T0_measured − T0_predicted)
   int32  ppmEstimate      = ...;
   uint32 ppmSamples       = ...;
@@ -591,14 +747,17 @@ Per node, in `loradevices.yml`:
 |---|---|---|
 | `timed_mode` | `false` | master switch for Mode B |
 | `slot_index` | auto | 0…31, assigned in declaration order like `login_slot_` |
-| `windows_per_round` | **2** | §4.7 diversity dial; 1 for max battery |
+| `windows_per_round` | **1** | §4.7 — >1 is geometrically impossible at 32 slots |
 | `beacon_interval_s` | `350` | 0 = off (Mode B then holds phase only briefly); raise to 3500 once ppm is trusted |
 | `auto_sleep_ok` | `true` | Mode C Tier 1 |
 | `rx1_delay_ms` / `rx2_delay_ms` | 1000 / 2000 | Mode C Tier 2 |
 
-`beacon_interval_s = 0` is a valid, safe operating point: the node falls back to
-Mode A between traffic, which costs power but never connectivity. Useful as a
-kill switch and for A/B measurement.
+`beacon_interval_s = 0` is a **kill switch, not a normal operating point**. The
+node falls back to Mode A between traffic — never a connectivity risk, but at
+3.5 commands/day it also means the node demotes and re-promotes several times
+daily, which is exactly the A↔B flapping §4.6's hysteresis exists to prevent.
+Cost without benefit (§4.4). Use it to disable Mode B or for A/B measurement,
+not as a configuration to ship.
 
 ---
 
@@ -610,9 +769,17 @@ Two tracks. Neither blocks the other.
 
 | phase | content | gate |
 |---|---|---|
-| **C0** | Cancel `resumeFallbackCb` on `noteSessionProven()` | fallback no longer fires after a proven session |
-| **C1** | `sleepOk` field, hub sets it when its per-node queue is empty, node sleeps on it | wake 28.1 s → ~7.7 s, measured on a real check-in |
-| **C2** | RX1/RX2 windows off TxDone (§5.3) | wake → ~3 s; no missed downlinks over a week |
+| **C0** | Cancel `resumeFallbackCb` on `noteSessionProven()` (`CmdDispatcher.cpp:866`) | fallback no longer fires after a proven session |
+| **C1** | `sleepOk` field; hub sets it when its per-node queue is empty, node sleeps on it | wake 28.1 s → ~7.7 s, measured on a real check-in |
+
+**C0 and C1 are the independent, cheap part of Track C and deliver most of its
+value.** They need nothing from Track B.
+
+**C2 — RX1/RX2 windows off TxDone — is not independent** and has been moved out
+of this track (§5.4). It requires, in addition to the node work: hub RX
+timestamping (**Bx**, new), single-copy TX policy (**B-1**), prepare/fire
+determinism (**B5**), and the transmit scheduler (**B1a**). It is priced with
+Track B below, not here.
 
 ### Track B — interactive nodes
 
@@ -620,13 +787,18 @@ Two tracks. Neither blocks the other.
 |---|---|---|
 | **B-1** | `LoraTiming.h` (§2.2) + per-frame TX policy `send(buf, len, {copies, first_mark_us, copy_stride_us})` replacing the global `setBurstCopies` | host tests pin every constant; a single-copy frame is expressible |
 | **B0** | GPIO light-sleep wakeup on DIO0 **and** DIO1, disarmed in step with `gpio_intr_disable` (§2.5) | timestamps lose their 100 ms-scale outliers, jitter < 1 ms, **and light-sleep residency is unchanged** |
-| **B1** | Hub grid anchor; bursts start at the addressed node's `T0`. **On air: unchanged.** | bursts observably start on the grid; nothing regresses |
+| **B1** | Hub grid anchor; bursts start at the addressed node's `T0`. **On air: unchanged.** Includes the startup broadcast demote of §4.6. | bursts observably start on the grid; nothing regresses |
+| **B1a** | **Transmit scheduler on the hub** — replace the single FIFO `data_queue` with a reordering, time-scheduled queue. Required by §4.5's two-round deferral and by C2; expressible in neither today. | a frame can be placed "not before round n+2, behind nothing else" |
 | **B2** | Node phase tracking — `T0_measured`, `phaseErrUs`, `ppmEstimate`, `rtcSlowSrc` in the beacon. **Must filter the phase sample by slot/address first**: `noteDriftSample` is called before parsing by design (`frtosTasks.cpp:160-165`), so a node currently stamps its neighbour's frames and `phaseErrUs` would be bimodal at 0 and ±46.9 ms. | `phaseErrUs` inside ±2 ms in the field, on every node, over days |
-| **B3** | **One window + beacon slot together** (§4.1, §4.4) — they are one deliverable. Hub still bursts. Slot-aware deferral (§4.5) lands here, since two nodes can now be in different modes. | reception ≥ Mode A over a week; battery measurably improved |
-| **B4** | Single-copy downlink + the cached-ack fix (§4.7), **node and hub**. The hub half is larger: `tx_tracked_op_` re-packs with a fresh msgid today and must become pack-once / cache / retransmit-stored. | command success rate unchanged over a week |
-| **B5** | Determinism work (§2.4 items 1–5) + pending-data bitmap. **Not a prerequisite** — at ±14.08 ms it buys resync interval, not correctness. | p99 fire residual < 200 µs |
+| **B3** | **One window + beacon slot together** (§4.1, §4.4) — one deliverable. Hub still bursts. Slot-aware deferral (§4.5) lands here, since two nodes can now be in different modes. | **`T_detect` measured on the bench first** (§12.2 — it sets the entire late-side guard, and a field failure would surface late, on 32 nodes, unattributable); then reception ≥ Mode A over a week and battery measurably improved |
+| **B4** | Single-copy downlink + the cached-ack fix (§4.7), **node and hub**. The hub half is larger: `tx_tracked_op_` re-packs with a fresh msgid today and must become pack-once / cache / retransmit-stored. **Not independently revertible** — the cached ack changes `SessionManager`'s replay semantics (`SessionManager.cpp:112-121`) for Mode A traffic too, since the admission path is shared. Rolling it back on a live fleet reverts replay behaviour for every node. | command success rate unchanged over a week |
+| **B5** | Determinism work (§2.4 items 1–5) + pending-data bitmap. Not a prerequisite *for Mode B* — at ±14.08 ms it buys resync interval, not correctness — but it **is** a prerequisite for C2. | p99 fire residual < 200 µs |
+| **Bx** | **Hub RX timestamping** — the hub has no timestamp of any kind today (§5.4). Needed only by C2. | an uplink's `T0` is known to ±1 ms |
+| **C2** | RX1/RX2 windows off TxDone, once B-1, B1a, B5 and Bx exist | wake → ~3 s; no missed downlinks over a week |
 
-**B3 is the deliverable.** B-1…B2 make it safe; B4–B5 make it cheap.
+**B3 is the deliverable.** B-1…B2 make it safe; B4–B5 make it cheap; Bx and C2
+are a separate, larger piece of work that only the automatic fleet benefits
+from.
 
 Note B5's gate is **unmeasurable as the hub is built**: there is no
 `gpio_isr_handler_add` anywhere in the hub component, and `lora_endPacket(false)`
@@ -730,4 +902,13 @@ Nothing here can be settled from the repositories.
 5. **ppm under the production power profile.** The +8 ppm was measured with light
    sleep **disabled**; it says nothing about the clock Mode B runs on.
 6. **Interactive vs automatic split** across the 32-node target. Decides which
-   track carries the value.
+   track carries the value — and §4.5's "128 bursts/day" already assumes an
+   answer to it.
+7. **Node DRAIN + build turnaround** (§4.3). Assumed at 20 ms, never measured,
+   and it sets the servable-slot count that §4.3 and §4.4 both rest on. The k+3
+   headline survives up to 62.9 ms; the k+2 ack row breaks above 36.5 ms.
+8. **That an `esp_timer` one-shot reliably wakes the node from automatic light
+   sleep.** The whole ARM mechanism depends on it and the plan asserts it
+   nowhere.
+9. **The hub's `CONFIG_FREERTOS_HZ`.** §10 correctly notes 88 ms is consistent
+   with 1000/500/250/125 Hz, but §2.3 quotes the 1 ms hub figure as fact.
