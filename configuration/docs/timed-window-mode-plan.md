@@ -1,5 +1,11 @@
 # Timed-window mode — implementation plan
 
+> **SUPERSEDED for design content — see `implementation-plan.md`.**
+> This document's slot geometry, economics and phase order have been replaced.
+> It is kept for its derivations, its message sequence charts, and its record of
+> what two adversarial reviews found; those remain valid. Do not implement from
+> it.
+
 **Target: the node opens ONE 29 ms receive window per 1.5 s round instead of
 three.** Receive duty 5.9 % → 1.93 %. Hub airtime per command 714 ms → 42 ms.
 

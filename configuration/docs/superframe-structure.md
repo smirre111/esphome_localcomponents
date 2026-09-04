@@ -1,5 +1,11 @@
 # Frame structure for ~32 nodes — a sketch
 
+> **SUPERSEDED for design content — see `implementation-plan.md`.**
+> This document's slot geometry, economics and phase order have been replaced.
+> It is kept for its derivations, its message sequence charts, and its record of
+> what two adversarial reviews found; those remain valid. Do not implement from
+> it.
+
 Written to answer a direct question: *"synced nodes use one RX window per 1.5 s;
 there is a broadcast beacon every 12–50 min; can the hub still send a superframe
 with a beacon, a contention phase and private slots?"*
