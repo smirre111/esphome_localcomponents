@@ -146,8 +146,10 @@ Against the **real** `lora_client.cpp` / shimmed tracker.
   `q = 0.30 → 83.193 %` for `1 − (1−q)⁵` (4 retries at
   `kOpRetryIntervalMs = 3000`, `kOpMaxRetries = 4`).
 - `BurstFallbackStrictlyImproves` — asserts the *sign*, not the value; see §9.2.
-- `RoundsTo999Percent` — `ceil(ln(0.001)/ln(1−p))`: `p = 0.964 → 3 rounds`,
-  `p = 0.177 → 36`, `p = 0.294 → 20`. See §9.3.
+- `RoundsTo999Percent` — `ceil(ln(0.001)/ln(1−p))`. **The answer depends on
+  which `w` §9.1 settles on**, which is itself the argument for settling it:
+  at `w = 29.44` the confined-region rows are 36 and 20 rounds; at `w = 29` they
+  are **37 and 21**. `p = 0.964 → 3 rounds` either way. See §9.1 and §9.3.
 
 ---
 
@@ -270,7 +272,7 @@ phase error, consecutive missed marks, `rtcSlowSrc`, confirmation age).
 - `WideWindowFallback` — `N = 200` → 51.2 ms window, `G = 24.96 ms`, holds 20 ppm
   for 1248 s = 20.8 min at 3.41 % duty. Still better than today's 5.9 %.
 - `AirtimeBudget` — pins plan §4.4 with all three rows derived, not typed:
-  - today, all burst: `112 × 17 × toa(60) = 80.08 s/day` (0.0927 %)
+  - today, all burst: `112 × 17 × toa(60) = 80.06 s/day` (0.0927 %)
   - Mode B + broadcast @5.8 min: `112 × toa(60) + (86400/348) × toa(45)
     = 4.71 + 8.41 = 13.12 s/day` (0.0152 %)
   - Mode B + **unicast** @5.8 min: `112 × toa(60) + (86400/348) × 32 × toa(45)
