@@ -40,6 +40,11 @@ typedef struct
   uint32_t magic;    // Magic number for validation
   uint8_t in_use;    // Flag to track buffer state
   uint8_t ref_count; // Reference counting
+  // How THIS frame is to be transmitted. Travels with the buffer because the
+  // policy is decided at enqueue and consumed at dequeue, and those are
+  // different moments on different tasks — see TxPolicy.
+  int      tx_copies;     // 0 = the default full burst
+  uint32_t tx_stride_ms;  // 0 = the default txIntervalMs
 } rx_buffer_t;
 
 // Statistics
@@ -99,9 +104,32 @@ namespace esphome
       void loop() override;
       void receive();
       void checkReception();
-      void send(uint8_t *data, size_t len);
+      // How one frame is transmitted.
+      //
+      // This replaces setBurstCopies(), which was a MUTABLE FIELD ON THE
+      // TRACKER read at burst time. The copy count was chosen by the caller at
+      // enqueue and read by sendTask at dequeue, so every frame queued while
+      // the field was set inherited it: during a 300 s drift test, a user
+      // pressing a blind button in Home Assistant had their command sent as ONE
+      // copy instead of seventeen — about 5.8 % delivery against a node in the
+      // ordinary 3-window mode. The old code's own comment worried about
+      // leaving the field set afterwards, which is the smaller half of the
+      // problem.
+      //
+      // There is deliberately no first_mark_us here yet. Placing a frame at an
+      // absolute instant needs the reordering transmit scheduler (B1a); a field
+      // nothing honours would be worse than its absence.
+      struct TxPolicy
+      {
+        int      copies{0};     // 0 = txSlotsPerRound, the normal burst
+        uint32_t stride_ms{0};  // 0 = txIntervalMs
+      };
+
+      void send(uint8_t *data, size_t len) { this->send(data, len, TxPolicy{}); }
+      void send(uint8_t *data, size_t len, const TxPolicy &policy);
       void sendPacketOnce(uint8_t *data, size_t len);
-      void sendPacketBurst(uint8_t *data, size_t len);
+      void sendPacketBurst(uint8_t *data, size_t len, int copies = 0,
+                           uint32_t stride_ms = 0);
 
       // Drift test: emit ONE copy instead of txSlotsPerRound.
       //
@@ -113,7 +141,6 @@ namespace esphome
       // silent until it was restarted.
       //
       // 0 restores the normal 17-copy burst.
-      void setBurstCopies(int n) { this->burst_copies_ = n; }
       void sendPacketBytes(uint8_t *data, size_t len);
       void sendTask(void *pvParameters);
       void register_listener(LORAListener *listener);
@@ -158,7 +185,6 @@ namespace esphome
 
       int rxSlotsPerRound{3};
       int txSlotsPerRound{17};
-      int burst_copies_{0};   // 0 = use txSlotsPerRound
       int roundDurationMs{1500};
       // Quiet window held in RX after each burst so the addressed node can send
       // its deferred reply (ACK/position) without being stepped on by the next

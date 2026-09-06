@@ -1862,9 +1862,12 @@ namespace esphome
       // hub went silent until it was restarted. Observed 2026-08-31 — the node
       // received nothing at all from the moment the test was triggered.
       //
-      // setBurstCopies(1) makes this one frame instead of seventeen, so the
-      // proven path is reused rather than duplicated.
-      self->parent_->send(self->drift_frame_, self->drift_frame_len_);
+      // A PER-FRAME copies=1 makes this one frame instead of seventeen, so the
+      // proven path is reused rather than duplicated — and, unlike the old
+      // global setBurstCopies(1), it cannot leak onto an ordinary command that
+      // a user happens to send during the test.
+      self->parent_->send(self->drift_frame_, self->drift_frame_len_,
+                          {/*copies=*/1, /*stride_ms=*/0});
 
       // Build the next one now, in the 99% of the period that is idle.
       self->build_drift_frame_(true);
@@ -1971,7 +1974,6 @@ namespace esphome
       this->set_timeout("drift_grid_arm", 3000, [this, grid_ms]() {
         if (!this->drift_test_active_)
           return;
-        this->parent_->setBurstCopies(1);   // timing frames only
         this->build_drift_frame_(true);
         // Microsecond-resolution pacing — the entire point of this rewrite.
         esp_timer_start_periodic(this->drift_timer_, (uint64_t) grid_ms * 1000ULL);
@@ -1991,14 +1993,10 @@ namespace esphome
       this->cancel_timeout("drift_end");
       this->cancel_timeout("drift_grid_arm");
 
-      // Restore the 17-copy burst BEFORE sending OFF, so the OFF command is
-      // bursted like every other command. The node may already have left
-      // continuous RX on its own deadline, in which case a single copy would
-      // very likely be missed.
-      //
-      // Restoring also matters in its own right: leaving the hub on single
-      // copies would quietly halve downlink reliability for every node.
-      this->parent_->setBurstCopies(0);
+      // The OFF command is bursted like every other command: the node may
+      // already have left continuous RX on its own deadline, in which case a
+      // single copy would very likely be missed. Nothing needs "restoring" any
+      // more — the single-copy choice never left the frame it applied to.
       this->build_drift_frame_(false);
       if (this->drift_frame_len_ > 0)
         this->parent_->send(this->drift_frame_, this->drift_frame_len_);

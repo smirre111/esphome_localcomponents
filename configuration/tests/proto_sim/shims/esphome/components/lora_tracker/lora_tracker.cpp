@@ -17,7 +17,12 @@ proto_sim::SimRadio* active_radio() { return g_active_radio; }
 void set_active_radio(proto_sim::SimRadio* r) { g_active_radio = r; }
 } // namespace shim_hooks
 
-void LORATracker::send(uint8_t* data, size_t len) {
+void LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
+    // Record the per-frame policy BEFORE the radio check, so a test can assert
+    // what was requested even when no radio is attached.
+    last_copies = policy.copies;
+    sent_copies.push_back(policy.copies);
+
     auto* r = shim_hooks::active_radio();
     if (!r) return;
     proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode,

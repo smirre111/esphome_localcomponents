@@ -48,14 +48,22 @@ public:
     void dump_config() override {}
     void loop() override {}
 
-    // Hub→node TX: emits an AirFrame{HubToNode, bytes} into the active SimRadio.
-    // Drift test: emit one copy instead of the 17-copy burst. Recorded so a
-    // test can assert it is RESTORED to 0 afterwards — leaving the hub on
-    // single copies would quietly halve downlink reliability for every node.
-    void setBurstCopies(int n) { burst_copies = n; }
-    int  burst_copies{0};
+    // Mirrors the production TxPolicy: the copy count belongs to the FRAME,
+    // not to the tracker. The old global setBurstCopies() meant any command
+    // sent during a drift test went out as a single copy.
+    struct TxPolicy {
+        int      copies{0};
+        uint32_t stride_ms{0};
+    };
 
-    void send(uint8_t* data, size_t len);
+    // Hub→node TX: emits an AirFrame{HubToNode, bytes} into the active SimRadio.
+    void send(uint8_t* data, size_t len) { send(data, len, TxPolicy{}); }
+    void send(uint8_t* data, size_t len, const TxPolicy& policy);
+
+    // Per-frame record of how each send was requested, so tests can assert that
+    // a normal command is never silently reduced to one copy.
+    std::vector<int> sent_copies;
+    int last_copies{0};
 
     void register_client(LORAClient* client);
     void register_listener(LORAListener* listener);

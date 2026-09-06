@@ -284,7 +284,8 @@ namespace esphome
           // Simulate processing
           // vTaskDelay(50 / portTICK_PERIOD_MS);
           lora_tx_busy_ = true;
-          this->sendPacketBurst(rx_buffer->data, rx_buffer->length);
+          this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
+                                rx_buffer->tx_copies, rx_buffer->tx_stride_ms);
           lora_tx_busy_ = false;
 
           // Safe hex dump with length check
@@ -339,7 +340,7 @@ namespace esphome
       // ESP_LOGI(TAG, ". : %d", mode);
     }
 
-    void LORATracker::send(uint8_t *data, size_t len)
+    void LORATracker::send(uint8_t *data, size_t len, const TxPolicy &policy)
     {
       // Validate inputs first
       if (!data || len == 0)
@@ -382,6 +383,13 @@ namespace esphome
         rx_buffer->length = copy_len;
         rx_buffer->data[copy_len] = '\0'; // Null terminate for safety
 
+        // The policy travels WITH the frame. Anything stored on the tracker
+        // instead would be read by sendTask at dequeue, by which time the
+        // caller that set it may be long gone and a different frame may be at
+        // the head of the queue.
+        rx_buffer->tx_copies    = policy.copies;
+        rx_buffer->tx_stride_ms = policy.stride_ms;
+
         // Send buffer pointer to data queue
         if (xQueueSend(data_queue, &rx_buffer, 0) != pdTRUE)
         {
@@ -395,16 +403,16 @@ namespace esphome
       }
     }
 
-    void LORATracker::sendPacketBurst(uint8_t *data, size_t len)
+    void LORATracker::sendPacketBurst(uint8_t *data, size_t len, int copies,
+                                      uint32_t stride_ms)
     {
 
       // const TickType_t xFrequency = pdMS_TO_TICKS(142); // For RX /TX config 3x RX + 7x TX
       // const TickType_t xFrequency = pdMS_TO_TICKS(59); // For RX /TX config 3x RX + 17x TX in 1sec
-      const TickType_t xFrequency = pdMS_TO_TICKS(this->txIntervalMs); // For RX /TX config 3x RX + 17x TX in 1.5sec
-
-      // One copy during a drift test — see setBurstCopies().
-      const int burstCopies = (this->burst_copies_ > 0) ? this->burst_copies_
-                                                        : this->txSlotsPerRound;
+      // Both come from the FRAME, not from tracker state; 0 means "the default".
+      const TickType_t xFrequency =
+          pdMS_TO_TICKS(stride_ms > 0 ? stride_ms : (uint32_t) this->txIntervalMs);
+      const int burstCopies = (copies > 0) ? copies : this->txSlotsPerRound;
 
       TickType_t xLastWakeTime;
       ESP_LOGI(TAG, "Sending packed burst");

@@ -809,11 +809,14 @@ splitting it.**
 
 | phase | content | gate |
 |---|---|---|
-| **C0** | Cancel `resumeFallbackCb` on `noteSessionProven()` (`CmdDispatcher.cpp:866`) | fallback no longer fires after a proven session |
-| **C1** | `sleepOk` field; hub sets it when its per-node queue is empty, node sleeps on it | wake 28.1 s → ~7.7 s, measured on a real check-in |
+| **C0** | ~~Cancel `resumeFallbackCb` on `noteSessionProven()`~~ — **LANDED** on node `main`; `noteSessionProven()` now stops `resume_timer_` and the code carries the Tier-0 rationale | fallback no longer fires after a proven session |
+| **C1** | ~~`sleepOk` field~~ — **LANDED**: the field is in the proto and `CmdDispatcher.cpp` sleeps on it | wake 28.1 s → ~7.7 s, measured on a real check-in |
 
 **C0 and C1 are the independent, cheap part of Track C and deliver most of its
-value.** They need nothing from Track B.
+value.** They need nothing from Track B — and both are **already implemented**
+on the node's `main` branch, discovered when the node repository was attached
+for the implementation work. The phasing above was written against an older
+checkout. What remains of Track C is C2 alone.
 
 **C2 — RX1/RX2 windows off TxDone — is not independent** and has been moved out
 of this track (§5.4). It requires, in addition to the node work: hub RX
@@ -825,7 +828,7 @@ Track B below, not here.
 
 | phase | content | gate |
 |---|---|---|
-| **B-1** | `LoraTiming.h` (§2.2) + per-frame TX policy `send(buf, len, {copies, first_mark_us, copy_stride_us})` replacing the global `setBurstCopies` | host tests pin every constant; a single-copy frame is expressible |
+| **B-1** | ~~`LoraTiming.h` (§2.2) + per-frame TX policy replacing the global `setBurstCopies`~~ — **DONE.** `LoraTiming.h`, `TimedGrid.h`, `TimedModePolicy.h`, `ClassAWindows.h` shared and drift-gated; `send(buf, len, {copies, stride_ms})` carries the policy on the buffer. `first_mark_us` deliberately omitted until B1a's scheduler can honour it. **Fixed a live bug:** `setBurstCopies` was tracker state set at enqueue and read at dequeue, so every frame sent during a 300 s drift test — including a user's blind command — went out as one copy, ~5.8 % delivery. | host tests pin every constant; a single-copy frame is expressible |
 | **B0** | GPIO light-sleep wakeup on DIO0 **and** DIO1, disarmed in step with `gpio_intr_disable` (§2.5) | timestamps lose their 100 ms-scale outliers, jitter < 1 ms, **and light-sleep residency is unchanged** |
 | **B1** | Hub grid anchor; bursts start at the addressed node's `T0`. **On air: unchanged.** Includes the startup broadcast demote of §4.6. | bursts observably start on the grid; nothing regresses |
 | **B1a** | **Transmit scheduler on the hub** — replace the single FIFO `data_queue` with a reordering, time-scheduled queue. Required by §4.5's two-round deferral and by C2; expressible in neither today. | a frame can be placed "not before round n+2, behind nothing else" |

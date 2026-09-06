@@ -885,3 +885,79 @@ TEST(RealLoraClient, BeaconWithInvalidClockPublishesNoOffset) {
     EXPECT_FALSE(rig.rol.clock_offset_valid_)
         << "a clockless node must not produce a bogus offset reading";
 }
+
+// ---------------------------------------------------------------------------
+// B-1: the transmit policy belongs to the FRAME, not to the tracker.
+//
+// setBurstCopies() was a mutable field on LORATracker, set by the caller at
+// enqueue and read by sendTask at dequeue. Those are different moments on
+// different tasks, so for the whole 300 s of a drift test EVERY frame the hub
+// sent inherited copies=1 — including an ordinary blind command a user pressed
+// in Home Assistant, delivered at roughly 5.8 % against a node in the normal
+// three-window mode. The old code's comment worried only about leaving the
+// field set afterwards, which is the smaller half of the bug.
+// ---------------------------------------------------------------------------
+
+TEST(TxPolicy, DefaultsToTheFullBurst) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    uint8_t frame[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+    h.tracker.send(frame, sizeof(frame));
+
+    ASSERT_EQ(h.tracker.sent_copies.size(), 1u);
+    EXPECT_EQ(h.tracker.sent_copies[0], 0) << "0 means txSlotsPerRound";
+}
+
+TEST(TxPolicy, SingleCopyIsPerFrameAndDoesNotPersist) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    uint8_t frame[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+    h.tracker.send(frame, sizeof(frame), {/*copies=*/1, /*stride_ms=*/0});
+    h.tracker.send(frame, sizeof(frame));
+
+    ASSERT_EQ(h.tracker.sent_copies.size(), 2u);
+    EXPECT_EQ(h.tracker.sent_copies[0], 1);
+    EXPECT_EQ(h.tracker.sent_copies[1], 0)
+        << "a single-copy frame must not change how the NEXT frame is sent";
+}
+
+TEST(TxPolicy, OrdinaryCommandKeepsItsBurstDuringADriftTest) {
+    // The regression. Start a real drift test on the real LORAListener, then
+    // send an ordinary frame while it is active.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ensure_psa_ready();
+
+    h.rol.start_drift_test(/*duration_s=*/300, /*grid_ms=*/1100);
+    ASSERT_TRUE(h.rol.drift_test_active());
+
+    const size_t before = h.tracker.sent_copies.size();
+    uint8_t user_command[16] = {0};
+    h.tracker.send(user_command, sizeof(user_command));
+
+    ASSERT_GT(h.tracker.sent_copies.size(), before);
+    EXPECT_EQ(h.tracker.sent_copies.back(), 0)
+        << "a user command sent during a drift test must still be bursted; "
+           "one copy is ~5.8 % delivery to a node in three-window mode";
+
+    h.rol.stop_drift_test();
+    EXPECT_FALSE(h.rol.drift_test_active());
+}
+
+TEST(TxPolicy, StoppingADriftTestBurstsTheOffCommand) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ensure_psa_ready();
+
+    h.rol.start_drift_test(/*duration_s=*/300, /*grid_ms=*/1100);
+    h.tracker.sent_copies.clear();
+    h.rol.stop_drift_test();
+
+    // The OFF frame goes out as a normal burst: the node may already have left
+    // continuous RX on its own deadline, and a single copy would likely be lost.
+    ASSERT_FALSE(h.tracker.sent_copies.empty());
+    for (int c : h.tracker.sent_copies)
+        EXPECT_EQ(c, 0) << "the OFF command must be bursted";
+}
