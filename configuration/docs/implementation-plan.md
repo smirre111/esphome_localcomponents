@@ -791,7 +791,7 @@ without M1 and M2 the KPIs of `mac-layer.md` §6 cannot be measured, and B3's ga
 | phase | content | gate |
 |---|---|---|
 | **M0** | Name the layers in the existing code — comments and one header listing what belongs where. No code moves. | a reviewer can say which layer any function is in |
-| **M1** | ~~**MAC control frame + MAC echo.**~~ — **NODE HALF DONE.** `MacControl` in both message directions (field 20); `CmdDispatcher::handleMacControl` counts, timestamps and echoes via `send_tx_buffer`, bypassing the application queues entirely. Six host tests against the real dispatcher. **Hub half outstanding:** sending pings on a grid and recording echoes. | `turnaroundUs` measures `RxDone → TX fire` and nothing else — which is what §4.3's servable-slot rule needs and cannot get today |
+| **M1** | ~~**MAC control frame + MAC echo.**~~ — **DONE, both halves.** `MacControl` in both message directions (field 20). Node: `CmdDispatcher::handleMacControl` counts, timestamps and echoes via `send_tx_buffer`, bypassing the application queues. Hub: `start_mac_ping()` emits one copy per mark on an `esp_timer` grid and records echoes by `seq`. Twelve host tests across both sides. | `turnaroundUs` measures `RxDone → TX fire` and nothing else — which is what §4.3's servable-slot rule needs and cannot get today |
 | **M2** | KPI counters split by funnel stage (`mac-layer.md` §6.1), replacing the mixed-layer success rate | `FER_air`, `FER_link` and `WMR` are separately reportable |
 | **M3** | MAC-1 / MAC-2 switches, with the arming rules of `mac-layer.md` §4 (authenticated arm, unauthenticated traffic; no session ⟹ refuse) | each sublayer's cost is a measured delta, not an estimate |
 
