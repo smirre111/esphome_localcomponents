@@ -210,6 +210,9 @@ endfunction()
 add_header_test(lora_timing_test)
 add_header_test(timed_grid_test)
 add_header_test(mode_a_geometry_test)
+add_header_test(timed_mode_policy_test)
+add_header_test(class_a_windows_test)
+add_header_test(mode_a_reliability_test)
 
 # ----------------------------------------------------------------------------
 # Phase 3: compile the REAL production lora_client.cpp against host shims.
