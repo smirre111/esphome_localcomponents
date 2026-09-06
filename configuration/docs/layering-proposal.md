@@ -7,6 +7,11 @@ The proposal: split what is currently one class on each side into a **link
 layer** (session, crypto, delivery, wake scheduling) and an **application
 layer** (covers, schedules, telemetry).
 
+> **Followed up in `mac-layer.md`**, which draws the boundary precisely enough to
+> test against: the MAC service interface, MAC-0/1/2 as independently switchable
+> sublayers, the frame funnel and KPI definitions, and the finding that `msgId`
+> serves three roles with contradictory retransmission rules.
+
 ---
 
 ## 1. The argument is a list of today's bugs

@@ -20,6 +20,31 @@ Two deliverables:
 §9 lists **four numbers in the plan that these tests cannot reproduce.** Writing
 the specification surfaced them; they are stated rather than smoothed over.
 
+### Scope: this is a MAC-layer test plan
+
+Everything here tests the **MAC layer** — timing, frame error rates and the KPIs
+of `mac-layer.md` §6. The application layer (covers, position, schedules,
+telemetry) is deliberately out of scope, and the boundary is defined in
+`mac-layer.md` §1.
+
+Three consequences run through the whole document:
+
+- **The three modes are MAC-0 constructs.** Mode A's burst geometry, Mode B's
+  slot grid, Mode C's RX1/RX2 offsets — none has an application term. A test
+  that needs to know what a blind is has crossed the boundary.
+- **Security and sequencing are optional sublayers.** MAC-2 (AEAD) and MAC-1
+  (frame counter, replay window) are **off by default** in the on-air test mode
+  and switched on afterwards, so each one's cost lands in a measured delta rather
+  than in the baseline (`mac-layer.md` §4).
+- **A MAC test frame terminates at the MAC.** It is counted, timestamped and
+  echoed without ever reaching the application. This is what closes the "inert
+  frame" gap: there is no application dispatch to make safe, because there is no
+  application dispatch.
+
+Application-layer tests already exist and stay where they are:
+`real_lora_cover_test.cpp`, `scheduler_test.cpp`, `motor_policy_test.cpp`,
+`schedule_text_test.cpp`, `auto_mode_policy_test.cpp`.
+
 ---
 
 ## 1. What "independent" means here, and where it runs out
@@ -547,8 +572,36 @@ message ModeTest {
   uint32 reportEveryS    = 8;   // partial reports; 0 = final only
   uint32 seq             = 9;   // hub's monotonic mark index — the ruler
   int32  armOffsetUs     = 10;  // MODE_SWEEP: deliberate ARM error, for T_detect
+
+  // Sublayers (mac-layer.md §4). BOTH DEFAULT OFF. Turning one on and
+  // re-running the identical grid makes that sublayer's cost a measured delta.
+  bool   enableCounter   = 11;  // MAC-1: frame counter + replay window
+  bool   enableCrypto    = 12;  // MAC-2: AEAD
+  bool   macEcho         = 13;  // MAC-0 replies with no application round trip
 }
 ```
+
+**The grid frame is a MAC control frame.** MAC-0 counts it, timestamps it and —
+with `macEcho` — answers it, and it is never handed to `mac.on_payload`. No
+application code runs, so there is nothing to make inert.
+
+`macEcho` is what makes `turnaroundUs` mean what §4.3 of the plan needs. Today
+the only way to obtain a reply is a command the application answers, so any
+turnaround measured that way contains application dispatch — while the plan's
+20 ms budget "budgets **zero** for DRAIN". A MAC echo measures `RxDone → TX fire`
+and nothing else; `enableCounter` and `enableCrypto` then add their costs back
+separately.
+
+`enableCrypto = false` is not an invented test-only state: the link is already
+unencrypted before the base-nonce exchange, so MAC-0 is the configuration every
+node passes through on every cold boot.
+
+**Arming is authenticated even when the traffic is not.** `ModeTest{enable}`
+travels the normal application path; the frames it produces need no session. Two
+rules follow (`mac-layer.md` §4): a node with **no** session must refuse the arm
+command, or the unauthenticated bootstrap window becomes a way to hold 32 nodes
+in a test mode; and `MODE_SWEEP` — which deliberately mis-arms windows — must be
+refused by any node not flagged as a bench node.
 
 `seq` rather than `msgid` as the ruler mark, for the same reason `DriftTest`
 indexes by msgid: **a frame lost to the air leaves a gap instead of shifting
@@ -561,12 +614,17 @@ message ModeTestReport {
   uint32 seqFirst = 1;  uint32 seqLast = 2;  uint32 elapsedS = 3;
   uint32 mode = 4;      bool   powerProfileProduction = 5;
 
-  // Frames — I1: counted from raw radio events, not from mode state
-  uint32 framesHeard = 10;      // RxDone events, any address
-  uint32 framesCrcOk = 11;
-  uint32 framesAddressed = 12;  // header parsed, destined for me
-  uint32 framesDecoded = 13;    // AEAD ok
-  uint32 crcErrors = 14;  uint32 aeadFailures = 15;  uint32 seqGaps = 16;
+  // The frame funnel (mac-layer.md §6.1), one counter per stage. Stage 0
+  // (offered) is the hub's; stage 1 (on air) is the witness's; neither is
+  // reported here, which is I2. I1: all of these come from raw radio events,
+  // never from mode state.
+  uint32 detected = 10;         // RxDone or RxTimeout fired
+  uint32 crcValid = 11;
+  uint32 addressed = 12;        // MAC-0 filter passed
+  uint32 counterAccepted = 13;  // MAC-1, when enableCounter
+  uint32 micValid = 14;         // MAC-2, when enableCrypto
+  uint32 crcErrors = 15;  uint32 duplicates = 16;  uint32 micFailures = 17;
+  uint32 seqGaps = 18;          // from `seq`, independent of MAC-1 being on
 
   // Windows — the mode's own decisions, reported as VALUES UNDER TEST
   uint32 windowsArmed = 20;  uint32 windowsHit = 21;  uint32 windowsEmpty = 22;
@@ -575,7 +633,7 @@ message ModeTestReport {
   // Timing, in microseconds. Histograms as {min, p50, p95, p99, max, n}.
   Hist phaseErrUs = 30;      // T0_measured − T0_predicted
   Hist armResidualUs = 31;   // t_arm_actual − t_arm_target  (§2.4's ±100 µs claim)
-  Hist turnaroundUs = 32;    // t_reply_fire − t_rxdone      (§12.7)
+  Hist turnaroundUs = 32;    // MAC echo only: t_reply_fire − t_rxdone (§12.7)
   Hist oneShotErrorUs = 33;  // esp_timer one-shot under light sleep (§12.8)
 
   int32  ppmEstimate = 40;  uint32 ppmSamples = 41;  int32 measuredPeriodUs = 42;
@@ -583,8 +641,14 @@ message ModeTestReport {
 
   uint64 sleepUs = 50;  uint64 wallUs = 51;   // light-sleep residency
   uint32 rtcSlowSrc = 52;  uint32 tickRateHz = 53;  uint32 cpuFreqMhz = 54;
+  bool   counterOn = 55;   bool cryptoOn = 56;   // which sublayers this run used
 }
 ```
+
+`counterOn` / `cryptoOn` travel with the numbers for the same reason
+`powerProfileProduction` does: a KPI measured at MAC-0 must never be quoted later
+as a MAC-2 number by accident. That confusion — a figure measured under one
+configuration and cited under another — is exactly what §12.5 of the plan is.
 
 `Hist` is five int32s and a count — not a full histogram. **Distributions, not
 means**: §12.3 flags the RxDone ISR latency as most likely to fail precisely
@@ -650,10 +714,22 @@ dependency-free accumulator the node compiles — fed synthetic event streams:
   must not reset the accumulator; `DriftTest` had exactly this bug shape (a
   re-arm must add to the average rather than restart it, "otherwise the result
   would only ever reflect the final burst")
-- `SuccessRateDenominatorIsTheHubsCount` — `framesHeard / framesOffered`, where
-  `framesOffered` comes from the hub log joined on `seq`. **The node never
-  computes its own success rate**, because the node cannot know what it did not
-  hear. This is I2 in one assertion.
+- `RatesAreNamedApartNotConflated` — `FER_air`, `FER_link` and `WMR`
+  (`mac-layer.md` §6.2) computed from the funnel counters and asserted distinct:
+  a run where the hub silently fails to transmit must move `FER_link` and leave
+  `FER_air` unchanged. Three quantities are routinely called "frame error rate"
+  and they have different fixes.
+- `SuccessRateDenominatorIsTheHubsCount` — `crcValid / offered`, where `offered`
+  comes from the hub log joined on `seq`. **The node never computes its own
+  frame-error rate**, because the node cannot know what it did not hear. This is
+  I2 in one assertion.
+- `CommandSuccessRateIsNotAMacKpi` — a guard test: the report carries no
+  application outcome. Command success mixes MAC loss with application retry and
+  idempotency; it is the right number for judging the product and the wrong one
+  for judging a mode (`mac-layer.md` §6.4).
+- `SeqGapsSurviveMac1BeingOff` — `seq` is an opaque mark, counted whether or not
+  the frame counter is enabled. If gap detection silently depended on MAC-1, the
+  default MAC-0 run would report no losses at all.
 
 ### 10.5 The witness receiver (I5)
 
@@ -740,7 +816,7 @@ report prints*, so a gate is passed or failed rather than argued.
 | **B1** | bursts observably start on the grid; nothing regresses | witness log: first copy within ±2 ms of `T0_k`; `framesDecoded` rate unchanged vs the pre-B1 run |
 | **B1a** | a frame can be placed "not before round n+2, behind nothing else" | mixed-mode run: zero collisions where the hub also held traffic for the timed node |
 | **B2** | `phaseErrUs` inside ±2 ms in the field, on every node, over days | `phaseErrUs` p99 < 2000 µs, **unimodal** — a bimodal distribution at 0 and ±46.9 ms is the unfiltered-sample bug of §5.5 |
-| **B3** | `T_detect` measured first; then reception ≥ Mode A over a week | HW-2 completed; then `framesDecoded/framesOffered` in `MODE_B` ≥ the `MODE_A` arm of the same week, both joined against the witness |
+| **B3** | `T_detect` measured first; then reception ≥ Mode A over a week | HW-2 completed; then **`WMR`** in `MODE_B` ≤ the `MODE_A` arm of the same week, with **`FER_air` equal within noise** across both arms at equal payload and power. If `FER_air` differs, the two arms are not a fair comparison and the `WMR` result means nothing — that check is the gate, not a footnote. |
 | **B4** | command success rate unchanged over a week | end-to-end ack rate, single-copy vs burst, same denominator |
 | **B5** | p99 fire residual < 200 µs | `armResidualUs` p99 on the node; **the hub half is unmeasurable as built** — no `gpio_isr_handler_add` anywhere in the hub component, and `lora_endPacket(false)` polls `REG_IRQ_FLAGS` with `esphome::delay(2)`. Needs a wired DIO0 on the hub or a scope. |
 | **Bx** | an uplink's `T0` known to ±1 ms | witness cross-check of the hub's new timestamp |
@@ -784,6 +860,11 @@ than no test plan.
 
 ## 12. Cross-references
 
+- `mac-layer.md` — **the layer boundary this plan is scoped to**: the MAC
+  service interface, the MAC-0/1/2 sublayers, the frame funnel and the KPI
+  definitions of §6, and the `msgId` triple-overload finding.
+- `layering-proposal.md` — the original link/application argument (2026-08-31)
+  that `mac-layer.md` sharpens.
 - `implementation-plan.md` — authoritative design; §9 sketches these tests, §10
   the defects they are written against, §12 the measurements §10.6 closes.
 - `mode-diagrams.md` — to-scale timing, sequences and power states.
