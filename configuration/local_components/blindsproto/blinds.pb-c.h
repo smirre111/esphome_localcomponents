@@ -28,6 +28,7 @@ typedef struct ScheduleConfig ScheduleConfig;
 typedef struct NodeWakeBeacon NodeWakeBeacon;
 typedef struct LoraHeader LoraHeader;
 typedef struct DriftTest DriftTest;
+typedef struct MacControl MacControl;
 typedef struct LoraClientOperationMessage LoraClientOperationMessage;
 typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
@@ -38,6 +39,18 @@ typedef struct LoraClientResponseMessage LoraClientResponseMessage;
 
 /* --- enums --- */
 
+typedef enum _MacControl__Kind {
+  MAC_CONTROL__KIND__MAC_UNSPEC = 0,
+  /*
+   * hub -> node: the ruler mark
+   */
+  MAC_CONTROL__KIND__MAC_PING = 1,
+  /*
+   * node -> hub: MAC-0's reply, no application involved
+   */
+  MAC_CONTROL__KIND__MAC_ECHO = 2
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(MAC_CONTROL__KIND)
+} MacControl__Kind;
 typedef enum _CovOperation {
   COV_OPERATION__CMD_OPEN = 0,
   COV_OPERATION__CMD_CLOSE = 1,
@@ -510,6 +523,48 @@ struct  DriftTest
     , 0, 0, 0 }
 
 
+/*
+ * MAC-layer control frame (configuration/docs/mac-layer.md section 5).
+ * Consumed by the MAC: counted, timestamped, optionally echoed, and NEVER
+ * handed to the application. That is the whole point of it — there is no inert
+ * command to guard against, because no application code runs. It makes the MAC
+ * measurable on its own: frame yield and timing without cover operations,
+ * schedules or a motor anywhere in the path.
+ * Deliberately usable with no session. The link is already unencrypted before
+ * the base-nonce exchange, so an unencrypted MAC ping is not a new mode, it is
+ * the state every node passes through on every cold boot. Security and the
+ * frame counter are separate sublayers that get switched on afterwards, so each
+ * one's cost lands in a measured delta rather than in the baseline.
+ * ARMING a test is authenticated even when the traffic being measured is not:
+ * a node with no session must refuse to start one.
+ */
+struct  MacControl
+{
+  ProtobufCMessage base;
+  MacControl__Kind kind;
+  /*
+   * Opaque mark, carried whether or not the frame counter sublayer is on. A
+   * frame lost to the air leaves a GAP rather than shifting every later
+   * sample, which is why this is not derived from msgid.
+   */
+  uint32_t seq;
+  /*
+   * MAC-0 answers without an application round trip. This is what makes a
+   * measured turnaround mean RxDone -> TX fire and nothing else.
+   */
+  protobuf_c_boolean wantecho;
+  /*
+   * Pads time on air so a sweep can cover the 25 / 45 / 60 / 152 B frame
+   * table; the FIFO read is per byte, so turnaround must be measured as a
+   * function of length.
+   */
+  ProtobufCBinaryData pad;
+};
+#define MAC_CONTROL__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&mac_control__descriptor) \
+    , MAC_CONTROL__KIND__MAC_UNSPEC, 0, 0, {0,NULL} }
+
+
 typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET = 0,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION = 10,
@@ -521,6 +576,7 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC = 16,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE = 17,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST = 18,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL = 20,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
@@ -546,6 +602,12 @@ struct  LoraClientOperationMessage
      */
     EncryptedPayload *encrypted;
     LoginMsg *login;
+    /*
+     * MAC-layer control frame. Terminates at the MAC; a node that does not
+     * know this field ignores it (proto3 unknown-field behaviour), so it is
+     * safe to ship to a hub ahead of the nodes.
+     */
+    MacControl *maccontrol;
     LoraCoverOperation *operation;
     ScheduleConfig *schedule;
     /*
@@ -621,6 +683,7 @@ typedef enum {
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN = 14,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK = 15,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON = 16,
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL = 20,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_RESPONSE_MESSAGE__PROTO__CASE)
 } LoraClientResponseMessage__ProtoCase;
@@ -643,6 +706,14 @@ struct  LoraClientResponseMessage
      */
     EncryptedPayload *encrypted;
     LoginMsg *login;
+    /*
+     * MAC-layer echo. Emitted by MAC-0 in reply to a MacControl ping,
+     * WITHOUT any application round trip — that is what makes a measured
+     * turnaround mean RxDone -> TX fire and nothing else. Today the only
+     * way to get a reply is a command the application answers, so any
+     * turnaround measured that way silently includes application dispatch.
+     */
+    MacControl *maccontrol;
     CoverPosition *position;
     ClientRegister *register_;
     ClientBattery *state;
@@ -900,6 +971,25 @@ DriftTest *
 void   drift_test__free_unpacked
                      (DriftTest *message,
                       ProtobufCAllocator *allocator);
+/* MacControl methods */
+void   mac_control__init
+                     (MacControl         *message);
+size_t mac_control__get_packed_size
+                     (const MacControl   *message);
+size_t mac_control__pack
+                     (const MacControl   *message,
+                      uint8_t             *out);
+size_t mac_control__pack_to_buffer
+                     (const MacControl   *message,
+                      ProtobufCBuffer     *buffer);
+MacControl *
+       mac_control__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   mac_control__free_unpacked
+                     (MacControl *message,
+                      ProtobufCAllocator *allocator);
 /* LoraClientOperationMessage methods */
 void   lora_client_operation_message__init
                      (LoraClientOperationMessage         *message);
@@ -1055,6 +1145,9 @@ typedef void (*LoraHeader_Closure)
 typedef void (*DriftTest_Closure)
                  (const DriftTest *message,
                   void *closure_data);
+typedef void (*MacControl_Closure)
+                 (const MacControl *message,
+                  void *closure_data);
 typedef void (*LoraClientOperationMessage_Closure)
                  (const LoraClientOperationMessage *message,
                   void *closure_data);
@@ -1099,6 +1192,8 @@ extern const ProtobufCMessageDescriptor schedule_config__descriptor;
 extern const ProtobufCMessageDescriptor node_wake_beacon__descriptor;
 extern const ProtobufCMessageDescriptor lora_header__descriptor;
 extern const ProtobufCMessageDescriptor drift_test__descriptor;
+extern const ProtobufCMessageDescriptor mac_control__descriptor;
+extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_operation_message__descriptor;
 extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;

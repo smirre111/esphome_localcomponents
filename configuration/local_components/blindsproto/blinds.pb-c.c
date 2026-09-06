@@ -592,6 +592,51 @@ void   drift_test__free_unpacked
   assert(message->base.descriptor == &drift_test__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   mac_control__init
+                     (MacControl         *message)
+{
+  static const MacControl init_value = MAC_CONTROL__INIT;
+  *message = init_value;
+}
+size_t mac_control__get_packed_size
+                     (const MacControl *message)
+{
+  assert(message->base.descriptor == &mac_control__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t mac_control__pack
+                     (const MacControl *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &mac_control__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t mac_control__pack_to_buffer
+                     (const MacControl *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &mac_control__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+MacControl *
+       mac_control__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (MacControl *)
+     protobuf_c_message_unpack (&mac_control__descriptor,
+                                allocator, len, data);
+}
+void   mac_control__free_unpacked
+                     (MacControl *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &mac_control__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   lora_client_operation_message__init
                      (LoraClientOperationMessage         *message)
 {
@@ -1981,7 +2026,114 @@ const ProtobufCMessageDescriptor drift_test__descriptor =
   (ProtobufCMessageInit) drift_test__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[11] =
+static const ProtobufCEnumValue mac_control__kind__enum_values_by_number[3] =
+{
+  { "MAC_UNSPEC", "MAC_CONTROL__KIND__MAC_UNSPEC", 0 },
+  { "MAC_PING", "MAC_CONTROL__KIND__MAC_PING", 1 },
+  { "MAC_ECHO", "MAC_CONTROL__KIND__MAC_ECHO", 2 },
+};
+static const ProtobufCIntRange mac_control__kind__value_ranges[] = {
+{0, 0},{0, 3}
+};
+static const ProtobufCEnumValueIndex mac_control__kind__enum_values_by_name[3] =
+{
+  { "MAC_ECHO", 2 },
+  { "MAC_PING", 1 },
+  { "MAC_UNSPEC", 0 },
+};
+const ProtobufCEnumDescriptor mac_control__kind__descriptor =
+{
+  PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
+  "MacControl.Kind",
+  "Kind",
+  "MacControl__Kind",
+  "",
+  3,
+  mac_control__kind__enum_values_by_number,
+  3,
+  mac_control__kind__enum_values_by_name,
+  1,
+  mac_control__kind__value_ranges,
+  NULL,NULL,NULL,NULL   /* reserved[1234] */
+};
+static const ProtobufCFieldDescriptor mac_control__field_descriptors[4] =
+{
+  {
+    "kind",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(MacControl, kind),
+    &mac_control__kind__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "seq",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(MacControl, seq),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "wantEcho",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(MacControl, wantecho),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "pad",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(MacControl, pad),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned mac_control__field_indices_by_name[] = {
+  0,   /* field[0] = kind */
+  3,   /* field[3] = pad */
+  1,   /* field[1] = seq */
+  2,   /* field[2] = wantEcho */
+};
+static const ProtobufCIntRange mac_control__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 4 }
+};
+const ProtobufCMessageDescriptor mac_control__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "MacControl",
+  "MacControl",
+  "MacControl",
+  "",
+  sizeof(MacControl),
+  4,
+  mac_control__field_descriptors,
+  mac_control__field_indices_by_name,
+  1,  mac_control__number_ranges,
+  (ProtobufCMessageInit) mac_control__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[12] =
 {
   {
     "header",
@@ -2115,6 +2267,18 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "maccontrol",
+    20,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, maccontrol),
+    &mac_control__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   7,   /* field[7] = basenonce */
@@ -2124,16 +2288,18 @@ static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   1,   /* field[1] = encrypted */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
+  11,   /* field[11] = maccontrol */
   2,   /* field[2] = operation */
   9,   /* field[9] = schedule */
   3,   /* field[3] = sysop */
   8,   /* field[8] = timesync */
 };
-static const ProtobufCIntRange lora_client_operation_message__number_ranges[2 + 1] =
+static const ProtobufCIntRange lora_client_operation_message__number_ranges[3 + 1] =
 {
   { 1, 0 },
   { 9, 1 },
-  { 0, 11 }
+  { 20, 11 },
+  { 0, 12 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -2143,10 +2309,10 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  11,
+  12,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
-  2,  lora_client_operation_message__number_ranges,
+  3,  lora_client_operation_message__number_ranges,
   (ProtobufCMessageInit) lora_client_operation_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
@@ -2341,7 +2507,7 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   (ProtobufCMessageInit) cover_position__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[9] =
+static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[10] =
 {
   {
     "header",
@@ -2451,6 +2617,18 @@ static const ProtobufCFieldDescriptor lora_client_response_message__field_descri
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "maccontrol",
+    20,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientResponseMessage, proto_case),
+    offsetof(LoraClientResponseMessage, maccontrol),
+    &mac_control__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_response_message__field_indices_by_name[] = {
   7,   /* field[7] = ack */
@@ -2459,15 +2637,17 @@ static const unsigned lora_client_response_message__field_indices_by_name[] = {
   1,   /* field[1] = encrypted */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
+  9,   /* field[9] = maccontrol */
   5,   /* field[5] = position */
   3,   /* field[3] = register */
   4,   /* field[4] = state */
 };
-static const ProtobufCIntRange lora_client_response_message__number_ranges[2 + 1] =
+static const ProtobufCIntRange lora_client_response_message__number_ranges[3 + 1] =
 {
   { 1, 0 },
   { 9, 1 },
-  { 0, 9 }
+  { 20, 9 },
+  { 0, 10 }
 };
 const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
 {
@@ -2477,10 +2657,10 @@ const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
   "LoraClientResponseMessage",
   "",
   sizeof(LoraClientResponseMessage),
-  9,
+  10,
   lora_client_response_message__field_descriptors,
   lora_client_response_message__field_indices_by_name,
-  2,  lora_client_response_message__number_ranges,
+  3,  lora_client_response_message__number_ranges,
   (ProtobufCMessageInit) lora_client_response_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };

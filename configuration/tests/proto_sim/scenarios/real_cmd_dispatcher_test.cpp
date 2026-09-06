@@ -2285,3 +2285,135 @@ TEST_F(RealNodeFixture, AModeSysopDoesNotLeakIntoTheSystemCommandQueue) {
     disp.handleSysop(&op, &hdr);
     EXPECT_TRUE(sys.getAutoMode());   // handled, and handled only once
 }
+
+// ---------------------------------------------------------------------------
+// M1 — the MAC control frame terminates at MAC-0.
+//
+// Built with the REAL protobuf-c stubs rather than the sim's hand-written
+// mirror, so the bytes are exactly what the hub puts on the air. The mirror
+// never covered DriftTest either; for a frame whose whole purpose is to be
+// measured, byte fidelity is the point.
+//
+// What these assert is the layer boundary: a MacControl frame is counted,
+// timestamped and echoed, and NO application handler runs. That is why it is
+// safe to send at any time — there is no inert command to design, because
+// there is no application dispatch.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<uint8_t> build_mac_ping(uint32_t seq, bool want_echo,
+                                    uint32_t msgid, size_t pad_bytes = 0) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = 1;          // the hub
+    hdr.msgid         = msgid;
+
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind     = MAC_CONTROL__KIND__MAC_PING;
+    mc.seq      = seq;
+    mc.wantecho = want_echo;
+
+    std::vector<uint8_t> pad(pad_bytes, 0xAB);
+    if (pad_bytes) { mc.pad.len = pad.size(); mc.pad.data = pad.data(); }
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header     = &hdr;
+    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.maccontrol = &mc;
+
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, MacPingIsCountedAndTimestamped) {
+    ASSERT_EQ(disp.macCounters().ping_rx, 0u);
+
+    auto bytes = build_mac_ping(/*seq=*/7, /*want_echo=*/false, /*msgid=*/1000);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u);
+    EXPECT_EQ(disp.macCounters().last_seq, 7u);
+}
+
+TEST_F(RealNodeFixture, MacPingWithoutEchoSendsNothing) {
+    auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/1000);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u);
+    EXPECT_EQ(disp.macCounters().echo_tx, 0u);
+}
+
+TEST_F(RealNodeFixture, MacPingWithEchoRepliesFromMac0) {
+    auto bytes = build_mac_ping(/*seq=*/42, /*want_echo=*/true, /*msgid=*/1000);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u);
+    EXPECT_EQ(disp.macCounters().echo_tx, 1u)
+        << "MAC-0 must answer without any application round trip";
+    EXPECT_EQ(disp.macCounters().echo_failed, 0u);
+    EXPECT_EQ(disp.macCounters().last_seq, 42u);
+}
+
+TEST_F(RealNodeFixture, SeqIsCarriedNotDerivedFromMsgid) {
+    // A frame lost to the air must leave a GAP rather than shifting every
+    // later sample, which is why seq is its own field. Send marks 5 and 9 with
+    // consecutive msgids: the node reports the MARK, not the msgid.
+    // msgids stay near the node's own counter: the replay window rejects an
+    // id too far ahead ("Rejected message ID: 2000 ... my MsgID: 0"). That
+    // check is MAC-1 admission, and today it is entangled with MAC-0 — which
+    // is exactly why mac-layer.md wants the sublayer independently switchable.
+    auto a = build_mac_ping(/*seq=*/5, false, /*msgid=*/100);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    EXPECT_EQ(disp.macCounters().last_seq, 5u);
+
+    auto b = build_mac_ping(/*seq=*/9, false, /*msgid=*/101);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
+    EXPECT_EQ(disp.macCounters().last_seq, 9u);
+    EXPECT_EQ(disp.macCounters().ping_rx, 2u);
+}
+
+TEST_F(RealNodeFixture, MacEchoFromAPeerIsIgnored) {
+    // Only a PING is actionable. An echo arriving at a node is either our own
+    // frame looped back or a peer misbehaving; if the node answered it, two
+    // nodes could echo each other indefinitely.
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr;
+    hdr.destsubnet  = kSubnet;
+    hdr.senderaddress = 1;
+    hdr.msgid = 300;
+
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind     = MAC_CONTROL__KIND__MAC_ECHO;
+    mc.seq      = 3;
+    mc.wantecho = true;                 // even so: no reply
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.maccontrol = &mc;
+
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_EQ(disp.macCounters().ping_rx, 0u);
+    EXPECT_EQ(disp.macCounters().echo_tx, 0u);
+}
+
+TEST_F(RealNodeFixture, PaddingSweepsTimeOnAirWithoutChangingBehaviour) {
+    // The FIFO read is per byte, so turnaround has to be measurable as a
+    // function of frame length. Padding must not change what the MAC does.
+    for (size_t pad : {size_t{0}, size_t{20}, size_t{100}}) {
+        disp.resetMacCounters();
+        auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/true,
+                                    /*msgid=*/(uint32_t)(200 + pad), pad);
+        EXPECT_GT(bytes.size(), pad);
+        disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+        EXPECT_EQ(disp.macCounters().ping_rx, 1u) << "pad " << pad;
+        EXPECT_EQ(disp.macCounters().echo_tx, 1u) << "pad " << pad;
+    }
+}

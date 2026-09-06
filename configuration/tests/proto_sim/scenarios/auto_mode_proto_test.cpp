@@ -242,17 +242,23 @@ TEST(AutoModeProto, FutureFieldNumberDecodesAsNotSetKeepingHeaderReadable) {
     // so on) — direction picks the parser, so cross-parsing a real message
     // would test a case that cannot occur on air.
     //
-    // Frame = field 1 (header, submessage) + field 20 (unknown, length-delim).
+    // Frame = field 1 (header, submessage) + field 30 (unknown, length-delim).
+    //
+    // This used to use field 20, and field 20 became MacControl — at which
+    // point the test failed, correctly: it can only mean what it says while the
+    // number it picks is genuinely unassigned in BOTH message types. Whoever
+    // next claims 30 will get the same failure and should move it again rather
+    // than weaken the assertion.
     ps::LoraClientResponseMessage hdr_only;
     hdr_only.header = make_header();
     hdr_only.header.senderAddress = 17;
     hdr_only.proto  = ps::LoraClientResponseMessage::Proto::NotSet;
     std::vector<uint8_t> bytes = ps::serialize_resp(hdr_only);
 
-    // Append field 20, wire type 2 (length-delimited): tag = 20<<3 | 2 = 162,
-    // which is a two-byte varint (0xA2 0x01).
+    // Append field 30, wire type 2 (length-delimited): tag = 30<<3 | 2 = 242,
+    // which is a two-byte varint (0xF2 0x01).
     const uint8_t unknown_payload[] = {0x08, 0x2A};   // arbitrary inner bytes
-    bytes.push_back(0xA2);
+    bytes.push_back(0xF2);
     bytes.push_back(0x01);
     bytes.push_back(sizeof(unknown_payload));
     bytes.insert(bytes.end(), std::begin(unknown_payload), std::end(unknown_payload));
