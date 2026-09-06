@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 320" width="980" height="320" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="980" height="320" fill="#ffffff"/>
+<text x="16.0" y="26.0" font-size="15" fill="#1b1f24" text-anchor="start" font-weight="600">2 — Mode A (today): 17 copies sweep across a windowed receiver</text>
+<text x="82.0" y="90.0" font-size="11" fill="#1b1f24" text-anchor="end" font-weight="600">hub</text>
+<rect x="92.0" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="140.7" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="189.4" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="238.1" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="286.8" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="335.5" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="384.2" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="432.9" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="481.5" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="530.2" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="578.9" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="627.6" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="676.3" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="725.0" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="773.7" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="822.4" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="871.1" y="74.0" width="23.3" height="24.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<text x="507.0" y="64.0" font-size="10.5" fill="#bc4c00" text-anchor="middle" font-weight="600">17 copies · 88 ms apart · each 42.0 ms on air</text>
+<text x="82.0" y="152.0" font-size="11" fill="#1b1f24" text-anchor="end" font-weight="600">node</text>
+<rect x="104.2" y="136.0" width="16.3" height="24.0" fill="#ddf4ff" opacity="1.0" rx="2" stroke="#0969da" stroke-width="1"/>
+<rect x="380.8" y="136.0" width="16.3" height="24.0" fill="#ddf4ff" opacity="1.0" rx="2" stroke="#0969da" stroke-width="1"/>
+<rect x="657.5" y="136.0" width="16.3" height="24.0" fill="#ddf4ff" opacity="1.0" rx="2" stroke="#0969da" stroke-width="1"/>
+<text x="507.0" y="184.0" font-size="10.5" fill="#0969da" text-anchor="middle" font-weight="600">3 windows · 29.44 ms every 500 ms · duty 5.9 %</text>
+<line x1="387.2" y1="98.0" x2="387.2" y2="136.0" stroke="#1a7f37" stroke-width="1.4" stroke-dasharray="2 2"/>
+<circle cx="387.2" cy="133.0" r="3" fill="#1a7f37"/>
+<rect x="92.0" y="212.0" width="830.0" height="96.0" fill="#f6f8fa" opacity="1.0" rx="4" stroke="#d8dee4" stroke-width="1"/>
+<text x="108.0" y="234.0" font-size="11" fill="#1b1f24" text-anchor="start" font-weight="600">P( ≥1 copy heard per round )</text>
+<text x="108.0" y="256.0" font-size="10.5" fill="#57606a" text-anchor="start" font-weight="400">3 windows, 17 copies  (today)</text>
+<text x="492.0" y="256.0" font-size="11" fill="#1a7f37" text-anchor="start" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">96.4 %</text>
+<text x="108.0" y="274.0" font-size="10.5" fill="#57606a" text-anchor="start" font-weight="400">1 window, 17 copies, unsynchronised</text>
+<text x="492.0" y="274.0" font-size="11" fill="#cf222e" text-anchor="start" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">32.9 %</text>
+<text x="108.0" y="292.0" font-size="10.5" fill="#57606a" text-anchor="start" font-weight="400">1 window, 1 copy, synchronised  (Mode B)</text>
+<text x="492.0" y="292.0" font-size="11" fill="#1a7f37" text-anchor="start" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">~100 %</text>
+<text x="562.0" y="256.0" font-size="10" fill="#57606a" text-anchor="start" font-weight="400">88 ms against 500 ms is incommensurate, so copies sweep</text>
+<text x="562.0" y="272.0" font-size="10" fill="#57606a" text-anchor="start" font-weight="400">across the window. Treating the 3 windows as independent</text>
+<text x="562.0" y="288.0" font-size="10" fill="#57606a" text-anchor="start" font-weight="400">gives 69.8 % — wrong by 27 points.</text>
+</svg>

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 300" width="980" height="300" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="980" height="300" fill="#ffffff"/>
+<text x="16.0" y="26.0" font-size="15" fill="#1b1f24" text-anchor="start" font-weight="600">1 — Frame anatomy: T0 = SFD end is the reference both ends name</text>
+<rect x="90.0" y="92.0" width="149.6" height="34.0" fill="#fff1e5" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="239.6" y="92.0" width="97.7" height="34.0" fill="#ffe0c2" opacity="1.0" rx="2" stroke="#bc4c00" stroke-width="1"/>
+<rect x="337.4" y="92.0" width="572.6" height="34.0" fill="#f6f8fa" opacity="1.0" rx="2" stroke="#57606a" stroke-width="1"/>
+<text x="164.8" y="113.0" font-size="10.5" fill="#bc4c00" text-anchor="middle" font-weight="600">preamble + sync + SFD</text>
+<text x="288.5" y="113.0" font-size="10.5" fill="#bc4c00" text-anchor="middle" font-weight="600">header</text>
+<text x="623.7" y="113.0" font-size="10.5" fill="#57606a" text-anchor="middle" font-weight="400">payload …</text>
+<text x="80.0" y="113.0" font-size="11" fill="#1b1f24" text-anchor="end" font-weight="600">air</text>
+<line x1="239.6" y1="62.0" x2="239.6" y2="184.0" stroke="#1b1f24" stroke-width="2"/>
+<text x="239.6" y="56.0" font-size="12.5" fill="#1b1f24" text-anchor="middle" font-weight="700">T0  (SFD end)</text>
+<line x1="90.0" y1="144.0" x2="239.6" y2="144.0" stroke="#bc4c00" stroke-width="1"/>
+<path d="M90.0,144 l4,-3 l0,6 z" fill="#bc4c00"/>
+<path d="M239.6,144 l-4,-3 l0,6 z" fill="#bc4c00"/>
+<text x="164.8" y="139.0" font-size="10" fill="#bc4c00" text-anchor="middle" font-weight="500">T_pre = 3136 µs</text>
+<line x1="239.6" y1="144.0" x2="337.4" y2="144.0" stroke="#bc4c00" stroke-width="1"/>
+<path d="M239.6,144 l4,-3 l0,6 z" fill="#bc4c00"/>
+<path d="M337.4,144 l-4,-3 l0,6 z" fill="#bc4c00"/>
+<text x="288.5" y="139.0" font-size="10" fill="#bc4c00" text-anchor="middle" font-weight="500">T_hdr = 2048 µs</text>
+<line x1="90.0" y1="84.0" x2="90.0" y2="150.0" stroke="#57606a" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="96.0" y="162.0" font-size="10" fill="#57606a" text-anchor="start" font-weight="600">air start</text>
+<line x1="79.5" y1="84.0" x2="79.5" y2="168.0" stroke="#bc4c00" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="85.5" y="180.0" font-size="10" fill="#bc4c00" text-anchor="start" font-weight="600">hub FIRE — RegOpMode = TX</text>
+<line x1="337.4" y1="84.0" x2="337.4" y2="150.0" stroke="#cf222e" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="337.4" y="162.0" font-size="10" fill="#cf222e" text-anchor="middle" font-weight="600">ValidHeader — DIO3 NOT ROUTED</text>
+<text x="80.0" y="224.0" font-size="11" fill="#1b1f24" text-anchor="end" font-weight="600">node</text>
+<text x="623.7" y="224.0" font-size="11" fill="#0969da" text-anchor="middle" font-weight="600">RxDone  →  T0 = t_rxdone − n_sym(len)·T_sym</text>
+<line x1="910.0" y1="206.0" x2="910.0" y2="230.0" stroke="#0969da" stroke-width="1.6"/>
+<text x="90.0" y="252.0" font-size="10.5" fill="#57606a" text-anchor="start" font-weight="400" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">hub:   T0 = t_fire + d_tx_ramp + T_pre        (d_tx_ramp ≈ 220 µs — UNMEASURED)</text>
+<text x="90.0" y="268.0" font-size="10.5" fill="#57606a" text-anchor="start" font-weight="400" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">node:  T0 = t_rxdone − n_sym(len)·T_sym       one line; never subtract T_hdr separately</text>
+<text x="90.0" y="290.0" font-size="10.5" fill="#57606a" text-anchor="start" font-weight="400">T_sym 256 µs   ·   ack 25 B 21.6 ms   ·   beacon 45 B 33.9 ms   ·   command 60 B 42.0 ms   ·   ScheduleConfig 152 B 95.3 ms</text>
+</svg>
