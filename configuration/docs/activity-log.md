@@ -34,16 +34,19 @@ causes on the node (`BlindsESP`, branch
 - **Single unaveraged sample.** One `adc_oneshot_read` per measurement (the
   10-sample helper in `SystemCtrl` was never wired up). Now a trimmed mean of
   16 samples (3 lowest + 3 highest dropped).
-- **Load sag cached and echoed.** The measurement triggered at the end of a move
-  was taken while the pack was still sagging under the motor load, and that value
-  went into the last-known-good cache, which *every* battery **and** position
-  frame then echoes until the next measurement — hence the same wrong value
-  frame after frame, and worse the lower (higher internal resistance) the pack
-  got. The post-move measurement now waits 2.5 s for recovery, is skipped
-  entirely while the motor holds the supply (with retries), and is range-checked
-  (6 – 15 V) before it may enter the cache. `checkQueuesIdle()` counts a pending
-  or in-progress measurement as busy so a sleep request cannot cut the post-move
-  update short.
+- **Garbage allowed into the cache.** Any reading at all went into the
+  last-known-good cache, which *every* battery **and** position frame echoes
+  until the next measurement — so one bad value was reported frame after frame.
+  Readings are now range-checked (6 – 15 V) before they may enter the cache, and
+  `checkQueuesIdle()` counts a pending or in-progress measurement as busy so a
+  sleep request cannot cut a post-move update short.
+- **Deliberately kept: the post-move reading is taken immediately, under load.**
+  The measurement triggered at the end of a move still runs straight away, and
+  still runs (without touching the supply) while the motor holds it. The sag it
+  captures is the wanted signal — that is how a weakening pack announces itself.
+  The consequence is that the sagged value stays in the cache and is echoed by
+  later frames until the next measurement; shorten `battery_update_interval` if
+  that window matters.
 - **Cache primed at boot.** A deep-sleep wake is a cold boot, so the cache started
   at 0 V and every frame carried 0 V until the first measurement. The task now
   takes one cache-only measurement at start (no TX — the LoRa session is not up
