@@ -16,6 +16,47 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-09-06 — v1.0.13: battery voltage conversion, sampling and load-sag fixes
+
+Symptom: as a pack discharged, the hub kept reporting the same too-low voltage
+(~10.7 V) over and over instead of a moving, correct value. Three separate
+causes on the node (`BlindsESP`, branch
+`claude/blindsesp-battery-voltage-adc-78srik`):
+
+- **Wrong ADC scale (~11 % low).** `taskBatteryMonitor` converted raw counts with
+  a full scale of `3.95 V / 2` — the nominal 12 dB full scale halved for the
+  6 dB attenuation actually configured. The real 6 dB full scale is ~2.2 V
+  (Vref ~1.1 V × 2), so a 12.1 V pack was reported as ~10.7 V, i.e. already
+  "empty" on the hub's 9.6 – 12.6 V (3S) scale. Conversion now goes through the
+  chip's eFuse ADC calibration (`adc_cali_raw_to_voltage`, line-fitting scheme on
+  the ESP32), which also linearises the SAR curve; a per-board trim constant and
+  a nominal-full-scale fallback remain for chips without calibration data.
+- **Single unaveraged sample.** One `adc_oneshot_read` per measurement (the
+  10-sample helper in `SystemCtrl` was never wired up). Now a trimmed mean of
+  16 samples (3 lowest + 3 highest dropped).
+- **Load sag cached and echoed.** The measurement triggered at the end of a move
+  was taken while the pack was still sagging under the motor load, and that value
+  went into the last-known-good cache, which *every* battery **and** position
+  frame then echoes until the next measurement — hence the same wrong value
+  frame after frame, and worse the lower (higher internal resistance) the pack
+  got. The post-move measurement now waits 2.5 s for recovery, is skipped
+  entirely while the motor holds the supply (with retries), and is range-checked
+  (6 – 15 V) before it may enter the cache. `checkQueuesIdle()` counts a pending
+  or in-progress measurement as busy so a sleep request cannot cut the post-move
+  update short.
+- **Cache primed at boot.** A deep-sleep wake is a cold boot, so the cache started
+  at 0 V and every frame carried 0 V until the first measurement. The task now
+  takes one cache-only measurement at start (no TX — the LoRa session is not up
+  yet).
+- **Hub-side guard** (`loracover/sensor/lora_sensor.cpp`): battery/voltage are no
+  longer published from STATE or POSITION frames when the value is outside
+  6 – 15 V, so a node's un-measured 0 V no longer lands in HA history as 0 %.
+
+Node → v1.0.13. Not yet flashed/verified on hardware: after flashing, compare the
+`Battery: raw=… -> …V` log line against a multimeter at the pack terminals and,
+if the divider resistors are off nominal, adjust `kBattTrimFactor` in
+`main/frtosTasks.cpp`.
+
 ### 2026-07-27 — v1.0.12: configurable battery interval + stale-proto cleanup
 
 - **Battery update interval is now configurable from the hub YAML** (default

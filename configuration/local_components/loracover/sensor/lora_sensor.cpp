@@ -9,6 +9,15 @@ namespace esphome
 
     static const char *const TAG = "loracov";
 
+    // 3S Li-ion pack: the hub maps 9.6 - 12.6 V onto 0 - 100 %.  Anything far
+    // outside that window is not a battery state but a node that has no
+    // measurement yet (its last-known-good cache still holds 0 V) or a corrupt
+    // reading — publishing it would put a bogus 0 V / 0 % point into HA history.
+    static bool battery_voltage_plausible(float voltage)
+    {
+      return voltage >= 6.0f && voltage <= 15.0f;
+    }
+
     void LoraCover::dump_config()
     {
       ESP_LOGCONFIG(TAG, "LORA_COVER");
@@ -172,14 +181,23 @@ namespace esphome
         float battery_level = (voltage - 3.2*3) / (4.2*3 - 3.2*3) * 100.0;
         battery_level = std::clamp(battery_level, 0.0f, 100.0f);
 
-        if (this->battery_ != nullptr)
+        // A node that has not completed a measurement yet (fresh boot / deep-sleep
+        // wake) reports 0 V from its last-known-good cache.  Publishing that would
+        // show up as a 0 V / 0 % spike in HA, so drop implausible values instead.
+        if (battery_voltage_plausible(voltage))
         {
-          this->battery_->publish_state(battery_level);
-
+          if (this->battery_ != nullptr)
+          {
+            this->battery_->publish_state(battery_level);
+          }
+          if (this->voltage_ != nullptr)
+          {
+            this->voltage_->publish_state(voltage);
+          }
         }
-        if (this->voltage_ != nullptr)
+        else
         {
-          this->voltage_->publish_state(voltage);
+          ESP_LOGW(TAG, "Ignoring implausible battery voltage %.2f V in STATE frame", voltage);
         }
         // F-11: publish hub-side link RSSI for this packet.
         if (this->rssi_ != nullptr && this->parent_ != nullptr && this->parent_->parent_ != nullptr)
@@ -196,14 +214,22 @@ namespace esphome
         float battery_level = (voltage - 3.2*3) / (4.2*3 - 3.2*3) * 100.0;
         battery_level = std::clamp(battery_level, 0.0f, 100.0f);
 
-        if (this->battery_ != nullptr)
+        // Same guard as the STATE frame: the position frame carries the node's
+        // cached voltage, which is 0 V until its first measurement after a boot.
+        if (battery_voltage_plausible(voltage))
         {
-          this->battery_->publish_state(battery_level);
-
+          if (this->battery_ != nullptr)
+          {
+            this->battery_->publish_state(battery_level);
+          }
+          if (this->voltage_ != nullptr)
+          {
+            this->voltage_->publish_state(voltage);
+          }
         }
-        if (this->voltage_ != nullptr)
+        else
         {
-          this->voltage_->publish_state(voltage);
+          ESP_LOGW(TAG, "Ignoring implausible battery voltage %.2f V in POSITION frame", voltage);
         }
         // F-11: motor current rides in the position frame (raw ADC counts).
         if (this->motor_current_ != nullptr)
