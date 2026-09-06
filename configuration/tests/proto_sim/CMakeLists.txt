@@ -23,6 +23,52 @@ if(PROTO_SIM_COVERAGE)
     add_link_options(--coverage)
 endif()
 
+# ----------------------------------------------------------------------------
+# Where the node repository (BlindsESP) lives.
+#
+# Half this suite compiles REAL node source — the dependency-free policy
+# headers, Scheduler.cpp, CmdDispatcher.cpp — so the path to the other repo is
+# load-bearing, not a convenience. It used to be two hardcoded Windows paths
+# repeated in four places; on any other machine every node-side target silently
+# vanished and the suite still reported a cheerful pass on what remained.
+#
+# Override with -DBLINDS_ESP_ROOT=/path/to/BlindsESP, or set BLINDS_ESP_ROOT in
+# the environment. Otherwise the first candidate that actually contains the
+# node source wins.
+# ----------------------------------------------------------------------------
+if(NOT BLINDS_ESP_ROOT AND DEFINED ENV{BLINDS_ESP_ROOT})
+    set(BLINDS_ESP_ROOT $ENV{BLINDS_ESP_ROOT})
+endif()
+if(NOT BLINDS_ESP_ROOT)
+    foreach(_candidate
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../BlindsESP
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../blindsesp
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../../BlindsESP
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../../../blindsesp
+            $ENV{HOME}/BlindsESP
+            $ENV{HOME}/blindsesp
+            /mnt/c/Development/PlatformIO/PlatformIO/BlindsESP
+            C:/Development/PlatformIO/PlatformIO/BlindsESP)
+        if(EXISTS ${_candidate}/main/include/FrameCrypto.h)
+            set(BLINDS_ESP_ROOT ${_candidate})
+            break()
+        endif()
+    endforeach()
+endif()
+set(BLINDS_ESP_ROOT "${BLINDS_ESP_ROOT}" CACHE PATH "Path to the BlindsESP node repository")
+
+if(BLINDS_ESP_ROOT AND EXISTS ${BLINDS_ESP_ROOT}/main/include/FrameCrypto.h)
+    get_filename_component(BLINDS_ESP_ROOT ${BLINDS_ESP_ROOT} ABSOLUTE)
+    message(STATUS "BlindsESP node source: ${BLINDS_ESP_ROOT}")
+else()
+    message(WARNING
+        "BlindsESP node source NOT found. Every node-side target and every "
+        "cross-repo drift gate will be SKIPPED, and the suite will still pass. "
+        "Pass -DBLINDS_ESP_ROOT=/path/to/BlindsESP to build them.")
+endif()
+set(BLINDS_ESP_MAIN    ${BLINDS_ESP_ROOT}/main)
+set(BLINDS_ESP_INCLUDE ${BLINDS_ESP_ROOT}/main/include)
+
 include(FetchContent)
 FetchContent_Declare(
     googletest
@@ -52,10 +98,6 @@ add_library(proto_sim STATIC
 # FrameCrypto.h: the sim builds the frames the tests assert against, so it must
 # use the SAME wire-format code as production rather than its own reference
 # implementation — otherwise sim and hub can be wrong together and stay green.
-set(BLINDS_ESP_INCLUDE /mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/include)
-if(NOT EXISTS ${BLINDS_ESP_INCLUDE}/FrameCrypto.h)
-    set(BLINDS_ESP_INCLUDE C:/Development/PlatformIO/PlatformIO/BlindsESP/main/include)
-endif()
 
 target_include_directories(proto_sim PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -96,10 +138,7 @@ if(PROTOC_C_EXECUTABLE)
     # ESPHome's committed ones. Catches BOTH "edited the proto but forgot to
     # regenerate" and semantic drift (field number, type, oneof case),
     # regardless of whitespace / comment formatting.
-    set(HUB_PROTO_DIR /mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/proto)
-    if(NOT EXISTS ${HUB_PROTO_DIR}/blinds.proto)
-        set(HUB_PROTO_DIR C:/Development/PlatformIO/PlatformIO/BlindsESP/proto)
-    endif()
+    set(HUB_PROTO_DIR ${BLINDS_ESP_ROOT}/proto)
     if(EXISTS ${HUB_PROTO_DIR}/blinds.proto)
         add_test(NAME schema_drift_hub_vs_esphome
                  COMMAND ${CMAKE_COMMAND}
@@ -228,11 +267,6 @@ gtest_discover_tests(real_lora_cover_test)
 # LoraInterface). Tasks are NOT spawned; tests drive onReceiveNew() and pump
 # the TX queue by hand.
 # ----------------------------------------------------------------------------
-set(BLINDS_ESP_MAIN /mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main)
-if(NOT EXISTS ${BLINDS_ESP_MAIN})
-    # Fallback for native Windows path lookups during config probing.
-    set(BLINDS_ESP_MAIN C:/Development/PlatformIO/PlatformIO/BlindsESP/main)
-endif()
 
 # Gate 4: the AEAD wire format. FrameCrypto.h is the source of truth on the node;
 # the hub carries a vendored copy because the ESPHome build compiles only
