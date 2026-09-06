@@ -55,6 +55,27 @@ causes on the node (`BlindsESP`, branch
   longer published from STATE or POSITION frames when the value is outside
   6 – 15 V, so a node's un-measured 0 V no longer lands in HA history as 0 %.
 
+Motor current, same firmware version:
+
+- **Reported in amps instead of raw ADC counts.** The VNH5019's CS pin sources
+  `I_SENSE = I_OUT / K` into an external resistor, so `I_OUT = V_CS · K / R_CS`,
+  with K (I_OUT/I_SENSE) 7110 typ at 3 A and 7030 typ at 8 A per the datasheet.
+  The node now converts through the eFuse ADC calibration and puts amps in the
+  CoverPosition `current` field (already a float — no proto change); the hub
+  sensor gained `unit_of_measurement: A` and 2 decimals. The FSM keeps consuming
+  raw counts, so the current-sense endstop is untouched. **`kMotorCurrentSenseR`
+  (1 kΩ, a current Pololu carrier ≈ 0.141 V/A) is a guess — check the board.**
+- **ADC2 read errors no longer panic the node.** `ESP_ERROR_CHECK` around the
+  CS read meant a panic/reset mid-move whenever Wi-Fi held the ADC2 lock
+  (provisioning/OTA) or ADC2 flagged an invalid conversion. A failed read skips
+  the tick instead; no fabricated zero is pushed, since the FSM reads zero
+  current as "endstop reached".
+- Note for later: with 0 dB attenuation and a 1 kΩ sense resistor the usable
+  window is ~0.7 – 7.8 A. Below ~0.7 A the ESP32 ADC is inaccurate, which is
+  also the region the "current == 0" endstop test lives in — a threshold in amps
+  would be more robust than an exact-zero comparison, but that changes stop
+  behaviour and was left alone.
+
 Node → v1.0.13. Not yet flashed/verified on hardware: after flashing, compare the
 `Battery: raw=… -> …V` log line against a multimeter at the pack terminals and,
 if the divider resistors are off nominal, adjust `kBattTrimFactor` in

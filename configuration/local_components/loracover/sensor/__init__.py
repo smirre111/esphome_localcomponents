@@ -11,6 +11,7 @@ from esphome.const import (
     DEVICE_CLASS_SIGNAL_STRENGTH,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
+    UNIT_AMPERE,
     UNIT_DECIBEL_MILLIWATT,
     UNIT_PERCENT,
     UNIT_VOLT,
@@ -52,12 +53,14 @@ CONFIG_SCHEMA = (
                 accuracy_decimals=0,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
-            # F-11: motor current reported in the CoverPosition frame (raw ADC
-            # counts — apply a calibration filter in YAML to convert to amps).
+            # Motor current from the CoverPosition frame.  Node v1.0.13 and
+            # later send amps (the VNH5019 CS reading converted on the node);
+            # older node firmware sends raw ADC counts in this field.
             cv.Optional(CONF_MOTOR_CURRENT): sensor.sensor_schema(
+                unit_of_measurement=UNIT_AMPERE,
                 device_class=DEVICE_CLASS_CURRENT,
                 state_class=STATE_CLASS_MEASUREMENT,
-                accuracy_decimals=0,
+                accuracy_decimals=2,
                 icon="mdi:current-dc",
             ),
         }
