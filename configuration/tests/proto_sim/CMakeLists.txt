@@ -349,6 +349,29 @@ if(EXISTS ${SCHED_SRC_C} AND EXISTS ${SCHED_VEND_C})
                      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
     set_tests_properties(scheduler_impl_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
 endif()
+# Gate 6: the shared timing/geometry headers. Same reasoning as FrameCrypto.h
+# and Scheduler.{h,cpp} — the node owns the file, the hub carries a vendored
+# copy because the ESPHome build compiles only local_components/ and cannot
+# reach into the BlindsESP tree.
+#
+# Drift here is worse than a compile error, because there is none: both sides
+# build cleanly and disagree about WHEN, which surfaces on the air as a window
+# armed at the wrong microsecond and gets attributed to the radio.
+foreach(shared_hdr LoraTiming.h TimedGrid.h TimedModePolicy.h ClassAWindows.h)
+    set(_src  ${BLINDS_ESP_MAIN}/include/${shared_hdr})
+    set(_vend ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/${shared_hdr})
+    if(EXISTS ${_src} AND EXISTS ${_vend})
+        string(REGEX REPLACE "\\.h$" "" _stem ${shared_hdr})
+        string(TOLOWER ${_stem} _stem)
+        add_test(NAME ${_stem}_drift_hub_vs_node
+                 COMMAND ${CMAKE_COMMAND}
+                         -DSOURCE_HEADER=${_src}
+                         -DVENDORED_HEADER=${_vend}
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
+        set_tests_properties(${_stem}_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
+    endif()
+endforeach()
+
 set(NODE_SHIM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shims_node)
 
 # P3: the schedule arithmetic is dependency-free by design (only <stdint.h> and
