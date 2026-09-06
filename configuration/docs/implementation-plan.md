@@ -779,7 +779,31 @@ not as a configuration to ship.
 
 ## 8. Phasing
 
-Two tracks. Neither blocks the other.
+Three tracks. B and C do not block each other. **Track M blocks the measurement
+of both**, and nothing else.
+
+### Track M — the MAC boundary
+
+`mac-layer.md` §8 steps 1–4, priced here because `test-plan.md` depends on them:
+without M1 and M2 the KPIs of `mac-layer.md` §6 cannot be measured, and B3's gate
+("reception ≥ Mode A over a week") has no fair way to compare two arms.
+
+| phase | content | gate |
+|---|---|---|
+| **M0** | Name the layers in the existing code — comments and one header listing what belongs where. No code moves. | a reviewer can say which layer any function is in |
+| **M1** | **MAC control frame + MAC echo.** One dispatch branch per side: MAC-0 consumes, counts, timestamps and echoes a frame without touching the application. | `turnaroundUs` measures `RxDone → TX fire` and nothing else — which is what §4.3's servable-slot rule needs and cannot get today |
+| **M2** | KPI counters split by funnel stage (`mac-layer.md` §6.1), replacing the mixed-layer success rate | `FER_air`, `FER_link` and `WMR` are separately reportable |
+| **M3** | MAC-1 / MAC-2 switches, with the arming rules of `mac-layer.md` §4 (authenticated arm, unauthenticated traffic; no session ⟹ refuse) | each sublayer's cost is a measured delta, not an estimate |
+
+**M is small and it comes first.** M1 is one branch on each side; M0 and M2 are
+bookkeeping. Everything downstream that claims a number — B2's phase error, B3's
+reception comparison, B5's fire residual, §12.7's turnaround — is measured
+through M2's counters, so building B before M means building it blind.
+
+Not in Track M, and deliberately: the fixed-offset wire header
+(`mac-layer.md` §2) and the `msgId` split (§3). Both are the right end state and
+both are a fleet migration; **B4 already makes the `msgId` overload safe without
+splitting it.**
 
 ### Track C — automatic-mode nodes
 
@@ -814,7 +838,11 @@ Track B below, not here.
 
 **B3 is the deliverable.** B-1…B2 make it safe; B4–B5 make it cheap; Bx and C2
 are a separate, larger piece of work that only the automatic fleet benefits
-from.
+from. **M0–M2 come before all of it**, because they are what turns each gate
+above from a judgement into a number.
+
+Dependency, stated once: **M1 → M2 → (B2 gate, B3 gate, B5 gate, §12.7)**. M3 is
+needed only to attribute cost between sublayers, so it can follow B3.
 
 Note B5's gate is **unmeasurable as the hub is built**: there is no
 `gpio_isr_handler_add` anywhere in the hub component, and `lora_endPacket(false)`

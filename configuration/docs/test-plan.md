@@ -41,6 +41,11 @@ Three consequences run through the whole document:
   frame" gap: there is no application dispatch to make safe, because there is no
   application dispatch.
 
+**Prerequisite:** the on-air half of this plan needs `implementation-plan.md`
+§8's **Track M** — M1 (MAC control frame + echo) and M2 (funnel counters) — which
+is where that work is priced. The host tests of §4–§8 need none of it and can be
+written today.
+
 Application-layer tests already exist and stay where they are:
 `real_lora_cover_test.cpp`, `scheduler_test.cpp`, `motor_policy_test.cpp`,
 `schedule_text_test.cpp`, `auto_mode_policy_test.cpp`.
