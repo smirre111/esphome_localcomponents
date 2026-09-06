@@ -194,6 +194,24 @@ add_scenario(recovery_test)
 add_scenario(auto_mode_proto_test)   # P0: automatic-mode schema + frame budget
 
 # ----------------------------------------------------------------------------
+# Shared, dependency-free timing/geometry headers (docs/test-plan.md section 2,
+# layer L0/L1). These compile with nothing but <stdint.h>, so they are tested
+# here rather than on a roof, and both firmware images include the same file.
+# ----------------------------------------------------------------------------
+set(SHARED_HDR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client)
+
+function(add_header_test name)
+    add_executable(${name} scenarios/${name}.cpp)
+    target_include_directories(${name} PRIVATE ${SHARED_HDR_DIR})
+    target_link_libraries(${name} PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(${name})
+endfunction()
+
+add_header_test(lora_timing_test)
+add_header_test(timed_grid_test)
+add_header_test(mode_a_geometry_test)
+
+# ----------------------------------------------------------------------------
 # Phase 3: compile the REAL production lora_client.cpp against host shims.
 # The library produced here exposes esphome::lora_tracker::LORAListener as
 # defined in the production headers — no parallel implementation.
