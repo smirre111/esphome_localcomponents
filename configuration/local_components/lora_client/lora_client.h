@@ -24,6 +24,7 @@
 #include "esphome/components/lora_client/ScheduleText.h"
 
 struct NodeWakeBeacon;
+struct MacControl;                  // MAC-0 ping / echo, taken by pointer
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
 
 namespace esphome
@@ -208,11 +209,49 @@ namespace esphome
       void stop_drift_test();
       bool drift_test_active() const { return this->drift_test_active_; }
 
+      // --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------
+      //
+      // The hub half of the MAC control frame. Emits a MacControl PING on a
+      // grid and records the echoes the node's MAC-0 sends back, WITHOUT any
+      // application message in either direction. That is what makes the frame
+      // funnel and the turnaround measurable at all: every existing exchange
+      // has a cover operation or a schedule somewhere inside it.
+      //
+      // Single copy per mark, expressible only since the per-frame TxPolicy
+      // replaced the global setBurstCopies. A burst would defeat the purpose —
+      // seventeen copies of one mark is not one mark.
+      void start_mac_ping(uint32_t duration_s = 300, uint32_t grid_ms = 1100,
+                          bool want_echo = true, uint32_t pad_bytes = 0);
+      void stop_mac_ping();
+      bool mac_ping_active() const { return this->mac_ping_active_; }
+
+      // Stage 0 of the funnel is the hub's alone: only the sender knows what it
+      // offered. The node can never compute its own frame-error rate, because
+      // it cannot know what it did not hear.
+      struct MacStats
+      {
+        uint32_t pings_offered{0};   // marks handed to the transmit queue
+        uint32_t echoes_rx{0};
+        uint32_t echo_seq_gaps{0};   // marks with no echo, by seq
+        uint32_t last_seq_sent{0};
+        uint32_t last_seq_echoed{0};
+        bool     have_echo{false};
+      };
+      const MacStats &mac_stats() const { return this->mac_stats_; }
+      void reset_mac_stats() { this->mac_stats_ = MacStats{}; }
+
      protected:
       // Builds the NEXT frame into drift_frame_, so the timer callback only
       // transmits. Packing must not happen inside the interval being measured.
       void build_drift_frame_(bool enable);
       static void drift_timer_cb_(void *arg);
+
+      // Same shape as the drift frame, and for the same reason: the NEXT frame
+      // is packed immediately after a send, in the 99 % of the period that is
+      // idle, so packing never lands inside the interval being measured.
+      void build_mac_ping_frame_();
+      static void mac_ping_timer_cb_(void *arg);
+      void handle_mac_echo_(const ::MacControl *echo);
 
       // Login stagger slot: 0, 1, 2 ... in YAML declaration order.
       //
@@ -260,6 +299,15 @@ namespace esphome
       esp_timer_handle_t drift_timer_{nullptr};
       uint8_t  drift_frame_[128]{};
       size_t   drift_frame_len_{0};
+
+      bool     mac_ping_active_{false};
+      bool     mac_ping_want_echo_{true};
+      uint32_t mac_ping_pad_bytes_{0};
+      uint32_t mac_ping_seq_{0};
+      esp_timer_handle_t mac_ping_timer_{nullptr};
+      uint8_t  mac_ping_frame_[192]{};
+      size_t   mac_ping_frame_len_{0};
+      MacStats mac_stats_{};
 
      public:
 

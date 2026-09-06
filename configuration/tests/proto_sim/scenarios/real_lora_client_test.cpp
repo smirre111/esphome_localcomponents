@@ -12,6 +12,10 @@
 #include "esphome/components/lora_tracker/lora_tracker.h"
 #include "esphome/components/homeassistant/time/homeassistant_time.h"
 
+// The MAC tests build frames with the REAL generated stubs, so the bytes
+// are exactly what goes on the air.
+#include "blinds.pb-c.h"
+
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
 #include "sim/wire_codec.h"
@@ -960,4 +964,160 @@ TEST(TxPolicy, StoppingADriftTestBurstsTheOffCommand) {
     ASSERT_FALSE(h.tracker.sent_copies.empty());
     for (int c : h.tracker.sent_copies)
         EXPECT_EQ(c, 0) << "the OFF command must be bursted";
+}
+
+// ---------------------------------------------------------------------------
+// M1, hub half — MAC-0 ping and echo (mac-layer.md sections 5 and 6).
+//
+// Stage 0 of the frame funnel is the hub's alone: only the sender knows what it
+// offered. That is why pings_offered lives here and the node never computes its
+// own frame-error rate — it cannot know what it did not hear.
+// ---------------------------------------------------------------------------
+
+TEST(MacPing, StartsAndStopsCleanly) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ensure_psa_ready();
+
+    EXPECT_FALSE(h.rol.mac_ping_active());
+    h.rol.start_mac_ping(/*duration_s=*/300, /*grid_ms=*/1100);
+    EXPECT_TRUE(h.rol.mac_ping_active());
+    h.rol.stop_mac_ping();
+    EXPECT_FALSE(h.rol.mac_ping_active());
+}
+
+TEST(MacPing, StartIsIdempotentAndDoesNotResetStatsMidRun) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ensure_psa_ready();
+
+    h.rol.start_mac_ping(300, 1100);
+    // A second start must not silently restart the accumulator: the run would
+    // then only ever reflect its final segment, which is the shape of bug the
+    // drift test already had to fix once.
+    h.rol.start_mac_ping(300, 1100);
+    EXPECT_TRUE(h.rol.mac_ping_active());
+    h.rol.stop_mac_ping();
+}
+
+TEST(MacPing, EchoIsCountedAndConsumedNotForwarded) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ensure_psa_ready();
+
+    h.rol.start_mac_ping(300, 1100);
+    ASSERT_EQ(h.rol.mac_stats().echoes_rx, 0u);
+
+    // Feed a plaintext MAC echo in, exactly as the node's MAC-0 emits it.
+    ::LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = 1;
+    hdr.destsubnet    = 2;
+    hdr.senderaddress = 2;
+    hdr.msgid         = 500;
+
+    ::MacControl echo = MAC_CONTROL__INIT;
+    echo.kind = MAC_CONTROL__KIND__MAC_ECHO;
+    echo.seq  = 1;
+
+    ::LoraClientResponseMessage resp = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    resp.header     = &hdr;
+    resp.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
+    resp.maccontrol = &echo;
+
+    std::vector<uint8_t> bytes(lora_client_response_message__get_packed_size(&resp));
+    lora_client_response_message__pack(&resp, bytes.data());
+    h.rol.set_response(bytes.data(), bytes.size());
+
+    EXPECT_EQ(h.rol.mac_stats().echoes_rx, 1u);
+    EXPECT_EQ(h.rol.mac_stats().last_seq_echoed, 1u);
+    h.rol.stop_mac_ping();
+}
+
+TEST(MacPing, MissingMarksAreCountedAsGapsBySeq) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ensure_psa_ready();
+    h.rol.start_mac_ping(300, 1100);
+
+    auto feed_echo = [&](uint32_t seq, uint32_t msgid) {
+        ::LoraHeader hdr = LORA_HEADER__INIT;
+        hdr.destaddress = 1; hdr.destsubnet = 2; hdr.senderaddress = 2;
+        hdr.msgid = msgid;
+        ::MacControl e = MAC_CONTROL__INIT;
+        e.kind = MAC_CONTROL__KIND__MAC_ECHO;
+        e.seq  = seq;
+        ::LoraClientResponseMessage r = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+        r.header = &hdr;
+        r.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
+        r.maccontrol = &e;
+        std::vector<uint8_t> b(lora_client_response_message__get_packed_size(&r));
+        lora_client_response_message__pack(&r, b.data());
+        h.rol.set_response(b.data(), b.size());
+    };
+
+    // Marks 1 and 4 come back; 2 and 3 were lost. A lost frame must leave a
+    // HOLE rather than shifting every later sample — which is exactly why seq
+    // is carried separately from msgid.
+    feed_echo(1, 600);
+    feed_echo(4, 601);
+
+    EXPECT_EQ(h.rol.mac_stats().echoes_rx, 2u);
+    EXPECT_EQ(h.rol.mac_stats().echo_seq_gaps, 2u);
+    EXPECT_EQ(h.rol.mac_stats().last_seq_echoed, 4u);
+    h.rol.stop_mac_ping();
+}
+
+TEST(MacPing, FirstEchoIsNotAGapEvenIfItsSeqIsHigh) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ensure_psa_ready();
+    h.rol.start_mac_ping(300, 1100);
+
+    ::LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = 1; hdr.destsubnet = 2; hdr.senderaddress = 2; hdr.msgid = 700;
+    ::MacControl e = MAC_CONTROL__INIT;
+    e.kind = MAC_CONTROL__KIND__MAC_ECHO;
+    e.seq  = 9;
+    ::LoraClientResponseMessage r = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    r.header = &hdr;
+    r.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
+    r.maccontrol = &e;
+    std::vector<uint8_t> b(lora_client_response_message__get_packed_size(&r));
+    lora_client_response_message__pack(&r, b.data());
+    h.rol.set_response(b.data(), b.size());
+
+    // Without the have_echo guard this would report eight phantom losses on the
+    // very first echo of every run.
+    EXPECT_EQ(h.rol.mac_stats().echoes_rx, 1u);
+    EXPECT_EQ(h.rol.mac_stats().echo_seq_gaps, 0u);
+    h.rol.stop_mac_ping();
+}
+
+TEST(MacPing, APingIsNeverAnsweredByTheHub) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ensure_psa_ready();
+    h.rol.start_mac_ping(300, 1100);
+
+    ::LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = 1; hdr.destsubnet = 2; hdr.senderaddress = 2; hdr.msgid = 800;
+    ::MacControl ping = MAC_CONTROL__INIT;
+    ping.kind = MAC_CONTROL__KIND__MAC_PING;   // wrong direction on purpose
+    ping.seq = 1;
+    ping.wantecho = true;
+    ::LoraClientResponseMessage r = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    r.header = &hdr;
+    r.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
+    r.maccontrol = &ping;
+    std::vector<uint8_t> b(lora_client_response_message__get_packed_size(&r));
+    lora_client_response_message__pack(&r, b.data());
+
+    const size_t before = h.tracker.sent_copies.size();
+    h.rol.set_response(b.data(), b.size());
+
+    // Neither counted as an echo nor answered. If the hub replied to a ping and
+    // the node replied to an echo, the two would trade frames forever.
+    EXPECT_EQ(h.rol.mac_stats().echoes_rx, 0u);
+    EXPECT_EQ(h.tracker.sent_copies.size(), before);
+    h.rol.stop_mac_ping();
 }

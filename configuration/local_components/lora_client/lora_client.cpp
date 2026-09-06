@@ -1058,13 +1058,11 @@ namespace esphome
         free(plaintext);
         if (inner)
         {
-          if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && inner->ack)
-            this->handle_command_ack_(inner->ack->ack_msg_id);
-          else if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
-                   this->op_awaiting_ack_)
-            this->handle_command_ack_(this->op_last_msgid_); // position confirms delivery
-          else if (inner->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && inner->beacon)
-            this->handle_beacon_(inner->beacon);
+          // Was a verbatim copy of dispatch_payload_'s chain. The comment on
+          // that function says the two paths are identical and must be split
+          // only deliberately — so call it rather than maintaining a second
+          // copy that a new message type can silently be added to just once.
+          this->dispatch_payload_(inner);
 
           inner->header = rcv_message->header; // borrow outer header for forwarding
           size_t   fwd_len = lora_client_response_message__get_packed_size(inner);
@@ -1089,6 +1087,163 @@ namespace esphome
     // position report count as delivery confirmation. If the plaintext path
     // should ever accept LESS than the encrypted one (a defensible security
     // position), split them again deliberately rather than by drift.
+    // -----------------------------------------------------------------------
+    // MAC-0 ping / echo — the hub half (mac-layer.md sections 5 and 6).
+    //
+    // Deliberately shaped like the drift test, because that shape was arrived
+    // at by paying for the alternatives: the frame goes through the NORMAL
+    // transmit queue rather than sendPacketOnce() from the timer callback (that
+    // bypasses TxDone handling and the return-to-RX in the tracker main loop,
+    // and left the SX1278 stuck in TX with the hub silent until restarted), and
+    // the next frame is built immediately after a send rather than inside the
+    // interval being measured.
+    //
+    // What is different: one copy per mark, not seventeen. Seventeen copies of
+    // one mark is not one mark, and until the per-frame TxPolicy existed there
+    // was no way to say so.
+    // -----------------------------------------------------------------------
+    void LORAListener::build_mac_ping_frame_()
+    {
+      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = this->incrTxMessageId();
+      header.burstindex    = 0;
+      header.burstcount    = 0;
+
+      MacControl mc = MAC_CONTROL__INIT;
+      mc.kind     = MAC_CONTROL__KIND__MAC_PING;
+      mc.seq      = ++this->mac_ping_seq_;
+      mc.wantecho = this->mac_ping_want_echo_;
+
+      // Padding sweeps time on air across the frame table. The FIFO read is per
+      // byte on both ends, so a turnaround measured at one length says nothing
+      // about another.
+      uint8_t pad[128];
+      uint32_t pad_len = this->mac_ping_pad_bytes_;
+      if (pad_len > sizeof(pad))
+        pad_len = sizeof(pad);
+      if (pad_len)
+      {
+        memset(pad, 0xAB, pad_len);
+        mc.pad.len  = pad_len;
+        mc.pad.data = pad;
+      }
+
+      op_message.header     = &header;
+      op_message.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+      op_message.maccontrol = &mc;
+
+      const size_t packed = lora_client_operation_message__get_packed_size(&op_message);
+      if (packed > sizeof(this->mac_ping_frame_))
+      {
+        ESP_LOGE(TAG, "[%s] MAC ping frame too large (%u B) — not sent",
+                 this->get_name().c_str(), (unsigned) packed);
+        this->mac_ping_frame_len_ = 0;
+        return;
+      }
+      lora_client_operation_message__pack(&op_message, this->mac_ping_frame_);
+      this->mac_ping_frame_len_ = packed;
+    }
+
+    void LORAListener::mac_ping_timer_cb_(void *arg)
+    {
+      auto *self = static_cast<LORAListener *>(arg);
+      if (!self->mac_ping_active_ || self->mac_ping_frame_len_ == 0)
+        return;
+
+      // ONE copy. This is the whole reason B-1 had to come first.
+      self->parent_->send(self->mac_ping_frame_, self->mac_ping_frame_len_,
+                          {/*copies=*/1, /*stride_ms=*/0});
+      self->mac_stats_.pings_offered++;
+      self->mac_stats_.last_seq_sent = self->mac_ping_seq_;
+
+      self->build_mac_ping_frame_();
+    }
+
+    void LORAListener::handle_mac_echo_(const ::MacControl *echo)
+    {
+      if (echo == nullptr || echo->kind != MAC_CONTROL__KIND__MAC_ECHO)
+        return;
+
+      this->mac_stats_.echoes_rx++;
+
+      // Count marks that were offered and never came back. Keyed on seq, which
+      // is exact and gap-tolerant: a frame lost to the air leaves a hole rather
+      // than shifting every later sample.
+      if (this->mac_stats_.have_echo && echo->seq > this->mac_stats_.last_seq_echoed + 1)
+        this->mac_stats_.echo_seq_gaps +=
+            echo->seq - this->mac_stats_.last_seq_echoed - 1;
+
+      this->mac_stats_.last_seq_echoed = echo->seq;
+      this->mac_stats_.have_echo = true;
+
+      ESP_LOGD(TAG, "[%s] MAC echo seq=%u (offered %u, echoed %u, gaps %u)",
+               this->get_name().c_str(), (unsigned) echo->seq,
+               (unsigned) this->mac_stats_.pings_offered,
+               (unsigned) this->mac_stats_.echoes_rx,
+               (unsigned) this->mac_stats_.echo_seq_gaps);
+    }
+
+    void LORAListener::start_mac_ping(uint32_t duration_s, uint32_t grid_ms,
+                                      bool want_echo, uint32_t pad_bytes)
+    {
+      if (this->mac_ping_active_)
+        return;
+
+      this->mac_ping_active_    = true;
+      this->mac_ping_want_echo_ = want_echo;
+      this->mac_ping_pad_bytes_ = pad_bytes;
+      this->reset_mac_stats();
+
+      if (this->mac_ping_timer_ == nullptr)
+      {
+        const esp_timer_create_args_t args = {
+            .callback              = &LORAListener::mac_ping_timer_cb_,
+            .arg                   = this,
+            .dispatch_method       = ESP_TIMER_TASK,
+            .name                  = "mac_ping",
+            .skip_unhandled_events = true,
+        };
+        if (esp_timer_create(&args, &this->mac_ping_timer_) != ESP_OK)
+        {
+          ESP_LOGE(TAG, "[%s] MAC ping: timer create failed", this->get_name().c_str());
+          this->mac_ping_active_ = false;
+          return;
+        }
+      }
+
+      this->build_mac_ping_frame_();
+      esp_timer_start_periodic(this->mac_ping_timer_, (uint64_t) grid_ms * 1000ULL);
+      this->set_timeout("mac_ping_end", duration_s * 1000,
+                        [this]() { this->stop_mac_ping(); });
+
+      ESP_LOGI(TAG, "[%s] MAC ping START: %u s, grid %u ms, single copy, "
+                    "echo %s, pad %u B",
+               this->get_name().c_str(), (unsigned) duration_s, (unsigned) grid_ms,
+               want_echo ? "on" : "off", (unsigned) pad_bytes);
+    }
+
+    void LORAListener::stop_mac_ping()
+    {
+      if (!this->mac_ping_active_)
+        return;
+      this->mac_ping_active_ = false;
+      if (this->mac_ping_timer_ != nullptr)
+        esp_timer_stop(this->mac_ping_timer_);
+      this->cancel_timeout("mac_ping_end");
+      this->mac_ping_frame_len_ = 0;
+
+      // The two sides of the funnel, reported together. A yield computed from
+      // one end alone is not a measurement.
+      ESP_LOGI(TAG, "[%s] MAC ping STOP: offered %u, echoed %u, gaps %u",
+               this->get_name().c_str(), (unsigned) this->mac_stats_.pings_offered,
+               (unsigned) this->mac_stats_.echoes_rx,
+               (unsigned) this->mac_stats_.echo_seq_gaps);
+    }
+
     void LORAListener::dispatch_payload_(LoraClientResponseMessage *msg)
     {
       if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && msg->ack)
@@ -1098,6 +1253,10 @@ namespace esphome
         this->handle_command_ack_(this->op_last_msgid_); // position confirms delivery
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && msg->beacon)
         this->handle_beacon_(msg->beacon);
+      // MAC-0: consumed here, never forwarded to a cover or a schedule.
+      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL &&
+               msg->maccontrol)
+        this->handle_mac_echo_(msg->maccontrol);
     }
 
     void LORAListener::set_response(uint8_t *data, size_t len)
