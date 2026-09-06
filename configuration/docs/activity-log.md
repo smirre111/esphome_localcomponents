@@ -63,8 +63,14 @@ Motor current, same firmware version:
   The node now converts through the eFuse ADC calibration and puts amps in the
   CoverPosition `current` field (already a float — no proto change); the hub
   sensor gained `unit_of_measurement: A` and 2 decimals. The FSM keeps consuming
-  raw counts, so the current-sense endstop is untouched. **`kMotorCurrentSenseR`
-  (1 kΩ, a current Pololu carrier ≈ 0.141 V/A) is a guess — check the board.**
+  raw counts, so the current-sense endstop is untouched. Front end confirmed on
+  the board: 1 kΩ from CS to ground (≈ 0.141 V/A) into the datasheet's 10 kΩ /
+  33 nF RC filter. The series 10 kΩ carries no DC into the ADC pin so it does not
+  change the scale, and the 33 nF is what keeps SAR sampling well behaved (the
+  sample-and-hold cap refills from it, not through the 10 kΩ). τ = 11 kΩ × 33 nF
+  = 363 µs → ~1.8 ms to settle after a current step, and the 20 kHz PWM averaged
+  over ~7 periods, so the value is true current at the 100 % duty the drive
+  settles to and duty-weighted during the 30 % start ramp.
 - **ADC2 read errors no longer panic the node.** `ESP_ERROR_CHECK` around the
   CS read meant a panic/reset mid-move whenever Wi-Fi held the ADC2 lock
   (provisioning/OTA) or ADC2 flagged an invalid conversion. A failed read skips
