@@ -13,6 +13,18 @@
 #include "esp_err.h"
 #include "esp_timer.h"
 
+// ---------------------------------------------------------------------------
+// Monotonic microsecond clock. Production paces the transmit grid off this,
+// so the harness owns it outright rather than reading the wall clock: a grid
+// anchor test that drifted with real time would be untestable.
+// ---------------------------------------------------------------------------
+static int64_t g_now_us = 0;
+
+int64_t esp_timer_get_time(void) { return g_now_us; }
+
+void proto_sim_timer_set_now_us(int64_t us) { g_now_us = us; }
+void proto_sim_timer_advance_us(int64_t delta_us) { g_now_us += delta_us; }
+
 // esp_timer one-shots. Nothing fires on its own; proto_sim_timer_fire_all()
 // is how a test advances time.
 // ---------------------------------------------------------------------------

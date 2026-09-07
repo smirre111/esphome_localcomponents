@@ -45,6 +45,10 @@ void proto_sim_timer_fire_all(void);
 // How many one-shots are currently armed — lets a test assert that a fallback
 // was cancelled rather than merely not fired.
 int  proto_sim_timer_armed_count(void);
+// The microsecond clock esp_timer_get_time() reports. Tests set it outright
+// rather than letting it follow the wall clock.
+void    proto_sim_timer_set_now_us(int64_t us);
+void    proto_sim_timer_advance_us(int64_t delta_us);
 // Drop all registered timers (call between tests).
 void proto_sim_timer_reset(void);
 

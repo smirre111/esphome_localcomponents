@@ -16,6 +16,24 @@ namespace proto_sim { class SimClock; }
 
 namespace esphome {
 
+// Production's setup_priority namespace. Components order themselves against
+// these; only the relative values matter, so the real constants are mirrored.
+namespace setup_priority {
+constexpr float BUS            = 1000.0f;
+constexpr float IO             = 900.0f;
+constexpr float HARDWARE       = 800.0f;
+constexpr float DATA           = 600.0f;
+constexpr float PROCESSOR      = 400.0f;
+constexpr float BLUETOOTH      = 350.0f;
+constexpr float AFTER_BLUETOOTH = 300.0f;
+constexpr float WIFI           = 250.0f;
+constexpr float ETHERNET       = 250.0f;
+constexpr float BEFORE_CONNECTION = 220.0f;
+constexpr float AFTER_WIFI     = 200.0f;
+constexpr float AFTER_CONNECTION = 100.0f;
+constexpr float LATE           = -100.0f;
+} // namespace setup_priority
+
 // Test-side hooks: scenarios attach a SimClock + a NVS slot store before
 // constructing real LORAListener instances. Defined in
 // shims/esphome/core/component.cpp.
@@ -51,6 +69,7 @@ public:
     virtual void setup() {}
     virtual void dump_config() {}
     virtual void loop() {}
+    virtual float get_setup_priority() const { return setup_priority::DATA; }
 
     // Scheduler — routes into the active SimClock with a name prefix that
     // makes the per-instance scoping match production (production uses

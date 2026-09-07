@@ -229,6 +229,7 @@ add_header_test(ack_cache_test)
 # ----------------------------------------------------------------------------
 set(LORA_CLIENT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client)
 set(SHIM_DIR        ${CMAKE_CURRENT_SOURCE_DIR}/shims)
+set(NODE_SHIM_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/shims_node)
 
 # PSA Crypto headers ship with libmbedtls-dev on Ubuntu; mbedcrypto already
 # linked via proto_sim.
@@ -285,6 +286,65 @@ target_include_directories(real_lora_cover
 target_link_libraries(real_lora_cover PUBLIC real_lora_client proto_sim)
 target_compile_options(real_lora_cover PRIVATE
     -Wno-unused-parameter -Wno-sign-compare -Wno-format)
+
+# ----------------------------------------------------------------------------
+# The REAL lora_tracker.cpp, compiled at last.
+#
+# Until this target existed no test compiled it — the suite substituted a shim
+# class wholesale. That blind spot hid two defects that only review caught: a
+# msgid that wedges the link after ~1024 MAC pings, and a TimedGrid.h include
+# inside #ifdef USE_OTA that breaks any ESPHome build without OTA. Neither is
+# exotic; both are invisible if the file never reaches a compiler.
+#
+# The SX1278 driver is replaced by a recorder (shims/lora_hal_stub.cpp): this
+# target is about the tracker's own logic — burst structure, per-frame TX
+# policy, the grid anchor — not about modelling a radio. Timing behaviour lives
+# in sim/air_channel.h, which does model it.
+#
+# NOTE: sendTask() is an infinite loop and is NOT run here. Tests call the
+# transmit functions directly, which is where the logic under test lives.
+# ----------------------------------------------------------------------------
+set(LORA_TRACKER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_tracker)
+
+# lora_client.h (and the cover headers) reach the tracker through the ESPHome
+# path esphome/components/lora_tracker/lora_tracker.h. Every other target
+# resolves that to the shim class in shims/; this one must resolve it to the
+# production header, or the real class and the shim class both land in the
+# translation unit and collide. A generated overlay, searched ahead of
+# SHIM_DIR, redirects just that one path.
+set(TRACKER_OVERLAY ${CMAKE_CURRENT_BINARY_DIR}/tracker_overlay)
+file(MAKE_DIRECTORY ${TRACKER_OVERLAY}/esphome/components/lora_tracker)
+file(WRITE ${TRACKER_OVERLAY}/esphome/components/lora_tracker/lora_tracker.h
+     "#pragma once\n#include \"${LORA_TRACKER_DIR}/lora_tracker.h\"\n")
+
+add_library(real_lora_tracker STATIC
+    ${LORA_TRACKER_DIR}/lora_tracker.cpp
+    ${SHIM_DIR}/lora_hal_stub.cpp
+    ${SHIM_DIR}/esphome/core/component.cpp
+    ${SHIM_DIR}/esp_random.c
+    ${SHIM_DIR}/esp_timer_stub.c
+)
+# NODE_SHIM_DIR comes LAST of the header dirs on purpose: it carries a lora.h
+# of its own (the node's driver stub), and the hub's production lora.h must
+# win. Only its freertos/ and driver/ subtrees are wanted here.
+target_include_directories(real_lora_tracker BEFORE PUBLIC
+    ${TRACKER_OVERLAY}              # real tracker header at the ESPHome path
+    ${SHIM_DIR}
+    ${LORA_TRACKER_DIR}             # the production lora.h
+    ${LORA_CLIENT_DIR}
+    ${BLINDSPROTO_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROTOBUF_C_INCLUDE_DIRS}
+    ${NODE_SHIM_DIR}                # FreeRTOS + driver/spi_master shims
+)
+target_link_libraries(real_lora_tracker PUBLIC proto_sim)
+target_compile_options(real_lora_tracker PRIVATE
+    -Wno-unused-parameter -Wno-sign-compare -Wno-format)
+
+add_executable(real_lora_tracker_test scenarios/real_lora_tracker_test.cpp)
+target_link_libraries(real_lora_tracker_test
+    PRIVATE real_lora_tracker GTest::gtest GTest::gtest_main)
+gtest_discover_tests(real_lora_tracker_test)
 
 add_executable(real_lora_cover_test scenarios/real_lora_cover_test.cpp)
 target_link_libraries(real_lora_cover_test
@@ -381,7 +441,6 @@ foreach(shared_hdr LoraTiming.h TimedGrid.h TimedModePolicy.h ClassAWindows.h Ma
     endif()
 endforeach()
 
-set(NODE_SHIM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shims_node)
 
 # P3: the schedule arithmetic is dependency-free by design (only <stdint.h> and
 # <time.h>), so it compiles directly from the production source with no shims

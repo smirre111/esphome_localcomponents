@@ -17,3 +17,14 @@
 #define ESP_LOGD(tag, fmt, ...)       ESP_LOG_AT_(4, tag, fmt, ##__VA_ARGS__)
 #define ESP_LOGCONFIG(tag, fmt, ...)  ESP_LOG_AT_(5, tag, fmt, ##__VA_ARGS__)
 #define ESP_LOGV(tag, fmt, ...)       ESP_LOG_AT_(6, tag, fmt, ##__VA_ARGS__)
+
+// ESP-IDF's hex dumper. Production uses it to dump a frame at info level;
+// here it prints one line so the payload stays greppable in test output.
+#define ESP_LOG_BUFFER_HEX(tag, buf, len)                                    \
+    do { if (PROTO_SIM_REAL_LOG_LEVEL >= 3) {                                \
+        std::fprintf(stderr, "[%s] hex(%u):", (tag), (unsigned)(len));       \
+        for (unsigned i_ = 0; i_ < (unsigned)(len); ++i_)                    \
+            std::fprintf(stderr, " %02X",                                    \
+                         ((const unsigned char*)(buf))[i_]);                 \
+        std::fprintf(stderr, "\n");                                          \
+    } } while (0)

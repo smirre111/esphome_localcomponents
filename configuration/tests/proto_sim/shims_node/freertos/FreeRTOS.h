@@ -34,6 +34,12 @@ inline void portEXIT_CRITICAL(portMUX_TYPE*)       {}
 inline void portENTER_CRITICAL(portMUX_TYPE& mux)  { (void)mux; }
 inline void portEXIT_CRITICAL(portMUX_TYPE& mux)   { (void)mux; }
 inline void vTaskDelay(TickType_t)                  {}
+// Absolute-deadline delay. The host has no scheduler to block on, so this
+// only advances the caller's wake-time bookkeeping, which is what the
+// tracker's burst loop reads back.
+inline void vTaskDelayUntil(TickType_t* prev_wake, TickType_t increment) {
+    if (prev_wake) *prev_wake += increment;
+}
 
 // Queue — back-store is std::deque<std::vector<uint8_t>>. Items are
 // item_size bytes; opaque to the producer/consumer.
@@ -86,3 +92,8 @@ inline TickType_t xTaskGetTickCount() { return 0; }
 inline BaseType_t xTaskCreate(void(*)(void*), const char*, uint32_t,
                               void*, UBaseType_t, TaskHandle_t*) { return pdPASS; }
 inline void vTaskDelete(TaskHandle_t) {}
+// ESP-IDF extension. Like xTaskCreate above it reports success without
+// spawning anything: tests drive the task bodies directly.
+inline BaseType_t xTaskCreatePinnedToCore(void(*)(void*), const char*, uint32_t,
+                                          void*, UBaseType_t, TaskHandle_t*,
+                                          BaseType_t) { return pdPASS; }
