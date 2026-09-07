@@ -2582,3 +2582,64 @@ TEST_F(RealNodeFixture, ForeignPlaintextFramesAreCountedNotIgnored) {
     EXPECT_EQ(disp.macFunnel().foreign, before + 1u);
     EXPECT_EQ(disp.macCounters().ping_rx, 0u);
 }
+
+// ---------------------------------------------------------------------------
+// B2 — phase samples are committed only for frames addressed to this node.
+//
+// This is the bug the design warns about, exercised through production code:
+// noteDriftSample() runs before parsing (correct for drift), so without the
+// commit-late split a node stamps its neighbours' frames and phaseErrUs goes
+// bimodal at 0 and one slot pitch.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, NoPhaseSampleWithoutAGrid) {
+    // expected_t0_us_ is 0 until B3 publishes a grid. Committing against 0
+    // would make every error the node's whole uptime.
+    ASSERT_EQ(disp.expectedT0Us(), 0);
+    auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/500);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_EQ(disp.phaseStats().n, 0u);
+}
+
+TEST_F(RealNodeFixture, AForeignFrameCommitsNoPhaseSample) {
+    disp.setExpectedT0Us(1000000);
+    disp.resetPhaseStats();
+
+    // Addressed to a different node — exactly the traffic a node hears most of
+    // the time on a shared channel.
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr + 5;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = 1;
+    hdr.msgid         = 510;
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind = MAC_CONTROL__KIND__MAC_PING;
+    mc.seq  = 1;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.maccontrol = &mc;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_EQ(disp.phaseStats().n, 0u)
+        << "stamping a neighbour's frame is what makes phaseErrUs bimodal";
+    EXPECT_GE(disp.macFunnel().foreign, 1u) << "but it IS counted as foreign";
+}
+
+TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
+    disp.setExpectedT0Us(1000000);
+    disp.resetPhaseStats();
+
+    auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/520);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_EQ(disp.phaseStats().n, 1u);
+}
+
+TEST_F(RealNodeFixture, RtcSourceDefaultsToUnknownNotCrystal) {
+    // The safe reading of a node that has not reported is that it cannot hold
+    // phase — Mode B is gated on the crystal.
+    EXPECT_EQ(disp.rtcSlowSrc(), phase::RtcSlowSrc::Unknown);
+}

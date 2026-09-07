@@ -459,6 +459,33 @@ struct  NodeWakeBeacon
    */
   uint32_t fwversion;
   /*
+   * --- B2: phase tracking -------------------------------------------
+   * What the hub needs to decide whether this node may be promoted to a
+   * timed window. rtcSlowSrc gates it outright: on the internal RC
+   * oscillator (~5 %) a node cannot hold phase between beacons and must
+   * stay in Mode A VISIBLY rather than silently failing to hear anything.
+   */
+  /*
+   * 0 unknown, 1 internal RC, 2 32 kHz crystal
+   */
+  uint32_t rtcslowsrc;
+  /*
+   * node-vs-hub clock error, 0 if unmeasured
+   */
+  int32_t ppmestimate;
+  /*
+   * 0 => ppmEstimate carries no information
+   */
+  uint32_t ppmsamples;
+  /*
+   * Phase error against the grid, in microseconds. SPREAD, not just the
+   * mean: two clusters one slot pitch apart average to something innocent,
+   * and the spread is what exposes them.
+   */
+  int32_t phaseerrus;
+  int32_t phasespreadus;
+  uint32_t phasesamples;
+  /*
    * esp_reset_reason() from the boot that produced this beacon.
    * A node in the field is otherwise undiagnosable: three separate incidents
    * (a cold boot that lost RTC RAM, a run of OTA reboots, and a node that
@@ -473,7 +500,7 @@ struct  NodeWakeBeacon
 };
 #define NODE_WAKE_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
-    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  LoraHeader

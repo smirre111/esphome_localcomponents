@@ -1677,7 +1677,7 @@ const ProtobufCMessageDescriptor schedule_config__descriptor =
   (ProtobufCMessageInit) schedule_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[12] =
+static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[18] =
 {
   {
     "reason",
@@ -1823,6 +1823,78 @@ static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[12] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "rtcSlowSrc",
+    20,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, rtcslowsrc),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "ppmEstimate",
+    21,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_INT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, ppmestimate),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "ppmSamples",
+    22,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, ppmsamples),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "phaseErrUs",
+    23,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_INT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, phaseerrus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "phaseSpreadUs",
+    24,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_INT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, phasespreadus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "phaseSamples",
+    25,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, phasesamples),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned node_wake_beacon__field_indices_by_name[] = {
   6,   /* field[6] = awakeWindow_ms */
@@ -1831,17 +1903,24 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
   3,   /* field[3] = mode */
   7,   /* field[7] = nextEventEpoch */
   2,   /* field[2] = nodeEpoch */
+  15,   /* field[15] = phaseErrUs */
+  17,   /* field[17] = phaseSamples */
+  16,   /* field[16] = phaseSpreadUs */
   5,   /* field[5] = position */
+  13,   /* field[13] = ppmEstimate */
+  14,   /* field[14] = ppmSamples */
   0,   /* field[0] = reason */
   11,   /* field[11] = resetReason */
+  12,   /* field[12] = rtcSlowSrc */
   1,   /* field[1] = schedVersion */
   8,   /* field[8] = sessionResume */
   4,   /* field[4] = voltage */
 };
-static const ProtobufCIntRange node_wake_beacon__number_ranges[1 + 1] =
+static const ProtobufCIntRange node_wake_beacon__number_ranges[2 + 1] =
 {
   { 1, 0 },
-  { 0, 12 }
+  { 20, 12 },
+  { 0, 18 }
 };
 const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
 {
@@ -1851,10 +1930,10 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   "NodeWakeBeacon",
   "",
   sizeof(NodeWakeBeacon),
-  12,
+  18,
   node_wake_beacon__field_descriptors,
   node_wake_beacon__field_indices_by_name,
-  1,  node_wake_beacon__number_ranges,
+  2,  node_wake_beacon__number_ranges,
   (ProtobufCMessageInit) node_wake_beacon__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
