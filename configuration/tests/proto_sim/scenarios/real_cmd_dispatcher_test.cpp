@@ -2417,3 +2417,56 @@ TEST_F(RealNodeFixture, PaddingSweepsTimeOnAirWithoutChangingBehaviour) {
         EXPECT_EQ(disp.macCounters().echo_tx, 1u) << "pad " << pad;
     }
 }
+
+// ---------------------------------------------------------------------------
+// M2 — the funnel advances in the REAL dispatcher, not just in the header.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, FunnelCountsParsedFrames) {
+    ASSERT_EQ(disp.macFunnel().parsed, 0u);
+    auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/100);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_EQ(disp.macFunnel().parsed, 1u);
+    EXPECT_EQ(disp.macFunnel().parse_failures, 0u);
+}
+
+TEST_F(RealNodeFixture, FunnelCountsGarbageAsAParseFailureNotLoss) {
+    // Noise and foreign protocols reach the dispatcher constantly on a shared
+    // channel. They are counted, not treated as link loss.
+    uint8_t junk[24];
+    for (size_t i = 0; i < sizeof(junk); ++i) junk[i] = static_cast<uint8_t>(0xF0 | (i & 0x0F));
+    disp.onReceiveNew(junk, static_cast<int>(sizeof(junk)));
+
+    EXPECT_EQ(disp.macFunnel().parse_failures, 1u);
+    EXPECT_EQ(disp.macFunnel().parsed, 0u);
+    EXPECT_EQ(disp.macFunnel().crc_errors, 0u)
+        << "a parse failure is not a CRC error — different stage, different fix";
+}
+
+TEST_F(RealNodeFixture, FunnelCountsTheReplayWindowAsDuplicatesNotLoss) {
+    auto a = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/150);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    const uint32_t accepted_after_first = disp.macFunnel().counter_accepted;
+    EXPECT_GE(accepted_after_first, 1u);
+
+    // Same msgid again — exactly what copies 2..17 of a burst look like.
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    EXPECT_EQ(disp.macFunnel().duplicates, 1u);
+    EXPECT_EQ(disp.macFunnel().counter_accepted, accepted_after_first)
+        << "a duplicate must not advance the accepted count";
+}
+
+TEST_F(RealNodeFixture, DetectedIsReportedByTheRadioPathNotInferred) {
+    // The DIO0 task owns stages 2-3 because that is the only place the CRC flag
+    // exists. The dispatcher must not invent them from frames it happened to
+    // parse, or a frame lost before RxDone would never be counted at all.
+    auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/160);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_EQ(disp.macFunnel().detected, 0u);
+
+    disp.noteFrameDetected(/*crc_ok=*/true);
+    disp.noteFrameDetected(/*crc_ok=*/false);
+    EXPECT_EQ(disp.macFunnel().detected, 2u);
+    EXPECT_EQ(disp.macFunnel().crc_valid, 1u);
+    EXPECT_EQ(disp.macFunnel().crc_errors, 1u);
+}
