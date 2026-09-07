@@ -186,9 +186,55 @@ namespace esphome
       int get_last_rssi() const { return this->last_packet_rssi_; }
       float get_last_snr() const { return this->last_packet_snr_; }
 
+      // --- Bx: hub RX timestamping -----------------------------------------
+      //
+      // Before this the hub had no timestamp of ANY kind — esp_timer_get_time,
+      // micros() and millis() appeared zero times in this component — so an
+      // uplink's position in time was simply unknown, which is why Class A
+      // (C2) could not be built against it.
+      //
+      // What it can know today is bounded by how it learns about a packet: a
+      // poll from loop(), with esphome::delay(10) per iteration. RxDone
+      // happened somewhere between the previous poll and this one, so the
+      // unbiased estimate is the MIDPOINT of that interval and the uncertainty
+      // is half its width. Both are reported rather than assumed; the interval
+      // is measured, because 10 ms is the delay, not the period.
+      //
+      // This does NOT meet C2's ±1 ms gate and cannot: that needs DIO0 wired
+      // to the ESP32 and an ISR stamp, exactly as the node does it
+      // (g_dio0_rx_us in isr_pinLoraDIO0). DIO0 is not in the hub's pin map at
+      // all, so the ISR half is a hardware change, not a code one. The
+      // arithmetic above it — T0 from RxDone via LoraTiming.h — is the same
+      // either way, so it is written once, here, and an ISR stamp would only
+      // replace where last_rx_done_us_ comes from.
+      //
+      // Clients read these inside set_response(), which the tracker calls
+      // synchronously on the same task immediately after updating them — the
+      // same contract get_last_rssi() already relies on. That is why the
+      // timestamp is not threaded through set_response()'s signature.
+      int64_t  last_rx_done_us() const { return this->last_rx_done_us_; }
+      int64_t  last_rx_t0_us() const   { return this->last_rx_t0_us_; }
+      uint32_t rx_stamp_uncertainty_us() const {
+        return this->last_rx_uncertainty_us_;
+      }
+      // Worst poll gap seen since boot. The uncertainty above is per-packet;
+      // this is what a bench procedure should report.
+      uint32_t worst_poll_gap_us() const { return this->worst_poll_gap_us_; }
+
     protected:
       int   last_packet_rssi_{0};
       float last_packet_snr_{0.0f};
+
+      // An explicit flag, not `last_poll_us_ > 0`. esp_timer_get_time() starts
+      // near zero at boot, so a sentinel of 0 makes the first polls report a
+      // gap of 0 — an uncertainty of ±0 µs, which is a false claim of
+      // precision at exactly the moment the hub knows least.
+      bool     have_poll_baseline_{false};
+      int64_t  last_poll_us_{0};
+      int64_t  last_rx_done_us_{0};
+      int64_t  last_rx_t0_us_{0};
+      uint32_t last_rx_uncertainty_us_{0};
+      uint32_t worst_poll_gap_us_{0};
 
       esp_err_t init_memory_pool(void);
       int64_t grid_anchor_us_{0};

@@ -28,6 +28,9 @@
 // bare "TimedGrid.h" is not on this component's quoted-include search path
 // once ESPHome copies local_components/ into esphome/components/.
 #include "esphome/components/lora_client/TimedGrid.h"
+// Symbol arithmetic for the Bx receive timestamp (T0 from RxDone). Same
+// reasoning as above: qualified path, and unconditional.
+#include "esphome/components/lora_client/LoraTiming.h"
 
 #ifdef USE_OTA
 #include "esphome/components/ota/ota_backend.h"
@@ -135,6 +138,11 @@ namespace esphome
     void LORATracker::dump_config()
     {
       ESP_LOGCONFIG(TAG, "LORA Tracker:");
+      // Bx: say out loud how well the hub can place an uplink in time. The
+      // number is measured, and it is the reason C2 is not buildable on this
+      // hardware yet — see the note on last_rx_done_us() in the header.
+      ESP_LOGCONFIG(TAG, "  RX timestamp source: main-loop poll (no DIO0 wired)");
+      ESP_LOGCONFIG(TAG, "  worst poll gap so far: %u us", this->worst_poll_gap_us_);
     }
 
     void LORATracker::setup()
@@ -226,6 +234,21 @@ namespace esphome
       // AFTER releasing the mutex: set_response() does crypto, NVS writes and
       // scheduler work that must not block the radio (and only ever runs on the
       // main-loop task, so buf_ has no other reader).
+      // Bx: stamp the poll BEFORE touching the radio.
+      //
+      // lora_receive_packet() reads REG_IRQ_FLAGS as its first act, so this is
+      // the closest the poll path gets to "when we learned a packet was
+      // there". RxDone itself happened somewhere in (previous poll, now], so
+      // the estimate is the midpoint of that window and the uncertainty is
+      // half its width. Measuring the gap rather than assuming loop()'s 10 ms
+      // matters: the gap is the delay plus whatever else the main loop did.
+      const int64_t poll_us = esp_timer_get_time();
+      const int64_t gap_us  = this->have_poll_baseline_ ? (poll_us - this->last_poll_us_) : 0;
+      this->last_poll_us_        = poll_us;
+      this->have_poll_baseline_  = true;
+      if (gap_us > 0 && (uint32_t) gap_us > this->worst_poll_gap_us_)
+        this->worst_poll_gap_us_ = (uint32_t) gap_us;
+
       if (this->radio_mutex_ != nullptr)
         xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
 
@@ -236,6 +259,14 @@ namespace esphome
         // can publish it to Home Assistant.
         this->last_packet_rssi_ = lora_packetRssi();
         this->last_packet_snr_  = lora_packetSnr();
+
+        this->last_rx_done_us_       = poll_us - gap_us / 2;
+        this->last_rx_uncertainty_us_ = (uint32_t) (gap_us / 2);
+        // T0 = SFD end, the single timing reference used at both ends. Never
+        // decomposed by hand — LoraTiming.h owns the symbol arithmetic, and
+        // PL is the length the radio reports, which excludes the CRC.
+        this->last_rx_t0_us_ =
+            loratiming::t0FromRxDoneUs(this->last_rx_done_us_, (uint32_t) rxLen);
       }
 
       if (this->radio_mutex_ != nullptr)

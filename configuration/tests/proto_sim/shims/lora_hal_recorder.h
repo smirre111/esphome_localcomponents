@@ -43,7 +43,16 @@ struct Recorder {
         for (const auto& c : calls) if (c == fn) ++n;
         return n;
     }
-    void reset() { calls.clear(); packets.clear(); staging.clear(); }
+    // Packets the fake radio will hand back, oldest first. lora_receive_packet
+    // pops one per call and returns 0 when the queue is empty, which is what
+    // the poll loop sees on an idle channel.
+    std::vector<std::vector<uint8_t>> inbox;
+
+    void queueRx(std::vector<uint8_t> frame) { inbox.push_back(std::move(frame)); }
+
+    void reset() {
+        calls.clear(); packets.clear(); staging.clear(); inbox.clear();
+    }
 };
 
 Recorder& rec();

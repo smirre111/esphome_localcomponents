@@ -1,3 +1,4 @@
+#include <cstring>
 #include "lora.h"
 #include "lora_hal_recorder.h"
 
@@ -295,10 +296,15 @@ void lora_send_packet(uint8_t *buf, int size) {
 }
 
 int lora_receive_packet(uint8_t *buf, int size) {
-    (void) buf;
-    (void) size;
     lorahal::rec().note("lora_receive_packet");
-    return 0;
+    auto& in = lorahal::rec().inbox;
+    if (in.empty()) return 0;
+
+    const auto frame = in.front();
+    in.erase(in.begin());
+    const int n = (int) (frame.size() < (size_t) size ? frame.size() : (size_t) size);
+    if (buf && n > 0) memcpy(buf, frame.data(), (size_t) n);
+    return n;
 }
 
 int lora_received() {

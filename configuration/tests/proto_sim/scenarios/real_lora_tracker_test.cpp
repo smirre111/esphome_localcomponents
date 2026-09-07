@@ -9,6 +9,8 @@
 #include "esphome/components/lora_tracker/lora_tracker.h"
 #include "lora_hal_recorder.h"
 #include "TimedGrid.h"
+#include "LoraTiming.h"
+#include "esp_timer.h"
 #include "blinds.pb-c.h"
 
 #include <vector>
@@ -197,4 +199,123 @@ TEST(RealTracker, SendTaskBlocksAFurther400msAfterABurst) {
     EXPECT_GT(occupied_us, (int64_t) timedgrid::kRoundUs)
         << "but the task does not: this is why deferral is two rounds, not one";
     EXPECT_NEAR((double) occupied_us, 1850000.0, 5000.0);
+}
+
+// ---------------------------------------------------------------------------
+// Bx — the hub learns when a packet arrived
+// ---------------------------------------------------------------------------
+
+namespace {
+// checkReception() is public; the poll loop that drives it is not run here, so
+// tests call it directly and move the harness clock between calls, which is
+// exactly what a poll gap is.
+struct RxProbe : LORATracker {
+    void poll() { this->checkReception(); }
+};
+
+std::vector<uint8_t> frameOf(size_t n) { return std::vector<uint8_t>(n, 0x5A); }
+}  // namespace
+
+TEST(RealTrackerRx, NoPacketLeavesTheTimestampUnset) {
+    lorahal::rec().reset();
+    proto_sim_timer_set_now_us(1'000'000);
+
+    RxProbe t;
+    t.poll();
+    t.poll();
+
+    EXPECT_EQ(t.last_rx_done_us(), 0) << "an empty poll must not stamp anything";
+    EXPECT_EQ(t.last_rx_t0_us(), 0);
+}
+
+TEST(RealTrackerRx, T0IsRxDoneMinusThePayloadsSymbols) {
+    // The whole point of the timestamp: T0, the SFD end, which is the single
+    // reference both ends agree on. Never decomposed by hand.
+    lorahal::rec().reset();
+    proto_sim_timer_set_now_us(5'000'000);
+
+    RxProbe t;
+    t.poll();                                    // establishes the poll baseline
+    proto_sim_timer_advance_us(10'000);          // one loop() iteration
+    lorahal::rec().queueRx(frameOf(60));
+    t.poll();
+
+    const int64_t rxdone = t.last_rx_done_us();
+    EXPECT_EQ(t.last_rx_t0_us(),
+              loratiming::t0FromRxDoneUs(rxdone, 60));
+    EXPECT_LT(t.last_rx_t0_us(), rxdone) << "T0 precedes RxDone by the payload";
+}
+
+TEST(RealTrackerRx, TheEstimateIsTheMidpointOfThePollGap) {
+    // RxDone happened somewhere in (previous poll, this poll]. Stamping "now"
+    // would be biased late by a whole gap; the midpoint is unbiased, and the
+    // uncertainty is half the gap. Both are reported, neither assumed.
+    lorahal::rec().reset();
+    proto_sim_timer_set_now_us(2'000'000);
+
+    RxProbe t;
+    t.poll();
+    const int64_t prev_poll = 2'000'000;
+    proto_sim_timer_advance_us(12'000);
+    const int64_t this_poll = prev_poll + 12'000;
+
+    lorahal::rec().queueRx(frameOf(45));
+    t.poll();
+
+    EXPECT_EQ(t.last_rx_done_us(), this_poll - 6'000);
+    EXPECT_EQ(t.rx_stamp_uncertainty_us(), 6'000u);
+    EXPECT_GT(t.last_rx_done_us(), prev_poll) << "not before the previous poll";
+    EXPECT_LT(t.last_rx_done_us(), this_poll) << "not after this one";
+}
+
+TEST(RealTrackerRx, TheUncertaintyTracksTheMeasuredGapNotTheNominalDelay) {
+    // loop() delays 10 ms; the GAP is that plus whatever else the main loop
+    // did. Assuming 10 ms would understate the error exactly when the hub is
+    // busy, which is when it matters.
+    lorahal::rec().reset();
+    proto_sim_timer_set_now_us(0);
+
+    RxProbe t;
+    t.poll();
+    proto_sim_timer_advance_us(47'000);          // a slow iteration
+    lorahal::rec().queueRx(frameOf(60));
+    t.poll();
+
+    EXPECT_EQ(t.rx_stamp_uncertainty_us(), 23'500u);
+    EXPECT_EQ(t.worst_poll_gap_us(), 47'000u);
+}
+
+TEST(RealTrackerRx, TheWorstGapIsAHighWaterMark) {
+    lorahal::rec().reset();
+    proto_sim_timer_set_now_us(0);
+
+    RxProbe t;
+    t.poll();
+    proto_sim_timer_advance_us(30'000);
+    t.poll();
+    proto_sim_timer_advance_us(9'000);
+    t.poll();
+
+    EXPECT_EQ(t.worst_poll_gap_us(), 30'000u)
+        << "a later quiet iteration must not erase the outlier";
+}
+
+TEST(RealTrackerRx, ThePollPathCannotMeetC2sGate) {
+    // Stated as a test so the claim is checked rather than remembered. C2 wants
+    // T0 to ±1 ms; a 10 ms poll gives ±5 ms at best, and that is the NOMINAL
+    // gap. Closing it needs DIO0 wired to the ESP32 and an ISR stamp — a
+    // hardware change, since DIO0 is not in the hub's pin map at all.
+    lorahal::rec().reset();
+    proto_sim_timer_set_now_us(0);
+
+    RxProbe t;
+    t.poll();
+    proto_sim_timer_advance_us(10'000);          // the nominal loop() delay
+    lorahal::rec().queueRx(frameOf(60));
+    t.poll();
+
+    EXPECT_GT(t.rx_stamp_uncertainty_us(), 1'000u)
+        << "if this ever passes, the poll path got faster than C2's gate and "
+           "the ISR work can be reconsidered";
+    EXPECT_EQ(t.rx_stamp_uncertainty_us(), 5'000u);
 }

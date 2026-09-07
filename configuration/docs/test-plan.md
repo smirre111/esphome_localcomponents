@@ -833,10 +833,14 @@ comparison is only meaningful if both arms are measured the same way.
 | **HW-6** | interactive/automatic split (§12.6) | Not a measurement. A deployment decision; `ModeTest` cannot help. | — |
 | **HW-7** | node DRAIN + build turnaround (§12.7) | `turnaroundUs` histogram: `t_reply_fire − t_rxdone`, both from `esp_timer` on-node. Sweep `payloadPadTo` across 25/45/60/152 B — the FIFO read is per-byte, so this must be measured *as a function of length*. Feeds directly into §5.2's parameterised servable-slot test: **k+2 breaks above 36.5 ms**. | none |
 | **HW-8** | `esp_timer` one-shot wakes from automatic light sleep (§12.8) | `oneShotErrorUs` histogram plus a miss counter: arm a one-shot at a known offset under the production profile, record `t_actual − t_target`. **The whole ARM mechanism depends on this and the plan asserts it nowhere.** A single miss is a failed gate, not an outlier. | none |
-| **HW-9** | hub `CONFIG_FREERTOS_HZ` (§12.9) | `tickRateHz` reported at boot by both ends, plus a `vTaskDelay(1)` duration check. Then pin it in `loradevices.yml`. | none |
+| **HW-9** | hub `CONFIG_FREERTOS_HZ` (§12.9) | ~~`tickRateHz` reported at boot by both ends, plus a `vTaskDelay(1)` duration check. Then pin it in `loradevices.yml`.~~ **PINNED** to 1000 in `loradevices.yml`, with the reasoning inline. The bench check is now a *confirmation* rather than a discovery: report `tickRateHz` at boot and assert it against the pinned value. The node's is `CONFIG_FREERTOS_HZ=100` and is the reason `lora_reset()`'s `pdMS_TO_TICKS(1)` was zero ticks. | none |
+| **HW-10** | hub RX-stamp uncertainty (Bx) | New, and cheap: `dump_config()` prints the worst poll gap seen since boot, and `rx_stamp_uncertainty_us()` gives it per packet. Run a normal traffic mix for an hour and read the high-water mark — it bounds how well the hub can place any uplink, which is what C2's ±1 ms gate is measured against. **Expect it to be large during a burst**: `checkReception()` is not called while `lora_tx_busy_`, so the gap across a 17-copy burst is the burst. That is honest — the hub genuinely was not listening. | none |
 
-Seven of nine close on-node with no external instrument. HW-1's mean and HW-4
-need hardware; HW-6 is not a measurement.
+Eight of ten close on-node with no external instrument. HW-1's mean and HW-4
+need hardware; HW-6 is not a measurement. HW-10 is new with Bx and needs
+nothing but a running hub — and its expected answer, ±5 ms, is already known to
+fail C2's gate, so what it really measures is how much worse than nominal the
+poll gap gets in practice.
 
 **Ordering.** HW-9 is free and immediate. HW-2 gates B3 and needs only a bench
 node. HW-5 needs B0. HW-7 should run before §5.2's servable-slot constants are

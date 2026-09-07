@@ -682,11 +682,15 @@ behaviour**, and an earlier draft of this section claimed they did — see §5.4
 Class A is a two-ended contract. Everything in §5.3 is about the node. On the
 hub:
 
-- **There is no timestamp of any kind.** `esp_timer_get_time`, `micros()` and
-  `millis()` appear **zero times** in `local_components/lora_tracker/`. Uplinks
-  are noticed by a poll loop running `esphome::delay(10)` per iteration
-  (`lora_tracker.cpp:167`), so the hub's knowledge of when an uplink ended is
-  quantised to the loop period before anything else happens.
+- ~~**There is no timestamp of any kind.**~~ **PARTLY CLOSED — see Bx below.**
+  It was true: `esp_timer_get_time`, `micros()` and `millis()` appeared **zero
+  times** in `local_components/lora_tracker/`. `checkReception()` now stamps
+  the poll and derives `T0` from it, so an uplink has a position in time. That
+  position is still quantised by the poll loop's `esphome::delay(10)`
+  (`lora_tracker.cpp:167`) — the estimate is the **midpoint** of the gap since
+  the previous poll and the uncertainty is **half its width**, both measured
+  rather than assumed, because the gap is the delay plus whatever else the main
+  loop did. **±5 ms at the nominal gap, against C2's ±1 ms gate.**
 - **The reply is scheduled at +750 ms, not +1000** —
   `set_timeout("timesync_push", 750, …)` (`lora_client.cpp:927`, `:2189`).
 - **The reply is a 17-copy burst.** `send_timesync()` goes through
@@ -708,6 +712,30 @@ offset; a burst is the opposite construction.**
 So C2 needs, in addition to the node work: a **hub RX timestamp** (new, in no
 phase before this revision), single-copy TX policy (B-1), prepare/fire
 determinism (B5), and the transmit scheduler of §4.5. §8 places it accordingly.
+
+**What Bx delivered, and what it could not.** The arithmetic — `T0` from
+`RxDone` through `LoraTiming.h`, carried to clients the same way
+`get_last_rssi()` already is — is written once and is the same whatever the
+stamp's source. What Bx could not deliver is the source: closing to ±1 ms needs
+DIO0 wired to the ESP32 and an ISR stamp, exactly as the node does it
+(`g_dio0_rx_us` in `isr_pinLoraDIO0`). **DIO0 is not in the hub's pin map at
+all** (`lora.cpp:24-28` lists SCK, MISO, MOSI, CS, RESET and nothing else), so
+that half is a hardware change, not a code one. An ISR stamp would replace only
+where `last_rx_done_us_` comes from.
+
+Six tests in `real_lora_tracker_test.cpp` drive `checkReception()` against the
+harness clock: T0 is `RxDone` minus the payload's symbols; the estimate is the
+gap's midpoint and never falls outside it; the uncertainty tracks the *measured*
+gap rather than the nominal 10 ms (understating it exactly when the hub is busy
+is the failure mode that matters); the worst gap is a high-water mark; and one
+test asserts outright that the poll path **cannot** meet C2's gate, so the claim
+is checked rather than remembered.
+
+Writing the tests found a small defect in the first draft: the poll baseline
+used `last_poll_us_ > 0` as its sentinel, and `esp_timer_get_time()` starts near
+zero at boot — so the first polls reported a gap of 0, an uncertainty of ±0 µs,
+a false claim of precision at exactly the moment the hub knows least. It is an
+explicit flag now.
 
 ### 5.5 Ordering, and what it does not fix
 
@@ -876,7 +904,7 @@ Track B below, not here.
 | **B3** | ~~One window + beacon slot together~~ — **PARTIAL.** `GridSync` published/withdrawn, node adopts by solving for a local anchor, agreement-checked and refused on mismatch, startup broadcast demote (deferred here from B1). **Still open:** the node does not yet narrow to a single RX window — that is gated on `T_detect` (§12.2), which needs a bench. Slot-aware deferral needs B1a's reordering queue. | **`T_detect` measured on the bench first** (§12.2 — it sets the entire late-side guard, and a field failure would surface late, on 32 nodes, unattributable); then reception ≥ Mode A over a week and battery measurably improved |
 | **B4** | ~~Single-copy downlink + the cached-ack fix~~ — **PACK-ONCE AND CACHED ACK DONE.** Hub retransmits the STORED bytes (same msgid, same ciphertext) instead of re-packing from live state; node's `AckCache.h` answers a genuine retry while staying silent for the other 16 copies of a burst. **Still open:** making single-copy the default downlink, which is gated on B3's window. Original text: Single-copy downlink + the cached-ack fix (§4.7), **node and hub**. The hub half is larger: `tx_tracked_op_` re-packs with a fresh msgid today and must become pack-once / cache / retransmit-stored. **Not independently revertible** — the cached ack changes `SessionManager`'s replay semantics (`SessionManager.cpp:112-121`) for Mode A traffic too, since the admission path is shared. Rolling it back on a live fleet reverts replay behaviour for every node. | command success rate unchanged over a week |
 | **B5** | ~~Determinism work (§2.4 items 1–5)~~ — **HUB SIDE DONE, unverified on hardware.** Four things left the transmit critical path: the per-byte FIFO fill (now 1 transaction for 60 B, 3 for 152 B); the five per-packet radio config writes (SF, CR, BW, sync word, CRC — `setup()` already wrote them and nothing changes them at runtime, so seventeen burst copies were paying seventeen times); `esphome::delay(1)` in `lora_idle()`, which sat in front of *every* transmit, now 250 µs; and the two `ESP_LOGI` calls that held the radio mutex across a UART write (~3.5 ms at 115200). `lora_tx()`'s trailing `delay(1)` is now the datasheet's 220 µs and delays only the caller's return. **Still open:** the prepare/fire split proper, the pending-data bitmap, and the node side. | p99 fire residual < 200 µs |
-| **Bx** | **Hub RX timestamping** — the hub has no timestamp of any kind today (§5.4). Needed only by C2. | an uplink's `T0` is known to ±1 ms |
+| **Bx** | ~~**Hub RX timestamping**~~ — **CODE HALF DONE; the gate needs hardware.** `checkReception()` stamps the poll, derives `T0` via `LoraTiming.h`, and reports a *measured* uncertainty (midpoint of the poll gap, ±half its width) plus a worst-gap high-water mark, all readable by clients inside `set_response()` and printed by `dump_config()`. 6 tests. **±5 ms at the nominal 10 ms poll**, so the gate is not met and cannot be by software: DIO0 is not wired to the hub's ESP32 (§5.4). | an uplink's `T0` is known to ±1 ms — **blocked on wiring DIO0**, not on code |
 | **C2** | RX1/RX2 windows off TxDone, once B-1, B1a, B5 and Bx exist | wake → ~3 s; no missed downlinks over a week |
 
 **B3 is the deliverable.** B-1…B2 make it safe; B4–B5 make it cheap; Bx and C2
