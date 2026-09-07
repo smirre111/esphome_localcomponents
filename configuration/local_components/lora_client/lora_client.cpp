@@ -1503,6 +1503,20 @@ namespace esphome
       size_t   len = 0;
       if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
       {
+        // B4: PACK ONCE. Keep the exact bytes so a retry retransmits THESE,
+        // rather than re-packing from live state.
+        //
+        // Re-packing was two bugs at once. It minted a fresh msgid, so the
+        // node's replay filter admitted the retry and executed the command a
+        // SECOND time — a blind that moves twice. And tx_tracked_op_ re-reads
+        // op_position_ at pack time, so a user moving the blind mid-retry
+        // produced different plaintext under a msgid-derived AEAD nonce; with
+        // a reused msgid that is GCM nonce reuse, and with a fresh one it is a
+        // duplicate command. Storing the frame removes both: same msgid, same
+        // ciphertext, and the node can recognise a duplicate and re-ack it.
+        this->op_frame_.assign(buf, buf + len);
+        this->op_frame_msgid_ = header.msgid;
+
         // The tracked command downlink is the one B1's gate is about: with
         // alignment on, this is the burst that must observably start on the
         // grid. With it off (the default) behaviour is byte-for-byte as before.
@@ -1583,12 +1597,34 @@ namespace esphome
           this->do_login_and_arm_retry_();
           return;
         }
-        uint32_t msgid = this->tx_tracked_op_();
-        this->op_last_msgid_ = msgid;
+        // NOT tx_tracked_op_(): that re-packs from live state with a fresh
+        // msgid. op_last_msgid_ deliberately does NOT move — the retry IS the
+        // original command, and the ack window must keep accepting its id.
+        uint32_t msgid = this->retransmit_tracked_op_();
         ESP_LOGW(TAG, "[%s] Tracked op retransmit %u/%u (msgid=%u)", this->get_name().c_str(),
                  (unsigned)this->op_retry_count_, (unsigned)kOpMaxRetries, (unsigned)msgid);
         this->schedule_op_retry_(); // re-arm the next one-shot
       });
+    }
+
+    // B4: retransmit the STORED frame, byte for byte.
+    //
+    // Returns the msgid actually transmitted, which for a retry is the ORIGINAL
+    // one — that is the point. A fresh msgid would be a new command to the node.
+    uint32_t LORAListener::retransmit_tracked_op_()
+    {
+      if (this->op_frame_.empty())
+      {
+        // Nothing stored (a retry that survived a reboot, or a first send that
+        // failed to pack). Falling back to a fresh pack is correct: it is a new
+        // command, and the node will treat it as one.
+        ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing",
+                 this->get_name().c_str());
+        return this->tx_tracked_op_();
+      }
+
+      this->send_aligned_(this->op_frame_.data(), this->op_frame_.size());
+      return this->op_frame_msgid_;
     }
 
     void LORAListener::handle_command_ack_(uint32_t ack_msg_id)

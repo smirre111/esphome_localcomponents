@@ -291,6 +291,10 @@ namespace esphome
       void send_aligned_(const uint8_t *buf, size_t len);
       void send_aligned_(const uint8_t *buf, size_t len, const TxPolicy &policy);
 
+      // B4: the exact bytes of the tracked op in flight, so a retry
+      // retransmits them rather than re-packing from live state.
+      uint32_t retransmit_tracked_op_();
+
       void build_mac_ping_frame_();
       static void mac_ping_timer_cb_(void *arg);
       void handle_mac_echo_(const ::MacControl *echo);
@@ -353,6 +357,8 @@ namespace esphome
       uint32_t mac_ping_seq_{0};
       // Separate from the session TX id: see build_mac_ping_frame_().
       uint32_t mac_ping_msgid_{0};
+      std::vector<uint8_t> op_frame_;
+      uint32_t             op_frame_msgid_{0};
       esp_timer_handle_t mac_ping_timer_{nullptr};
       uint8_t  mac_ping_frame_[192]{};
       size_t   mac_ping_frame_len_{0};

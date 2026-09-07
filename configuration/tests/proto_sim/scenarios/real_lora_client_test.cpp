@@ -1354,3 +1354,63 @@ TEST(GridAligned, TheDeferredFrameSurvivesTheCallersFree) {
     h.clock.tick(2000);
     SUCCEED() << "no use-after-free; the copy is what was transmitted";
 }
+
+// ---------------------------------------------------------------------------
+// B4 — pack once, retransmit the stored bytes.
+//
+// Re-packing on retry was two bugs at once: a fresh msgid made the node execute
+// the command a SECOND time (a blind that moves twice), and re-reading
+// op_position_ at pack time meant a user moving the blind mid-retry produced
+// different plaintext under a msgid-derived AEAD nonce.
+// ---------------------------------------------------------------------------
+
+TEST(TrackedOpRetry, ARetransmitReusesTheMsgidAndTheExactBytes) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.5f);
+    h.clock.tick(10);
+    const auto first = h.radio.hub_to_node_frames();
+    ASSERT_FALSE(first.empty()) << "the command must go out at all";
+    const auto original = first.back();
+
+    // Let the retry timer fire without any ack.
+    h.clock.tick(3000 + 50);   // kOpRetryIntervalMs
+    const auto after = h.radio.hub_to_node_frames();
+    ASSERT_GT(after.size(), first.size()) << "a retry must be transmitted";
+    const auto retry = after.back();
+
+    EXPECT_EQ(retry.bytes, original.bytes)
+        << "byte-identical: same msgid, same ciphertext, no GCM nonce reuse "
+           "and no second execution at the node";
+}
+
+TEST(TrackedOpRetry, ANewCommandGetsANewMsgid) {
+    // Pack-once must not freeze the client: a fresh user command is a NEW
+    // command and must supersede, with its own msgid. Only the RETRY of an
+    // in-flight command reuses bytes.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
+    h.clock.tick(10);
+    const auto first = h.radio.hub_to_node_frames().back();
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.90f);
+    h.clock.tick(10);
+    const auto second = h.radio.hub_to_node_frames().back();
+
+    EXPECT_NE(first.bytes, second.bytes)
+        << "a new command is not a retransmission";
+}
+
+// NOTE on what is NOT tested here. The sharpest form of the hazard —
+// op_position_ changing between the pack and the retry WITHOUT a new command —
+// is not reachable through the public API in this harness, because
+// send_cover_operation() always starts a fresh tracked op. Pack-once removes it
+// by construction (the retry never re-reads live state), and that is verified
+// above by byte identity rather than by reproducing the mutation.
