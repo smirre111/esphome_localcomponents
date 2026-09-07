@@ -33,6 +33,7 @@ enum class Refusal : uint8_t {
     SlotOutOfRange,      // slotIndex >= slotCount
     TxSlotOutOfRange,    // the frame claims a position off its own grid
     BeaconSlotOutOfRange,
+    SweepOffsetNotAllowed,   // non-zero armOffsetUs on a node that is not a bench unit
 };
 
 struct Params
@@ -46,6 +47,9 @@ struct Params
     uint32_t sym_timeout{timedgrid::kSymbolTimeoutSymbols};
     uint32_t resync_max_s{704};
     uint32_t ul_offset_us{0};
+    // HW-2 sweep offset. Zero in every normal configuration; non-zero
+    // deliberately mis-arms the window and is refused off the bench.
+    int32_t  arm_offset_us{0};
 };
 
 // Agreement check, run BEFORE anything is adopted.
@@ -54,8 +58,12 @@ struct Params
 // believe in a different pitch and quietly miss every window — a failure that
 // looks like a dead radio. The geometry is carried on the wire precisely so
 // this check is possible; refusing is much better than half-adopting.
-constexpr Refusal validate(const Params &p, uint32_t tx_slot)
+constexpr Refusal validate(const Params &p, uint32_t tx_slot, bool is_bench_node = true)
 {
+    // Checked FIRST: a sweep offset is the one parameter here that
+    // deliberately breaks reception, so refusing it must not depend on the
+    // rest of the grid being agreeable.
+    if (p.arm_offset_us != 0 && !is_bench_node)     return Refusal::SweepOffsetNotAllowed;
     if (p.slot_count != timedgrid::kSlotCount)      return Refusal::SlotCountMismatch;
     if (p.round_us   != timedgrid::kRoundUs)        return Refusal::RoundMismatch;
     if (p.pitch_us   != timedgrid::kSlotPitchUs)    return Refusal::PitchMismatch;
@@ -84,6 +92,15 @@ struct State
 
     void clear() { *this = State{}; }
 };
+
+// When the receiver opens for a given mark: T0 - (T_pre + G), plus the HW-2
+// sweep offset. The offset is added rather than folded into the arm lead so
+// that a sweep never silently becomes the node's idea of correct.
+constexpr int64_t armInstantUs(const State &st, int64_t t0_us)
+{
+    return t0_us - (int64_t) timedgrid::kArmLeadUs
+                 + (int64_t) st.params.arm_offset_us;
+}
 
 // This node's T0 for a given round.
 constexpr int64_t t0ForRound(const State &st, uint32_t round)

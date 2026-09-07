@@ -218,6 +218,7 @@ add_header_test(mac_sublayers_test)
 add_header_test(phase_tracker_test)
 add_header_test(grid_state_test)
 add_header_test(air_channel_test)
+add_header_test(sweep_analysis_test)
 
 # ----------------------------------------------------------------------------
 # Phase 3: compile the REAL production lora_client.cpp against host shims.
@@ -363,7 +364,7 @@ endif()
 # Drift here is worse than a compile error, because there is none: both sides
 # build cleanly and disagree about WHEN, which surfaces on the air as a window
 # armed at the wrong microsecond and gets attributed to the radio.
-foreach(shared_hdr LoraTiming.h TimedGrid.h TimedModePolicy.h ClassAWindows.h MacFunnel.h MacSublayers.h PhaseTracker.h GridState.h)
+foreach(shared_hdr LoraTiming.h TimedGrid.h TimedModePolicy.h ClassAWindows.h MacFunnel.h MacSublayers.h PhaseTracker.h GridState.h SweepAnalysis.h)
     set(_src  ${BLINDS_ESP_MAIN}/include/${shared_hdr})
     set(_vend ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/${shared_hdr})
     if(EXISTS ${_src} AND EXISTS ${_vend})

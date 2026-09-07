@@ -694,10 +694,17 @@ struct  GridSync
    * node replies at T0 + this, not "immediately"
    */
   uint32_t uloffsetus;
+  /*
+   * HW-2 only: arm the window deliberately early (negative) or late by this
+   * much, so the reception edges can be swept and T_detect measured.
+   * BENCH ONLY. It intentionally breaks reception, so a node not flagged as
+   * a bench unit refuses a non-zero value and stays on the correct arm lead.
+   */
+  int32_t armoffsetus;
 };
 #define GRID_SYNC__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&grid_sync__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 typedef enum {

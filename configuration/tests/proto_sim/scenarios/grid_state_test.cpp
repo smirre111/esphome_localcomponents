@@ -162,3 +162,45 @@ TEST(GridState, ClearReturnsToModeA) {
     EXPECT_FALSE(st.active);
     EXPECT_EQ(st.anchor_us, 0);
 }
+
+// ---------------------------------------------------------------------------
+// HW-2 — the sweep offset is bench-only.
+// ---------------------------------------------------------------------------
+
+TEST(GridState, ASweepOffsetIsRefusedOffTheBench) {
+    // It deliberately breaks reception. A field node must keep the correct arm
+    // lead whatever the hub asks for.
+    Params p = good();
+    p.arm_offset_us = 5000;
+    EXPECT_EQ(validate(p, 3, /*is_bench_node=*/false), Refusal::SweepOffsetNotAllowed);
+    EXPECT_EQ(validate(p, 3, /*is_bench_node=*/true), Refusal::None);
+}
+
+TEST(GridState, TheSweepRefusalIsCheckedBeforeGeometry) {
+    // Refusing a degrading offset must not depend on the rest of the grid
+    // being agreeable, or a malformed frame could smuggle one past.
+    Params p = good();
+    p.arm_offset_us = 5000;
+    p.pitch_us = 31250;                    // also wrong
+    EXPECT_EQ(validate(p, 3, false), Refusal::SweepOffsetNotAllowed);
+}
+
+TEST(GridState, AZeroOffsetIsAlwaysFine) {
+    EXPECT_EQ(validate(good(), 3, /*is_bench_node=*/false), Refusal::None);
+}
+
+TEST(GridState, TheOffsetShiftsTheArmInstantAndNothingElse) {
+    State st;
+    st.active = true; st.params = good(4);
+    st.anchor_us = 0;
+    const int64_t t0 = t0ForRound(st, 3);
+
+    EXPECT_EQ(armInstantUs(st, t0), t0 - (int64_t) timedgrid::kArmLeadUs);
+
+    st.params.arm_offset_us = -2500;
+    EXPECT_EQ(armInstantUs(st, t0), t0 - (int64_t) timedgrid::kArmLeadUs - 2500);
+    EXPECT_EQ(t0ForRound(st, 3), t0) << "the grid itself must not move";
+
+    st.params.arm_offset_us = 7000;
+    EXPECT_EQ(armInstantUs(st, t0), t0 - (int64_t) timedgrid::kArmLeadUs + 7000);
+}
