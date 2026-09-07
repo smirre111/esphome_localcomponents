@@ -241,6 +241,7 @@ add_library(real_lora_client STATIC
 target_include_directories(real_lora_client
     BEFORE PUBLIC
         ${SHIM_DIR}                    # esphome/core/*, esp_bt_defs.h, esp_random.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client  # shared timing headers
         ${LORA_CLIENT_DIR}             # the production lora_client.h + lora_client_node.h
         ${BLINDSPROTO_DIR}             # blinds.pb-c.h
         ${CMAKE_CURRENT_SOURCE_DIR}    # sim/* used by the shims

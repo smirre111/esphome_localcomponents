@@ -23,6 +23,7 @@
 
 #ifdef USE_OTA
 #include "esphome/components/ota/ota_backend.h"
+#include "TimedGrid.h"
 #endif
 
 #undef TAG
@@ -134,6 +135,7 @@ namespace esphome
       global_lora_tracker = this;
 
       ESP_LOGI(TAG, "LORATracker setup started");
+      this->startGrid();
       // ESP_ERROR_CHECK(this->init_memory_pool());
 
       lora_init();
@@ -338,6 +340,43 @@ namespace esphome
       }
 
       // ESP_LOGI(TAG, ". : %d", mode);
+    }
+
+    // -----------------------------------------------------------------------
+    // B1: the grid anchor.
+    // -----------------------------------------------------------------------
+    void LORATracker::startGrid()
+    {
+      if (this->grid_started_)
+        return;   // set once, never moved
+      this->grid_anchor_us_ = esp_timer_get_time();
+      this->grid_started_   = true;
+      ESP_LOGI(TAG, "Grid anchor set at %lld us (%u slots of %u us in %u us)",
+               (long long) this->grid_anchor_us_,
+               (unsigned) timedgrid::kSlotCount,
+               (unsigned) timedgrid::kSlotPitchUs,
+               (unsigned) timedgrid::kRoundUs);
+    }
+
+    int64_t LORATracker::nextT0ForSlotUs(uint8_t slot, int64_t now_us) const
+    {
+      if (!this->grid_started_)
+        return now_us;   // no grid: send now, do not invent an instant
+
+      const int64_t pitch = (int64_t) timedgrid::kSlotPitchUs;
+      const int64_t round = (int64_t) timedgrid::kRoundUs;
+      const int64_t base  = this->grid_anchor_us_
+                          + (int64_t) (slot % timedgrid::kSlotCount) * pitch;
+
+      // Rounds elapsed since that slot's first T0, rounded UP so the answer is
+      // never in the past. Integer division truncates towards zero, which for a
+      // negative delta would round the wrong way — hence the explicit branch
+      // rather than a (d + round - 1) / round that only works for d >= 0.
+      const int64_t delta = now_us - base;
+      if (delta <= 0)
+        return base;
+      const int64_t rounds = (delta + round - 1) / round;
+      return base + rounds * round;
     }
 
     void LORATracker::send(uint8_t *data, size_t len, const TxPolicy &policy)

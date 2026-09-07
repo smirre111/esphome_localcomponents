@@ -125,6 +125,28 @@ namespace esphome
         uint32_t stride_ms{0};  // 0 = txIntervalMs
       };
 
+      // --- B1: the grid anchor (implementation-plan.md 4.2) ---------------
+      //
+      //   T0_k(n) = A + n * kRoundUs + k * kSlotPitchUs
+      //
+      // A is set ONCE, here, and never moved. That is what lets a node hold a
+      // phase across hours; it is also why a hub restart invalidates every
+      // node's phase at once, and why the grid must be withdrawn on startup
+      // before anything else is transmitted.
+      //
+      // The anchor lives on the tracker rather than per client because there
+      // is one grid per radio: two anchors would put two nodes on overlapping
+      // slots while each believed it owned its own.
+      void      startGrid();
+      int64_t   gridAnchorUs() const { return this->grid_anchor_us_; }
+      bool      gridStarted() const  { return this->grid_started_; }
+
+      // The next T0 for `slot` at or after `now_us`. Returns now_us itself when
+      // the grid has not started, so a caller that ignores gridStarted() sends
+      // immediately rather than at an arbitrary instant derived from a zero
+      // anchor.
+      int64_t   nextT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+
       void send(uint8_t *data, size_t len) { this->send(data, len, TxPolicy{}); }
       void send(uint8_t *data, size_t len, const TxPolicy &policy);
       void sendPacketOnce(uint8_t *data, size_t len);
@@ -157,6 +179,9 @@ namespace esphome
       float last_packet_snr_{0.0f};
 
       esp_err_t init_memory_pool(void);
+      int64_t grid_anchor_us_{0};
+      bool    grid_started_{false};
+
       rx_buffer_t *get_free_buffer(TickType_t timeout);
       esp_err_t return_buffer_to_pool(rx_buffer_t *buffer);
       esp_err_t buffer_ref_inc(rx_buffer_t *buffer);

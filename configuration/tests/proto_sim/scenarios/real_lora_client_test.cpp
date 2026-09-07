@@ -15,6 +15,7 @@
 // The MAC tests build frames with the REAL generated stubs, so the bytes
 // are exactly what goes on the air.
 #include "blinds.pb-c.h"
+#include "TimedGrid.h"
 
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
@@ -1120,4 +1121,102 @@ TEST(MacPing, APingIsNeverAnsweredByTheHub) {
     EXPECT_EQ(h.rol.mac_stats().echoes_rx, 0u);
     EXPECT_EQ(h.tracker.sent_copies.size(), before);
     h.rol.stop_mac_ping();
+}
+
+// ---------------------------------------------------------------------------
+// B1 — the grid anchor (implementation-plan.md 4.2).
+//
+// A is set once and never moved. That is what lets a node hold a phase across
+// hours, and it is why a hub restart invalidates every node's phase at once.
+// ---------------------------------------------------------------------------
+
+TEST(GridAnchor, StartsOnceAndNeverMoves) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+
+    h.tracker.startGrid();
+    ASSERT_TRUE(h.tracker.gridStarted());
+    const int64_t a = h.tracker.gridAnchorUs();
+
+    h.tracker.startGrid();   // a second call must be a no-op
+    EXPECT_EQ(h.tracker.gridAnchorUs(), a);
+}
+
+TEST(GridAnchor, SlotsAreOnePitchApartWithinARound) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    const int64_t a = h.tracker.gridAnchorUs();
+
+    for (uint8_t k = 0; k + 1 < timedgrid::kSlotCount; ++k) {
+        const int64_t t0 = h.tracker.nextT0ForSlotUs(k, a);
+        const int64_t t1 = h.tracker.nextT0ForSlotUs(k + 1, a);
+        EXPECT_EQ(t1 - t0, (int64_t) timedgrid::kSlotPitchUs) << "slots " << (int) k;
+    }
+}
+
+TEST(GridAnchor, NextT0IsNeverInThePast) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    const int64_t a = h.tracker.gridAnchorUs();
+
+    // Sweep a whole round in 1 ms steps, for a slot in the middle of the grid.
+    for (int64_t off = 0; off < (int64_t) timedgrid::kRoundUs; off += 1000) {
+        const int64_t now = a + off;
+        const int64_t t0  = h.tracker.nextT0ForSlotUs(7, now);
+        EXPECT_GE(t0, now) << "offset " << off;
+        EXPECT_LT(t0 - now, (int64_t) timedgrid::kRoundUs) << "offset " << off;
+    }
+}
+
+TEST(GridAnchor, EveryAnswerIsOnTheGrid) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    const int64_t a = h.tracker.gridAnchorUs();
+
+    for (uint8_t k : {uint8_t{0}, uint8_t{1}, uint8_t{31}})
+        for (int64_t off = 0; off < 3LL * timedgrid::kRoundUs; off += 7777) {
+            const int64_t t0 = h.tracker.nextT0ForSlotUs(k, a + off);
+            const int64_t rel = t0 - a - (int64_t) k * timedgrid::kSlotPitchUs;
+            EXPECT_EQ(rel % (int64_t) timedgrid::kRoundUs, 0)
+                << "slot " << (int) k << " offset " << off;
+        }
+}
+
+TEST(GridAnchor, ATimeBeforeTheSlotsFirstT0DoesNotRoundBackwards) {
+    // Integer division truncates towards zero, so a negative delta with a
+    // (d + round - 1) / round formula rounds the WRONG way and returns an
+    // instant in the past. Slot 31's first T0 is 1.45 s after the anchor, so
+    // any `now` in that window exercises it.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    const int64_t a = h.tracker.gridAnchorUs();
+
+    const int64_t first_t0 = a + (int64_t) 31 * timedgrid::kSlotPitchUs;
+    for (int64_t now = a; now < first_t0; now += 10000) {
+        const int64_t t0 = h.tracker.nextT0ForSlotUs(31, now);
+        EXPECT_EQ(t0, first_t0) << "now " << now;
+        EXPECT_GE(t0, now);
+    }
+}
+
+TEST(GridAnchor, SlotIndexWrapsRatherThanRunningOffTheGrid) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    const int64_t a = h.tracker.gridAnchorUs();
+    EXPECT_EQ(h.tracker.nextT0ForSlotUs(timedgrid::kSlotCount, a),
+              h.tracker.nextT0ForSlotUs(0, a));
+}
+
+TEST(GridAnchor, WithoutAGridTheAnswerIsNow) {
+    // A caller that ignores gridStarted() must send immediately, not at some
+    // instant derived from a zero anchor.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ASSERT_FALSE(h.tracker.gridStarted());
+    EXPECT_EQ(h.tracker.nextT0ForSlotUs(5, 123456), 123456);
 }

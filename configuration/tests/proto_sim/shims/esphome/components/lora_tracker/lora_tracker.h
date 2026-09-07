@@ -56,6 +56,14 @@ public:
         uint32_t stride_ms{0};
     };
 
+    // B1 grid anchor — mirrors production. Set once, never moved.
+    void    startGrid();
+    int64_t gridAnchorUs() const { return grid_anchor_us_; }
+    bool    gridStarted() const  { return grid_started_; }
+    int64_t nextT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+    int64_t grid_anchor_us_{0};
+    bool    grid_started_{false};
+
     // Hub→node TX: emits an AirFrame{HubToNode, bytes} into the active SimRadio.
     void send(uint8_t* data, size_t len) { send(data, len, TxPolicy{}); }
     void send(uint8_t* data, size_t len, const TxPolicy& policy);

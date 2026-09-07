@@ -6,6 +6,7 @@
 #include "esphome/components/lora_client/lora_client.h"
 #include "sim/messages.h"
 #include "sim/sim_radio.h"
+#include "TimedGrid.h"
 
 namespace esphome::lora_tracker {
 
@@ -16,6 +17,24 @@ proto_sim::SimRadio* g_active_radio = nullptr;
 proto_sim::SimRadio* active_radio() { return g_active_radio; }
 void set_active_radio(proto_sim::SimRadio* r) { g_active_radio = r; }
 } // namespace shim_hooks
+
+// Mirrors the production anchor arithmetic verbatim; the tests assert against
+// this, so it must not "simplify" the negative-delta branch away.
+void LORATracker::startGrid() {
+    if (grid_started_) return;
+    grid_anchor_us_ = 0;   // deterministic in the sim
+    grid_started_ = true;
+}
+
+int64_t LORATracker::nextT0ForSlotUs(uint8_t slot, int64_t now_us) const {
+    if (!grid_started_) return now_us;
+    const int64_t pitch = (int64_t) timedgrid::kSlotPitchUs;
+    const int64_t round = (int64_t) timedgrid::kRoundUs;
+    const int64_t base  = grid_anchor_us_ + (int64_t)(slot % timedgrid::kSlotCount) * pitch;
+    const int64_t delta = now_us - base;
+    if (delta <= 0) return base;
+    return base + ((delta + round - 1) / round) * round;
+}
 
 void LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     // Record the per-frame policy BEFORE the radio check, so a test can assert
