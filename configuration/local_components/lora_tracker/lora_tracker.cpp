@@ -386,6 +386,16 @@ namespace esphome
       return base + rounds * round;
     }
 
+    uint32_t LORATracker::msUntilNextT0(uint8_t slot) const
+    {
+      if (!this->grid_started_)
+        return 0;
+      const int64_t now = esp_timer_get_time();
+      const int64_t t0  = this->nextT0ForSlotUs(slot, now);
+      const int64_t d   = t0 - now;
+      return d <= 0 ? 0u : (uint32_t) ((d + 999) / 1000);
+    }
+
     void LORATracker::send(uint8_t *data, size_t len, const TxPolicy &policy)
     {
       // Validate inputs first

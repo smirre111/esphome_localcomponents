@@ -23,6 +23,14 @@ namespace proto_sim { class SimRadio; }
 
 namespace esphome::lora_tracker {
 
+// Mirrors production: namespace scope, not nested — lora_client.h only
+// forward-declares LORATracker.
+struct TxPolicy {
+    int      copies{0};
+    uint32_t stride_ms{0};
+};
+
+
 // LORAListener / LORAClient already declared by the includes above; no
 // forward decl needed.
 
@@ -51,16 +59,16 @@ public:
     // Mirrors the production TxPolicy: the copy count belongs to the FRAME,
     // not to the tracker. The old global setBurstCopies() meant any command
     // sent during a drift test went out as a single copy.
-    struct TxPolicy {
-        int      copies{0};
-        uint32_t stride_ms{0};
-    };
 
     // B1 grid anchor — mirrors production. Set once, never moved.
     void    startGrid();
     int64_t gridAnchorUs() const { return grid_anchor_us_; }
     bool    gridStarted() const  { return grid_started_; }
     int64_t nextT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+    uint32_t msUntilNextT0(uint8_t slot) const;
+    // The sim's "now" for grid arithmetic. Production reads esp_timer_get_time();
+    // a test sets this instead so the answer is deterministic.
+    int64_t sim_now_us{0};
     int64_t grid_anchor_us_{0};
     bool    grid_started_{false};
 

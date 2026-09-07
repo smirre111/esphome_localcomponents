@@ -15,6 +15,8 @@
 #include <map>
 #include <cstring>
 #include "psa/crypto.h"
+#include <vector>
+#include "esphome/components/lora_client/TimedGrid.h"
 
 // ---------------------------------------------------------------------------
 // Crypto constants — kept identical to BlindsESP/main/CmdDispatcher.cpp
@@ -315,6 +317,10 @@ namespace esphome
       // Claim a stagger slot in declaration order. setup() runs once per
       // listener, in YAML order, so slots are stable across reboots.
       this->login_slot_ = s_next_login_slot_++;
+      // Same index, same reason: declaration order is stable across reboots.
+      // Wraps at the grid depth so a 33rd client shares a slot rather than
+      // addressing a slot that does not exist.
+      this->grid_slot_ = (uint8_t) (this->login_slot_ % timedgrid::kSlotCount);
 
       // The compiled YAML seed has already been applied by now (codegen emits
       // add_schedule_entry() into main.cpp's setup(), which runs before
@@ -1330,6 +1336,46 @@ namespace esphome
     // ---------------------------------------------------------------------------
     // F-4: Command ACK / retransmit state machine
     // ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // B1: place a downlink on the grid.
+    //
+    // Deferring means the buffer must be OWNED — every caller frees its packed
+    // frame the moment this returns, so capturing the pointer would hand the
+    // scheduler freed memory a second later.
+    // -----------------------------------------------------------------------
+    void LORAListener::send_aligned_(const uint8_t *buf, size_t len)
+    {
+      this->send_aligned_(buf, len, TxPolicy{});
+    }
+
+    void LORAListener::send_aligned_(const uint8_t *buf, size_t len,
+                                     const TxPolicy &policy)
+    {
+      if (buf == nullptr || len == 0)
+        return;
+
+      const uint32_t delay_ms =
+          this->grid_aligned_ ? this->parent_->msUntilNextT0(this->grid_slot_) : 0u;
+
+      if (delay_ms == 0)
+      {
+        this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
+        return;
+      }
+
+      std::vector<uint8_t> owned(buf, buf + len);
+      ESP_LOGD(TAG, "[%s] deferring %u B to slot %u T0 in %u ms",
+               this->get_name().c_str(), (unsigned) len,
+               (unsigned) this->grid_slot_, (unsigned) delay_ms);
+
+      // Named timeout: a second command for the same node before the first has
+      // fired replaces it rather than queueing two frames into one slot.
+      this->set_timeout("grid_tx", delay_ms,
+                        [this, owned = std::move(owned), policy]() mutable {
+                          this->parent_->send(owned.data(), owned.size(), policy);
+                        });
+    }
+
     uint32_t LORAListener::tx_tracked_op_()
     {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -1370,7 +1416,10 @@ namespace esphome
       size_t   len = 0;
       if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
       {
-        this->parent_->send(buf, len);
+        // The tracked command downlink is the one B1's gate is about: with
+        // alignment on, this is the burst that must observably start on the
+        // grid. With it off (the default) behaviour is byte-for-byte as before.
+        this->send_aligned_(buf, len);
         free(buf);
       }
       else

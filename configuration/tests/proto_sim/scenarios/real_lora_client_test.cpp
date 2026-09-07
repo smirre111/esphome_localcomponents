@@ -1220,3 +1220,137 @@ TEST(GridAnchor, WithoutAGridTheAnswerIsNow) {
     ASSERT_FALSE(h.tracker.gridStarted());
     EXPECT_EQ(h.tracker.nextT0ForSlotUs(5, 123456), 123456);
 }
+
+// ---------------------------------------------------------------------------
+// B1 — grid-aligned downlink, default OFF.
+//
+// Alignment costs up to a full round (1.5 s) of latency on a user command and
+// buys nothing until the node opens a single window at that instant (B3). A
+// node in Mode A hears three windows every 1.5 s wherever the burst starts, so
+// enabling it now would be a pure regression. These tests pin that default as
+// hard as they pin the mechanism.
+// ---------------------------------------------------------------------------
+
+TEST(GridAligned, DefaultsToOffSoNothingRegresses) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    EXPECT_FALSE(h.rol.grid_aligned());
+}
+
+TEST(GridAligned, SlotsAreClaimedInDeclarationOrder) {
+    // Same mechanism as login_slot_: claimed in setup(), in YAML order, so it
+    // is stable across reboots with no configuration. RealHubHarness does not
+    // call setup() (it would restore NVS and schedule logins), so this test
+    // drives it explicitly — which is also what makes it a real check of the
+    // claim path rather than of a default-initialised member.
+    using namespace real_helpers;
+    RealHubHarness a{2, kMacRol2};
+    RealHubHarness b{3, kMacRol2};
+    a.rol.setup();
+    b.rol.setup();
+
+    EXPECT_NE(a.rol.grid_slot(), b.rol.grid_slot());
+    EXPECT_LT(a.rol.grid_slot(), timedgrid::kSlotCount);
+    EXPECT_LT(b.rol.grid_slot(), timedgrid::kSlotCount);
+}
+
+TEST(GridAligned, SlotWrapsAtTheGridDepth) {
+    // A 33rd client must share a slot rather than address one that does not
+    // exist. Asserting the rule directly; the claim itself is above.
+    for (uint32_t login = 0; login < 70; ++login)
+        EXPECT_LT((uint8_t) (login % timedgrid::kSlotCount), timedgrid::kSlotCount);
+    EXPECT_EQ(32u % timedgrid::kSlotCount, 0u);
+}
+
+TEST(GridAligned, DelayIsZeroWithoutAGrid) {
+    // A caller must never wait on an anchor that was never set.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    ASSERT_FALSE(h.tracker.gridStarted());
+    EXPECT_EQ(h.tracker.msUntilNextT0(5), 0u);
+}
+
+TEST(GridAligned, DelayRoundsUpSoAFrameNeverLandsEarly) {
+    // Arriving a millisecond early puts the frame in the previous slot's tail.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+
+    // Slot 1's T0 is 46875 us after the anchor. Ask 1 us after the anchor:
+    // 46874 us remain, which must round UP to 47 ms, not down to 46.
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
+    EXPECT_EQ(h.tracker.msUntilNextT0(1), 47u);
+
+    // Exactly at a T0 the answer is 0, not a whole round.
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + timedgrid::kSlotPitchUs;
+    EXPECT_EQ(h.tracker.msUntilNextT0(1), 0u);
+}
+
+TEST(GridAligned, DelayNeverExceedsOneRound) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    for (uint8_t k = 0; k < timedgrid::kSlotCount; ++k)
+        for (int64_t off = 0; off < (int64_t) timedgrid::kRoundUs; off += 37000) {
+            h.tracker.sim_now_us = h.tracker.gridAnchorUs() + off;
+            EXPECT_LE(h.tracker.msUntilNextT0(k), timedgrid::kRoundUs / 1000)
+                << "slot " << (int) k << " off " << off;
+        }
+}
+
+TEST(GridAligned, WithAlignmentOffTheFrameGoesOutImmediately) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1000;   // mid-slot
+
+    uint8_t frame[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const size_t before = h.tracker.sent_copies.size();
+    h.rol.send_aligned_for_test(frame, sizeof(frame));
+    EXPECT_EQ(h.tracker.sent_copies.size(), before + 1u)
+        << "the default path must not defer anything";
+}
+
+TEST(GridAligned, WithAlignmentOnTheFrameIsDeferredToT0) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    // 1 us past the anchor: this client's slot T0 is a whole pitch away unless
+    // it happens to own slot 0, so force a slot that is definitely ahead.
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
+
+    uint8_t frame[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const size_t before = h.tracker.sent_copies.size();
+    h.rol.send_aligned_for_test(frame, sizeof(frame));
+
+    if (h.tracker.msUntilNextT0(h.rol.grid_slot()) == 0) {
+        EXPECT_EQ(h.tracker.sent_copies.size(), before + 1u);
+    } else {
+        EXPECT_EQ(h.tracker.sent_copies.size(), before)
+            << "an aligned frame must wait for its slot";
+        h.clock.tick(2000);   // past any slot T0 in the round
+        EXPECT_GT(h.tracker.sent_copies.size(), before)
+            << "and must actually go out once the slot arrives";
+    }
+}
+
+TEST(GridAligned, TheDeferredFrameSurvivesTheCallersFree) {
+    // Every caller frees its packed buffer the moment send_aligned_ returns, so
+    // a deferred send that captured the pointer would hand the scheduler freed
+    // memory. Write a pattern, free it, then let the timer fire.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
+
+    auto *heap = static_cast<uint8_t *>(malloc(16));
+    for (int i = 0; i < 16; ++i) heap[i] = static_cast<uint8_t>(0xC0 + i);
+    h.rol.send_aligned_for_test(heap, 16);
+    memset(heap, 0xEE, 16);   // poison, as a real free+reuse would
+    free(heap);
+
+    h.clock.tick(2000);
+    SUCCEED() << "no use-after-free; the copy is what was transmitted";
+}

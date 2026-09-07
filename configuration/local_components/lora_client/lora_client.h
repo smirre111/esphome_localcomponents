@@ -55,6 +55,7 @@ namespace esphome
     class LORATracker;
     class LORAClientNode;
     class LORAListener;
+    struct TxPolicy;
 
     struct FrameCounter
     {
@@ -237,6 +238,26 @@ namespace esphome
         uint32_t last_seq_echoed{0};
         bool     have_echo{false};
       };
+      // --- B1: grid-aligned downlink -------------------------------------
+      //
+      // DEFAULT OFF, and that is the whole point of shipping it this way.
+      //
+      // Aligning a burst to the node's slot costs up to one round (1.5 s) of
+      // added latency on a user command, and buys NOTHING until the node
+      // actually opens a single window at that instant — which is B3. A node in
+      // Mode A listens three windows every 1.5 s regardless of where the burst
+      // starts, so turning this on now would be a pure regression in
+      // responsiveness. B3 enables it per node as those nodes are promoted.
+      void set_grid_aligned(bool v) { this->grid_aligned_ = v; }
+      bool grid_aligned() const     { return this->grid_aligned_; }
+      uint8_t grid_slot() const     { return this->grid_slot_; }
+
+      // Test seam: send_aligned_ is protected, and the alignment POLICY is the
+      // part worth testing directly rather than only through a full command.
+      void send_aligned_for_test(const uint8_t *buf, size_t len) {
+        this->send_aligned_(buf, len);
+      }
+
       const MacStats &mac_stats() const { return this->mac_stats_; }
       void reset_mac_stats() { this->mac_stats_ = MacStats{}; }
 
@@ -249,6 +270,14 @@ namespace esphome
       // Same shape as the drift frame, and for the same reason: the NEXT frame
       // is packed immediately after a send, in the 99 % of the period that is
       // idle, so packing never lands inside the interval being measured.
+      // Transmit `buf` either now or at this client's next grid T0, according
+      // to grid_aligned_. Takes a COPY when it defers: every caller frees its
+      // buffer immediately after handing it over.
+      // Two overloads rather than a default argument: TxPolicy is only
+      // forward-declared here, and `= {}` needs the complete type.
+      void send_aligned_(const uint8_t *buf, size_t len);
+      void send_aligned_(const uint8_t *buf, size_t len, const TxPolicy &policy);
+
       void build_mac_ping_frame_();
       static void mac_ping_timer_cb_(void *arg);
       void handle_mac_echo_(const ::MacControl *echo);
@@ -290,6 +319,11 @@ namespace esphome
 
       uint8_t  login_slot_{0};
       static uint8_t s_next_login_slot_;
+
+      // Grid slot, claimed in declaration order exactly as login_slot_ is, so
+      // it is stable across reboots without any extra configuration.
+      uint8_t  grid_slot_{0};
+      bool     grid_aligned_{false};
 
       bool     drift_test_active_{false};
       uint32_t drift_test_duration_s_{0};

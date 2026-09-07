@@ -61,6 +61,16 @@ namespace esphome
 {
   namespace lora_tracker
   {
+  // How one frame is transmitted. At NAMESPACE scope, not nested in
+  // LORATracker: lora_client.h only forward-declares the tracker, and a nested
+  // type of an incomplete class cannot be named. It describes a frame anyway.
+  struct TxPolicy
+  {
+    int      copies{0};     // 0 = txSlotsPerRound, the normal burst
+    uint32_t stride_ms{0};  // 0 = txIntervalMs
+  };
+
+
 
     // class LORATracker;
 
@@ -119,11 +129,6 @@ namespace esphome
       // There is deliberately no first_mark_us here yet. Placing a frame at an
       // absolute instant needs the reordering transmit scheduler (B1a); a field
       // nothing honours would be worse than its absence.
-      struct TxPolicy
-      {
-        int      copies{0};     // 0 = txSlotsPerRound, the normal burst
-        uint32_t stride_ms{0};  // 0 = txIntervalMs
-      };
 
       // --- B1: the grid anchor (implementation-plan.md 4.2) ---------------
       //
@@ -146,6 +151,13 @@ namespace esphome
       // immediately rather than at an arbitrary instant derived from a zero
       // anchor.
       int64_t   nextT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+
+      // Milliseconds to wait before a frame for `slot` would start on the
+      // grid. 0 means "send now" — both when the grid is not running and when
+      // T0 is already upon us, so a caller never has to special-case either.
+      // Rounds UP: arriving a millisecond early would put the frame in the
+      // previous slot's tail.
+      uint32_t  msUntilNextT0(uint8_t slot) const;
 
       void send(uint8_t *data, size_t len) { this->send(data, len, TxPolicy{}); }
       void send(uint8_t *data, size_t len, const TxPolicy &policy);
