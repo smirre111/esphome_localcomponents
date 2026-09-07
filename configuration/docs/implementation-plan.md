@@ -491,6 +491,32 @@ this — a window walked through by another node's burst is *not* empty. The
 counter must key on **"no frame addressed to me at my mark"**, not on "nothing
 received".
 
+**Both estimates above are now measured** (`mixed_mode_test.cpp`, against the
+air-channel model rather than the closed form):
+
+| estimated here | measured |
+|---|---|
+| "walks through node 1's window 81 % of the time" | a copy occupies 42.048 ms of a 46.875 ms pitch — **47 % of its 88 ms stride**, and the *union* of 17 copies denies **31 of 32 slots** |
+| "× 30/32 windows a burst actually blinds" | **31/32**. Only the last slot survives, and only because the 17th copy ends before it |
+
+The mechanism is worth stating because it is not obvious from either number: the
+88 ms stride is **1.878 slot pitches**, so successive copies walk *across* slot
+boundaries instead of landing on them, and each copy's 42 ms shadow clips the
+slots on both sides. The incommensurate sweep that makes the burst reliable
+(§3) is the same property that makes it total.
+
+So there is no hole to interleave into. Mixed operation cannot mean "both at
+once" in a round where a full burst runs; it means either the Mode A node is
+served with a **single copy** (B4's remaining half — which the same tests show
+costs exactly one slot, wherever it is placed), or that round belongs to the
+burst and to nothing else. That is what B1a's deferral has to encode.
+
+The demotion consequence is measured too, and it splits in two: of the 31
+denied slots, some hear **silence** and some hear a **frame addressed to another
+node** — `detected` and `crcValid` both increment on the latter while
+`addressed` does not. A KPI that stopped at `detected` would read that as a
+healthy link, which is why `MacFunnel.h` does not stop there.
+
 ### 4.6 Promotion and demotion
 
 ```mermaid
@@ -895,7 +921,8 @@ Host tests, in the style of the existing dependency-free policy headers:
   `kCopySpacingUs` cannot silently diverge.
 - **Slot-aware deferral** — one node in Mode B and one in Mode A: assert no
   burst copy overlaps the Mode B node's window *while the hub also has traffic
-  for it*. The property a single-node test can never catch.
+  for it*. The property a single-node test can never catch. **Written
+  (`mixed_mode_test.cpp`, 10 tests); it measures §4.5's two estimates.**
 - **Replay/ack** — a msgid-reuse retry produces a cached ack, not a drop; and a
   content change during a pending retry forces a **new** msgid.
 

@@ -221,6 +221,7 @@ add_header_test(air_channel_test)
 add_header_test(sweep_analysis_test)
 add_header_test(tx_queue_test)
 add_header_test(ack_cache_test)
+add_header_test(mixed_mode_test)
 
 # ----------------------------------------------------------------------------
 # Phase 3: compile the REAL production lora_client.cpp against host shims.

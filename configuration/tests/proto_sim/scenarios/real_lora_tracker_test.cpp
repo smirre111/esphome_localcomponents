@@ -155,3 +155,46 @@ TEST(RealTracker, AnUnparseableFrameIsStillSentVerbatim) {
     for (const auto& p : lorahal::rec().packets)
         EXPECT_EQ(p, std::vector<uint8_t>(raw, raw + sizeof(raw)));
 }
+
+// ---------------------------------------------------------------------------
+// The 1850 ms serialisation, read off the production defaults
+// ---------------------------------------------------------------------------
+
+namespace {
+// responseWindowMs is protected. It is also the single number that makes the
+// two-round deferral rule non-negotiable (test-plan.md section 4.2, and
+// mixed_mode_test.cpp::OneRoundClearsTheAirButTwoIsStillTheRule, which shows
+// the AIR is clear after one round — so this is the only thing left holding
+// the rule up). Reading it through a derived class beats copying the literal
+// into a test, where it would stop tracking the source.
+struct TrackerProbe : LORATracker {
+    using LORATracker::responseWindowMs;
+    using LORATracker::txIntervalMs;
+    using LORATracker::txSlotsPerRound;
+};
+}  // namespace
+
+TEST(RealTracker, SendTaskBlocksAFurther400msAfterABurst) {
+    TrackerProbe p;
+    EXPECT_EQ(p.responseWindowMs, 400);
+    // txIntervalMs is `roundDurationMs / txSlotsPerRound` — 1500/17 — and it
+    // lands on 88 only because C++ truncates. The exact quotient, 88.235, is
+    // the -2663 ppm ruler that cost three firmware revisions. The truncation is
+    // load-bearing; assert it rather than trusting it.
+    EXPECT_EQ(p.txIntervalMs, 88);
+    EXPECT_EQ(p.txIntervalMs * 1000u, loratiming::kBurstCopyStrideUs)
+        << "the hub's stride must equal the node's compiled kCopySpacingUs";
+    EXPECT_EQ(p.txSlotsPerRound, 17);
+
+    // 16 strides + one frame's air time + the response window.
+    const int64_t burst_us =
+        (int64_t) (p.txSlotsPerRound - 1) * p.txIntervalMs * 1000 +
+        (int64_t) loratiming::t0ToRxDoneUs(60) + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t occupied_us = burst_us + (int64_t) p.responseWindowMs * 1000;
+
+    EXPECT_LT(burst_us, (int64_t) timedgrid::kRoundUs)
+        << "the burst itself fits in a round";
+    EXPECT_GT(occupied_us, (int64_t) timedgrid::kRoundUs)
+        << "but the task does not: this is why deferral is two rounds, not one";
+    EXPECT_NEAR((double) occupied_us, 1850000.0, 5000.0);
+}

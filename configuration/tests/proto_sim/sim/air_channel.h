@@ -75,6 +75,24 @@ inline bool collides(const Transmission& a, const Transmission& b) {
     return a.air_start_us() < b.air_end_us() && b.air_start_us() < a.air_end_us();
 }
 
+// Air-time overlap IGNORING sender identity.
+//
+// collides() deliberately exempts same-sender frames: one radio transmits one
+// frame at a time, so they cannot corrupt each other. But that exemption is
+// precisely why they conflict — the hub cannot BEGIN a second transmission
+// while the first is still going out. Coexistence between modes is bounded by
+// this, not by collisions, so it needs its own predicate.
+inline bool airOverlaps(const Transmission& a, const Transmission& b) {
+    return a.air_start_us() < b.air_end_us() && b.air_start_us() < a.air_end_us();
+}
+
+inline bool anyAirOverlap(const Transmission& t,
+                          const std::vector<Transmission>& others) {
+    for (const auto& o : others)
+        if (airOverlaps(t, o)) return true;
+    return false;
+}
+
 struct ChannelResult {
     uint32_t offered{0};        // transmissions placed on the air
     uint32_t windows_armed{0};

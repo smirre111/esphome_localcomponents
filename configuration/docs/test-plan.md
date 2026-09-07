@@ -365,37 +365,70 @@ Real `lora_client.cpp` + real `CmdDispatcher.cpp` over `SimClock`/`SimRadio`.
 
 ### 5.6 `mixed_mode_test.cpp` — L3, the property one node can never show
 
-Two nodes: node 1 in Mode B on slot `k`, node 2 in Mode A.
+**Written — 12 tests, all passing.** Two nodes: node 1 in Mode B on slot `k`,
+node 2 in Mode A, both against `sim/air_channel.h` rather than a closed form.
 
-- `BurstWalksThroughTheTimedWindow` — node 2's 17-copy burst spans 1.4 s and
-  crosses node 1's window **81 %** of the time (42 ms copies every 88 ms leave a
-  46 ms gap; a 29.44 ms window fits with 17 ms of freedom). Assert the rate, so
-  the deferral rule has a measured problem to solve.
-- `NoCollisionWhileTheHubAlsoHasTrafficForTheTimedNode` — the actual property:
-  no burst copy overlaps node 1's window *while the hub also holds a frame for
-  node 1*. **This is the test §9 of the plan calls out as impossible with one
-  node**, and it is the B3 gate.
-- `DeferralIsTwoRoundsNotOne` — a burst occupies 1450 ms and `sendTask` blocks a
-  further 400 ms, so a frame deferred to round `n+1` lands inside the same
-  burst's response window on the same serialised task. Assert the deferred frame
-  is transmitted no earlier than round `n+2`.
-- `ReorderingQueueExpressesTheConstraint` — B1a. `send(buf, len, {copies,
-  first_mark_us, copy_stride_us})` alone cannot say "not before round n+2, and
-  behind nothing else". Assert the scheduler accepts and honours that constraint,
-  against a FIFO baseline that fails it.
-- `CollisionRateBudget` — `P(node needs a frame in a round) = 3.5/57600 =
-  6.076e-5`; `P(any of 32) = 1.943e-3`; `128 bursts/day × 1.943e-3 × 30/32 =
-  **0.233 collisions/day**`. A quarter of one command per day, all 32 slots
-  available, acquisition still 3 s.
-- `ContentionRegionIsRejected` — the 300 ms reserved region, kept as a
-  *regression* test so it cannot be reintroduced: 3 copies in 300 ms gives
-  17.66 % per round and 36 rounds (54 s) to 99.9 %, against 96.40 % and 3 rounds
-  for 17 copies across the round. Confining copies destroys the incommensurate
-  sweep that makes the burst work.
-- `DemotionCounterKeysOnAddressedFrames` — a window walked through by another
-  node's burst is **not empty**. The missed-mark counter must key on "no frame
-  addressed to me at my mark", not on "nothing received", or §5.6's own traffic
-  demotes the node it is protecting.
+The file turns on a distinction the per-mode tests never need. Frames from one
+sender never *collide* — one radio transmits one frame at a time — but that is
+exactly why they *conflict*: the hub cannot begin a slot transmission while a
+burst copy is still going out. Hub air time is a single serial resource. The
+channel model grew a second predicate for it (`airOverlaps`, alongside
+`collides`), and every result below is about the first, not the second.
+
+What the tests assert:
+
+- `ABurstCopyIsShorterThanItsStrideButNotByMuch` — a copy occupies 42.048 ms of
+  its 88 ms stride: **47 %**. The premise everything else rests on.
+- `AFullBurstDeniesAlmostTheEntireRound` — **31 of 32 slots**, against the
+  plan's estimate of 30/32 (§4.5). Only the last slot survives. The stride is
+  1.878 slot pitches, so copies walk *across* slot boundaries rather than
+  landing on them, and each 42 ms shadow clips the slots on both sides. The
+  incommensurate sweep that makes the burst reliable is what makes it total.
+- `TheBlockedSetIsNotAnArtefactOfHowItIsComputed` — 31/32 is a suspicious
+  enough number to re-derive slot by slot from the predicate.
+- `ABlockedSlotFailsInTwoDifferentWays` — some denied slots hear **silence**,
+  some hear a **frame addressed to the other node**. `detected` and `crcValid`
+  increment on the latter, `addressed` does not. A KPI that stopped at
+  `detected` would read that as a healthy link.
+- `AFrameCaughtInTheWrongSlotIsStillTheWrongFrame` — nothing about window
+  geometry distinguishes a copy meant for this node from one meant for another.
+  The address filter is MAC-1, not timing.
+- `ASingleCopyDownlinkBlocksAtMostOneSlot` — for every start slot. B4's
+  remaining half is not an optimisation here: it is what makes mixed operation
+  possible at all.
+- `TheBeaconReservationIsFarTooSmallToParkABurstIn` — the burst spans >90 % of
+  the round; `beaconClearSlots()` reserves a fraction of that. There is no hole
+  to interleave into.
+- `AForeignTransmitterCollidesWhereTheHubMerelyBlocks` — the two predicates,
+  made explicit against each other.
+- `AClassANodesRx1IsUnaffectedByTheGridButNotByTheBurst` — Mode C needs no clock
+  agreement with the hub, and that independence buys nothing against hub
+  occupancy.
+- `TheNodesUplinkAndTheHubsBurstCanCollide` — a node's uplink *is* a foreign
+  transmitter to a burst copy, so this one is a genuine collision and both
+  frames are lost. Part of why Mode C is the last fallback.
+- `OneRoundClearsTheAirButTwoIsStillTheRule` — **the correction this file
+  produced.** On the air, one round suffices: the burst's last copy ends at
+  1.447 s, inside the 1.5 s round, so round `n+1` is already clear for every
+  slot. The two-round rule of §4.5 therefore does **not** come from air
+  occupancy — it comes from the hub's single serialised `sendTask`, which blocks
+  a further ~400 ms after the burst (1850 ms against a 1500 ms round), and no
+  channel model can see that. The test exists so that `kDeferRounds` is never
+  relaxed to 1 on the strength of a geometry argument that does not reach the
+  constraint. The air margin is thin anyway: 53 ms, barely more than one slot.
+- `TheMissedMarkCounterMustKeyOnAddressedFramesNotOnSilence` — the demotion
+  trap, as the two counters a node could keep over the 31 denied slots. They
+  must disagree, or the plan's insistence on "no frame addressed to me at my
+  mark" would be academic. They do.
+
+Covered elsewhere, deliberately not duplicated here:
+
+| §5.6 item as originally specified | where it lives |
+|---|---|
+| `DeferralIsTwoRoundsNotOne` | `tx_queue_test.cpp` (the queue implements it); the *reason* is corrected above |
+| `ReorderingQueueExpressesTheConstraint` | `tx_queue_test.cpp` — priority, eligibility, stable FIFO tiebreak, 17 tests |
+| `CollisionRateBudget` | `mode_a_reliability_test.cpp::CollisionBudgetIsAQuarterOfACommandPerDay` |
+| `ContentionRegionIsRejected` | `mode_a_geometry_test.cpp::ConfiningCopiesDestroysTheSweep` and `AgreeForConfinedBurstsToo` |
 
 ---
 
