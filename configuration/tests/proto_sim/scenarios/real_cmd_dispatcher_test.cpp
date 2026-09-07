@@ -2476,7 +2476,8 @@ TEST_F(RealNodeFixture, DetectedIsReportedByTheRadioPathNotInferred) {
 // ---------------------------------------------------------------------------
 namespace {
 
-std::vector<uint8_t> build_mac_config(bool counter, bool crypto,
+// Negative sense on the wire, so a zeroed message is the SAFE one.
+std::vector<uint8_t> build_mac_config(bool disable_counter, bool disable_crypto,
                                       uint32_t duration_s, uint32_t msgid) {
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = kNodeAddr;
@@ -2486,8 +2487,8 @@ std::vector<uint8_t> build_mac_config(bool counter, bool crypto,
 
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind          = MAC_CONTROL__KIND__MAC_CONFIG;
-    mc.enablecounter = counter;
-    mc.enablecrypto  = crypto;
+    mc.disablecounter = disable_counter;
+    mc.disablecrypto  = disable_crypto;
     mc.durations     = duration_s;
 
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -2508,7 +2509,7 @@ TEST_F(RealNodeFixture, PlaintextMacConfigIsRefused) {
     ASSERT_TRUE(disp.macSublayers().counter_enabled);
     ASSERT_TRUE(disp.macSublayers().crypto_enabled);
 
-    auto bytes = build_mac_config(/*counter=*/false, /*crypto=*/false,
+    auto bytes = build_mac_config(/*disable_counter=*/true, /*disable_crypto=*/true,
                                   /*duration_s=*/60, /*msgid=*/400);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
@@ -2521,7 +2522,7 @@ TEST_F(RealNodeFixture, PlaintextMacConfigIsRefused) {
 TEST_F(RealNodeFixture, MacConfigDoesNotDriveTheApplication) {
     // A MAC_CONFIG frame is consumed at MAC-0 whether accepted or refused —
     // nothing reaches a cover, a schedule or the motor.
-    auto bytes = build_mac_config(false, false, 60, 401);
+    auto bytes = build_mac_config(true, true, 60, 401);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
     EXPECT_EQ(disp.macCounters().ping_rx, 0u);
     EXPECT_EQ(disp.macCounters().echo_tx, 0u);
@@ -2537,4 +2538,47 @@ TEST_F(RealNodeFixture, ApplicationFramesStillFaceTheReplayWindow) {
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     EXPECT_EQ(disp.macFunnel().duplicates, dup_before + 1u)
         << "with MAC-1 on (the default) a replay must still be rejected";
+}
+
+
+TEST_F(RealNodeFixture, AZeroedMacConfigDoesNotDisableAnything) {
+    // proto3 bools default FALSE. With an "enable" field a hub sending
+    // MAC_CONFIG with only durationS set — meaning to extend a run — silently
+    // switched off the replay window. Negative sense makes the zero value safe.
+    auto bytes = build_mac_config(/*disable_counter=*/false, /*disable_crypto=*/false,
+                                  /*duration_s=*/0, /*msgid=*/402);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_TRUE(disp.macSublayers().counter_enabled);
+    EXPECT_TRUE(disp.macSublayers().crypto_enabled);
+}
+
+TEST_F(RealNodeFixture, AddressedIsCountedOnBothOutcomes) {
+    // `addressed` used to be incremented nowhere, so stage 4->5 read as 100 %
+    // loss on a perfectly healthy link.
+    auto mine = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/430);
+    disp.onReceiveNew(mine.data(), static_cast<int>(mine.size()));
+    EXPECT_GE(disp.macFunnel().addressed, 1u);
+    EXPECT_EQ(disp.macFunnel().foreign, 0u);
+}
+
+TEST_F(RealNodeFixture, ForeignPlaintextFramesAreCountedNotIgnored) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr + 7;   // someone else's
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = 1;
+    hdr.msgid         = 440;
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind = MAC_CONTROL__KIND__MAC_PING;
+    mc.seq  = 1;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.maccontrol = &mc;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+
+    const uint32_t before = disp.macFunnel().foreign;
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_EQ(disp.macFunnel().foreign, before + 1u);
+    EXPECT_EQ(disp.macCounters().ping_rx, 0u);
 }

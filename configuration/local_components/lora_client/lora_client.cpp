@@ -1109,7 +1109,18 @@ namespace esphome
       header.destaddress   = this->short_address_;
       header.destsubnet    = this->subnet_address_;
       header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
+      // A DEDICATED counter, deliberately not incrTxMessageId().
+      //
+      // Two reasons, both load-bearing. (1) That call advances the session TX
+      // id the node's replay window tracks. The node hears only a fraction of
+      // the pings in windowed RX — and with MAC-1 off for control frames it
+      // does not advance its rx_id_ at all — so hub and node diverge by one per
+      // ping. At 250 ms spacing a 300 s run emits 1200 pings and the next real
+      // command lands outside the node's 1024-wide accept window: every command
+      // rejected as a "huge jump" until the next LOGIN. (2) incrTxMessageId()
+      // persists to NVS, and this runs in an esp_timer task while the ESPHome
+      // main loop owns that backend — hundreds of writes per run, off-loop.
+      header.msgid         = ++this->mac_ping_msgid_;
       header.burstindex    = 0;
       header.burstcount    = 0;
 
@@ -1220,8 +1231,12 @@ namespace esphome
       this->set_timeout("mac_ping_end", duration_s * 1000,
                         [this]() { this->stop_mac_ping(); });
 
+      // The ping msgids are their own sequence and will not satisfy the node's
+      // replay window, so a run needs MAC-1 off on the node (M3). Said out loud
+      // because the failure — every ping silently rejected — looks exactly like
+      // a reception problem.
       ESP_LOGI(TAG, "[%s] MAC ping START: %u s, grid %u ms, single copy, "
-                    "echo %s, pad %u B",
+                    "echo %s, pad %u B (requires MAC-1 disabled on the node)",
                this->get_name().c_str(), (unsigned) duration_s, (unsigned) grid_ms,
                want_echo ? "on" : "off", (unsigned) pad_bytes);
     }

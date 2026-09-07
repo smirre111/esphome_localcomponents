@@ -21,9 +21,16 @@
 #include <nvs_flash.h>
 #include <cinttypes>
 
+// The grid geometry. Unconditional: startGrid() and nextT0ForSlotUs() use
+// timedgrid:: constants whatever the ESPHome config contains, so an include
+// inside #ifdef USE_OTA meant a build without OTA did not compile. Path is the
+// component-qualified form every other cross-component include here uses — a
+// bare "TimedGrid.h" is not on this component's quoted-include search path
+// once ESPHome copies local_components/ into esphome/components/.
+#include "esphome/components/lora_client/TimedGrid.h"
+
 #ifdef USE_OTA
 #include "esphome/components/ota/ota_backend.h"
-#include "TimedGrid.h"
 #endif
 
 #undef TAG

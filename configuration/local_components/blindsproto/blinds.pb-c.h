@@ -569,19 +569,24 @@ struct  MacControl
    * traffic always passes through MAC-1 and MAC-2 whatever is set here; a
    * switch that could disable the replay window or authentication for real
    * commands would be a remote-unlock hole wearing a measurement's clothes.
-   * Both default to true, so a zeroed message is the SAFE configuration.
+   * NEGATIVE sense, deliberately. proto3 bools default to FALSE and
+   * MAC_CONTROL__INIT zeroes them, so an "enable" field would make a zeroed
+   * or partially-filled message DISABLE both sublayers — a hub sending
+   * MAC_CONFIG with only durationS set, meaning to extend a run, would
+   * silently switch off the replay window. With "disable" the zero value is
+   * the safe one, which is the invariant this message needs.
    * A MAC_CONFIG frame is refused unless it arrived AUTHENTICATED and the
    * node holds a session — a plaintext frame asking to turn authentication
    * off answers its own question.
    */
   /*
-   * MAC-1
+   * MAC-1 off
    */
-  protobuf_c_boolean enablecounter;
+  protobuf_c_boolean disablecounter;
   /*
-   * MAC-2
+   * MAC-2 off
    */
-  protobuf_c_boolean enablecrypto;
+  protobuf_c_boolean disablecrypto;
   /*
    * Node-owned deadline; the node caps it. 0 = node default.
    */

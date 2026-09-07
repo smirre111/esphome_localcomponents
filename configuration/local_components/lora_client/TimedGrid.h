@@ -148,7 +148,17 @@ static constexpr uint32_t kBeaconPayloadBytes = 45;
 
 constexpr uint32_t beaconClearSlots()
 {
-    return (timeOnAirUs(kBeaconPayloadBytes) + kSlotPitchUs - 1) / kSlotPitchUs;
+    // Measured from T0, like everything else, and including the next slot's arm
+    // lead — the same construction nextServableSlotDelta() uses.
+    //
+    // The earlier form divided timeOnAirUs() (measured from AIR START) by a
+    // pitch measured from T0 and omitted kArmLeadUs. It agrees at the shipped
+    // 45 B beacon, which is why the static_assert passed, but it over-reserves
+    // a whole slot for a shorter beacon (25 B: 1 slot where 0 is needed, 3 % of
+    // round capacity) because the two errors happen not to cancel there.
+    const uint32_t need = t0ToRxDoneUs(kBeaconPayloadBytes) + kArmLeadUs;
+    const uint32_t slots = (need + kSlotPitchUs - 1) / kSlotPitchUs;
+    return slots == 0 ? 0u : slots - 1u;
 }
 
 // How long the node can coast on a phase measurement before the guard band is

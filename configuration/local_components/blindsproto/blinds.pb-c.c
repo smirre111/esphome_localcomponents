@@ -2109,24 +2109,24 @@ static const ProtobufCFieldDescriptor mac_control__field_descriptors[7] =
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "enableCounter",
+    "disableCounter",
     5,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_BOOL,
     0,   /* quantifier_offset */
-    offsetof(MacControl, enablecounter),
+    offsetof(MacControl, disablecounter),
     NULL,
     NULL,
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "enableCrypto",
+    "disableCrypto",
     6,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_BOOL,
     0,   /* quantifier_offset */
-    offsetof(MacControl, enablecrypto),
+    offsetof(MacControl, disablecrypto),
     NULL,
     NULL,
     0,             /* flags */
@@ -2146,9 +2146,9 @@ static const ProtobufCFieldDescriptor mac_control__field_descriptors[7] =
   },
 };
 static const unsigned mac_control__field_indices_by_name[] = {
+  4,   /* field[4] = disableCounter */
+  5,   /* field[5] = disableCrypto */
   6,   /* field[6] = durationS */
-  4,   /* field[4] = enableCounter */
-  5,   /* field[5] = enableCrypto */
   0,   /* field[0] = kind */
   3,   /* field[3] = pad */
   1,   /* field[1] = seq */

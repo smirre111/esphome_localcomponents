@@ -304,6 +304,8 @@ namespace esphome
       bool     mac_ping_want_echo_{true};
       uint32_t mac_ping_pad_bytes_{0};
       uint32_t mac_ping_seq_{0};
+      // Separate from the session TX id: see build_mac_ping_frame_().
+      uint32_t mac_ping_msgid_{0};
       esp_timer_handle_t mac_ping_timer_{nullptr};
       uint8_t  mac_ping_frame_[192]{};
       size_t   mac_ping_frame_len_{0};
