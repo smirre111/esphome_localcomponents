@@ -554,18 +554,31 @@ namespace esphome
       // vTaskSuspend(xHandleLoraPolling);
       // Hold the radio mutex for the whole transmit so a concurrent RX read on
       // the main loop cannot interleave SPI transactions with the TX sequence.
+      // Logging BEFORE the mutex, not inside it. ESP_LOGI formats and writes to
+      // the UART; at 115200 baud a 40-character line is ~3.5 ms, and it was
+      // holding the radio mutex for all of it — blocking the main loop's RX
+      // read behind a log message.
+      ESP_LOGI(TAG, "Sending packet of length %d", len);
+
       if (this->radio_mutex_ != nullptr)
         xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
 
-      ESP_LOGI(TAG, "Sending packet of length %d", len);
       lora_idle();
 
-      lora_setSpreadingFactor(loraSpreadingFactor);
-      lora_setCodingRate4(loraCodingRate);
+      // Only the preamble length is per-packet.
+      //
+      // Spreading factor, coding rate, bandwidth, sync word and CRC were being
+      // re-written before EVERY copy of every burst, each one a register
+      // read-modify-write over SPI, none of them ever changing: setup() above
+      // already writes exactly these values and nothing alters them at
+      // runtime. Seventeen copies paid for it seventeen times, all of it
+      // between the caller's decision to send and the radio actually firing —
+      // which is precisely the interval B5 needs bounded.
+      //
+      // The preamble genuinely does alternate (TX uses loraPreambleLengthTx,
+      // RX loraPreambleLengthRx, restored after the packet below), so it
+      // stays.
       lora_setPreambleLength(loraPreambleLengthTx);
-      lora_setSignalBandwidth(loraSignalBandwidth);
-      lora_setSyncWord(loraSyncWord);
-      lora_enableCrc();
       // lora_setSymbolTimeout(1023);
 
       int status = lora_beginPacket(); // start packet
@@ -591,20 +604,21 @@ namespace esphome
 
       if (!async)
       {
-        ESP_LOGI(TAG, "Packet sent");
         lora_setPreambleLength(loraPreambleLengthRx);
 
         // lora_sleep();
 
         // vTaskResume(xHandleLoraPolling);
       }
-      else
-      {
-        ESP_LOGI(TAG, "Packet sent, waiting for TX DONE interrupt");
-      }
 
       if (this->radio_mutex_ != nullptr)
         xSemaphoreGive(this->radio_mutex_);
+
+      // Also outside the mutex, and for the same reason as the line above it.
+      if (async)
+        ESP_LOGI(TAG, "Packet sent, waiting for TX DONE interrupt");
+      else
+        ESP_LOGI(TAG, "Packet sent");
     }
 
     void LORATracker::register_client(LORAClient *client)

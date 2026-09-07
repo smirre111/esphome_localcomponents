@@ -13,3 +13,6 @@
 #define IRAM_ATTR
 #define DRAM_ATTR
 #define NOINLINE_ATTR
+// SPI transfer buffers must be word-aligned on device; on the host the
+// attribute is only an alignment hint and costs nothing to honour.
+#define WORD_ALIGNED_ATTR __attribute__((aligned(4)))

@@ -6,9 +6,11 @@
 #include "esp_system.h"
 #include "esp_log.h"
 #include "driver/spi_master.h"
+#include "esp_attr.h"   // WORD_ALIGNED_ATTR
 #include "soc/gpio_struct.h"
 #include "driver/gpio.h"
 #include <string.h>
+#include <assert.h>
 
 #include "lora.h"
 
@@ -147,7 +149,7 @@ void lora_write_reg(int reg, int val)
    uint8_t cRead = 0x80;
    uint8_t cmd = static_cast<uint8_t>(cRead | reg8);
    uint8_t out[2] = {cmd, val8};
-   uint8_t in[2];
+   uint8_t in[2] = {0, 0};
 
    spi_transaction_t t{};
    t.flags = 0;
@@ -155,23 +157,26 @@ void lora_write_reg(int reg, int val)
    t.tx_buffer = out;
    t.rx_buffer = in;
 
-   if (xSemaphoreTake(xSemaphore, (TickType_t)1) == pdTRUE)
+   // Wait for the bus rather than skipping the write.
+   //
+   // This used to time out after ONE tick and fall through in silence. A write
+   // that does not happen is not a delay, it is a different radio state: a
+   // dropped RegOpMode = TX is a frame that never transmits, with no error
+   // anywhere. The critical section is a single SPI transaction on a task (the
+   // hub registers no ISR into this driver), so blocking here is bounded by
+   // one transfer and cannot deadlock.
+   if (xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE)
    {
-      /* We were able to obtain the semaphore and can now access the
-            shared resource. */
-
       gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 0);
       spi_device_transmit(__spi, &t);
       gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 1);
 
-      /* We have finished accessing the shared resource.  Release the
-            semaphore. */
       xSemaphoreGive(xSemaphore);
    }
    else
    {
-      /* We could not obtain the semaphore and can therefore not access
-            the shared resource safely. */
+      // Only reachable if the mutex was never created.
+      ESP_LOGE(TAG, "lora_write_reg(0x%02X): no SPI mutex, write DROPPED", reg8);
    }
 }
 
@@ -196,7 +201,10 @@ int lora_read_reg(int reg)
    //     .rx_buffer = (void *)rx_buf};
 
    uint8_t out[2] = {static_cast<uint8_t>(reg), static_cast<uint8_t>(0xff)};
-   uint8_t in[2];
+   // Initialised, because the failure path below returns in[1] regardless. It
+   // used to return uninitialised stack, which is how a one-tick timeout on
+   // REG_IRQ_FLAGS could look like a TX-done that never happened.
+   uint8_t in[2] = {0, 0};
 
    spi_transaction_t t{};
    t.flags = 0;
@@ -204,25 +212,21 @@ int lora_read_reg(int reg)
    t.tx_buffer = out;
    t.rx_buffer = in;
 
-   if (xSemaphoreTake(xSemaphore, (TickType_t)1) == pdTRUE)
+   // Wait for the bus. Same reasoning as lora_write_reg above; here the
+   // consequence of skipping was worse, since the caller cannot distinguish a
+   // failed read from a register that genuinely reads 0.
+   if (xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE)
    {
-      /* We were able to obtain the semaphore and can now access the
-            shared resource. */
-
       gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 0);
       spi_device_transmit(__spi, &t);
       gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 1);
 
-      /* We have finished accessing the shared resource.  Release the
-            semaphore. */
       xSemaphoreGive(xSemaphore);
    }
    else
    {
-      /* We could not obtain the semaphore and can therefore not access
-            the shared resource safely. */
-      ESP_LOGE(TAG, "Could not read semaphore");
-      
+      // Only reachable if the mutex was never created.
+      ESP_LOGE(TAG, "lora_read_reg(0x%02X): no SPI mutex, returning 0", reg);
    }
 
    // return rx_buf[1];
@@ -616,10 +620,55 @@ size_t lora_write(const uint8_t *buffer, size_t size)
       size = MAX_PKT_LENGTH - currentLength;
    }
 
-   // write data
-   for (size_t i = 0; i < size; i++)
+   // Burst-write the FIFO instead of one SPI transaction per byte.
+   //
+   // The SX1278's FIFO pointer auto-increments, so [0x80|REG_FIFO, b0, b1, ...]
+   // in a single transfer lands exactly what the per-byte loop landed. What it
+   // saves is 1 transaction and 1 mutex acquisition per byte: a 60 B frame was
+   // 61 transactions, and a 152 B one 153. That cost sits directly in front of
+   // the TX fire instant, which is what B5's prepare/fire split needs bounded.
+   //
+   // The chunk size is not arbitrary. The bus is opened with dma_chan = 0
+   // (spi_bus_initialize above), so transfers go through the hardware data
+   // FIFO, which caps a transaction at SOC_SPI_MAXIMUM_BUFFER_SIZE = 64 bytes
+   // — one of which is the command. Enabling DMA would allow the whole frame
+   // in one transfer, but that is a bus-configuration change with its own
+   // requirements (DMA-capable, word-aligned buffers) and is deliberately not
+   // bundled here. 152 B goes from 153 transactions to 3.
+   static constexpr size_t kMaxPayloadPerTxn = 63;
+
+   for (size_t off = 0; off < size; off += kMaxPayloadPerTxn)
    {
-      lora_write_reg(REG_FIFO, buffer[i]);
+      const size_t chunk = (size - off < kMaxPayloadPerTxn) ? (size - off)
+                                                            : kMaxPayloadPerTxn;
+      WORD_ALIGNED_ATTR uint8_t tx[1 + kMaxPayloadPerTxn];
+      tx[0] = static_cast<uint8_t>(0x80 | REG_FIFO);
+      memcpy(&tx[1], buffer + off, chunk);
+
+      spi_transaction_t t{};
+      t.flags     = 0;
+      t.length    = 8 * (chunk + 1);
+      t.tx_buffer = tx;
+      t.rx_buffer = nullptr;
+
+      if (xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE)
+      {
+         gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 0);
+         spi_device_transmit(__spi, &t);
+         gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 1);
+
+         xSemaphoreGive(xSemaphore);
+      }
+      else
+      {
+         // Only reachable if the mutex was never created. Report the truth:
+         // the frame in the FIFO is now short, so it must not be sent as if
+         // whole.
+         ESP_LOGE(TAG, "lora_write: no SPI mutex, %u of %u bytes written",
+                  (unsigned) off, (unsigned) size);
+         lora_write_reg(REG_PAYLOAD_LENGTH, currentLength + off);
+         return off;
+      }
    }
 
    // update length
@@ -709,8 +758,18 @@ uint8_t lora_getPayloadLength()
 void lora_idle(void)
 {
    lora_write_reg(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_STDBY);
-   // vTaskDelay(1);
-   esphome::delay(1);
+   // Was esphome::delay(1). lora_idle() is the FIRST thing sendPacketBytes()
+   // does, so that millisecond sat on the critical path in front of every
+   // transmit — a millisecond of jitter against a guard band measured in tens
+   // of microseconds, and the largest single term in B5's fire residual.
+   //
+   // The transition into standby is a mode-register write; the datasheet
+   // figures already recorded below for the other direction (~220 us IDLE->TX,
+   // ~120 us IDLE->RXSINGLE) bound it. 250 us is generous for it and is 4x
+   // shorter than what it replaces.
+   //
+   // NOT VERIFIED ON HARDWARE.
+   esphome::delayMicroseconds(250);
 }
 
 /**
@@ -738,11 +797,18 @@ void lora_cad()
 
 void lora_tx()
 {
+   // The write below IS the fire instant: everything after it is the caller
+   // waiting, not the radio preparing.
    lora_write_reg(REG_OP_MODE, LORA_MODE_LONG_RANGE_MODE | LORA_MODE_TX);
-   //delayMicroseconds(220); // IDLE -> TX takes about ~220 µs
-   // vTaskDelay(1);
-   esphome::delay(1);
 
+   // Was esphome::delay(1), on the assumption that the caller must not poll
+   // REG_IRQ_FLAGS before the PLL has locked. IDLE -> TX takes ~220 us (the
+   // datasheet figure the commented-out line below already carried), so a
+   // millisecond is 4.5x longer than needed and it delays the RETURN, not the
+   // transmission. It costs airtime accounting, not correctness.
+   //
+   // NOT VERIFIED ON HARDWARE.
+   esphome::delayMicroseconds(220); // IDLE -> TX takes about ~220 us
 }
 
 void lora_rxSingle()

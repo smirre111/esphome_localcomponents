@@ -342,6 +342,39 @@ target_link_libraries(real_lora_tracker PUBLIC proto_sim)
 target_compile_options(real_lora_tracker PRIVATE
     -Wno-unused-parameter -Wno-sign-compare -Wno-format)
 
+# ----------------------------------------------------------------------------
+# The REAL SX1278 driver (lora_tracker/lora.cpp), over a recording SPI bus.
+#
+# One level below real_lora_tracker: that target stubs the driver entirely, so
+# nothing checked what the driver puts on the bus. The FIFO fill did one SPI
+# transaction PER BYTE — 153 of them for a 152 B frame, each with its own mutex
+# acquisition, all of it sitting between the decision to send and the radio
+# firing. Rewriting that to a burst write is only safe if something can see the
+# transaction shape, which is what shims_hub/spi_stub.cpp exists for.
+#
+# The fake radio answers reads from a flat register file and appends FIFO
+# writes to a vector. It does not model modulation, timing or IRQs — those live
+# in sim/air_channel.h and in the policy headers.
+# ----------------------------------------------------------------------------
+set(HUB_SHIM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shims_hub)
+add_library(real_lora_driver STATIC
+    ${LORA_TRACKER_DIR}/lora.cpp
+    ${HUB_SHIM_DIR}/spi_stub.cpp
+)
+target_include_directories(real_lora_driver BEFORE PUBLIC
+    ${HUB_SHIM_DIR}                 # driver/spi_master.h, driver/gpio.h, soc/
+    ${SHIM_DIR}                     # esphome/core/hal.h
+    ${LORA_TRACKER_DIR}             # lora.h
+    ${NODE_SHIM_DIR}                # FreeRTOS, esp_log.h, esp_attr.h
+)
+target_compile_options(real_lora_driver PRIVATE
+    -Wno-unused-parameter -Wno-sign-compare -Wno-format)
+
+add_executable(real_lora_driver_test scenarios/real_lora_driver_test.cpp)
+target_link_libraries(real_lora_driver_test
+    PRIVATE real_lora_driver GTest::gtest GTest::gtest_main)
+gtest_discover_tests(real_lora_driver_test)
+
 add_executable(real_lora_tracker_test scenarios/real_lora_tracker_test.cpp)
 target_link_libraries(real_lora_tracker_test
     PRIVATE real_lora_tracker GTest::gtest GTest::gtest_main)

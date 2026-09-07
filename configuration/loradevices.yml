@@ -24,6 +24,13 @@ esp32:
       CONFIG_INT_WDT_TIMEOUT_MS: "800"
       CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY: y
       CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK: y
+      # Pinned, not inherited. The transmit burst paces itself with
+      # vTaskDelayUntil(pdMS_TO_TICKS(88)), and pdMS_TO_TICKS quantises to the
+      # tick: at 1000 Hz that is 88 ms, at 100 Hz it is 80 ms, and an 8 ms
+      # per-copy error is 9 % of the stride the node's DriftEstimator regresses
+      # against. Nothing in this file previously said what the rate was, so the
+      # stride was correct only by inheritance from a default.
+      CONFIG_FREERTOS_HZ: "1000"
     # advanced:
     #   loop_task_stack_size: 16384
   
@@ -218,8 +225,15 @@ button:
   # --- Clock-drift characterisation (bench only) ---------------------------
   # Puts both ends into test mode: the node holds continuous RX, the hub emits
   # a burst every 15 s as a regular ruler. The node then regresses the arrival
-  # times of the 17 copies against their known 88235 us spacing; the slope is
-  # the relative drift. Result appears in the node's serial log as
+  # times of the 17 copies against their known 88000 us spacing; the slope is
+  # the relative drift.
+  #
+  # 88000, NOT 1500/17 = 88235. This comment said 88235 and that is the exact
+  # error that cost three firmware revisions: the hub's stride is
+  # `roundDurationMs / txSlotsPerRound` in C++ integer arithmetic, so it is 88
+  # ms exactly, and the node compiles kCopySpacingUs = 88000 to match. A ruler
+  # believed to be 88235 against copies actually 88000 apart reads as a
+  # -2663 ppm clock error that does not exist. Result appears in the node's serial log as
   # "DriftTest result: +N ppm over M bursts".
   #
   # Continuous RX costs ~11 mA against the ~1.2 mA interactive average, so this
