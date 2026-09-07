@@ -110,6 +110,19 @@ From `tests/proto_sim/README.md`, all learned the hard way:
 
 - **`ctest` does not rebuild.** Always `cmake --build` first. A compile error
   leaves stale binaries reporting a cheerful pass.
+- **A changed HEADER can leave stale OBJECTS even after a successful build**,
+  if the machine's clock has moved backwards — `make` prints "Clock skew
+  detected" and silently skips recompiling. The symptom is not a compile error
+  but a LAYOUT MISMATCH: one translation unit sees the new class, another the
+  old, and the result is `std::bad_alloc` inside an untouched function. Cost
+  here: a stale shim object produced 19 phantom failures that survived several
+  targeted rebuilds. **When a failure makes no sense, `--clean-first` before
+  investigating anything else.**
+- **Run the suite through `ctest`, not by executing a test binary directly.**
+  `gtest_discover_tests` gives each case its own process; running the binary
+  puts every case in one process, where the file-level node statics documented
+  below leak between them. Same commit, same binary: 0 failures under ctest, 12
+  under a direct run. The direct-run failures are the artefact.
 - **There is no `settimeofday` shim.** The node clock under host test is real
   wall time and cannot be stepped. Any test involving schedule timing builds its
   entries relative to *now*. **This bites Mode C**: RX1/RX2 offsets must be

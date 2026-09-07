@@ -2623,7 +2623,10 @@ TEST_F(RealNodeFixture, AForeignFrameCommitsNoPhaseSample) {
     std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
     lora_client_operation_message__pack(&op, bytes.data());
 
-    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    // A real timestamp, so what rejects this sample is the ADDRESS FILTER and
+    // not the missing-timestamp guard. Without this the test passed either way.
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()),
+                      /*rx_us=*/1040000);
 
     EXPECT_EQ(disp.phaseStats().n, 0u)
         << "stamping a neighbour's frame is what makes phaseErrUs bimodal";
@@ -2634,8 +2637,12 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
     disp.setExpectedT0Us(1000000);
     disp.resetPhaseStats();
 
+    // rx_us must be REAL: onReceiveNew defaults it to 0, and 0 means "no
+    // timestamp", which correctly commits nothing. Passing the default here
+    // would have made this test pass for the wrong reason.
     auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/520);
-    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()),
+                      /*rx_us=*/1040000);
     EXPECT_EQ(disp.phaseStats().n, 1u);
 }
 
@@ -2718,7 +2725,8 @@ TEST_F(RealNodeFixture, WithdrawalIsUnconditionalAndClearsPhase) {
 
     // Feed a phase sample so there is something to clear.
     auto ping = build_mac_ping(1, false, 621);
-    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()),
+                      /*rx_us=*/1040000);
 
     auto off = build_grid_sync(false, 4, 622);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
@@ -2733,7 +2741,8 @@ TEST_F(RealNodeFixture, ReAnchoringResetsPhaseStats) {
     auto a = build_grid_sync(true, 4, 630);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     auto ping = build_mac_ping(1, false, 631);
-    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()),
+                      /*rx_us=*/1040000);
     ASSERT_GE(disp.phaseStats().n, 1u);
 
     auto b = build_grid_sync(true, 9, 632);   // new slot, new anchor
@@ -2748,4 +2757,98 @@ TEST_F(RealNodeFixture, GridSyncDoesNotReachTheApplication) {
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
     EXPECT_EQ(disp.macCounters().ping_rx, 0u);
     EXPECT_EQ(disp.macCounters().echo_tx, 0u);
+}
+
+// ---------------------------------------------------------------------------
+// B3 — one receive window per round. Default OFF until T_detect is measured.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, TimedRxDefaultsToOff) {
+    // Narrowing three windows to one trades a 3x reception margin for battery
+    // on the strength of an unmeasured T_detect. The mechanism ships; the
+    // switch waits for HW-2's number.
+    EXPECT_FALSE(disp.timedRxEnabled());
+    EXPECT_FALSE(disp.timedRxActive());
+}
+
+TEST_F(RealNodeFixture, TimedRxNeedsAGridEvenWhenEnabled) {
+    disp.setTimedRxEnabled(true);
+    EXPECT_FALSE(disp.timedRxActive()) << "no grid, no timed window";
+}
+
+TEST_F(RealNodeFixture, TimedRxNeedsTheCrystal) {
+    disp.setTimedRxEnabled(true);
+    auto g = build_grid_sync(true, 4, 700);
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // rtcSlowSrc is Unknown by default — the safe reading.
+    EXPECT_FALSE(disp.timedRxActive())
+        << "a node that cannot hold phase must stay in Mode A, visibly";
+
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::InternalRc);
+    EXPECT_FALSE(disp.timedRxActive()) << "~5 % is not a clock";
+}
+
+TEST_F(RealNodeFixture, TimedRxNeedsATrustworthyPhase) {
+    disp.setTimedRxEnabled(true);
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
+    auto g = build_grid_sync(true, 4, 710);
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
+
+    // Adoption resets the phase stats, so there is no baseline yet.
+    EXPECT_EQ(disp.phaseStats().n, 0u);
+    EXPECT_FALSE(disp.timedRxActive())
+        << "promotion needs a long baseline; demotion is immediate";
+}
+
+TEST_F(RealNodeFixture, ArmInstantLeadsTheMarkByTheArmLead) {
+    auto g = build_grid_sync(true, 4, 720);
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    const int64_t now = disp.expectedT0Us() - 100000;
+    const int64_t arm = disp.nextArmInstantUs(now);
+    const int64_t t0  = gridstate::nextT0Us(disp.gridState(), now);
+    EXPECT_EQ(t0 - arm, (int64_t) timedgrid::kArmLeadUs);
+}
+
+TEST_F(RealNodeFixture, MissedMarksKeyOnAddressedFramesNotOnSilence) {
+    auto g = build_grid_sync(true, 4, 730);
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
+    disp.noteMarkOutcome(/*addressed=*/false);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
+
+    // A frame FOR ME clears it. A window walked through by a neighbour's burst
+    // is not empty, which is why the caller passes "addressed", not "received".
+    disp.noteMarkOutcome(/*addressed=*/true);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
+}
+
+TEST_F(RealNodeFixture, MarkOutcomesAreTheOnlySourceOfWmr) {
+    // windows_armed stayed 0 until this existed, so the rate the design calls
+    // "the one that actually distinguishes the modes" read a permanent zero.
+    const uint32_t before = disp.macFunnel().windows_armed;
+    disp.noteMarkOutcome(true);
+    disp.noteMarkOutcome(false);
+    EXPECT_EQ(disp.macFunnel().windows_armed, before + 2u);
+    EXPECT_EQ(disp.macFunnel().windows_hit, 1u);
+    EXPECT_EQ(macfunnel::wmrPpm(disp.macFunnel()), 500000u) << "one of two missed";
+}
+
+TEST_F(RealNodeFixture, EnoughMissedMarksDemoteUnilaterally) {
+    auto g = build_grid_sync(true, 4, 740);
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i)
+        disp.noteMarkOutcome(false);
+
+    EXPECT_FALSE(disp.gridState().active)
+        << "staying in a window the hub no longer transmits into is the unsafe "
+           "direction; dropping to Mode A is always safe";
+    EXPECT_EQ(disp.expectedT0Us(), 0);
 }
