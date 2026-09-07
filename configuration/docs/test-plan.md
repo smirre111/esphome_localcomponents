@@ -127,17 +127,22 @@ From `tests/proto_sim/README.md`, all learned the hard way:
   wall time and cannot be stepped. Any test involving schedule timing builds its
   entries relative to *now*. **This bites Mode C**: RX1/RX2 offsets must be
   tested against `SimClock`, not against the node's wall clock.
-- **A machine whose clock jumps backwards fails those same tests**, and the
-  failure looks like a logic bug rather than an environment one. The six
-  schedule tests in `real_cmd_dispatcher_test.cpp` that call `arm_missed_entry`
-  read `time(nullptr)`, sleep 1.2 s, then read it again; production reads
-  `gettimeofday`. A backward step between the two reads makes an entry armed
-  "one minute ago" arrive from the future. Observed here on a container whose
-  clock repeatedly rolled back three weeks: 6 failures out of 644 in a parallel
-  run, all six passing when re-run alone. **Before believing such a failure,
-  check `date` and re-run the failing set on its own.** The proper fix is a
-  `gettimeofday` shim, which is the same change that would let Mode C's windows
-  be tested without `SimClock`; it is not written.
+- **The wall clock the node sees is anchored to `CLOCK_MONOTONIC`**
+  (`shims_node/host_clock.c`), because a machine whose clock jumps backwards
+  otherwise fails those same tests in a way that looks like a logic bug. The
+  six schedule tests in `real_cmd_dispatcher_test.cpp` that call
+  `arm_missed_entry` read `time(nullptr)`, sleep 1.2 s, then read it again;
+  production reads `gettimeofday`. A backward step between the two reads makes
+  an entry armed "one minute ago" arrive from the future. Observed here on a
+  container whose clock repeatedly snapped back three weeks: 6 failures out of
+  644 in a parallel run, all six passing when re-run alone. The shim interposes
+  both calls and answers `epoch_at_start + monotonic elapsed`, so an interval
+  measured across a sleep is the interval that elapsed whatever the host did.
+  **It is listed on the test EXECUTABLE, not only on the static library** — a
+  definition of `time()` inside an archive is never pulled in, because the
+  linker already has libc's and the archive member resolves nothing. This is
+  still not the *settable* clock Mode C's window tests want: time can be
+  observed here, not stepped.
 - **Node state is file-level static and shared across every test in a binary.**
   `RTC_DATA_ATTR` is a no-op on the host. A Mode B test that leaves a node
   promoted will silently change every test defined after it — so **every timed

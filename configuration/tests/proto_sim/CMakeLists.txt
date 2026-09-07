@@ -584,6 +584,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         ${NODE_STAGE}/comm_utils.c
         ${BLINDS_ESP_MAIN}/Scheduler.cpp
         ${NODE_SHIM_DIR}/esp_idf_stubs.c
+        ${NODE_SHIM_DIR}/host_clock.c
         ${NODE_SHIM_DIR}/extern_stubs.cpp
     )
     target_include_directories(real_cmd_dispatcher
@@ -605,13 +606,22 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         scenarios/session_manager_test.cpp
         ${NODE_STAGE}/SessionManager.cpp
         ${NODE_SHIM_DIR}/esp_idf_stubs.c
+        ${NODE_SHIM_DIR}/host_clock.c
     )
     target_include_directories(session_manager_test
         BEFORE PRIVATE ${NODE_STAGE} ${NODE_SHIM_DIR})
     target_link_libraries(session_manager_test PRIVATE GTest::gtest GTest::gtest_main)
     gtest_discover_tests(session_manager_test)
 
-    add_executable(real_cmd_dispatcher_test scenarios/real_cmd_dispatcher_test.cpp)
+    # host_clock.c is listed on the EXECUTABLE, not only on the static library
+    # it also belongs to. A definition of time()/gettimeofday() inside an
+    # archive is never pulled in: the linker already has libc's, so the archive
+    # member resolves nothing and is skipped. Naming the source here puts the
+    # object in the link unconditionally, which is what makes the interposition
+    # actually happen.
+    add_executable(real_cmd_dispatcher_test
+        scenarios/real_cmd_dispatcher_test.cpp
+        ${NODE_SHIM_DIR}/host_clock.c)
     target_link_libraries(real_cmd_dispatcher_test
         PRIVATE real_cmd_dispatcher proto_sim GTest::gtest GTest::gtest_main)
     gtest_discover_tests(real_cmd_dispatcher_test)
