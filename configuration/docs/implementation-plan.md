@@ -245,11 +245,24 @@ Unchanged: the node listens in 3 windows of 29.44 ms every 1.5 s
 is what every node uses to acquire one. Reception geometry, derived in closed
 form:
 
-| configuration | P(≥1 copy heard per round) |
-|---|---|
-| 3 windows, 17 copies | **96.4 %** |
-| 1 window, 17 copies, unsynchronised | 32.9 % |
-| 1 window, 1 copy, synchronised | ~100 % |
+| configuration | closed form (window width) | **measured (physical)** |
+|---|---|---|
+| 3 windows, 17 copies | 96.4 % | **95.3 %** |
+| 1 window, 17 copies, unsynchronised | 32.9 % | **31.9 %** |
+| 1 window, 1 copy, synchronised | ~100 % | 100 % |
+
+**The measured column is the one to quote.** The closed form uses the window
+width `w` as the catch width. Physically a frame must BOTH start after the
+window opens AND complete detection before it closes, so the usable width is
+`W − T_detect = 29.44 − 1.28 = 28.16 ms` — which is exactly `2G`, the guard band
+already derived in §4.2. The two derivations were inconsistent with each other
+and nobody noticed, because the closed form was only ever checked against an
+enumeration of itself.
+
+Measured by `tests/proto_sim/scenarios/air_channel_test.cpp`, which runs the
+frames past a receiver that opens and closes (`sim/air_channel.h`). The
+conclusion is unchanged and slightly strengthened: three windows still beat one
+by 3×, and the honest figure is ~1 point lower than advertised in both rows.
 
 Copy *i* leaves at `88i`; it is caught iff `(x + 88i) mod P ∈ [0, w)` with
 `w = 29 ms` (the window rounded down — use the same `w` in the predicate, the

@@ -202,7 +202,7 @@ set(SHARED_HDR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_clien
 
 function(add_header_test name)
     add_executable(${name} scenarios/${name}.cpp)
-    target_include_directories(${name} PRIVATE ${SHARED_HDR_DIR})
+    target_include_directories(${name} PRIVATE ${SHARED_HDR_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(${name} PRIVATE GTest::gtest GTest::gtest_main)
     gtest_discover_tests(${name})
 endfunction()
@@ -217,6 +217,7 @@ add_header_test(mac_funnel_test)
 add_header_test(mac_sublayers_test)
 add_header_test(phase_tracker_test)
 add_header_test(grid_state_test)
+add_header_test(air_channel_test)
 
 # ----------------------------------------------------------------------------
 # Phase 3: compile the REAL production lora_client.cpp against host shims.

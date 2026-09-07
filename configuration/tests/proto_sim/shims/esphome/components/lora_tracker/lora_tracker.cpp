@@ -53,7 +53,12 @@ void LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     if (!r) return;
     proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode,
                           std::vector<uint8_t>(data, data + len)};
-    r->send(f);
+
+    const int n = expand_bursts
+                      ? (policy.copies > 0 ? policy.copies : default_copies)
+                      : 1;
+    for (int i = 0; i < n; ++i)
+        r->send(f);
 }
 
 void LORATracker::register_client(LORAClient* client) {

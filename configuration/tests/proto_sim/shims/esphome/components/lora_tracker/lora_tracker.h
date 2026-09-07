@@ -81,6 +81,16 @@ public:
     std::vector<int> sent_copies;
     int last_copies{0};
 
+    // Emit `copies` AirFrames instead of one, so node-side duplicate handling
+    // sees a real burst. OPT-IN: the default of one frame is what every
+    // protocol test counts on, and silently multiplying their transcripts by
+    // 17 would rewrite their assertions rather than strengthen them. Burst
+    // GEOMETRY is covered by sim/air_channel.h, which models time; this is for
+    // tests that care about duplicate ADMISSION.
+    void set_expand_bursts(bool v) { expand_bursts = v; }
+    bool expand_bursts{false};
+    int  default_copies{17};
+
     void register_client(LORAClient* client);
     void register_listener(LORAListener* listener);
 
