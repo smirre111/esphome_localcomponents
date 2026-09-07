@@ -204,3 +204,79 @@ TEST(GridState, TheOffsetShiftsTheArmInstantAndNothingElse) {
     st.params.arm_offset_us = 7000;
     EXPECT_EQ(armInstantUs(st, t0), t0 - (int64_t) timedgrid::kArmLeadUs + 7000);
 }
+
+// ---------------------------------------------------------------------------
+// B3 — the delay a one-shot timer is armed with
+// ---------------------------------------------------------------------------
+
+TEST(GridState, ArmDelayLandsTheRadioOnTheArmInstantMinusTheCallersLead) {
+    State st;
+    st.active = true; st.params = good(5);
+    st.anchor_us = 0;
+
+    const int64_t lead = 1000;
+    const int64_t now  = 10'000;                       // well before slot 5's T0
+    const int64_t d    = armDelayUs(st, now, lead);
+
+    EXPECT_EQ(now + d + lead, armInstantUs(st, nextT0Us(st, now)))
+        << "the timer fires exactly `lead` before the radio must be listening";
+}
+
+TEST(GridState, ArmDelayIsNeverZeroOrNegative) {
+    // esp_timer_start_once rejects some of those, and a caller that skipped the
+    // mark instead would guarantee a miss where arming late might still catch
+    // the frame — lateness inside the guard band G is survivable, silence is
+    // not.
+    State st;
+    st.active = true; st.params = good(0);
+    st.anchor_us = 0;
+
+    for (int64_t now = -50'000; now < 3LL * timedgrid::kRoundUs; now += 1013)
+        EXPECT_GE(armDelayUs(st, now, /*lead=*/1000), 1) << "now " << now;
+
+    // Specifically: an instant already past its own arm point.
+    const int64_t t0   = nextT0Us(st, 0);
+    const int64_t late = armInstantUs(st, t0) + 500;   // 0.5 ms after arming was due
+    EXPECT_EQ(armDelayUs(st, late, /*lead=*/1000), 1);
+}
+
+TEST(GridState, ALargerLeadArmsEarlierNotLater) {
+    State st;
+    st.active = true; st.params = good(7);
+    st.anchor_us = 0;
+    const int64_t now = 1000;
+
+    const int64_t small = armDelayUs(st, now, 500);
+    const int64_t large = armDelayUs(st, now, 5000);
+    EXPECT_LT(large, small);
+    EXPECT_EQ(small - large, 4500);
+}
+
+TEST(GridState, ArmDelayNeverExceedsARound) {
+    // A delay longer than a round would mean a mark was skipped.
+    State st;
+    st.active = true; st.params = good(11);
+    st.anchor_us = 500'000;
+
+    for (int64_t now = 600'000; now < 600'000 + 3LL * timedgrid::kRoundUs; now += 7919)
+        EXPECT_LE(armDelayUs(st, now, /*lead=*/1000),
+                  (int64_t) timedgrid::kRoundUs) << "now " << now;
+}
+
+TEST(GridState, TheSweepOffsetMovesTheArmDelayWithIt) {
+    // HW-2 steps arm_offset_us to find the reception edge. If the offset did
+    // not reach the timer the sweep would measure nothing at all.
+    State a; a.active = true; a.params = good(2); a.anchor_us = 0;
+    State b = a; b.params.arm_offset_us = 3000;
+
+    const int64_t now = 5000;
+    EXPECT_EQ(armDelayUs(b, now, 1000) - armDelayUs(a, now, 1000), 3000);
+}
+
+TEST(GridState, WithoutAGridTheDelayIsImmediateNotAStall) {
+    State st;
+    EXPECT_FALSE(st.active);
+    EXPECT_EQ(armDelayUs(st, 777'777, 1000), 1)
+        << "no grid means the caller should not be asking; stalling is worse "
+           "than arming early";
+}

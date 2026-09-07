@@ -102,6 +102,7 @@ constexpr int64_t armInstantUs(const State &st, int64_t t0_us)
                  + (int64_t) st.params.arm_offset_us;
 }
 
+
 // This node's T0 for a given round.
 constexpr int64_t t0ForRound(const State &st, uint32_t round)
 {
@@ -122,6 +123,26 @@ constexpr int64_t nextT0Us(const State &st, int64_t now_us)
     const int64_t delta = now_us - base;
     if (delta <= 0) return base;
     return base + ((delta + round - 1) / round) * round;
+}
+
+// How long from `now` until the one-shot that arms the radio should fire.
+//
+// `lead_us` covers the software between the timer callback and the radio
+// actually listening — the semaphore give, the task wake, and the register
+// writes that idle the radio, set the DIO mapping and symbol timeout, clear
+// interrupts and enter RX single. It belongs to the caller, not to the grid:
+// the node measures it (HW-3), the hub has no equivalent.
+//
+// The result is never negative and never zero. A mark already upon us is armed
+// IMMEDIATELY rather than skipped: arming late still catches the frame while
+// the lateness is inside the guard band G, and skipping guarantees a miss. An
+// inactive grid returns 0 delay for the same reason — the caller should not be
+// asking, and stalling is worse than an early arm.
+constexpr int64_t armDelayUs(const State &st, int64_t now_us, int64_t lead_us)
+{
+    if (!st.active) return 1;
+    const int64_t d = armInstantUs(st, nextT0Us(st, now_us)) - lead_us - now_us;
+    return (d < 1) ? 1 : d;
 }
 
 // Is `round` a beacon round? Round 0 counts, so a node that has just adopted a
