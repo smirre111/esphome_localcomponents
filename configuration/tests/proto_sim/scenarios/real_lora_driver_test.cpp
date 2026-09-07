@@ -165,3 +165,32 @@ TEST_F(DriverTest, IdleIsASingleModeRegisterWriteToo) {
     EXPECT_TRUE(spisim::bus().txns[0].isWrite());
     EXPECT_EQ(spisim::bus().txns[0].reg(), (uint8_t) 0x01);
 }
+
+// ---------------------------------------------------------------------------
+// The TX-done wait, which used to have no way out
+// ---------------------------------------------------------------------------
+
+TEST_F(DriverTest, WaitTxDoneReturnsWhenTheFlagIsAlreadySet) {
+    // IRQ flags live at REG_IRQ_FLAGS; TX_DONE is bit 3.
+    constexpr uint8_t kRegIrqFlags = 0x12;
+    constexpr uint8_t kTxDone      = 0x08;
+    spisim::bus().setReg(kRegIrqFlags, kTxDone);
+
+    EXPECT_EQ(lora_waitTxDone(), 1);
+    EXPECT_GT(lora_lastTxDoneUs(), 0)
+        << "and it records WHEN, which is the hub's only knowledge of when its "
+           "own frame left";
+}
+
+TEST_F(DriverTest, WaitTxDoneGivesUpInsteadOfSpinningForever) {
+    // The flag never sets. Before the timeout this spun forever and the
+    // transmit task never ran again — reachable whenever a RegOpMode = TX
+    // write was dropped, which the register-write mutex used to allow.
+    constexpr uint8_t kRegIrqFlags = 0x12;
+    spisim::bus().setReg(kRegIrqFlags, 0x00);
+
+    const int64_t before = lora_lastTxDoneUs();
+    EXPECT_EQ(lora_waitTxDone(), 0) << "every caller already logs this as TX timeout";
+    EXPECT_EQ(lora_lastTxDoneUs(), before)
+        << "a transmit that did not complete must not stamp a completion time";
+}

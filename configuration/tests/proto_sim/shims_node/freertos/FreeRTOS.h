@@ -71,6 +71,15 @@ inline BaseType_t xQueueReceive(QueueHandle_t q, void* out, TickType_t /*wait*/)
     if (out) std::copy_n(blob.begin(), q->item_size, static_cast<uint8_t*>(out));
     return pdTRUE;
 }
+// Peek without removing. The host has no blocking, so a wait argument is
+// ignored exactly as it is for xQueueReceive: a test that wants an item there
+// puts it there first.
+inline BaseType_t xQueuePeek(QueueHandle_t q, void* out, TickType_t /*wait*/) {
+    if (!q || q->items.empty()) return pdFALSE;
+    if (out) std::copy_n(q->items.front().begin(), q->item_size,
+                         static_cast<uint8_t*>(out));
+    return pdTRUE;
+}
 inline UBaseType_t uxQueueMessagesWaiting(QueueHandle_t q) {
     return q ? static_cast<UBaseType_t>(q->items.size()) : 0;
 }

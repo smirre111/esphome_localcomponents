@@ -25,6 +25,15 @@ int lora_beginPacket(int implicitHeader) {
     return 1;
 }
 
+int lora_waitTxDone() {
+    lorahal::rec().note("lora_waitTxDone");
+    return 1;  // the fake radio always finishes; 0 is the timeout path
+}
+
+int64_t lora_lastTxDoneUs() {
+    return lorahal::rec().txdone_us;
+}
+
 int lora_endPacket(bool async) {
     (void) async;
     lorahal::rec().note("lora_endPacket");

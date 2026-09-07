@@ -16,6 +16,10 @@
 
 #include "esphome/components/lora_client/lora_client.h"
 #include "esphome/components/blindsproto/blinds.pb-c.h"
+// B1a: the reordering transmit queue. Dependency-free (stdint only), so
+// including it here costs nothing; qualified path for the same reason as
+// TimedGrid.h in the .cpp.
+#include "esphome/components/lora_client/TxQueue.h"
 
 // Configuration
 #define POOL_SIZE 5
@@ -45,6 +49,8 @@ typedef struct
   // different moments on different tasks — see TxPolicy.
   int      tx_copies;     // 0 = the default full burst
   uint32_t tx_stride_ms;  // 0 = the default txIntervalMs
+  int64_t  tx_earliest_us; // 0 = no constraint
+  uint8_t  tx_priority;    // txqueue::Priority as an integer
 } rx_buffer_t;
 
 // Statistics
@@ -68,6 +74,17 @@ namespace esphome
   {
     int      copies{0};     // 0 = txSlotsPerRound, the normal burst
     uint32_t stride_ms{0};  // 0 = txIntervalMs
+
+    // B1a. Not before this instant, on the hub's esp_timer clock; 0 means
+    // "as soon as the radio is free". This is what section 4.5's deferral
+    // needs and what B-1 deliberately left out until there was a scheduler
+    // that could honour it — a FIFO cannot express "later than the frame
+    // behind me".
+    int64_t  earliest_us{0};
+    // Lower numbers go first; matches txqueue::Priority, kept as a plain
+    // integer so this header does not force TxQueue.h on every includer.
+    // 0 = Immediate, 1 = Normal, 2 = Background.
+    uint8_t  priority{1};
   };
 
 
@@ -176,7 +193,25 @@ namespace esphome
       //
       // 0 restores the normal 17-copy burst.
       void sendPacketBytes(uint8_t *data, size_t len);
+
+      // B5's prepare/fire split. See the banner above preparePacket in the
+      // .cpp for why the radio mutex spans the pair.
+      bool preparePacket(uint8_t *data, size_t len);
+      bool firePacket(int64_t not_before_us = 0);
+      void abortPreparedPacket();
       void sendTask(void *pvParameters);
+
+      // B1a: one pass of the transmit scheduler — drain the handoff queue into
+      // the reordering queue, then send the frame that is eligible now, if any.
+      // Returns true if a frame was transmitted.
+      //
+      // Split out of sendTask's for(;;) so it can be tested: the task itself is
+      // an infinite loop with blocking waits, and the interesting behaviour —
+      // which frame goes next, and when — is all here.
+      bool serviceTxQueue(int64_t now_us);
+      void drainHandoffQueue_();
+      // When the scheduler next has something to send. INT64_MAX if idle.
+      int64_t nextTxEligibleUs(int64_t now_us) const;
       void register_listener(LORAListener *listener);
       void register_client(LORAClient *client);
 
@@ -256,6 +291,21 @@ namespace esphome
       // hint that lets the main loop skip receive() while a copy is actively
       // transmitting (avoiding needless blocking on the mutex); the mutex is the
       // actual mutual-exclusion guarantee between sendTask and the main loop.
+      // B1a: the reordering, time-scheduled transmit queue. data_queue stays as
+      // the handoff from producer tasks — it is a FreeRTOS queue and can be
+      // written from anywhere — and sendTask drains it into this, which is
+      // where ordering and eligibility are decided.
+      txqueue::Queue tx_queue_;
+
+      // A frame is in the FIFO and the radio mutex is held, waiting for FIRE.
+      bool tx_prepared_{false};
+      // Ceiling on firePacket's busy wait. A caller asking for more than this
+      // has computed its instant wrongly — most likely against the wrong clock
+      // — and spinning for it would starve the task and trip the watchdog.
+      // One slot pitch is generous: a correctly prepared frame waits
+      // microseconds.
+      static constexpr int64_t kMaxFireBusyWaitUs = 46875;
+
       SemaphoreHandle_t radio_mutex_{nullptr};
       bool lora_tx_busy_{false};
       uint8_t buf_[255]; // Maximum Payload size of SX1276/77/78/79 is 255

@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "driver/spi_master.h"
 #include "esp_attr.h"   // WORD_ALIGNED_ATTR
+#include "esp_timer.h" // esp_timer_get_time
 #include "soc/gpio_struct.h"
 #include "driver/gpio.h"
 #include <string.h>
@@ -464,6 +465,46 @@ int lora_beginPacket(int implicitHeader)
    return 1;
 }
 
+// When TX_DONE was last observed, in esp_timer microseconds; 0 before the first
+// transmit. Split out of lora_endPacket so the prepare/fire split in
+// lora_tracker.cpp can call the wait separately from the fire.
+static volatile int64_t g_last_txdone_us = 0;
+
+int64_t lora_lastTxDoneUs(void)
+{
+   return g_last_txdone_us;
+}
+
+int lora_waitTxDone(void)
+{
+   // Was `while (flag clear) esphome::delay(2);` with NO TERMINATION. If
+   // TX_DONE never set — a dropped RegOpMode = TX, which was possible until
+   // the register-write mutex timeout above was removed — this spun forever
+   // and the transmit task never ran again. Every caller already has a branch
+   // for a zero return and logs it as "TX timeout"; it just could never be
+   // reached.
+   //
+   // The poll is also finer. 2 ms against frames of 42-95 ms was not terrible,
+   // but the instant TX_DONE is observed is the hub's only knowledge of when
+   // its own frame left, and it costs nothing to know it to ~500 us.
+   static constexpr int64_t kTxDoneTimeoutUs = 500000; // ~5x the longest frame
+   const int64_t t_start = esp_timer_get_time();
+
+   while ((lora_read_reg(REG_IRQ_FLAGS) & LORA_IRQ_FLAG_TX_DONE) == 0)
+   {
+      if (esp_timer_get_time() - t_start > kTxDoneTimeoutUs)
+      {
+         ESP_LOGE(TAG, "lora_waitTxDone: no TX_DONE after %lld us, giving up",
+                  (long long) kTxDoneTimeoutUs);
+         return 0;
+      }
+      esphome::delayMicroseconds(500);
+   }
+   g_last_txdone_us = esp_timer_get_time();
+   lora_clearInterrupts(LORA_IRQ_FLAG_TX_DONE);
+   return 1;
+}
+
 int lora_endPacket(bool async)
 {
    // BW: 7800 kHz, SF: 12, Preamble: 12 => Whole packet time: 16 935.4 ms
@@ -476,15 +517,7 @@ int lora_endPacket(bool async)
    lora_tx();
 
    if (!async)
-   {
-      // wait for TX done
-      while ((lora_read_reg(REG_IRQ_FLAGS) & LORA_IRQ_FLAG_TX_DONE) == 0)
-      {
-         // vTaskDelay(2);
-         esphome::delay(2);
-      }
-      lora_clearInterrupts(LORA_IRQ_FLAG_TX_DONE);
-   }
+      return lora_waitTxDone();
 
    return 1;
 }

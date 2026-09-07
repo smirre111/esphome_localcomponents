@@ -360,6 +360,10 @@ set(HUB_SHIM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shims_hub)
 add_library(real_lora_driver STATIC
     ${LORA_TRACKER_DIR}/lora.cpp
     ${HUB_SHIM_DIR}/spi_stub.cpp
+    # esp_timer, for the TX-done wait's timeout and its completion stamp. The
+    # harness owns this clock, so a test can watch the timeout fire without
+    # actually waiting half a second.
+    ${SHIM_DIR}/esp_timer_stub.c
 )
 target_include_directories(real_lora_driver BEFORE PUBLIC
     ${HUB_SHIM_DIR}                 # driver/spi_master.h, driver/gpio.h, soc/

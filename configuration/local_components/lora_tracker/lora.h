@@ -66,6 +66,13 @@ int lora_init(void);
 void lora_end();
 int lora_beginPacket(int implicitHeader = false);
 int lora_endPacket(bool async = false);
+// The TX-done wait on its own, so a caller can separate PREPARE (config, FIFO
+// fill) from FIRE (lora_tx) and still block for completion afterwards. Returns
+// 0 on timeout, like lora_endPacket.
+int lora_waitTxDone(void);
+// When the last TX_DONE was observed, in esp_timer microseconds; 0 before the
+// first transmit.
+int64_t lora_lastTxDoneUs(void);
 bool lora_isTransmitting();
 int lora_parsePacket(int size);
 int lora_parsePacket(uint8_t irqFlags, int size);

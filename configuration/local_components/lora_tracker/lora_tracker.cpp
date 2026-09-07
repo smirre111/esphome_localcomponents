@@ -288,68 +288,146 @@ namespace esphome
       }
     }
 
+    // B1a: drain the handoff queue into the reordering queue.
+    //
+    // data_queue is a FreeRTOS queue because producers run on other tasks and
+    // need something they can write from anywhere. It is a FIFO, and a FIFO
+    // cannot express "not before round n+2, and behind nothing else" — which
+    // is what section 4.5's deferral requires and what B-1 left out on purpose
+    // until there was a scheduler to honour it. So the queue is only a handoff:
+    // ordering and eligibility are decided here.
+    void LORATracker::drainHandoffQueue_()
+    {
+      rx_buffer_t *rx_buffer = nullptr;
+      while (xQueueReceive(data_queue, &rx_buffer, 0) == pdTRUE)
+      {
+        // Validate before scheduling. Use continue, NOT return: this runs on
+        // the persistent TX task, and returning early would leave the rest of
+        // the handoff queue unread.
+        if (!this->validate_buffer(rx_buffer))
+        {
+          ESP_LOGE(TAG, "Received invalid buffer, skipping");
+          continue;
+        }
+        if (rx_buffer->length > BUFFER_SIZE)
+        {
+          ESP_LOGE(TAG, "Buffer length %d exceeds max %d",
+                   rx_buffer->length, BUFFER_SIZE);
+          this->return_buffer_to_pool(rx_buffer);
+          continue;
+        }
+
+        const uint8_t slot = (uint8_t) (rx_buffer - memory_pool);
+        if (slot >= POOL_SIZE)
+        {
+          // Not from the pool. Cannot be scheduled by index and cannot be
+          // safely returned either; say so rather than corrupting the queue.
+          ESP_LOGE(TAG, "Buffer %p is not from the pool, dropping", rx_buffer);
+          continue;
+        }
+
+        const txqueue::Priority prio =
+            (rx_buffer->tx_priority == 0) ? txqueue::Priority::Immediate
+          : (rx_buffer->tx_priority >= 2) ? txqueue::Priority::Background
+                                          : txqueue::Priority::Normal;
+
+        if (!this->tx_queue_.push(slot, rx_buffer->tx_earliest_us, prio))
+        {
+          // The scheduler is full. Refuse loudly and return the buffer — the
+          // alternative, silently sending it out of order, would defeat the
+          // deferral the queue exists to provide.
+          ESP_LOGW(TAG, "TX scheduler full (%u entries), dropping %d bytes",
+                   (unsigned) this->tx_queue_.size(), (int) rx_buffer->length);
+          this->return_buffer_to_pool(rx_buffer);
+        }
+      }
+    }
+
+    int64_t LORATracker::nextTxEligibleUs(int64_t now_us) const
+    {
+      return this->tx_queue_.nextEligibleUs(now_us);
+    }
+
+    bool LORATracker::serviceTxQueue(int64_t now_us)
+    {
+      this->drainHandoffQueue_();
+
+      const uint8_t slot = this->tx_queue_.pop(now_us);
+      if (slot == txqueue::kInvalidSlot)
+        return false;
+
+      rx_buffer_t *rx_buffer = &memory_pool[slot];
+
+      ESP_LOGI(TAG, "Processing %d bytes from buffer %p",
+               rx_buffer->length, rx_buffer);
+
+      lora_tx_busy_ = true;
+      this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
+                            rx_buffer->tx_copies, rx_buffer->tx_stride_ms);
+      lora_tx_busy_ = false;
+
+      if (rx_buffer->length > 0)
+      {
+        ESP_LOG_BUFFER_HEX(TAG, rx_buffer->data, rx_buffer->length);
+      }
+
+      this->return_buffer_to_pool(rx_buffer);
+      return true;
+    }
+
     void LORATracker::sendTask(void *pvParameters)
     {
       (void)pvParameters;
 
-      rx_buffer_t *rx_buffer;
-
       for (;;)
       {
-        if (xQueueReceive(data_queue, &rx_buffer, portMAX_DELAY) == pdTRUE)
+        const int64_t now_us = esp_timer_get_time();
+
+        if (this->serviceTxQueue(now_us))
         {
-
-          // Validate before processing.  Use continue, NOT return: this is the
-          // persistent TX task's for(;;) loop, so returning would delete the task
-          // and permanently stop all hub->node transmission.  The invalid buffer
-          // cannot be safely returned to the pool, so skip this iteration.
-          if (!this->validate_buffer(rx_buffer))
-          {
-            ESP_LOGE(TAG, "Received invalid buffer, skipping");
-            continue;
-          }
-
-          // Additional bounds check
-          if (rx_buffer->length > BUFFER_SIZE)
-          {
-            ESP_LOGE(TAG, "Buffer length %d exceeds max %d",
-                     rx_buffer->length, BUFFER_SIZE);
-            this->return_buffer_to_pool(rx_buffer);
-            continue;
-          }
-
-          ESP_LOGI(TAG, "Processing %d bytes from buffer %p",
-                   rx_buffer->length, rx_buffer);
-
-          // Simulate processing
-          // vTaskDelay(50 / portTICK_PERIOD_MS);
-          lora_tx_busy_ = true;
-          this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
-                                rx_buffer->tx_copies, rx_buffer->tx_stride_ms);
-          lora_tx_busy_ = false;
-
-          // Safe hex dump with length check
-          if (rx_buffer->length > 0)
-          {
-            ESP_LOG_BUFFER_HEX(TAG, rx_buffer->data, rx_buffer->length);
-          }
-
-          // Return buffer to pool
-          this->return_buffer_to_pool(rx_buffer);
-
           // Post-burst response window.  The addressed node defers its reply
           // (ACK / position) until just after this burst ends, then transmits
           // into the clear channel.  Hold off dequeuing the next burst and keep
           // the radio in RX so that reply is heard instead of being stepped on
           // by the next burst.  lora_tx_busy_ is already false, so the main
           // loop's receive() reads any incoming packet during this window.
+          //
+          // This window is also why deferral is TWO rounds and not one: burst
+          // plus window is ~1850 ms against a 1500 ms round, so a frame held
+          // to round n+1 would land inside this very wait. See
+          // txqueue::kDeferRounds.
           if (this->radio_mutex_ != nullptr)
             xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
           lora_receive(0);
           if (this->radio_mutex_ != nullptr)
             xSemaphoreGive(this->radio_mutex_);
           vTaskDelay(pdMS_TO_TICKS(this->responseWindowMs));
+          continue;
         }
+
+        // Nothing eligible. Sleep until either something becomes eligible or a
+        // producer hands over a new frame, whichever comes first.
+        //
+        // This replaces an xQueueReceive(portMAX_DELAY): with a deferred frame
+        // in the scheduler, blocking forever on the handoff queue would hold
+        // that frame until some UNRELATED traffic happened to arrive and wake
+        // the task. The peek is what makes the wait interruptible — the frame
+        // it sees is drained at the top of the next pass, not here.
+        const int64_t next_us = this->tx_queue_.nextEligibleUs(now_us);
+        TickType_t wait_ticks;
+        if (next_us == INT64_MAX)
+        {
+          wait_ticks = portMAX_DELAY;   // genuinely idle
+        }
+        else
+        {
+          const int64_t delta_us = next_us - now_us;
+          wait_ticks = (delta_us <= 0) ? 0
+                                       : pdMS_TO_TICKS(delta_us / 1000 + 1);
+        }
+
+        rx_buffer_t *peeked = nullptr;
+        xQueuePeek(data_queue, &peeked, wait_ticks);
       }
     }
 
@@ -474,8 +552,10 @@ namespace esphome
         // instead would be read by sendTask at dequeue, by which time the
         // caller that set it may be long gone and a different frame may be at
         // the head of the queue.
-        rx_buffer->tx_copies    = policy.copies;
-        rx_buffer->tx_stride_ms = policy.stride_ms;
+        rx_buffer->tx_copies      = policy.copies;
+        rx_buffer->tx_stride_ms   = policy.stride_ms;
+        rx_buffer->tx_earliest_us = policy.earliest_us;
+        rx_buffer->tx_priority    = policy.priority;
 
         // Send buffer pointer to data queue
         if (xQueueSend(data_queue, &rx_buffer, 0) != pdTRUE)
@@ -579,17 +659,36 @@ namespace esphome
       this->sendPacketBytes(data, len);
     }
 
-    void LORATracker::sendPacketBytes(uint8_t *data, size_t len)
-    {
+    // ---- B5: PREPARE / FIRE -------------------------------------------
+    //
+    // Everything a transmit does splits cleanly in two. PREPARE is idling the
+    // radio, setting the TX preamble, arming the FIFO pointer and clocking the
+    // payload in — SPI work whose duration varies with payload length and with
+    // whatever else is on the bus. FIRE is one register write, and it is the
+    // instant the frame actually starts going out.
+    //
+    // Doing them together means the fire instant inherits all of PREPARE's
+    // variance, which is what B5's "p99 fire residual < 200 us" gate is about
+    // and what Mode B's grid needs bounded. Separated, a caller can prepare
+    // early — at leisure, whenever the radio is free — and fire at a computed
+    // instant with only one register write in front of it.
+    //
+    // The radio mutex is taken by PREPARE and released by FIRE. That is
+    // deliberate: between them the FIFO holds a half-built frame, and a
+    // concurrent receive on the main loop would read it out from under us.
+    // tx_prepared_ makes a missing FIRE detectable rather than a deadlock.
+    // ---------------------------------------------------------------------
 
-      // vTaskSuspend(xHandleLoraPolling);
-      // Hold the radio mutex for the whole transmit so a concurrent RX read on
-      // the main loop cannot interleave SPI transactions with the TX sequence.
-      // Logging BEFORE the mutex, not inside it. ESP_LOGI formats and writes to
-      // the UART; at 115200 baud a 40-character line is ~3.5 ms, and it was
-      // holding the radio mutex for all of it — blocking the main loop's RX
-      // read behind a log message.
-      ESP_LOGI(TAG, "Sending packet of length %d", len);
+    bool LORATracker::preparePacket(uint8_t *data, size_t len)
+    {
+      if (this->tx_prepared_)
+      {
+        // A previous PREPARE was never fired. Its mutex is still held and its
+        // bytes are still in the FIFO; overwriting them silently would send a
+        // spliced frame. Abandon the old one explicitly.
+        ESP_LOGE(TAG, "preparePacket called twice, discarding the first");
+        this->abortPreparedPacket();
+      }
 
       if (this->radio_mutex_ != nullptr)
         xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
@@ -603,53 +702,95 @@ namespace esphome
       // read-modify-write over SPI, none of them ever changing: setup() above
       // already writes exactly these values and nothing alters them at
       // runtime. Seventeen copies paid for it seventeen times, all of it
-      // between the caller's decision to send and the radio actually firing —
-      // which is precisely the interval B5 needs bounded.
+      // between the caller's decision to send and the radio actually firing.
       //
       // The preamble genuinely does alternate (TX uses loraPreambleLengthTx,
-      // RX loraPreambleLengthRx, restored after the packet below), so it
-      // stays.
+      // RX loraPreambleLengthRx, restored after the packet in firePacket), so
+      // it stays.
       lora_setPreambleLength(loraPreambleLengthTx);
-      // lora_setSymbolTimeout(1023);
 
-      int status = lora_beginPacket(); // start packet
+      const int status = lora_beginPacket();
       if (status == 0)
       {
         ESP_LOGW(TAG, "Already Xmitting");
       }
 
-      lora_write(data, len); // add destination address
+      lora_write(data, len);
+      this->tx_prepared_ = true;
+      return status != 0;
+    }
 
-      // bool async = true;
-      bool async = false;
+    void LORATracker::abortPreparedPacket()
+    {
+      if (!this->tx_prepared_)
+        return;
 
-      if (async)
+      // Leave the radio listening rather than half-armed for a transmit.
+      lora_setPreambleLength(loraPreambleLengthRx);
+      lora_receive(0);
+      this->tx_prepared_ = false;
+
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreGive(this->radio_mutex_);
+    }
+
+    bool LORATracker::firePacket(int64_t not_before_us)
+    {
+      if (!this->tx_prepared_)
       {
+        ESP_LOGE(TAG, "firePacket with nothing prepared");
+        return false;
       }
 
-      status = lora_endPacket(async); // finish packet and send it
-      if (status == 0)
+      // Hold to the requested instant. A busy wait, deliberately: the whole
+      // point of the split is that nothing schedulable stands between here and
+      // the register write, and at these distances (a caller that prepared
+      // early is waiting hundreds of microseconds, not milliseconds) yielding
+      // would reintroduce exactly the variance being removed. A caller that
+      // wants to wait longer should prepare later.
+      if (not_before_us > 0)
+      {
+        int64_t remaining = not_before_us - esp_timer_get_time();
+        if (remaining > kMaxFireBusyWaitUs)
+        {
+          ESP_LOGW(TAG, "firePacket asked to wait %lld us, capping at %d",
+                   (long long) remaining, (int) kMaxFireBusyWaitUs);
+          remaining = kMaxFireBusyWaitUs;
+        }
+        while (remaining > 0)
+        {
+          esphome::delayMicroseconds((uint32_t) remaining);
+          remaining = not_before_us - esp_timer_get_time();
+        }
+      }
+
+      lora_tx();   // THE fire instant
+
+      const int ok = lora_waitTxDone();
+      if (ok == 0)
       {
         ESP_LOGW(TAG, "TX timeout");
       }
 
-      if (!async)
-      {
-        lora_setPreambleLength(loraPreambleLengthRx);
-
-        // lora_sleep();
-
-        // vTaskResume(xHandleLoraPolling);
-      }
+      lora_setPreambleLength(loraPreambleLengthRx);
+      this->tx_prepared_ = false;
 
       if (this->radio_mutex_ != nullptr)
         xSemaphoreGive(this->radio_mutex_);
 
-      // Also outside the mutex, and for the same reason as the line above it.
-      if (async)
-        ESP_LOGI(TAG, "Packet sent, waiting for TX DONE interrupt");
-      else
-        ESP_LOGI(TAG, "Packet sent");
+      // Outside the mutex: ESP_LOGI formats and writes to the UART, and at
+      // 115200 baud a 40-character line is ~3.5 ms of the radio held idle.
+      ESP_LOGI(TAG, "Packet sent");
+      return ok != 0;
+    }
+
+    void LORATracker::sendPacketBytes(uint8_t *data, size_t len)
+    {
+      // Logging BEFORE the mutex, for the same reason as in firePacket.
+      ESP_LOGI(TAG, "Sending packet of length %d", len);
+
+      this->preparePacket(data, len);
+      this->firePacket(/*not_before_us=*/0);
     }
 
     void LORATracker::register_client(LORAClient *client)

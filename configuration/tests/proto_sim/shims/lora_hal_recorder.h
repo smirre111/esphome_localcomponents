@@ -29,10 +29,17 @@ struct Recorder {
 
     void note(const char* fn) {
         calls.emplace_back(fn);
-        if (std::string(fn) == "lora_endPacket") {
+        // A frame is closed by lora_tx, not by lora_endPacket.
+        //
+        // lora_tx IS the fire instant, and since B5's prepare/fire split the
+        // tracker calls it directly — lora_endPacket (which wraps fire + wait)
+        // is no longer on the transmit path at all. Keying on lora_tx records
+        // what actually went out, under either arrangement.
+        const std::string name(fn);
+        if (name == "lora_tx") {
             packets.push_back(staging);
             staging.clear();
-        } else if (std::string(fn) == "lora_beginPacket") {
+        } else if (name == "lora_beginPacket") {
             staging.clear();
         }
     }
@@ -48,10 +55,14 @@ struct Recorder {
     // the poll loop sees on an idle channel.
     std::vector<std::vector<uint8_t>> inbox;
 
+    // What lora_lastTxDoneUs() reports. Set by a test that cares.
+    int64_t txdone_us{0};
+
     void queueRx(std::vector<uint8_t> frame) { inbox.push_back(std::move(frame)); }
 
     void reset() {
         calls.clear(); packets.clear(); staging.clear(); inbox.clear();
+        txdone_us = 0;
     }
 };
 

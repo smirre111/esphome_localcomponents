@@ -13,9 +13,11 @@
 #include "esp_timer.h"
 #include "blinds.pb-c.h"
 
+#include <cstring>
 #include <vector>
 
 using esphome::lora_tracker::LORATracker;
+using esphome::lora_tracker::TxPolicy;
 
 namespace {
 
@@ -85,8 +87,8 @@ TEST(RealTracker, ABurstEmitsTheDefaultCopyCount) {
     uint8_t frame[24] = {0};
     t.sendPacketBurst(frame, sizeof(frame));
 
-    EXPECT_EQ(lorahal::rec().count("lora_endPacket"), (size_t) 17)
-        << "the default burst is txSlotsPerRound copies";
+    EXPECT_EQ(lorahal::rec().count("lora_tx"), (size_t) 17)
+        << "the default burst is txSlotsPerRound copies (lora_tx is the fire)";
     EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 17);
 }
 
@@ -97,7 +99,7 @@ TEST(RealTracker, APerFrameCopyCountIsHonouredByTheRealBurstLoop) {
     uint8_t frame[24] = {0};
     t.sendPacketBurst(frame, sizeof(frame), /*copies=*/1, /*stride_ms=*/0);
 
-    EXPECT_EQ(lorahal::rec().count("lora_endPacket"), (size_t) 1)
+    EXPECT_EQ(lorahal::rec().count("lora_tx"), (size_t) 1)
         << "one copy means one frame on the air";
 }
 
@@ -318,4 +320,282 @@ TEST(RealTrackerRx, ThePollPathCannotMeetC2sGate) {
         << "if this ever passes, the poll path got faster than C2's gate and "
            "the ISR work can be reconsidered";
     EXPECT_EQ(t.rx_stamp_uncertainty_us(), 5'000u);
+}
+
+// ---------------------------------------------------------------------------
+// B1a — the reordering, time-scheduled transmit queue
+// ---------------------------------------------------------------------------
+
+namespace {
+// sendTask() is an infinite loop with blocking waits, so the scheduling step
+// was split out of it. This is the whole reason serviceTxQueue() exists as a
+// method: the interesting behaviour — which frame goes next, and when — is
+// testable, and the task around it is a thin loop.
+struct TxProbe : LORATracker {
+    using LORATracker::serviceTxQueue;
+    using LORATracker::nextTxEligibleUs;
+    void init() { this->init_memory_pool(); }
+};
+
+// A frame the burst loop will send as raw bytes, with a recognisable first byte
+// so the order of transmission can be read off the recorder.
+std::vector<uint8_t> tagged(uint8_t tag) {
+    std::vector<uint8_t> v(24, tag);
+    return v;
+}
+
+uint8_t firstByteOfPacket(size_t i) {
+    return lorahal::rec().packets.at(i).front();
+}
+}  // namespace
+
+TEST(RealTrackerTx, AnEligibleFrameIsSentAndAnIdleQueueReportsNothingToDo) {
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    EXPECT_FALSE(t.serviceTxQueue(0)) << "nothing queued, nothing sent";
+    EXPECT_EQ(t.nextTxEligibleUs(0), INT64_MAX) << "and nothing to wait for";
+
+    auto f = tagged(0xA1);
+    t.send(f.data(), f.size(), TxPolicy{/*copies=*/1});
+    EXPECT_TRUE(t.serviceTxQueue(0));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    EXPECT_EQ(firstByteOfPacket(0), 0xA1);
+}
+
+TEST(RealTrackerTx, ADeferredFrameIsHeldAndTheWaitIsBounded) {
+    // The property a FIFO cannot provide. Before this, sendTask blocked on
+    // xQueueReceive(portMAX_DELAY), so a deferred frame waited not until it was
+    // eligible but until some UNRELATED traffic happened to wake the task.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    auto f = tagged(0xB2);
+    TxPolicy later;
+    later.copies      = 1;
+    later.earliest_us = 3'000'000;          // two rounds out
+    t.send(f.data(), f.size(), later);
+
+    EXPECT_FALSE(t.serviceTxQueue(0)) << "not yet";
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0);
+    EXPECT_EQ(t.nextTxEligibleUs(0), 3'000'000)
+        << "and the task knows exactly how long to sleep";
+
+    EXPECT_FALSE(t.serviceTxQueue(2'999'999));
+    EXPECT_TRUE(t.serviceTxQueue(3'000'000)) << "eligible at the instant, not after";
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+}
+
+TEST(RealTrackerTx, AnEligibleFrameOvertakesADeferredOneAheadOfIt) {
+    // "Not before round n+2, and behind nothing else" — the sentence section
+    // 4.5 says the old API could not express.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    auto held = tagged(0xC1);
+    TxPolicy defer; defer.copies = 1; defer.earliest_us = 3'000'000;
+    t.send(held.data(), held.size(), defer);
+
+    auto now = tagged(0xC2);
+    t.send(now.data(), now.size(), TxPolicy{/*copies=*/1});
+
+    ASSERT_TRUE(t.serviceTxQueue(0));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    EXPECT_EQ(firstByteOfPacket(0), 0xC2) << "the second frame went first";
+
+    ASSERT_TRUE(t.serviceTxQueue(3'000'000));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 2);
+    EXPECT_EQ(firstByteOfPacket(1), 0xC1);
+}
+
+TEST(RealTrackerTx, EqualPriorityKeepsInsertionOrder) {
+    // The tiebreak is insertion order, never earliest_us: two frames both
+    // eligible now must not be reordered by a field that no longer constrains
+    // either of them.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    auto a = tagged(0xD1);
+    TxPolicy early; early.copies = 1; early.earliest_us = 0;
+    t.send(a.data(), a.size(), early);
+
+    auto b = tagged(0xD2);
+    TxPolicy earlier; earlier.copies = 1; earlier.earliest_us = -1000;
+    t.send(b.data(), b.size(), earlier);
+
+    ASSERT_TRUE(t.serviceTxQueue(10'000));
+    ASSERT_TRUE(t.serviceTxQueue(10'000));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 2);
+    EXPECT_EQ(firstByteOfPacket(0), 0xD1);
+    EXPECT_EQ(firstByteOfPacket(1), 0xD2);
+}
+
+TEST(RealTrackerTx, AnImmediateFrameJumpsAnEligibleNormalOne) {
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    auto normal = tagged(0xE1);
+    t.send(normal.data(), normal.size(), TxPolicy{/*copies=*/1});
+
+    auto urgent = tagged(0xE2);
+    TxPolicy now; now.copies = 1; now.priority = 0;   // Immediate
+    t.send(urgent.data(), urgent.size(), now);
+
+    ASSERT_TRUE(t.serviceTxQueue(0));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    EXPECT_EQ(firstByteOfPacket(0), 0xE2);
+}
+
+TEST(RealTrackerTx, PriorityDoesNotOverrideTheDeferral) {
+    // An Immediate frame that is not yet eligible must still wait. Otherwise
+    // "immediate" would silently mean "ignore the channel reservation", which
+    // is exactly the collision the deferral exists to avoid.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    auto urgent = tagged(0xF1);
+    TxPolicy p; p.copies = 1; p.priority = 0; p.earliest_us = 3'000'000;
+    t.send(urgent.data(), urgent.size(), p);
+
+    EXPECT_FALSE(t.serviceTxQueue(0));
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0);
+    EXPECT_TRUE(t.serviceTxQueue(3'000'000));
+}
+
+TEST(RealTrackerTx, TheDefaultPolicyIsSendNowAtNormalPriority) {
+    // Every existing caller passes TxPolicy{} or nothing. If the defaults
+    // changed behaviour, B1a would be a silent regression across the hub.
+    TxPolicy p;
+    EXPECT_EQ(p.earliest_us, 0);
+    EXPECT_EQ(p.priority, 1);
+
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+    auto f = tagged(0x11);
+    t.send(f.data(), f.size(), TxPolicy{/*copies=*/1});
+    EXPECT_TRUE(t.serviceTxQueue(0)) << "eligible immediately";
+}
+
+// ---------------------------------------------------------------------------
+// B5 — PREPARE and FIRE as separate acts
+// ---------------------------------------------------------------------------
+
+namespace {
+struct FireProbe : LORATracker {
+    using LORATracker::preparePacket;
+    using LORATracker::firePacket;
+    using LORATracker::abortPreparedPacket;
+};
+
+// Index of the first occurrence of a call, or SIZE_MAX.
+size_t indexOf(const char* fn) {
+    const auto& c = lorahal::rec().calls;
+    for (size_t i = 0; i < c.size(); ++i) if (c[i] == fn) return i;
+    return SIZE_MAX;
+}
+}  // namespace
+
+TEST(RealTrackerFire, PrepareLoadsTheFifoAndDoesNotTransmit) {
+    // The whole point: after PREPARE the frame is in the radio and nothing has
+    // gone out. Everything whose duration varies with payload length — the
+    // FIFO clocking above all — is behind us.
+    lorahal::rec().reset();
+    FireProbe t;
+    uint8_t frame[60];
+    for (size_t i = 0; i < sizeof(frame); ++i) frame[i] = (uint8_t) i;
+
+    t.preparePacket(frame, sizeof(frame));
+
+    EXPECT_EQ(lorahal::rec().count("lora_tx"), (size_t) 0)
+        << "PREPARE must not fire";
+    EXPECT_EQ(lorahal::rec().count("lora_beginPacket"), (size_t) 1);
+    EXPECT_EQ(lorahal::rec().staging.size(), (size_t) 60)
+        << "the payload is in the FIFO, waiting";
+
+    t.firePacket(0);
+    EXPECT_EQ(lorahal::rec().count("lora_tx"), (size_t) 1);
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    EXPECT_EQ(lorahal::rec().packets[0].size(), (size_t) 60);
+}
+
+TEST(RealTrackerFire, NothingLengthDependentSitsBetweenPrepareAndTheFire) {
+    // Stated as an ordering assertion because that is what the gate is about.
+    // If a payload write, a config write or a mode change ever reappears after
+    // PREPARE, the fire instant inherits its variance again.
+    lorahal::rec().reset();
+    FireProbe t;
+    uint8_t frame[152];
+    memset(frame, 0x77, sizeof(frame));
+
+    t.preparePacket(frame, sizeof(frame));
+    const size_t calls_after_prepare = lorahal::rec().calls.size();
+    t.firePacket(0);
+
+    // Between PREPARE returning and lora_tx there must be nothing at all.
+    const size_t tx_at = indexOf("lora_tx");
+    ASSERT_NE(tx_at, SIZE_MAX);
+    EXPECT_EQ(tx_at, calls_after_prepare)
+        << "the fire is the very next thing the radio is asked to do";
+}
+
+TEST(RealTrackerFire, FireWithoutPrepareIsRefusedRatherThanSendingStaleBytes) {
+    lorahal::rec().reset();
+    FireProbe t;
+    EXPECT_FALSE(t.firePacket(0));
+    EXPECT_EQ(lorahal::rec().count("lora_tx"), (size_t) 0)
+        << "whatever is in the FIFO is not ours";
+}
+
+TEST(RealTrackerFire, ASecondPrepareDiscardsTheFirstInsteadOfSplicingIt) {
+    // Two PREPAREs with no FIRE between them would otherwise clock the second
+    // payload in behind the first and send them as one frame.
+    lorahal::rec().reset();
+    FireProbe t;
+    uint8_t a[20]; memset(a, 0xA0, sizeof(a));
+    uint8_t b[30]; memset(b, 0xB0, sizeof(b));
+
+    t.preparePacket(a, sizeof(a));
+    t.preparePacket(b, sizeof(b));
+    t.firePacket(0);
+
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    EXPECT_EQ(lorahal::rec().packets[0].size(), (size_t) 30)
+        << "only the second frame goes out, whole";
+    EXPECT_EQ(lorahal::rec().packets[0].front(), 0xB0);
+}
+
+TEST(RealTrackerFire, AbortLeavesTheRadioListeningNotHalfArmed) {
+    lorahal::rec().reset();
+    FireProbe t;
+    uint8_t frame[24]; memset(frame, 0x33, sizeof(frame));
+
+    t.preparePacket(frame, sizeof(frame));
+    t.abortPreparedPacket();
+
+    EXPECT_EQ(lorahal::rec().count("lora_tx"), (size_t) 0);
+    EXPECT_GE(lorahal::rec().count("lora_receive"), (size_t) 1)
+        << "a radio left armed for a transmit that never comes is deaf";
+    EXPECT_FALSE(t.firePacket(0)) << "and there is nothing left to fire";
+}
+
+TEST(RealTrackerFire, SendPacketBytesStillDoesBothAndIsUnchanged) {
+    // Every existing caller goes through sendPacketBytes. The split must not
+    // alter what it does.
+    lorahal::rec().reset();
+    FireProbe t;
+    uint8_t frame[45]; memset(frame, 0x5C, sizeof(frame));
+
+    t.sendPacketBytes(frame, sizeof(frame));
+
+    EXPECT_EQ(lorahal::rec().count("lora_beginPacket"), (size_t) 1);
+    EXPECT_EQ(lorahal::rec().count("lora_tx"), (size_t) 1);
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    EXPECT_EQ(lorahal::rec().packets[0].size(), (size_t) 45);
 }
