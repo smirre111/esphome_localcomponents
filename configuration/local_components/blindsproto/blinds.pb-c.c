@@ -637,6 +637,51 @@ void   mac_control__free_unpacked
   assert(message->base.descriptor == &mac_control__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   grid_sync__init
+                     (GridSync         *message)
+{
+  static const GridSync init_value = GRID_SYNC__INIT;
+  *message = init_value;
+}
+size_t grid_sync__get_packed_size
+                     (const GridSync *message)
+{
+  assert(message->base.descriptor == &grid_sync__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t grid_sync__pack
+                     (const GridSync *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &grid_sync__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t grid_sync__pack_to_buffer
+                     (const GridSync *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &grid_sync__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+GridSync *
+       grid_sync__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (GridSync *)
+     protobuf_c_message_unpack (&grid_sync__descriptor,
+                                allocator, len, data);
+}
+void   grid_sync__free_unpacked
+                     (GridSync *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &grid_sync__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   lora_client_operation_message__init
                      (LoraClientOperationMessage         *message)
 {
@@ -2253,7 +2298,188 @@ const ProtobufCMessageDescriptor mac_control__descriptor =
   (ProtobufCMessageInit) mac_control__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[12] =
+static const ProtobufCFieldDescriptor grid_sync__field_descriptors[12] =
+{
+  {
+    "enable",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, enable),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "slotIndex",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, slotindex),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "slotCount",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, slotcount),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "roundUs",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, roundus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "pitchUs",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, pitchus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "txRound",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, txround),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "txSlot",
+    7,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, txslot),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "beaconSlotIndex",
+    8,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, beaconslotindex),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "beaconEveryRounds",
+    9,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, beaconeveryrounds),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "symTimeout",
+    10,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, symtimeout),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "resyncMaxS",
+    11,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, resyncmaxs),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "ulOffsetUs",
+    12,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, uloffsetus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned grid_sync__field_indices_by_name[] = {
+  8,   /* field[8] = beaconEveryRounds */
+  7,   /* field[7] = beaconSlotIndex */
+  0,   /* field[0] = enable */
+  4,   /* field[4] = pitchUs */
+  10,   /* field[10] = resyncMaxS */
+  3,   /* field[3] = roundUs */
+  2,   /* field[2] = slotCount */
+  1,   /* field[1] = slotIndex */
+  9,   /* field[9] = symTimeout */
+  5,   /* field[5] = txRound */
+  6,   /* field[6] = txSlot */
+  11,   /* field[11] = ulOffsetUs */
+};
+static const ProtobufCIntRange grid_sync__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 12 }
+};
+const ProtobufCMessageDescriptor grid_sync__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "GridSync",
+  "GridSync",
+  "GridSync",
+  "",
+  sizeof(GridSync),
+  12,
+  grid_sync__field_descriptors,
+  grid_sync__field_indices_by_name,
+  1,  grid_sync__number_ranges,
+  (ProtobufCMessageInit) grid_sync__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[13] =
 {
   {
     "header",
@@ -2399,6 +2625,18 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "gridsync",
+    21,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, gridsync),
+    &grid_sync__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   7,   /* field[7] = basenonce */
@@ -2406,6 +2644,7 @@ static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   5,   /* field[5] = coverconfig */
   10,   /* field[10] = drifttest */
   1,   /* field[1] = encrypted */
+  12,   /* field[12] = gridsync */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
   11,   /* field[11] = maccontrol */
@@ -2419,7 +2658,7 @@ static const ProtobufCIntRange lora_client_operation_message__number_ranges[3 + 
   { 1, 0 },
   { 9, 1 },
   { 20, 11 },
-  { 0, 12 }
+  { 0, 13 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -2429,7 +2668,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  12,
+  13,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
   3,  lora_client_operation_message__number_ranges,

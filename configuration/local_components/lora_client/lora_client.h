@@ -248,6 +248,19 @@ namespace esphome
       // Mode A listens three windows every 1.5 s regardless of where the burst
       // starts, so turning this on now would be a pure regression in
       // responsiveness. B3 enables it per node as those nodes are promoted.
+      // --- B3: publish / withdraw the grid --------------------------------
+      //
+      // send_grid_sync(false) is the STARTUP BROADCAST DEMOTE, and it must go
+      // out before anything else. The anchor is "set once and never moved", so
+      // after a hub restart the hub holds a fresh anchor while every node still
+      // holds the old one. Without this each node would burn up to resyncMaxS
+      // (11.7 min) of missed windows before demoting itself — and the beacon
+      // that would re-anchor it is on a grid it no longer shares.
+      void send_grid_sync(bool enable);
+      // Broadcast withdrawal, addressed to every node at once. Deliberately
+      // separate: after a restart the hub may not yet know which nodes exist.
+      void broadcast_grid_demote();
+
       void set_grid_aligned(bool v) { this->grid_aligned_ = v; }
       bool grid_aligned() const     { return this->grid_aligned_; }
       uint8_t grid_slot() const     { return this->grid_slot_; }

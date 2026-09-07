@@ -34,6 +34,7 @@ extern "C" {
 #include <ctime>
 #include <sys/time.h>
 #include <vector>
+#include "GridState.h"
 
 using proto_sim::aes_gcm_decrypt;
 using proto_sim::derive_gcm_iv;
@@ -2642,4 +2643,109 @@ TEST_F(RealNodeFixture, RtcSourceDefaultsToUnknownNotCrystal) {
     // The safe reading of a node that has not reported is that it cannot hold
     // phase — Mode B is gated on the crystal.
     EXPECT_EQ(disp.rtcSlowSrc(), phase::RtcSlowSrc::Unknown);
+}
+
+// ---------------------------------------------------------------------------
+// B3 — the real dispatcher adopts, refuses and withdraws a grid.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<uint8_t> build_grid_sync(bool enable, uint32_t slot, uint32_t msgid,
+                                     uint32_t slot_count = timedgrid::kSlotCount,
+                                     uint32_t pitch_us = timedgrid::kSlotPitchUs) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = 1;
+    hdr.msgid         = msgid;
+
+    GridSync gs = GRID_SYNC__INIT;
+    gs.enable            = enable;
+    gs.slotindex         = slot;
+    gs.slotcount         = slot_count;
+    gs.roundus           = timedgrid::kRoundUs;
+    gs.pitchus           = pitch_us;
+    gs.txround           = 0;
+    gs.txslot            = slot;
+    gs.beaconslotindex   = timedgrid::kSlotCount - 1;
+    gs.beaconeveryrounds = 233;
+    gs.symtimeout        = timedgrid::kSymbolTimeoutSymbols;
+    gs.resyncmaxs        = 350;
+    gs.uloffsetus        = 60000;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header   = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+    op.gridsync = &gs;
+
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, NodeStartsWithNoGrid) {
+    EXPECT_FALSE(disp.gridState().active);
+    EXPECT_EQ(disp.expectedT0Us(), 0);
+}
+
+TEST_F(RealNodeFixture, AnAgreeingGridIsAdoptedAndAnchored) {
+    auto bytes = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/600);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    ASSERT_TRUE(disp.gridState().active);
+    EXPECT_EQ(disp.lastGridRefusal(), gridstate::Refusal::None);
+    EXPECT_EQ(disp.gridState().params.slot_index, 4u);
+    EXPECT_GT(disp.expectedT0Us(), 0) << "a grid must produce a next mark";
+}
+
+TEST_F(RealNodeFixture, AGridWeDisagreeWithIsRefusedNotHalfAdopted) {
+    // Different pitch: a node that adopted this would miss every window and
+    // look like a dead radio.
+    auto bytes = build_grid_sync(true, 4, 610, timedgrid::kSlotCount, 31250);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_FALSE(disp.gridState().active);
+    EXPECT_EQ(disp.lastGridRefusal(), gridstate::Refusal::PitchMismatch);
+    EXPECT_EQ(disp.expectedT0Us(), 0);
+}
+
+TEST_F(RealNodeFixture, WithdrawalIsUnconditionalAndClearsPhase) {
+    auto on = build_grid_sync(true, 4, 620);
+    disp.onReceiveNew(on.data(), static_cast<int>(on.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // Feed a phase sample so there is something to clear.
+    auto ping = build_mac_ping(1, false, 621);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+
+    auto off = build_grid_sync(false, 4, 622);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+
+    EXPECT_FALSE(disp.gridState().active);
+    EXPECT_EQ(disp.expectedT0Us(), 0);
+    EXPECT_EQ(disp.phaseStats().n, 0u)
+        << "samples against a withdrawn anchor describe a grid that is gone";
+}
+
+TEST_F(RealNodeFixture, ReAnchoringResetsPhaseStats) {
+    auto a = build_grid_sync(true, 4, 630);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    auto ping = build_mac_ping(1, false, 631);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    ASSERT_GE(disp.phaseStats().n, 1u);
+
+    auto b = build_grid_sync(true, 9, 632);   // new slot, new anchor
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
+    EXPECT_EQ(disp.gridState().params.slot_index, 9u);
+    EXPECT_EQ(disp.phaseStats().n, 0u)
+        << "old samples describe the old anchor";
+}
+
+TEST_F(RealNodeFixture, GridSyncDoesNotReachTheApplication) {
+    auto bytes = build_grid_sync(true, 4, 640);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 0u);
+    EXPECT_EQ(disp.macCounters().echo_tx, 0u);
 }

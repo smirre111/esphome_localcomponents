@@ -312,6 +312,18 @@ namespace esphome
 
     uint8_t LORAListener::s_next_login_slot_ = 0;
 
+    // Beacon placement (implementation-plan.md 4.4). Slot 0 is deliberately NOT
+    // used: a 45 B beacon there runs to +30.7 ms and covers slot 1's window
+    // opening at +29.7, blinding the same node on every beacon round forever.
+    // The beacon owns the last slot, and beaconClearSlots() worth of slots
+    // after it are left free.
+    static constexpr uint32_t kBeaconSlotIndex  = timedgrid::kSlotCount - 1;
+    // 350 s at 1.5 s per round, i.e. half the +/-20 ppm ceiling.
+    static constexpr uint32_t kBeaconEveryRounds = 233;
+    // The node replies at T0 + this rather than "immediately"; must be >= the
+    // measured DRAIN + build time, which is HW-7's number.
+    static constexpr uint32_t kUplinkOffsetUs   = 60000;
+
     void LORAListener::setup()
     {
       // Claim a stagger slot in declaration order. setup() runs once per
@@ -321,6 +333,10 @@ namespace esphome
       // Wraps at the grid depth so a 33rd client shares a slot rather than
       // addressing a slot that does not exist.
       this->grid_slot_ = (uint8_t) (this->login_slot_ % timedgrid::kSlotCount);
+
+      // B1/B3: withdraw any grid the nodes may still be holding, BEFORE
+      // anything else goes out. Our anchor is new; theirs is stale.
+      this->broadcast_grid_demote();
 
       // The compiled YAML seed has already been applied by now (codegen emits
       // add_schedule_entry() into main.cpp's setup(), which runs before
@@ -1343,6 +1359,77 @@ namespace esphome
     // frame the moment this returns, so capturing the pointer would hand the
     // scheduler freed memory a second later.
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // B3: publish the grid to this node, or withdraw it.
+    //
+    // The frame declares its OWN grid position so the node can solve for a
+    // local anchor — see GridState.h. Sent as a normal burst: a node being told
+    // about the grid is by definition not yet on it.
+    // -----------------------------------------------------------------------
+    void LORAListener::send_grid_sync(bool enable)
+    {
+      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = this->incrTxMessageId();
+
+      GridSync gs = GRID_SYNC__INIT;
+      gs.enable = enable;
+      if (enable)
+      {
+        gs.slotindex        = this->grid_slot_;
+        gs.slotcount        = timedgrid::kSlotCount;
+        gs.roundus          = timedgrid::kRoundUs;
+        gs.pitchus          = timedgrid::kSlotPitchUs;
+        gs.beaconslotindex  = kBeaconSlotIndex;
+        gs.beaconeveryrounds = kBeaconEveryRounds;
+        gs.symtimeout       = timedgrid::kSymbolTimeoutSymbols;
+        gs.resyncmaxs       = timedgrid::maxResyncIntervalS(20) / 2;   // half the
+                                                                       // +/-20 ppm
+                                                                       // ceiling
+        gs.uloffsetus       = kUplinkOffsetUs;
+
+        // This frame's own position. It is what the node anchors on, so it must
+        // describe where the frame will ACTUALLY be transmitted — which, while
+        // alignment is off (B1), is "as soon as the queue drains". Declaring a
+        // position the frame does not occupy would anchor every node wrong, so
+        // the grid is published only from an aligned client.
+        gs.txround = 0;
+        gs.txslot  = this->grid_slot_;
+      }
+
+      op_message.header   = &header;
+      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+      op_message.gridsync = &gs;
+
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      if (!s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      {
+        ESP_LOGE(TAG, "[%s] failed to pack GridSync", this->get_name().c_str());
+        return;
+      }
+      this->parent_->send(buf, len);
+      free(buf);
+
+      ESP_LOGI(TAG, "[%s] GridSync %s (slot %u)", this->get_name().c_str(),
+               enable ? "PUBLISHED" : "WITHDRAWN", (unsigned) this->grid_slot_);
+    }
+
+    void LORAListener::broadcast_grid_demote()
+    {
+      // Broadcast, because after a restart the hub may not yet know which nodes
+      // exist — and every one of them is holding an anchor that is now wrong.
+      const uint8_t saved = this->short_address_;
+      this->short_address_ = LORATracker::broadcastAddressing;
+      this->send_grid_sync(false);
+      this->short_address_ = saved;
+      ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent",
+               this->get_name().c_str());
+    }
+
     void LORAListener::send_aligned_(const uint8_t *buf, size_t len)
     {
       this->send_aligned_(buf, len, TxPolicy{});

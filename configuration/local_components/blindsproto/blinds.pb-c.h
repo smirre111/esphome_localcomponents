@@ -29,6 +29,7 @@ typedef struct NodeWakeBeacon NodeWakeBeacon;
 typedef struct LoraHeader LoraHeader;
 typedef struct DriftTest DriftTest;
 typedef struct MacControl MacControl;
+typedef struct GridSync GridSync;
 typedef struct LoraClientOperationMessage LoraClientOperationMessage;
 typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
@@ -624,6 +625,81 @@ struct  MacControl
     , MAC_CONTROL__KIND__MAC_UNSPEC, 0, 0, {0,NULL}, 0, 0, 0 }
 
 
+/*
+ * GridSync — publishes the timed-window grid to one node (B3).
+ * THE ANCHOR CANNOT BE SENT AS A TIMESTAMP. The hub's esp_timer and the node's
+ * are unrelated clocks, so a hub-absolute anchor means nothing on the node.
+ * Instead this frame declares its OWN position on the grid: "my T0 is round
+ * txRound, slot txSlot". The node already recovers T0 from RxDone
+ * (LoraTiming.h), so it can solve for a LOCAL anchor:
+ *   anchor_node = T0_measured - txRound*roundUs - txSlot*pitchUs
+ * which is the same grid expressed in the node's own time. Everything after
+ * that is arithmetic the node does for itself, and no clock is ever
+ * transferred.
+ * The geometry fields are carried rather than assumed so the node can REFUSE a
+ * grid it does not agree with: a hub and node compiled against different
+ * TimedGrid.h constants would otherwise each believe in a different slot pitch
+ * and quietly miss every window.
+ */
+struct  GridSync
+{
+  ProtobufCMessage base;
+  /*
+   * false = withdraw the grid, go back to Mode A
+   */
+  protobuf_c_boolean enable;
+  /*
+   * this node's slot
+   */
+  uint32_t slotindex;
+  /*
+   * grid depth, for agreement checking
+   */
+  uint32_t slotcount;
+  /*
+   * 1 500 000
+   */
+  uint32_t roundus;
+  /*
+   * roundUs / slotCount
+   */
+  uint32_t pitchus;
+  /*
+   * Where THIS frame sits on the grid, so the node can solve for its anchor.
+   */
+  uint32_t txround;
+  uint32_t txslot;
+  /*
+   * Beacon placement. The 32 private windows are at 32 different phases, so
+   * one broadcast cannot reach them all: the beacon needs its own instant
+   * that every node opens, on beacon rounds only.
+   */
+  uint32_t beaconslotindex;
+  /*
+   * 0 = no beacon
+   */
+  uint32_t beaconeveryrounds;
+  /*
+   * Runtime knobs the node applies rather than compiles in.
+   */
+  /*
+   * RX window width, in symbols
+   */
+  uint32_t symtimeout;
+  /*
+   * hold phase no longer than this without a frame
+   */
+  uint32_t resyncmaxs;
+  /*
+   * node replies at T0 + this, not "immediately"
+   */
+  uint32_t uloffsetus;
+};
+#define GRID_SYNC__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_sync__descriptor) \
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+
 typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET = 0,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION = 10,
@@ -636,6 +712,7 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE = 17,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST = 18,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL = 20,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC = 21,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
@@ -660,6 +737,11 @@ struct  LoraClientOperationMessage
      * structured fields above are absent.  Field 9 keeps a 1-byte tag.
      */
     EncryptedPayload *encrypted;
+    /*
+     * The timed-window grid (B3). A node that does not know this field
+     * ignores it and stays in Mode A, which is the safe direction.
+     */
+    GridSync *gridsync;
     LoginMsg *login;
     /*
      * MAC-layer control frame. Terminates at the MAC; a node that does not
@@ -1049,6 +1131,25 @@ MacControl *
 void   mac_control__free_unpacked
                      (MacControl *message,
                       ProtobufCAllocator *allocator);
+/* GridSync methods */
+void   grid_sync__init
+                     (GridSync         *message);
+size_t grid_sync__get_packed_size
+                     (const GridSync   *message);
+size_t grid_sync__pack
+                     (const GridSync   *message,
+                      uint8_t             *out);
+size_t grid_sync__pack_to_buffer
+                     (const GridSync   *message,
+                      ProtobufCBuffer     *buffer);
+GridSync *
+       grid_sync__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_sync__free_unpacked
+                     (GridSync *message,
+                      ProtobufCAllocator *allocator);
 /* LoraClientOperationMessage methods */
 void   lora_client_operation_message__init
                      (LoraClientOperationMessage         *message);
@@ -1207,6 +1308,9 @@ typedef void (*DriftTest_Closure)
 typedef void (*MacControl_Closure)
                  (const MacControl *message,
                   void *closure_data);
+typedef void (*GridSync_Closure)
+                 (const GridSync *message,
+                  void *closure_data);
 typedef void (*LoraClientOperationMessage_Closure)
                  (const LoraClientOperationMessage *message,
                   void *closure_data);
@@ -1253,6 +1357,7 @@ extern const ProtobufCMessageDescriptor lora_header__descriptor;
 extern const ProtobufCMessageDescriptor drift_test__descriptor;
 extern const ProtobufCMessageDescriptor mac_control__descriptor;
 extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
+extern const ProtobufCMessageDescriptor grid_sync__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_operation_message__descriptor;
 extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;
