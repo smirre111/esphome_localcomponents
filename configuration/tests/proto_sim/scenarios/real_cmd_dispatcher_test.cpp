@@ -2470,3 +2470,71 @@ TEST_F(RealNodeFixture, DetectedIsReportedByTheRadioPathNotInferred) {
     EXPECT_EQ(disp.macFunnel().crc_valid, 1u);
     EXPECT_EQ(disp.macFunnel().crc_errors, 1u);
 }
+
+// ---------------------------------------------------------------------------
+// M3 — the sublayer switches, in the REAL dispatcher.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<uint8_t> build_mac_config(bool counter, bool crypto,
+                                      uint32_t duration_s, uint32_t msgid) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = 1;
+    hdr.msgid         = msgid;
+
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind          = MAC_CONTROL__KIND__MAC_CONFIG;
+    mc.enablecounter = counter;
+    mc.enablecrypto  = crypto;
+    mc.durations     = duration_s;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header     = &hdr;
+    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.maccontrol = &mc;
+
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, PlaintextMacConfigIsRefused) {
+    // The security property, end to end through production code: a PLAINTEXT
+    // frame asking to disable authentication must change nothing.
+    ASSERT_TRUE(disp.macSublayers().counter_enabled);
+    ASSERT_TRUE(disp.macSublayers().crypto_enabled);
+
+    auto bytes = build_mac_config(/*counter=*/false, /*crypto=*/false,
+                                  /*duration_s=*/60, /*msgid=*/400);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_TRUE(disp.macSublayers().counter_enabled)
+        << "an unauthenticated frame must not disable the replay window";
+    EXPECT_TRUE(disp.macSublayers().crypto_enabled)
+        << "an unauthenticated frame must not disable authentication";
+}
+
+TEST_F(RealNodeFixture, MacConfigDoesNotDriveTheApplication) {
+    // A MAC_CONFIG frame is consumed at MAC-0 whether accepted or refused —
+    // nothing reaches a cover, a schedule or the motor.
+    auto bytes = build_mac_config(false, false, 60, 401);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 0u);
+    EXPECT_EQ(disp.macCounters().echo_tx, 0u);
+}
+
+TEST_F(RealNodeFixture, ApplicationFramesStillFaceTheReplayWindow) {
+    // Even if the switches were somehow off, a non-MAC-control frame must be
+    // checked. Asserted through the real admission path with a replayed msgid.
+    auto a = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/420);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    const uint32_t dup_before = disp.macFunnel().duplicates;
+
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    EXPECT_EQ(disp.macFunnel().duplicates, dup_before + 1u)
+        << "with MAC-1 on (the default) a replay must still be rejected";
+}

@@ -2026,17 +2026,19 @@ const ProtobufCMessageDescriptor drift_test__descriptor =
   (ProtobufCMessageInit) drift_test__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCEnumValue mac_control__kind__enum_values_by_number[3] =
+static const ProtobufCEnumValue mac_control__kind__enum_values_by_number[4] =
 {
   { "MAC_UNSPEC", "MAC_CONTROL__KIND__MAC_UNSPEC", 0 },
   { "MAC_PING", "MAC_CONTROL__KIND__MAC_PING", 1 },
   { "MAC_ECHO", "MAC_CONTROL__KIND__MAC_ECHO", 2 },
+  { "MAC_CONFIG", "MAC_CONTROL__KIND__MAC_CONFIG", 3 },
 };
 static const ProtobufCIntRange mac_control__kind__value_ranges[] = {
-{0, 0},{0, 3}
+{0, 0},{0, 4}
 };
-static const ProtobufCEnumValueIndex mac_control__kind__enum_values_by_name[3] =
+static const ProtobufCEnumValueIndex mac_control__kind__enum_values_by_name[4] =
 {
+  { "MAC_CONFIG", 3 },
   { "MAC_ECHO", 2 },
   { "MAC_PING", 1 },
   { "MAC_UNSPEC", 0 },
@@ -2048,15 +2050,15 @@ const ProtobufCEnumDescriptor mac_control__kind__descriptor =
   "Kind",
   "MacControl__Kind",
   "",
-  3,
+  4,
   mac_control__kind__enum_values_by_number,
-  3,
+  4,
   mac_control__kind__enum_values_by_name,
   1,
   mac_control__kind__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCFieldDescriptor mac_control__field_descriptors[4] =
+static const ProtobufCFieldDescriptor mac_control__field_descriptors[7] =
 {
   {
     "kind",
@@ -2106,8 +2108,47 @@ static const ProtobufCFieldDescriptor mac_control__field_descriptors[4] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "enableCounter",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(MacControl, enablecounter),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "enableCrypto",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(MacControl, enablecrypto),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "durationS",
+    7,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(MacControl, durations),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned mac_control__field_indices_by_name[] = {
+  6,   /* field[6] = durationS */
+  4,   /* field[4] = enableCounter */
+  5,   /* field[5] = enableCrypto */
   0,   /* field[0] = kind */
   3,   /* field[3] = pad */
   1,   /* field[1] = seq */
@@ -2116,7 +2157,7 @@ static const unsigned mac_control__field_indices_by_name[] = {
 static const ProtobufCIntRange mac_control__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 4 }
+  { 0, 7 }
 };
 const ProtobufCMessageDescriptor mac_control__descriptor =
 {
@@ -2126,7 +2167,7 @@ const ProtobufCMessageDescriptor mac_control__descriptor =
   "MacControl",
   "",
   sizeof(MacControl),
-  4,
+  7,
   mac_control__field_descriptors,
   mac_control__field_indices_by_name,
   1,  mac_control__number_ranges,

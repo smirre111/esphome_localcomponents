@@ -793,9 +793,10 @@ without M1 and M2 the KPIs of `mac-layer.md` §6 cannot be measured, and B3's ga
 | **M0** | Name the layers in the existing code — comments and one header listing what belongs where. No code moves. | a reviewer can say which layer any function is in |
 | **M1** | ~~**MAC control frame + MAC echo.**~~ — **DONE, both halves.** `MacControl` in both message directions (field 20). Node: `CmdDispatcher::handleMacControl` counts, timestamps and echoes via `send_tx_buffer`, bypassing the application queues. Hub: `start_mac_ping()` emits one copy per mark on an `esp_timer` grid and records echoes by `seq`. Twelve host tests across both sides. | `turnaroundUs` measures `RxDone → TX fire` and nothing else — which is what §4.3's servable-slot rule needs and cannot get today |
 | **M2** | ~~KPI counters split by funnel stage~~ — **DONE.** `MacFunnel.h` (shared, drift-gated) counts detected/crcValid/parsed/addressed/counterAccepted/micValid and computes `FER_air`, `FER_link`, `WMR`, `DUP`, `MIC_FAIL` as integer ppm. Wired into the node's real RX path; 17 host tests. | `FER_air`, `FER_link` and `WMR` are separately reportable |
-| **M3** | MAC-1 / MAC-2 switches, with the arming rules of `mac-layer.md` §4 (authenticated arm, unauthenticated traffic; no session ⟹ refuse) | each sublayer's cost is a measured delta, not an estimate |
+| **M3** | ~~MAC-1 / MAC-2 switches, with the arming rules~~ — **DONE.** `MacSublayers.h` (shared, gated); switches apply to **MAC control frames only** so application traffic is never exempt; arming requires a session AND an authenticated request; node-owned 15 min cap. 14 host tests. | each sublayer's cost is a measured delta, not an estimate |
 
-**M is small and it comes first.** M1 is one branch on each side; M0 and M2 are
+**Track M is complete** (M0's layer naming is carried by the headers' banners
+rather than a separate pass). **M is small and it comes first.** M1 is one branch on each side; M0 and M2 are
 bookkeeping. Everything downstream that claims a number — B2's phase error, B3's
 reception comparison, B5's fire residual, §12.7's turnaround — is measured
 through M2's counters, so building B before M means building it blind.

@@ -48,7 +48,11 @@ typedef enum _MacControl__Kind {
   /*
    * node -> hub: MAC-0's reply, no application involved
    */
-  MAC_CONTROL__KIND__MAC_ECHO = 2
+  MAC_CONTROL__KIND__MAC_ECHO = 2,
+  /*
+   * hub -> node: arm/disarm the MAC-1 / MAC-2 sublayers
+   */
+  MAC_CONTROL__KIND__MAC_CONFIG = 3
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(MAC_CONTROL__KIND)
 } MacControl__Kind;
 typedef enum _CovOperation {
@@ -559,10 +563,33 @@ struct  MacControl
    * function of length.
    */
   ProtobufCBinaryData pad;
+  /*
+   * --- MAC_CONFIG only (mac-layer.md section 4) -------------------------
+   * These switch the sublayers FOR MAC CONTROL FRAMES ONLY. Application
+   * traffic always passes through MAC-1 and MAC-2 whatever is set here; a
+   * switch that could disable the replay window or authentication for real
+   * commands would be a remote-unlock hole wearing a measurement's clothes.
+   * Both default to true, so a zeroed message is the SAFE configuration.
+   * A MAC_CONFIG frame is refused unless it arrived AUTHENTICATED and the
+   * node holds a session — a plaintext frame asking to turn authentication
+   * off answers its own question.
+   */
+  /*
+   * MAC-1
+   */
+  protobuf_c_boolean enablecounter;
+  /*
+   * MAC-2
+   */
+  protobuf_c_boolean enablecrypto;
+  /*
+   * Node-owned deadline; the node caps it. 0 = node default.
+   */
+  uint32_t durations;
 };
 #define MAC_CONTROL__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&mac_control__descriptor) \
-    , MAC_CONTROL__KIND__MAC_UNSPEC, 0, 0, {0,NULL} }
+    , MAC_CONTROL__KIND__MAC_UNSPEC, 0, 0, {0,NULL}, 0, 0, 0 }
 
 
 typedef enum {
