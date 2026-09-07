@@ -1,0 +1,210 @@
+// TxQueue — the reordering, time-scheduled transmit queue (B1a).
+//
+// The gate is one sentence: "a frame can be placed 'not before round n+2, and
+// behind nothing else'". Both halves are ordering statements a FIFO cannot
+// express, so the tests are about ORDER, not throughput.
+//
+// See docs/implementation-plan.md 4.5 and section 8's B1a row.
+
+#include <gtest/gtest.h>
+
+#include <vector>
+
+#include "TxQueue.h"
+#include "TimedGrid.h"
+
+using namespace txqueue;
+
+namespace {
+std::vector<uint8_t> drain(Queue &q, int64_t now) {
+    std::vector<uint8_t> out;
+    for (;;) {
+        const uint8_t s = q.pop(now);
+        if (s == kInvalidSlot) break;
+        out.push_back(s);
+    }
+    return out;
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// FIFO is preserved where nothing asks otherwise
+// ---------------------------------------------------------------------------
+
+TEST(TxQueue, EqualPriorityKeepsInsertionOrder) {
+    // Not a detail: a command and its retry are built in order, and the retry
+    // ladder assumes they arrive in that order. Without a stable tiebreak the
+    // second could overwrite the first at the far end.
+    Queue q;
+    for (uint8_t i = 0; i < 5; ++i)
+        ASSERT_TRUE(q.push(i, 0, Priority::Normal));
+
+    EXPECT_EQ(drain(q, 0), (std::vector<uint8_t>{0, 1, 2, 3, 4}));
+}
+
+TEST(TxQueue, AnEmptyQueueYieldsNothing) {
+    Queue q;
+    EXPECT_TRUE(q.empty());
+    EXPECT_EQ(q.pop(0), kInvalidSlot);
+}
+
+// ---------------------------------------------------------------------------
+// "not before round n+2"
+// ---------------------------------------------------------------------------
+
+TEST(TxQueue, ADeferredFrameIsNotEligibleEarly) {
+    Queue q;
+    const int64_t now = 1000000;
+    const int64_t later = deferUntilUs(now, timedgrid::kRoundUs);
+    ASSERT_TRUE(q.push(7, later, Priority::Normal));
+
+    EXPECT_EQ(q.pop(now), kInvalidSlot) << "not before means not before";
+    EXPECT_EQ(q.pop(later - 1), kInvalidSlot);
+    EXPECT_EQ(q.pop(later), 7u);
+}
+
+TEST(TxQueue, DeferralIsTwoRoundsNotOne) {
+    // A burst occupies 1450 ms and sendTask blocks a further 400 ms — 1850 ms
+    // against a 1500 ms round — so one round does not clear it.
+    const int64_t now = 0;
+    const int64_t until = deferUntilUs(now, timedgrid::kRoundUs);
+    EXPECT_EQ(until, 2 * (int64_t) timedgrid::kRoundUs);
+    EXPECT_GT(until, 1850000) << "must clear a burst plus its response window";
+}
+
+TEST(TxQueue, NotEligibleIsNotTheSameAsEmpty) {
+    // A caller that treated them alike would spin at 100 % CPU on a queue that
+    // holds only deferred frames.
+    Queue q;
+    ASSERT_TRUE(q.push(3, 5000, Priority::Normal));
+    EXPECT_FALSE(q.empty());
+    EXPECT_EQ(q.pop(0), kInvalidSlot);
+    EXPECT_EQ(q.nextEligibleUs(0), 5000);
+}
+
+TEST(TxQueue, NextEligibleReportsNowWhenSomethingIsReady) {
+    Queue q;
+    ASSERT_TRUE(q.push(1, 0, Priority::Normal));
+    ASSERT_TRUE(q.push(2, 900000, Priority::Normal));
+    EXPECT_EQ(q.nextEligibleUs(100), 100) << "something is ready right now";
+}
+
+TEST(TxQueue, NextEligibleOnAnEmptyQueueIsNever) {
+    Queue q;
+    EXPECT_EQ(q.nextEligibleUs(0), INT64_MAX);
+}
+
+// ---------------------------------------------------------------------------
+// "behind nothing else"
+// ---------------------------------------------------------------------------
+
+TEST(TxQueue, AnImmediateFrameJumpsEveryEligibleFrame) {
+    // The other half of the gate: having waited its two rounds, the deferred
+    // frame must not then queue behind traffic that arrived while it waited.
+    Queue q;
+    for (uint8_t i = 0; i < 4; ++i)
+        ASSERT_TRUE(q.push(i, 0, Priority::Normal));
+    ASSERT_TRUE(q.push(99, 0, Priority::Immediate));
+
+    EXPECT_EQ(q.pop(0), 99u) << "behind nothing else";
+    EXPECT_EQ(drain(q, 0), (std::vector<uint8_t>{0, 1, 2, 3}))
+        << "and the rest keep their order";
+}
+
+TEST(TxQueue, PriorityDoesNotOverrideTheDeferral) {
+    // Highest priority still cannot go before its earliest instant — otherwise
+    // "not before round n+2" would be silently defeated by raising priority.
+    Queue q;
+    ASSERT_TRUE(q.push(5, 1000, Priority::Immediate));
+    ASSERT_TRUE(q.push(6, 0, Priority::Background));
+
+    EXPECT_EQ(q.pop(0), 6u) << "the only ELIGIBLE frame wins, whatever its rank";
+    EXPECT_EQ(q.pop(1000), 5u);
+}
+
+TEST(TxQueue, BackgroundTrafficYieldsToEverything) {
+    Queue q;
+    ASSERT_TRUE(q.push(1, 0, Priority::Background));   // queued first
+    ASSERT_TRUE(q.push(2, 0, Priority::Normal));
+    ASSERT_TRUE(q.push(3, 0, Priority::Immediate));
+    EXPECT_EQ(drain(q, 0), (std::vector<uint8_t>{3, 2, 1}));
+}
+
+TEST(TxQueue, EqualPriorityIsNotReorderedByEarliestInstant) {
+    // Two frames that became eligible at different times but share a priority
+    // must still go out in the order they were BUILT.
+    Queue q;
+    ASSERT_TRUE(q.push(1, 500, Priority::Normal));   // built first, ready later
+    ASSERT_TRUE(q.push(2, 0, Priority::Normal));     // built second, ready now
+
+    EXPECT_EQ(q.pop(0), 2u) << "only one is eligible at t=0";
+    EXPECT_EQ(q.pop(1000), 1u);
+
+    Queue r;
+    ASSERT_TRUE(r.push(1, 0, Priority::Normal));
+    ASSERT_TRUE(r.push(2, 0, Priority::Normal));
+    EXPECT_EQ(drain(r, 1000), (std::vector<uint8_t>{1, 2}))
+        << "both eligible: insertion order, never earliest_us";
+}
+
+// ---------------------------------------------------------------------------
+// Capacity and hygiene
+// ---------------------------------------------------------------------------
+
+TEST(TxQueue, AFullQueueRefusesRatherThanDropsSilently) {
+    // The caller keeps its buffer and can log. Silently discarding a downlink
+    // is how a command disappears with no trace.
+    Queue q;
+    for (uint8_t i = 0; i < kMaxEntries; ++i)
+        ASSERT_TRUE(q.push(i, 0, Priority::Normal)) << i;
+    EXPECT_TRUE(q.full());
+    EXPECT_FALSE(q.push(100, 0, Priority::Immediate))
+        << "even the highest priority cannot displace a queued frame";
+}
+
+TEST(TxQueue, SpaceIsReusedAfterAPop) {
+    Queue q;
+    for (uint8_t i = 0; i < kMaxEntries; ++i) ASSERT_TRUE(q.push(i, 0, Priority::Normal));
+    ASSERT_EQ(q.pop(0), 0u);
+    EXPECT_FALSE(q.full());
+    EXPECT_TRUE(q.push(50, 0, Priority::Normal));
+}
+
+TEST(TxQueue, NothingIsDeliveredTwice) {
+    Queue q;
+    for (uint8_t i = 0; i < 6; ++i) ASSERT_TRUE(q.push(i, 0, Priority::Normal));
+    const auto got = drain(q, 0);
+    EXPECT_EQ(got.size(), 6u);
+    EXPECT_TRUE(q.empty());
+    EXPECT_EQ(q.pop(0), kInvalidSlot);
+    EXPECT_EQ(q.size(), 0u);
+}
+
+TEST(TxQueue, AnInvalidSlotIsRejected) {
+    Queue q;
+    EXPECT_FALSE(q.push(kInvalidSlot, 0, Priority::Normal))
+        << "kInvalidSlot is the sentinel pop() returns; queueing it would make "
+           "a real entry indistinguishable from an empty queue";
+}
+
+TEST(TxQueue, ClearEmptiesEverythingIncludingTheSequence) {
+    Queue q;
+    for (uint8_t i = 0; i < 5; ++i) ASSERT_TRUE(q.push(i, 0, Priority::Normal));
+    q.clear();
+    EXPECT_TRUE(q.empty());
+    EXPECT_EQ(q.pop(0), kInvalidSlot);
+
+    // Sequence restarts, so ordering after a clear is still insertion order.
+    ASSERT_TRUE(q.push(9, 0, Priority::Normal));
+    ASSERT_TRUE(q.push(8, 0, Priority::Normal));
+    EXPECT_EQ(drain(q, 0), (std::vector<uint8_t>{9, 8}));
+}
+
+TEST(TxQueue, AClockThatJumpsBackwardsDoesNotLoseFrames) {
+    // This container's clock does exactly that. A frame already eligible must
+    // not become permanently ineligible because `now` went backwards.
+    Queue q;
+    ASSERT_TRUE(q.push(4, 1000, Priority::Normal));
+    EXPECT_EQ(q.pop(500), kInvalidSlot);
+    EXPECT_EQ(q.pop(2000), 4u) << "it is still there once time passes again";
+}
