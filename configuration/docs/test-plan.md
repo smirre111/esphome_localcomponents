@@ -603,12 +603,36 @@ both directions; `CmdDispatcher::handleModeTest` arms, runs and restores;
 eight buttons — a MAC-0 baseline, the same run with MAC-1, the same again with
 MAC-2, a Mode B run, a stop, and three bench-only sweep offsets.
 
-Two things are deliberately **not** built and are called out where they belong:
-the witness receiver (§10.5, which is gap I2 — nothing on either end can say how
-many frames reached the air), and the sample sinks for `armResidualUs` and
-`oneShotErrorUs`, which exist as `noteModeTest*` entry points on `CmdDispatcher`
-but are not yet called from the arming and one-shot paths. Their histograms will
-report `n = 0` until they are, which is honest rather than empty.
+All four histograms and the whole funnel now have sources. Wiring them turned
+up four things that were reporting zero rather than reporting nothing:
+
+- `mt_counters_` was a **second** `macfunnel::Counters` that nothing ever
+  incremented, so every funnel field in the report read zero — the half of the
+  report that matters most, silently empty. The report is now a **delta**
+  against a snapshot of the real `funnel_`, which cannot drift from the
+  counters the node actually keeps and which is the "difference between two runs
+  of the identical grid" measurement the mode exists to make.
+- `noteMarkOutcome` had **no caller**, so `windows_armed` stayed 0 and WMR — the
+  rate §6 calls the one that actually distinguishes the three modes — read a
+  permanent zero. Armed and hit are now separate events reported from where each
+  is known: armed by `LoraInterface` when a **timed** window opens, hit at the
+  address filter. A window that received a foreign frame, a CRC failure or an
+  unparseable one counts as armed and not hit — counting both at the address
+  filter would have dropped those out of the denominator and made WMR
+  flattering.
+- `macEcho` was stored and never read, so the flag did nothing. A running test
+  with it off now silences the echo even for a frame that asks for one.
+- `turnaroundUs` had no sink, so §12.7 — the measurement the servable-slot rule
+  rests on — had no distribution. It is fed from the MAC echo's existing
+  `RxDone → TX fire` figure.
+
+Free-running Mode A windows are deliberately **excluded** from WMR: most are
+legitimately empty because the hub is not sending, so counting them would make
+the rate a measure of hub traffic rather than of whether marks are being met. A
+mark is a promise; a Mode A window is a hope.
+
+One thing is deliberately **not** built: the witness receiver (§10.5), which is
+gap I2 — nothing on either end can say how many frames reached the air.
 
 
 ### 10.1 Why not extend `DriftTest`

@@ -87,6 +87,14 @@ struct Counters
     void noteCounter(bool accepted) { if (accepted) counter_accepted++; else duplicates++; }
     void noteMic(bool ok)           { if (ok) mic_valid++;        else mic_failures++; }
     void noteWindow(bool hit)       { windows_armed++; if (hit) windows_hit++; }
+    // Armed and hit as SEPARATE events, because they happen at different
+    // moments and a frame can die between them. A window that opens and then
+    // receives something that fails CRC, fails to parse, or is addressed to
+    // another node has still been armed — the battery was spent. Counting both
+    // at the address filter would silently drop those windows out of the
+    // denominator and make WMR flattering.
+    void noteWindowArmed()          { windows_armed++; }
+    void noteWindowHit()            { windows_hit++; }
 };
 
 // Rates in parts per million, so they are exact integers on a device with no

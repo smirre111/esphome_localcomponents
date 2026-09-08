@@ -163,3 +163,46 @@ TEST(MacFunnel, LargeCountsDoNotOverflow) {
     c.crc_valid = 3000000;
     EXPECT_EQ(ferLinkPpm(c, 4000000), 250000u);
 }
+
+// ---------------------------------------------------------------------------
+// Armed and hit as separate events
+// ---------------------------------------------------------------------------
+
+TEST(MacFunnel, AWindowThatCaughtSomethingUnusableStillCountsAsArmed) {
+    // The flattering-WMR trap. A window that opens and then receives a frame
+    // which fails CRC, fails to parse, or is addressed to another node has
+    // still been armed — the battery was spent. Counting armed only at the
+    // address filter would drop those out of the denominator.
+    macfunnel::Counters c;
+    c.noteWindowArmed();
+    c.noteWindowArmed();
+    c.noteWindowArmed();
+    c.noteWindowHit();          // only one of the three produced a usable frame
+
+    EXPECT_EQ(c.windows_armed, 3u);
+    EXPECT_EQ(c.windows_hit, 1u);
+    EXPECT_EQ(macfunnel::wmrPpm(c), 666666u) << "two thirds missed";
+}
+
+TEST(MacFunnel, TheSplitFormAgreesWithTheCombinedOne) {
+    macfunnel::Counters split, combined;
+    for (bool hit : {true, false, true, true, false}) {
+        split.noteWindowArmed();
+        if (hit) split.noteWindowHit();
+        combined.noteWindow(hit);
+    }
+    EXPECT_EQ(split.windows_armed, combined.windows_armed);
+    EXPECT_EQ(split.windows_hit, combined.windows_hit);
+    EXPECT_EQ(macfunnel::wmrPpm(split), macfunnel::wmrPpm(combined));
+}
+
+TEST(MacFunnel, NoWindowsArmedIsNotAPerfectScore) {
+    // WMR with a zero denominator must read 0 as "not measured", and the caller
+    // has to check windows_armed to tell that apart from "nothing missed".
+    // Until this session nothing called the arming side at all, so this was the
+    // permanent state of the KPI the design calls the one that distinguishes
+    // the three modes.
+    macfunnel::Counters c;
+    EXPECT_EQ(c.windows_armed, 0u);
+    EXPECT_EQ(macfunnel::wmrPpm(c), 0u);
+}
