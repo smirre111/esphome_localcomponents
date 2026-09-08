@@ -176,6 +176,13 @@ namespace esphome
       // previous slot's tail.
       uint32_t  msUntilNextT0(uint8_t slot) const;
 
+      // Section 4.5's slot-aware deferral. A burst denies 31 of the 32 slots in
+      // the round it runs in, so a timed downlink whose mark falls inside one
+      // must move to the next CLEAR mark rather than be transmitted into it.
+      int64_t   busyUntilUs() const;
+      int64_t   nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+      uint32_t  msUntilNextClearT0(uint8_t slot) const;
+
       void send(uint8_t *data, size_t len) { this->send(data, len, TxPolicy{}); }
       void send(uint8_t *data, size_t len, const TxPolicy &policy);
       void sendPacketOnce(uint8_t *data, size_t len);
@@ -274,6 +281,9 @@ namespace esphome
       esp_err_t init_memory_pool(void);
       int64_t grid_anchor_us_{0};
       bool    grid_started_{false};
+      // When the hub's own burst stops occupying the channel, including the
+      // post-burst response window sendTask holds the radio in.
+      int64_t burst_busy_until_us_{0};
 
       rx_buffer_t *get_free_buffer(TickType_t timeout);
       esp_err_t return_buffer_to_pool(rx_buffer_t *buffer);

@@ -66,6 +66,11 @@ public:
     bool    gridStarted() const  { return grid_started_; }
     int64_t nextT0ForSlotUs(uint8_t slot, int64_t now_us) const;
     uint32_t msUntilNextT0(uint8_t slot) const;
+    int64_t  busyUntilUs() const;
+    int64_t  nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+    uint32_t msUntilNextClearT0(uint8_t slot) const;
+    // Test seam: stand a burst in the way of the grid.
+    int64_t  busy_until_us{0};
     // The sim's "now" for grid arithmetic. Production reads esp_timer_get_time();
     // a test sets this instead so the answer is deterministic.
     int64_t sim_now_us{0};

@@ -361,6 +361,20 @@ namespace esphome
       ESP_LOGI(TAG, "Processing %d bytes from buffer %p",
                rx_buffer->length, rx_buffer);
 
+      // Declare the channel busy BEFORE transmitting, not after: a caller
+      // deciding where to place a timed downlink must see the burst that is
+      // about to run, not the one that just finished.
+      const int copies = (rx_buffer->tx_copies > 0) ? rx_buffer->tx_copies
+                                                    : this->txSlotsPerRound;
+      const uint32_t stride_ms = (rx_buffer->tx_stride_ms > 0)
+                                 ? rx_buffer->tx_stride_ms
+                                 : (uint32_t) this->txIntervalMs;
+      this->burst_busy_until_us_ =
+          now_us + (int64_t) (copies - 1) * (int64_t) stride_ms * 1000
+                 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) rx_buffer->length)
+                 + (int64_t) loratiming::kPreambleToT0Us
+                 + (int64_t) this->responseWindowMs * 1000;
+
       lora_tx_busy_ = true;
       this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
                             rx_buffer->tx_copies, rx_buffer->tx_stride_ms);
@@ -501,6 +515,47 @@ namespace esphome
         return 0;
       const int64_t now = esp_timer_get_time();
       const int64_t t0  = this->nextT0ForSlotUs(slot, now);
+      const int64_t d   = t0 - now;
+      return d <= 0 ? 0u : (uint32_t) ((d + 999) / 1000);
+    }
+
+    // When the channel is next free of the hub's own burst.
+    //
+    // A 17-copy burst denies 31 of the 32 slots in the round it runs in — the
+    // 88 ms stride is 1.878 slot pitches, so copies walk ACROSS slot boundaries
+    // rather than landing on them, and each copy's 42 ms shadow clips the slots
+    // on both sides (measured; see section 4.5). There is no hole to interleave
+    // a timed downlink into, so the only correct answer for a Mode B node whose
+    // slot falls in that round is to move its frame out of the round entirely.
+    //
+    // The window extends past the last copy by responseWindowMs, because the
+    // addressed node defers ITS reply into that gap and sendTask holds the
+    // radio there. Burst plus window is ~1850 ms against a 1500 ms round, which
+    // is why the deferral is two rounds and not one.
+    int64_t LORATracker::busyUntilUs() const
+    {
+      return this->burst_busy_until_us_;
+    }
+
+    // The next T0 for `slot` that is not inside a burst.
+    //
+    // Not simply "the next T0 after busyUntil": a caller wants the node's own
+    // mark, and the node is only listening at its own marks. Skipping to the
+    // first T0 at or after the channel clears is exactly that — the grid
+    // arithmetic already spaces those a round apart.
+    int64_t LORATracker::nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const
+    {
+      const int64_t floor_us = (this->burst_busy_until_us_ > now_us)
+                             ? this->burst_busy_until_us_ : now_us;
+      return this->nextT0ForSlotUs(slot, floor_us);
+    }
+
+    uint32_t LORATracker::msUntilNextClearT0(uint8_t slot) const
+    {
+      if (!this->grid_started_)
+        return 0;
+      const int64_t now = esp_timer_get_time();
+      const int64_t t0  = this->nextClearT0ForSlotUs(slot, now);
       const int64_t d   = t0 - now;
       return d <= 0 ? 0u : (uint32_t) ((d + 999) / 1000);
     }

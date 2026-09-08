@@ -146,11 +146,13 @@ timer invites the same mistake.
 Everything reads `esp_timer_get_time()`. Nothing *schedules* on the FreeRTOS
 tick — 1000 Hz on the hub, **100 Hz on the node**.
 
-But the tick is not yet out of the path: **every SPI register write on both ends
+~~But the tick is not yet out of the path: every SPI register write on both ends
 is gated by `xSemaphoreTake(xSemaphore, (TickType_t)1)` and silently does nothing
-on timeout** (hub `lora.cpp:158`, node `components/lora/lora.cpp:143, 251, 304`).
-That is a 10 ms window on the node, and the timed-mode ARM write goes through it.
-It must become a bounded-and-*reported* take before Mode B ships (§10).
+on timeout.~~ **FIXED, both ends** (§10). Both `lora_write_reg` and
+`lora_read_reg` now wait on the mutex rather than skipping; the read's buffer is
+initialised, because it returned `in[1]` on both paths and a timeout on
+`REG_IRQ_FLAGS` therefore read as stack garbage. The tick is out of the transmit
+and arm paths too — see B5 in §8 for what came off each end.
 
 ### 2.4 Prepare / fire — separating the timing-critical path
 
@@ -437,9 +439,30 @@ so if it were placed at slot 0's `T0`, its 33.86 ms of air would run from −3.1
 same node on every beacon round**. `beaconSlotIndex` is added to `GridSync` (§6),
 and the hub must leave `ceil(33.86 / 46.875) = 1` slot clear after it.
 
-Optional later: the beacon may carry a 32-bit pending-data bitmap, so a node
-with its bit clear skips its private window until the next beacon
-(`wake-cost-proposal.md` Tier 3). Pure addition; not needed for v1.
+~~Optional later: the beacon may carry a 32-bit pending-data bitmap~~ —
+**BUILT.** `PendingData.h` (shared, gated, 11 tests) plus `GridSync.pendingMask`
+and `pendingMaskValid`. A node whose bit is clear skips its window; at the
+default 233-round cadence that is up to 349 s of skipped windows on one beacon,
+which is the saving and also why the two rules below are strict.
+
+**Absent is not empty.** A zeroed proto3 field is indistinguishable from a
+deliberate "nothing for anyone", so validity is carried by its own flag and an
+invalid mask means *listen*. Without that, the first beacon that omitted the
+field — or the first hub firmware that did not know it — would put the entire
+fleet to sleep.
+
+**A skip must expire.** Not "until the next beacon" but *at the round the next
+beacon is due*, whether or not it arrives. A node that skipped until a beacon it
+then missed would be deaf for nearly six minutes; one that kept trusting a stale
+mask would be deaf indefinitely. Every uncertain path — no cadence, a round
+before the beacon's own, an out-of-range slot — returns "listen", because the
+failure is silent: a node that skips wrongly reports nothing, it just stops
+hearing.
+
+The hub half is honest rather than complete: a `LORAListener` knows only its own
+pending traffic, so it publishes its own bit and sets every other. Setting them
+is the safe direction. A fleet-wide mask has to come from the tracker, where the
+queues are.
 
 ### 4.5 Mixed modes: priority, not a reserved region
 
@@ -903,9 +926,20 @@ Track B below, not here.
 | **B1** | ~~Hub grid anchor; bursts start at the addressed node's `T0`~~ — **DONE**, alignment **default off** (it costs up to 1.5 s of latency and buys nothing until B3; B3 enables it per promoted node). The startup broadcast demote moves to B3, where `GridSync` exists. | bursts observably start on the grid; nothing regresses |
 | **B1a** | ~~**Transmit scheduler on the hub**~~ — **DONE.** `TxQueue.h` (shared, gated): eligibility by `earliest_us`, priority, stable FIFO tiebreak, `deferUntilUs()` carrying the two-rounds reasoning; 17 tests. `sendTask` now drains `data_queue` into that queue and waits on `nextEligibleUs()` instead of blocking on `xQueueReceive(portMAX_DELAY)` — with a deferred frame in hand, the old wait held it not until it was eligible but until some *unrelated* traffic happened to wake the task. `TxPolicy` gained `earliest_us` and `priority`, which B-1 deliberately left out until there was a scheduler to honour them. The scheduling step is a method (`serviceTxQueue`) rather than the body of an infinite loop, so it is testable; 7 tests. | ~~a frame can be placed "not before round n+2, behind nothing else"~~ — **met**, and asserted directly |
 | **B2** | ~~Node phase tracking~~ — **DONE.** `PhaseTracker.h` (shared, gated); sample committed only for addressed frames; distribution not mean, so a bimodal set is rejected on spread. Beacon carries `rtcSlowSrc`, ppm, phase error/spread/count. 14 tests. Original text: `T0_measured`, `phaseErrUs`, `ppmEstimate`, `rtcSlowSrc` in the beacon. **Must filter the phase sample by slot/address first**: `noteDriftSample` is called before parsing by design (`frtosTasks.cpp:160-165`), so a node currently stamps its neighbour's frames and `phaseErrUs` would be bimodal at 0 and ±46.9 ms. | `phaseErrUs` inside ±2 ms in the field, on every node, over days |
-| **B3** | ~~One window + beacon slot together~~ — **THE NODE NOW ARMS ON THE GRID.** `GridSync` published/withdrawn, node adopts by solving for a local anchor, agreement-checked and refused on mismatch, startup broadcast demote (deferred here from B1). `LoraInterface` runs a **one-shot** timer at `gridstate::armDelayUs()` whenever `timedRxActive()`, and stops the free-running periodic one; it reverts to periodic on demotion or on a timer error, so it cannot go deaf. Inert unless a grid has been adopted AND the mode policy says Mode B. **This is what HW-2's sweep needed to run** — the dependency was the other way round from what this row used to say. **Still open:** slot-aware deferral, which needs B1a's reordering queue. | **`T_detect` measured on the bench first** (§12.2 — it sets the entire late-side guard, and a field failure would surface late, on 32 nodes, unattributable); then reception ≥ Mode A over a week and battery measurably improved |
+| **B3** | ~~One window + beacon slot together~~ — **THE NODE NOW ARMS ON THE GRID.** `GridSync` published/withdrawn, node adopts by solving for a local anchor, agreement-checked and refused on mismatch, startup broadcast demote (deferred here from B1). `LoraInterface` runs a **one-shot** timer at `gridstate::armDelayUs()` whenever `timedRxActive()`, and stops the free-running periodic one; it reverts to periodic on demotion or on a timer error, so it cannot go deaf. Inert unless a grid has been adopted AND the mode policy says Mode B. **This is what HW-2's sweep needed to run** — the dependency was the other way round from what this row used to say. ~~**Still open:** slot-aware deferral~~ — **DONE.** The tracker declares a
+busy window before each burst (last copy's air-end plus `responseWindowMs`) and
+`msUntilNextClearT0()` skips marks that fall inside it, so a timed downlink
+moves to the same slot a round later rather than being transmitted into a burst.
+That is the only correct answer: a 17-copy burst denies 31 of the 32 slots, so
+there is no hole to slide into. 5 tests. | **`T_detect` measured on the bench first** (§12.2 — it sets the entire late-side guard, and a field failure would surface late, on 32 nodes, unattributable); then reception ≥ Mode A over a week and battery measurably improved |
 | **B4** | ~~Single-copy downlink + the cached-ack fix~~ — **PACK-ONCE AND CACHED ACK DONE.** Hub retransmits the STORED bytes (same msgid, same ciphertext) instead of re-packing from live state; node's `AckCache.h` answers a genuine retry while staying silent for the other 16 copies of a burst. **Still open:** making single-copy the default downlink, which is gated on B3's window. Original text: Single-copy downlink + the cached-ack fix (§4.7), **node and hub**. The hub half is larger: `tx_tracked_op_` re-packs with a fresh msgid today and must become pack-once / cache / retransmit-stored. **Not independently revertible** — the cached ack changes `SessionManager`'s replay semantics (`SessionManager.cpp:112-121`) for Mode A traffic too, since the admission path is shared. Rolling it back on a live fleet reverts replay behaviour for every node. | command success rate unchanged over a week |
-| **B5** | ~~Determinism work (§2.4 items 1–5)~~ — **BOTH SIDES DONE, unverified on hardware.** Four things left the transmit critical path: the per-byte FIFO fill (now 1 transaction for 60 B, 3 for 152 B); the five per-packet radio config writes (SF, CR, BW, sync word, CRC — `setup()` already wrote them and nothing changes them at runtime, so seventeen burst copies were paying seventeen times); `esphome::delay(1)` in `lora_idle()`, which sat in front of *every* transmit, now 250 µs; and the two `ESP_LOGI` calls that held the radio mutex across a UART write (~3.5 ms at 115200). `lora_tx()`'s trailing `delay(1)` is now the datasheet's 220 µs and delays only the caller's return. **The node's half was worse**, because one tick there is 10 ms at `CONFIG_FREERTOS_HZ=100`: `lora_rxContinuous()` carried `vTaskDelay(1)` **on the arm path**, spending 71 % of the ±14.08 ms guard band before any real error term was counted (now 115 µs); `lora_tx()` carried another (now 220 µs); and `lora_endPacket()` polled TX-done at `vTaskDelay(2)` = **20 ms**, against 29.44 ms windows placed from TxDone — now 500 µs, with the instant recorded (`lora_lastTxDoneUs()`, which Mode C had no source for) and a 500 ms timeout, because that loop previously had **no termination at all**. The node's five per-packet config writes are gone from both transmit paths. **The prepare/fire split is in** on the hub: `preparePacket()` idles the radio, sets the TX preamble and clocks the FIFO — everything whose duration varies with payload length — and `firePacket(not_before_us)` is one register write, optionally held to a computed instant. The radio mutex spans the pair, because between them the FIFO holds a half-built frame; `tx_prepared_` makes a missing FIRE a logged error rather than a deadlock, and a second PREPARE discards the first instead of splicing the two payloads into one frame. `sendPacketBytes()` is now just the two in sequence, so every existing caller is unchanged. 6 tests, one of which asserts the *ordering* property the gate is really about: nothing at all stands between PREPARE returning and `lora_tx`. **Still open:** the pending-data bitmap, and the gate itself, which needs hardware. | p99 fire residual < 200 µs |
+| **B5** | ~~Determinism work (§2.4 items 1–5)~~ — **BOTH SIDES DONE, unverified on hardware.** Four things left the transmit critical path: the per-byte FIFO fill (now 1 transaction for 60 B, 3 for 152 B); the five per-packet radio config writes (SF, CR, BW, sync word, CRC — `setup()` already wrote them and nothing changes them at runtime, so seventeen burst copies were paying seventeen times); `esphome::delay(1)` in `lora_idle()`, which sat in front of *every* transmit, now 250 µs; and the two `ESP_LOGI` calls that held the radio mutex across a UART write (~3.5 ms at 115200). `lora_tx()`'s trailing `delay(1)` is now the datasheet's 220 µs and delays only the caller's return. **The node's half was worse**, because one tick there is 10 ms at `CONFIG_FREERTOS_HZ=100`: `lora_rxContinuous()` carried `vTaskDelay(1)` **on the arm path**, spending 71 % of the ±14.08 ms guard band before any real error term was counted (now 115 µs); `lora_tx()` carried another (now 220 µs); and `lora_endPacket()` polled TX-done at `vTaskDelay(2)` = **20 ms**, against 29.44 ms windows placed from TxDone — now 500 µs, with the instant recorded (`lora_lastTxDoneUs()`, which Mode C had no source for) and a 500 ms timeout, because that loop previously had **no termination at all**. The node's five per-packet config writes are gone from both transmit paths. **The prepare/fire split is in** on the hub: `preparePacket()` idles the radio, sets the TX preamble and clocks the FIFO — everything whose duration varies with payload length — and `firePacket(not_before_us)` is one register write, optionally held to a computed instant. The radio mutex spans the pair, because between them the FIFO holds a half-built frame; `tx_prepared_` makes a missing FIRE a logged error rather than a deadlock, and a second PREPARE discards the first instead of splicing the two payloads into one frame. `sendPacketBytes()` is now just the two in sequence, so every existing caller is unchanged. 6 tests, one of which asserts the *ordering* property the gate is really about: nothing at all stands between PREPARE returning and `lora_tx`. ~~**Still open:** the pending-data bitmap~~ — **DONE** (§4.4). **Still open:**
+the gate itself, which needs a scope or a wired DIO0 on the hub. The two
+histograms that would show it — `armResidualUs` (the whole chain) and
+`oneShotErrorUs` (the timer alone) — are now fed from the real arm path, and
+they are deliberately separate: if the residual is bad but the one-shot is fine
+the cost is software, and if the one-shot is bad it is the sleeping clock and no
+amount of prepare/fire work would help. | p99 fire residual < 200 µs |
 | **Bx** | ~~**Hub RX timestamping**~~ — **CODE HALF DONE; the gate needs hardware.** `checkReception()` stamps the poll, derives `T0` via `LoraTiming.h`, and reports a *measured* uncertainty (midpoint of the poll gap, ±half its width) plus a worst-gap high-water mark, all readable by clients inside `set_response()` and printed by `dump_config()`. 6 tests. **±5 ms at the nominal 10 ms poll**, so the gate is not met and cannot be by software: DIO0 is not wired to the hub's ESP32 (§5.4). | an uplink's `T0` is known to ±1 ms — **blocked on wiring DIO0**, not on code |
 | **C2** | RX1/RX2 windows off TxDone, once B-1, B1a, B5 and Bx exist | wake → ~3 s; no missed downlinks over a week |
 

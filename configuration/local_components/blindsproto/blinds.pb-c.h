@@ -718,10 +718,24 @@ struct  GridSync
    * a bench unit refuses a non-zero value and stays on the correct arm lead.
    */
   int32_t armoffsetus;
+  /*
+   * The pending-data bitmap (section 4.4, Tier 3). One bit per slot: set
+   * means "the hub has traffic for that node". A node whose bit is clear may
+   * skip its private window until the next beacon is due, which is the whole
+   * saving — an armed window is ~29 ms of receive at ~11 mA against a ~1.2 mA
+   * average, and most windows on most nodes are empty.
+   * pendingMaskValid exists because a zeroed proto3 field is
+   * indistinguishable from a deliberate "nothing for anyone". Reading a
+   * MISSING bitmap as all-clear would put the whole fleet to sleep on the
+   * first beacon that omitted it, or on the first hub firmware that did not
+   * know the field. Absent is not empty; absent means listen.
+   */
+  uint32_t pendingmask;
+  protobuf_c_boolean pendingmaskvalid;
 };
 #define GRID_SYNC__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&grid_sync__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*

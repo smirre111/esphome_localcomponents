@@ -599,3 +599,101 @@ TEST(RealTrackerFire, SendPacketBytesStillDoesBothAndIsUnchanged) {
     ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
     EXPECT_EQ(lorahal::rec().packets[0].size(), (size_t) 45);
 }
+
+// ---------------------------------------------------------------------------
+// Section 4.5's slot-aware deferral, on the production arithmetic
+// ---------------------------------------------------------------------------
+
+namespace {
+struct DeferProbe : TxProbe {
+    using LORATracker::busyUntilUs;
+    using LORATracker::nextClearT0ForSlotUs;
+};
+}  // namespace
+
+TEST(RealTrackerDefer, WithNoBurstInFlightAClearMarkIsJustTheNextMark) {
+    DeferProbe t;
+    t.startGrid();
+    const int64_t a = t.gridAnchorUs();
+    EXPECT_EQ(t.busyUntilUs(), 0);
+    for (uint8_t slot : {0, 5, 17, 31})
+        EXPECT_EQ(t.nextClearT0ForSlotUs(slot, a),
+                  t.nextT0ForSlotUs(slot, a)) << "slot " << (int) slot;
+}
+
+TEST(RealTrackerDefer, ABurstPushesAMarkOutByAWholeRound) {
+    // The measured result behind this: a 17-copy burst denies 31 of the 32
+    // slots in its round, so there is no hole to slide into — the only correct
+    // answer is the same slot, a round later.
+    lorahal::rec().reset();
+    DeferProbe t;
+    t.init();
+    t.startGrid();
+    const int64_t a = t.gridAnchorUs();
+
+    // Send a default (full) burst, which sets the busy window.
+    auto frame = packedOperationFrame();
+    proto_sim_timer_set_now_us(a);
+    t.send(frame.data(), frame.size(), TxPolicy{});
+    ASSERT_TRUE(t.serviceTxQueue(a));
+
+    const int64_t busy = t.busyUntilUs();
+    EXPECT_GT(busy, a + (int64_t) timedgrid::kRoundUs)
+        << "burst plus the response window outlasts a round — which is why the "
+           "deferral is two rounds and not one";
+
+    // Every slot's next clear mark must be at or after the channel is free.
+    for (uint8_t slot = 0; slot < timedgrid::kSlotCount; ++slot) {
+        const int64_t clear = t.nextClearT0ForSlotUs(slot, a);
+        EXPECT_GE(clear, busy) << "slot " << (int) slot;
+        // ...and it must still be one of THIS slot's marks, not a neighbour's.
+        EXPECT_EQ((clear - t.nextT0ForSlotUs(slot, a)) % (int64_t) timedgrid::kRoundUs, 0)
+            << "slot " << (int) slot << " was moved off its own grid";
+    }
+}
+
+TEST(RealTrackerDefer, TheBusyWindowIsDeclaredBeforeTheBurstNotAfterIt) {
+    // A caller deciding where to place a timed downlink must see the burst that
+    // is ABOUT to run. If the window were set afterwards, a frame queued during
+    // the burst would be placed against a channel the hub already knows is
+    // occupied — and land in it.
+    lorahal::rec().reset();
+    DeferProbe t;
+    t.init();
+    t.startGrid();
+
+    proto_sim_timer_set_now_us(0);
+    auto frame = packedOperationFrame();
+    t.send(frame.data(), frame.size(), TxPolicy{});
+
+    EXPECT_EQ(t.busyUntilUs(), 0) << "nothing sent yet";
+    ASSERT_TRUE(t.serviceTxQueue(0));
+    EXPECT_GT(t.busyUntilUs(), 0) << "and now the channel is spoken for";
+}
+
+TEST(RealTrackerDefer, ASingleCopyDownlinkBarelyMovesTheWindow) {
+    // B4's remaining half, seen from the other side: one copy occupies the
+    // channel for one frame plus the response window, not for a round and a
+    // half. That is what makes serving a Mode A node cheap enough to interleave.
+    lorahal::rec().reset();
+    DeferProbe t;
+    t.init();
+    t.startGrid();
+
+    proto_sim_timer_set_now_us(0);
+    auto frame = packedOperationFrame();
+    TxPolicy one; one.copies = 1;
+    t.send(frame.data(), frame.size(), one);
+    ASSERT_TRUE(t.serviceTxQueue(0));
+
+    EXPECT_LT(t.busyUntilUs(), (int64_t) timedgrid::kRoundUs)
+        << "a single copy must not deny the whole round";
+    EXPECT_GT(t.busyUntilUs(), 0);
+}
+
+TEST(RealTrackerDefer, WithoutAGridThereIsNothingToDeferTo) {
+    DeferProbe t;
+    ASSERT_FALSE(t.gridStarted());
+    EXPECT_EQ(t.msUntilNextClearT0(3), 0u)
+        << "no grid means send now, the same answer msUntilNextT0 gives";
+}

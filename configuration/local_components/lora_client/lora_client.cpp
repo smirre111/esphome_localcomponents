@@ -5,6 +5,8 @@
 // The funnel rate arithmetic, so a ModeTest report is recomputed on the hub
 // rather than trusted from the node (test-plan.md I1).
 #include "esphome/components/lora_client/MacFunnel.h"
+// Section 4.4: the pending-data bitmap the beacon carries.
+#include "esphome/components/lora_client/PendingData.h"
 #include "esphome/components/lora_client/Scheduler.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
 
@@ -1447,6 +1449,19 @@ namespace esphome
     // local anchor — see GridState.h. Sent as a normal burst: a node being told
     // about the grid is by definition not yet on it.
     // -----------------------------------------------------------------------
+    // Does this listener have a downlink waiting for its node?
+    //
+    // Conservative by construction: anything that might become a transmit
+    // counts. A false negative here tells the node it may stop listening for a
+    // beacon interval, which is how a command goes missing for six minutes; a
+    // false positive costs one 29 ms window.
+    bool LORAListener::has_pending_downlink_() const
+    {
+      return this->op_awaiting_ack_
+          || this->mode_test_active_
+          || this->drift_test_active_;
+    }
+
     void LORAListener::send_grid_sync(bool enable)
     {
       LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -1479,6 +1494,22 @@ namespace esphome
         // the grid is published only from an aligned client.
         gs.txround = 0;
         gs.txslot  = this->grid_slot_;
+
+        // The pending-data bitmap (section 4.4). A LORAListener knows only its
+        // OWN pending traffic — the fleet-wide view would have to come from the
+        // tracker, which is where all the queues live — so what it can publish
+        // honestly is: this node's bit, and every other bit SET.
+        //
+        // Setting the others is the safe direction, and deliberately not the
+        // convenient one. An empty bit is a licence to stop listening for a
+        // whole beacon interval (~5.8 min), so a bit this listener has no
+        // information about must never be clear. The saving is real for the one
+        // node this frame is addressed to and absent for the rest, which is the
+        // honest state of the implementation rather than a placeholder.
+        gs.pendingmask      = pending::withSlot(pending::allListening(),
+                                                this->grid_slot_,
+                                                this->has_pending_downlink_());
+        gs.pendingmaskvalid = true;
       }
 
       op_message.header   = &header;
@@ -1522,8 +1553,14 @@ namespace esphome
       if (buf == nullptr || len == 0)
         return;
 
+      // The next mark that is CLEAR of the hub's own burst, not simply the next
+      // mark. A 17-copy burst denies 31 of the 32 slots in its round (measured;
+      // section 4.5), so aiming at the next T0 would place this frame inside a
+      // burst roughly whenever one is running — the node would hear the burst
+      // it is not addressed by and nothing it is.
       const uint32_t delay_ms =
-          this->grid_aligned_ ? this->parent_->msUntilNextT0(this->grid_slot_) : 0u;
+          this->grid_aligned_ ? this->parent_->msUntilNextClearT0(this->grid_slot_)
+                              : 0u;
 
       if (delay_ms == 0)
       {

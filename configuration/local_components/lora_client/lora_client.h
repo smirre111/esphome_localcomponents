@@ -279,6 +279,9 @@ namespace esphome
       // (11.7 min) of missed windows before demoting itself — and the beacon
       // that would re-anchor it is on a grid it no longer shares.
       void send_grid_sync(bool enable);
+      // Whether a downlink is waiting for this node, for the pending-data
+      // bitmap. Conservative: anything that might become a transmit counts.
+      bool has_pending_downlink_() const;
       // Broadcast withdrawal, addressed to every node at once. Deliberately
       // separate: after a restart the hub may not yet know which nodes exist.
       void broadcast_grid_demote();

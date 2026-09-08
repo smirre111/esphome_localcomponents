@@ -22,6 +22,14 @@ constexpr BaseType_t pdFALSE            = 0;
 constexpr BaseType_t pdPASS             = 1;
 constexpr BaseType_t pdFAIL             = 0;
 
+// The node builds at 100 Hz; the shim's pdMS_TO_TICKS is 1:1 with ms, so this
+// is only what production READS (the ModeTest report carries it so a timing
+// number can never be read without knowing the tick it was taken on), not what
+// the shim schedules on.
+#ifndef configTICK_RATE_HZ
+#define configTICK_RATE_HZ 100
+#endif
+
 inline TickType_t pdMS_TO_TICKS(uint32_t ms) { return ms; }
 inline TickType_t portTICK_PERIOD_MS_VAL()    { return 1; }
 #define portTICK_PERIOD_MS portTICK_PERIOD_MS_VAL()

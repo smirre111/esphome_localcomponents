@@ -43,6 +43,23 @@ uint32_t LORATracker::msUntilNextT0(uint8_t slot) const {
     return d <= 0 ? 0u : (uint32_t)((d + 999) / 1000);
 }
 
+// Section 4.5's slot-aware deferral, mirrored. A test sets busy_until_us to
+// stand a burst in the way; production computes it from the burst it is about
+// to run.
+int64_t LORATracker::busyUntilUs() const { return busy_until_us; }
+
+int64_t LORATracker::nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const {
+    const int64_t floor_us = (busy_until_us > now_us) ? busy_until_us : now_us;
+    return nextT0ForSlotUs(slot, floor_us);
+}
+
+uint32_t LORATracker::msUntilNextClearT0(uint8_t slot) const {
+    if (!grid_started_) return 0;
+    const int64_t t0 = nextClearT0ForSlotUs(slot, sim_now_us);
+    const int64_t d  = t0 - sim_now_us;
+    return d <= 0 ? 0u : (uint32_t)((d + 999) / 1000);
+}
+
 void LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     // Record the per-frame policy BEFORE the radio check, so a test can assert
     // what was requested even when no radio is attached.

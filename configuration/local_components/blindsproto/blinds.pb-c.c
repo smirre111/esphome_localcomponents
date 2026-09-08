@@ -2433,7 +2433,7 @@ const ProtobufCMessageDescriptor mac_control__descriptor =
   (ProtobufCMessageInit) mac_control__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor grid_sync__field_descriptors[13] =
+static const ProtobufCFieldDescriptor grid_sync__field_descriptors[15] =
 {
   {
     "enable",
@@ -2591,12 +2591,38 @@ static const ProtobufCFieldDescriptor grid_sync__field_descriptors[13] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "pendingMask",
+    14,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, pendingmask),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "pendingMaskValid",
+    15,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, pendingmaskvalid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned grid_sync__field_indices_by_name[] = {
   12,   /* field[12] = armOffsetUs */
   8,   /* field[8] = beaconEveryRounds */
   7,   /* field[7] = beaconSlotIndex */
   0,   /* field[0] = enable */
+  13,   /* field[13] = pendingMask */
+  14,   /* field[14] = pendingMaskValid */
   4,   /* field[4] = pitchUs */
   10,   /* field[10] = resyncMaxS */
   3,   /* field[3] = roundUs */
@@ -2610,7 +2636,7 @@ static const unsigned grid_sync__field_indices_by_name[] = {
 static const ProtobufCIntRange grid_sync__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 13 }
+  { 0, 15 }
 };
 const ProtobufCMessageDescriptor grid_sync__descriptor =
 {
@@ -2620,7 +2646,7 @@ const ProtobufCMessageDescriptor grid_sync__descriptor =
   "GridSync",
   "",
   sizeof(GridSync),
-  13,
+  15,
   grid_sync__field_descriptors,
   grid_sync__field_indices_by_name,
   1,  grid_sync__number_ranges,

@@ -63,6 +63,10 @@ public:
     // and continuous RX. Nothing here drives a radio, but the sim asserts on
     // the flag — a test can then prove the node LEAVES continuous RX, which is
     // the property that keeps a bench test from flattening the pack.
+    // The free-running RX window period. ModeTest needs it to reject a grid
+    // period that would phase-lock against it (ModeTestPolicy.h).
+    int rxWindowPeriodMs() const { return 500; }
+
     void setContinuousRx(bool on) { continuous_rx_ = on; }
     bool continuousRx() const { return continuous_rx_; }
 
