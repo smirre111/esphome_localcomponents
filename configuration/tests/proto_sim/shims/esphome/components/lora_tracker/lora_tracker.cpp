@@ -65,6 +65,9 @@ void LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     // what was requested even when no radio is attached.
     last_copies = policy.copies;
     sent_copies.push_back(policy.copies);
+    last_earliest_us = policy.earliest_us;
+    sent_earliest_us.push_back(policy.earliest_us);
+    last_priority = policy.priority;
 
     auto* r = shim_hooks::active_radio();
     if (!r) return;

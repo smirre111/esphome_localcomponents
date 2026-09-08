@@ -7,6 +7,8 @@
 #include "esphome/components/lora_client/MacFunnel.h"
 // Section 4.4: the pending-data bitmap the beacon carries.
 #include "esphome/components/lora_client/PendingData.h"
+// C2: the Class A window offsets the hub aims replies at.
+#include "esphome/components/lora_client/ClassAWindows.h"
 #include "esphome/components/lora_client/Scheduler.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
 
@@ -2895,6 +2897,64 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       }
     }
 
+    // C2: place a reply inside the node's RX1 window.
+    //
+    // The node's Class A windows hang off T0_uplink, which it measures from its
+    // own TxDone. The hub's estimate of that same instant is Bx's receive
+    // stamp — last_rx_t0_us() — so a reply aimed at T0_uplink + kRx1DelayUs
+    // lands where the node is listening WITHOUT either end knowing the other's
+    // clock. That is the whole appeal of Class A, and it is why this works
+    // before the hub's stamp is anywhere near the +/-1 ms it eventually wants.
+    //
+    // What it replaces: set_timeout(..., 750, ...) into the ordinary burst
+    // path, so copies landed at 750 + 88*i ms. Worked through against this
+    // plan's own arm points, BOTH windows are empty — RX1 is [982.8, 1012.2]
+    // and the nearest copies are at 926 and 1014 — and the node then sleeps.
+    // Even a fortunate alignment would only be a 33.5 % hit. Class A needs a
+    // single copy at a precisely known offset; a burst is the opposite
+    // construction.
+    //
+    // Returns false when the hub has no usable stamp for this node's uplink, in
+    // which case the caller must fall back to today's behaviour rather than
+    // guess an origin.
+    bool LORAListener::send_into_rx1_(const uint8_t *buf, size_t len)
+    {
+      if (this->parent_ == nullptr || buf == nullptr || len == 0)
+        return false;
+
+      const int64_t t0_uplink = this->parent_->last_rx_t0_us();
+      if (t0_uplink <= 0)
+        return false;
+
+      const int64_t now = esp_timer_get_time();
+      // Fire so the frame's PREAMBLE starts at the window's centre, not its
+      // edge: the hub's own stamp carries an uncertainty of half a poll gap
+      // (Bx reports it), and centring spends that uncertainty against the guard
+      // band on both sides instead of all of it on one.
+      const int64_t target = t0_uplink + (int64_t) classa::kRx1DelayUs;
+      if (target <= now)
+      {
+        ESP_LOGW(TAG, "[%s] RX1 already past by %lld us — falling back",
+                 this->get_name().c_str(), (long long) (now - target));
+        return false;
+      }
+
+      TxPolicy p;
+      p.copies      = 1;              // a burst is the opposite construction
+      p.stride_ms   = 0;
+      p.earliest_us = target;
+      p.priority    = 0;              // Immediate: a missed window is a lost
+                                      // reply, and the next one is a wake away
+      this->parent_->send(const_cast<uint8_t *>(buf), len, p);
+
+      ESP_LOGI(TAG, "[%s] reply aimed at RX1: T0_uplink %lld, fire %lld "
+                    "(hub stamp +/-%u us)",
+               this->get_name().c_str(), (long long) t0_uplink,
+               (long long) target,
+               (unsigned) this->parent_->rx_stamp_uncertainty_us());
+      return true;
+    }
+
     void LORAListener::send_timesync()
     {
       if (this->parent_ == nullptr)
@@ -2948,7 +3008,12 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       size_t   len = 0;
       if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
       {
-        this->parent_->send(buf, len);
+        // C2 when the hub has a usable uplink stamp for this node, today's
+        // burst otherwise. Not a switch: the fallback IS the old behaviour, so
+        // a node the hub cannot place still gets its TimeSync the way it always
+        // did.
+        if (!this->send_into_rx1_(buf, len))
+          this->parent_->send(buf, len);
         free(buf);
         ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
                  this->get_name().c_str(), (unsigned long long) epoch,

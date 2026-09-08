@@ -282,6 +282,10 @@ namespace esphome
       // Whether a downlink is waiting for this node, for the pending-data
       // bitmap. Conservative: anything that might become a transmit counts.
       bool has_pending_downlink_() const;
+      // C2: send a single copy timed to land in the node's RX1 window, using
+      // the hub's own receive stamp as the shared origin. False when there is
+      // no usable stamp, so the caller falls back to today's burst.
+      bool send_into_rx1_(const uint8_t *buf, size_t len);
       // Broadcast withdrawal, addressed to every node at once. Deliberately
       // separate: after a restart the hub may not yet know which nodes exist.
       void broadcast_grid_demote();

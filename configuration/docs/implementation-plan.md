@@ -912,7 +912,8 @@ for the implementation work. The phasing above was written against an older
 checkout. What remains of Track C is C2 alone.
 
 **C2 — RX1/RX2 windows off TxDone — is not independent** and has been moved out
-of this track (§5.4). It requires, in addition to the node work: hub RX
+of this track (§5.4). *(It is now built; see B-1…Bx below for what it waited on
+and §5.4 for what it still needs from hardware.)* It requires, in addition to the node work: hub RX
 timestamping (**Bx**, new), single-copy TX policy (**B-1**), prepare/fire
 determinism (**B5**), and the transmit scheduler (**B1a**). It is priced with
 Track B below, not here.
@@ -941,7 +942,7 @@ they are deliberately separate: if the residual is bad but the one-shot is fine
 the cost is software, and if the one-shot is bad it is the sleeping clock and no
 amount of prepare/fire work would help. | p99 fire residual < 200 µs |
 | **Bx** | ~~**Hub RX timestamping**~~ — **CODE HALF DONE; the gate needs hardware.** `checkReception()` stamps the poll, derives `T0` via `LoraTiming.h`, and reports a *measured* uncertainty (midpoint of the poll gap, ±half its width) plus a worst-gap high-water mark, all readable by clients inside `set_response()` and printed by `dump_config()`. 6 tests. **±5 ms at the nominal 10 ms poll**, so the gate is not met and cannot be by software: DIO0 is not wired to the hub's ESP32 (§5.4). | an uplink's `T0` is known to ±1 ms — **blocked on wiring DIO0**, not on code |
-| **C2** | RX1/RX2 windows off TxDone, once B-1, B1a, B5 and Bx exist | wake → ~3 s; no missed downlinks over a week |
+| **C2** | ~~RX1/RX2 windows off TxDone, once B-1, B1a, B5 and Bx exist~~ — **BUILT, unverified on hardware.** All four prerequisites landed, and the node's side turned out not to need Bx's *precision* at all: it places its windows from its OWN TxDone, which went from a 20 ms poll to ~500 µs this session, and needs no clock agreement with the hub. Node: `noteUplinkSent()` sets the origin from the DIO0 edge (or the sync path's stamp, whichever is closer), `LoraInterface` arms RX1 then RX2 on the same one-shot B3 uses, and the DIO0/DIO1 handlers report each window's outcome — a caught frame from the radio event, an empty window from the RX-timeout flag, which is the only place a window is known to be genuinely empty. Hub: `send_into_rx1_()` sends **one copy** at `last_rx_t0_us() + kRx1DelayUs` through B1a's scheduler at Immediate priority, falling back to today's burst when it has no usable stamp — the fallback *is* the old behaviour, so a node the hub cannot place is unaffected. | wake → ~3 s; no missed downlinks over a week — **needs hardware**. Note the margin: the hub's ±5 ms stamp consumes **36 %** of the 14.08 ms guard before drift, arm residual or fire jitter spend anything. It fits by 2.8×, not by the order of magnitude the guard was sized for, and a test asserts that band so it cannot quietly shrink. |
 
 **B3 is the deliverable.** B-1…B2 make it safe; B4–B5 make it cheap; Bx and C2
 are a separate, larger piece of work that only the automatic fleet benefits

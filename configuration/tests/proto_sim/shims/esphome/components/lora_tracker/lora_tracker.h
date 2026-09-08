@@ -28,6 +28,10 @@ namespace esphome::lora_tracker {
 struct TxPolicy {
     int      copies{0};
     uint32_t stride_ms{0};
+    // B1a. Mirrors the production fields so a test can assert what a caller
+    // asked for, not merely that it asked.
+    int64_t  earliest_us{0};
+    uint8_t  priority{1};
 };
 
 
@@ -71,6 +75,21 @@ public:
     uint32_t msUntilNextClearT0(uint8_t slot) const;
     // Test seam: stand a burst in the way of the grid.
     int64_t  busy_until_us{0};
+
+    // Bx's receive stamp, mirrored. A test sets these directly; production
+    // derives them from the poll gap in checkReception().
+    int64_t  last_rx_t0_us() const { return this->last_rx_t0_us_v; }
+    int64_t  last_rx_done_us() const { return this->last_rx_done_us_v; }
+    uint32_t rx_stamp_uncertainty_us() const { return this->rx_uncertainty_v; }
+    int64_t  last_rx_t0_us_v{0};
+    int64_t  last_rx_done_us_v{0};
+    uint32_t rx_uncertainty_v{0};
+
+    // What the last send() was asked for, so a test can assert the SCHEDULE a
+    // caller requested and not only the bytes.
+    int64_t              last_earliest_us{0};
+    uint8_t              last_priority{1};
+    std::vector<int64_t> sent_earliest_us;
     // The sim's "now" for grid arithmetic. Production reads esp_timer_get_time();
     // a test sets this instead so the answer is deterministic.
     int64_t sim_now_us{0};
