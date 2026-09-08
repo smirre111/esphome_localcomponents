@@ -412,6 +412,33 @@ sensor:
 
 
 switch:
+  # --- B3: put a node into Mode B (timed windows) ---------------------------
+  #
+  # THE ENTRY POINT THAT WAS MISSING. Until this existed, send_grid_sync(true)
+  # was never called from anywhere and set_grid_aligned() had no callers, so no
+  # node could be told to adopt a grid however correct the node's own code was —
+  # and HW-2's sweep could not run either, because it needs a GridSync carrying
+  # armOffsetUs and the hub emitted none.
+  #
+  # Default OFF, and a deliberate opt-in rather than automatic promotion:
+  # T_detect is still unmeasured, so the guard band Mode B rests on is an
+  # assumption, and alignment costs up to 1.5 s of latency until the timed
+  # window exists.
+  #
+  # Turning this on makes Mode B REACHABLE, not active — the node's own policy
+  # still gates promotion on ppm validity, phase trustworthiness, missed marks
+  # and the RTC source.
+  - platform: template
+    name: "Timed Mode (Mode B) — node 2"
+    id: rol_2_timed_mode
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: 'id(rol_2)->enable_timed_mode(true);'
+    turn_off_action:
+      - lambda: 'id(rol_2)->enable_timed_mode(false);'
+
   # Per-slot enable switches — part of the SLOT-ENTITY UI, commented out with
   # the rest of it. In the text format a slot is removed by deleting it from
   # the line, so there is nothing to enable or disable.

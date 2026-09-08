@@ -290,6 +290,24 @@ namespace esphome
       // separate: after a restart the hub may not yet know which nodes exist.
       void broadcast_grid_demote();
 
+      // B3: put this node into (or out of) Mode B. THE ENTRY POINT THAT WAS
+      // MISSING — `send_grid_sync(true)` was never called from anywhere and
+      // `set_grid_aligned()` had no callers, so no node could ever be told to
+      // adopt a grid and the hub's own alignment could not be switched on.
+      // Mode B was unreachable from the hub side however correct the node was.
+      //
+      // Deliberately an explicit opt-in, defaulting OFF, exposed as a switch
+      // rather than done automatically: `T_detect` is unmeasured (HW-2), so the
+      // guard band Mode B rests on is an assumption, and §4.7 notes that
+      // turning alignment on costs up to 1.5 s of latency and buys nothing
+      // until the timed window exists. Promotion is per node, as §8's B3 row
+      // has always said.
+      //
+      // Also what unblocks HW-2: the sweep needs a GridSync carrying
+      // `armOffsetUs`, and until now the hub emitted none.
+      void enable_timed_mode(bool on);
+      bool timed_mode_enabled() const { return this->timed_mode_enabled_; }
+
       void set_grid_aligned(bool v) { this->grid_aligned_ = v; }
       bool grid_aligned() const     { return this->grid_aligned_; }
       uint8_t grid_slot() const     { return this->grid_slot_; }
@@ -373,6 +391,8 @@ namespace esphome
       // it is stable across reboots without any extra configuration.
       uint8_t  grid_slot_{0};
       bool     grid_aligned_{false};
+      // B3 opt-in; see enable_timed_mode().
+      bool     timed_mode_enabled_{false};
 
       bool     drift_test_active_{false};
       uint32_t drift_test_duration_s_{0};

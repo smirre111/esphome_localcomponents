@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+
 #include "AckCache.h"
 #include <iostream>
 #include "nvs.h"
@@ -2635,18 +2637,6 @@ TEST_F(RealNodeFixture, AForeignFrameCommitsNoPhaseSample) {
     EXPECT_GE(disp.macFunnel().foreign, 1u) << "but it IS counted as foreign";
 }
 
-TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
-    disp.setExpectedT0Us(1000000);
-    disp.resetPhaseStats();
-
-    // rx_us must be REAL: onReceiveNew defaults it to 0, and 0 means "no
-    // timestamp", which correctly commits nothing. Passing the default here
-    // would have made this test pass for the wrong reason.
-    auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/520);
-    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()),
-                      /*rx_us=*/1040000);
-    EXPECT_EQ(disp.phaseStats().n, 1u);
-}
 
 TEST_F(RealNodeFixture, RtcSourceDefaultsToUnknownNotCrystal) {
     // The safe reading of a node that has not reported is that it cannot hold
@@ -2970,4 +2960,140 @@ TEST_F(RealNodeFixture, TheArmedCacheWouldReAckOnceTheBurstSpanHasPassed) {
               ackcache::Decision::ReAck) << "past it: a genuine retry";
     EXPECT_EQ(ackcache::classify(c, 999, armed_at + ackcache::kBurstSpanUs),
               ackcache::Decision::NotADuplicate) << "a different command";
+}
+
+// ---------------------------------------------------------------------------
+// B3 — Mode B was unreachable on the node side; three separate reasons
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, AdoptingAGridEnablesTimedRx) {
+    // setTimedRxEnabled() had no caller anywhere, so timed_rx_enabled_ was
+    // permanently false and timedRxActive() returned false BEFORE consulting
+    // the grid at all. A node could accept a GridSync, solve its anchor, and
+    // still never arm a timed window. The hub asking for a grid IS the trigger.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/700);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), /*rx_us=*/5'000'000);
+
+    ASSERT_TRUE(disp.gridState().active);
+    EXPECT_TRUE(disp.timedRxEnabledForTest())
+        << "adopting a grid is what makes Mode B reachable";
+}
+
+TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
+    // expected_t0_us_ was assigned once at adoption and never advanced, so
+    // every sample after the first was measured against a mark one round
+    // further in the past — +1.5 s, +3.0 s, and so on. phaseTrustworthy()
+    // requires zero samples outside the guard, so it went permanently false on
+    // the SECOND addressed frame and Mode B could never be entered. The failure
+    // was silent and looked like a clock fault.
+    // noteDriftSample() is what the DIO0 task calls on every RxDone, and it is
+    // what sets the timestamp the phase sample is built from. Mirrored here
+    // because onReceiveNew alone does not set it.
+    auto gs = build_grid_sync(true, /*slot=*/0, /*msgid=*/710);
+    const int64_t anchor_rx = 10'000'000;
+    disp.noteDriftSample(anchor_rx);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), anchor_rx);
+    ASSERT_TRUE(disp.gridState().active);
+
+    // Compare two SAMPLED frames, not the adoption-time value: adoption records
+    // the next mark, and a frame arriving just after that mark shares it. Two
+    // frames a round apart are the honest comparison.
+    // Place T0 on the mark, not RxDone. The hub fires EARLIER for a longer
+    // frame precisely so that T0 — the SFD end — lands on the mark whatever the
+    // payload length; putting RxDone on the mark instead leaves an error equal
+    // to the difference in n_sym between two frame sizes, which for a GridSync
+    // against a sysop is 14.3 ms and would sail past the 14.08 ms guard. That
+    // is a real effect, and getting it wrong here would have looked like a
+    // phase bug in the code rather than in the test.
+    auto op1 = pack_sysop_op(/*msgid=*/711, CLIENT_OPERATION__CMD_STATUS);
+    const int64_t mark1 = disp.expectedT0Us() + timedgrid::kRoundUs;
+    const int64_t rx1 = mark1 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op1.size());
+    disp.noteDriftSample(rx1);
+    disp.onReceiveNew(op1.data(), static_cast<int>(op1.size()), rx1);
+    const int64_t expectation1 = disp.expectedT0Us();
+    ASSERT_NE(expectation1, 0);
+
+    auto op2 = pack_sysop_op(/*msgid=*/712, CLIENT_OPERATION__CMD_STATUS);
+    const int64_t mark2 = mark1 + timedgrid::kRoundUs;
+    const int64_t rx2 = mark2 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op2.size());
+    disp.noteDriftSample(rx2);
+    disp.onReceiveNew(op2.data(), static_cast<int>(op2.size()), rx2);
+
+    EXPECT_NE(disp.expectedT0Us(), expectation1)
+        << "the expectation is frozen — every later sample is a round further out";
+    EXPECT_EQ(disp.expectedT0Us() - expectation1, (int64_t) timedgrid::kRoundUs)
+        << "it must advance by exactly one round";
+
+    // And the phase error must stay small, which is the whole point: with a
+    // frozen expectation the second sample reads +1.5 s and phaseTrustworthy()
+    // goes permanently false.
+    EXPECT_LT((uint32_t) std::abs((long) disp.phaseStats().last_us), 2000u)
+        << "a frame placed exactly on its mark must read a near-zero phase "
+           "error; the frozen expectation made the second sample read +1.5 s, "
+           "which is what put phaseTrustworthy() permanently false";
+}
+
+TEST_F(RealNodeFixture, MissedMarksActuallyDemote) {
+    // The demotion body lived inside noteMarkOutcome, which has no callers, so
+    // when the radio paths were split onto noteMarkArmed/Hit/Missed the counter
+    // kept incrementing and nothing ever acted on it. grid_.active stayed true
+    // forever and the node held a grid it should have abandoned.
+    auto gs = build_grid_sync(true, /*slot=*/7, /*msgid=*/720);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 20'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+
+    for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
+        disp.noteMarkArmed();
+        disp.noteMarkMissed();
+    }
+
+    EXPECT_FALSE(disp.gridState().active)
+        << "the node must drop a grid it is no longer being served on";
+    EXPECT_TRUE(disp.timedRxEnabledForTest())
+        << "but timed RX stays ENABLED, so a later GridSync re-adopts without "
+           "needing anything else to happen — clearing it would recreate the "
+           "original bug as a flag nothing sets again";
+}
+
+TEST_F(RealNodeFixture, AnAddressedFrameResetsTheMissedMarkCount) {
+    auto gs = build_grid_sync(true, /*slot=*/7, /*msgid=*/730);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 30'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+
+    disp.noteMarkArmed();
+    disp.noteMarkMissed();
+    disp.noteMarkArmed();
+    disp.noteMarkMissed();
+    ASSERT_TRUE(disp.gridState().active) << "two is below the threshold";
+
+    // A frame addressed to us resets the count, so the third miss must not
+    // demote — it is the FIRST of a new run, not the third of the old one.
+    auto op = pack_sysop_op(/*msgid=*/731, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()), 30'100'000);
+
+    disp.noteMarkArmed();
+    disp.noteMarkMissed();
+    EXPECT_TRUE(disp.gridState().active);
+}
+
+TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
+    // Adopt a grid first, because that is what production does. This test used
+    // to seed the expectation with setExpectedT0Us(), a setter no production
+    // path ever calls — and relying on it hid the fact that the expectation was
+    // never advanced. The commit now gates on the grid, so the test has to
+    // establish one.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/0, /*msgid=*/519);
+    disp.noteDriftSample(1'000'000);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), /*rx_us=*/1'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+    disp.resetPhaseStats();
+
+    // rx_us must be REAL: onReceiveNew defaults it to 0, and 0 means "no
+    // timestamp", which correctly commits nothing. Passing the default here
+    // would have made this test pass for the wrong reason.
+    auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/520);
+    disp.noteDriftSample(1'040'000);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()),
+                      /*rx_us=*/1'040'000);
+    EXPECT_EQ(disp.phaseStats().n, 1u);
 }

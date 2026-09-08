@@ -1532,6 +1532,43 @@ namespace esphome
                enable ? "PUBLISHED" : "WITHDRAWN", (unsigned) this->grid_slot_);
     }
 
+    // B3's entry point. See the banner on the declaration for why this is an
+    // explicit opt-in rather than automatic.
+    void LORAListener::enable_timed_mode(bool on)
+    {
+      if (this->parent_ == nullptr)
+        return;
+      if (on == this->timed_mode_enabled_)
+        return;
+
+      this->timed_mode_enabled_ = on;
+
+      if (on)
+      {
+        // Order matters. The grid must be RUNNING before a GridSync is built,
+        // because the frame declares its own position on it (`txRound`/`txSlot`)
+        // and a node anchors on exactly that — publishing a position the frame
+        // does not occupy would anchor the node wrong, permanently, and it
+        // would look like a clock fault.
+        this->parent_->startGrid();
+        this->set_grid_aligned(true);
+        this->send_grid_sync(true);
+        ESP_LOGW(TAG, "[%s] timed mode ON — grid published, slot %u, alignment on",
+                 this->get_name().c_str(), (unsigned) this->grid_slot_);
+      }
+      else
+      {
+        // Withdraw BEFORE dropping alignment, so the withdrawal itself still
+        // goes out on the grid the node is listening on. Dropping alignment
+        // first would send it into a window the node has stopped opening — the
+        // one frame that must not be missed, missed.
+        this->send_grid_sync(false);
+        this->set_grid_aligned(false);
+        ESP_LOGW(TAG, "[%s] timed mode OFF — grid withdrawn, back to Mode A",
+                 this->get_name().c_str());
+      }
+    }
+
     void LORAListener::broadcast_grid_demote()
     {
       // Broadcast, because after a restart the hub may not yet know which nodes
