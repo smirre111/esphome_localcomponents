@@ -259,6 +259,93 @@ button:
     on_press:
       - lambda: 'id(rol_2)->stop_drift_test();'
 
+  # --- ModeTest: on-hardware validation of a mode (test-plan.md section 10) ---
+  #
+  # Distinct from the drift test above, which measures ONE thing (relative clock
+  # rate) with the power profile disabled. ModeTest runs under the PRODUCTION
+  # profile by default and reports the frame funnel, the window decisions and
+  # four timing distributions, so a mode's claims can be checked against the
+  # mode as it actually ships. The report is logged by the hub, recomputed from
+  # the node's RAW counters — the node never gets to grade itself.
+  #
+  # The node refuses to arm without a session, refuses MODE_SWEEP unless it is
+  # flagged as a bench node, and owns its own deadline: if the hub disappears
+  # mid-test the node still exits and restores everything, its MODE included.
+  #
+  # Arguments: (duration_s, grid_ms, mode, copies, keepPowerProfile,
+  #             enableCounter, enableCrypto, macEcho, armOffsetUs)
+  # mode: 0 leave alone, 1 A, 2 B, 3 C, 4 SWEEP.
+  - platform: template
+    name: "Mode Test A — MAC-0 baseline (node 2)"
+    id: rol_2_modetest_a
+    entity_category: diagnostic
+    on_press:
+      # 1100 ms for the same reason as the drift test: a period commensurate
+      # with the node's 500 ms RX interval phase-locks, and a frame that lands
+      # in an RX-off gap does so forever. The node REJECTS a commensurate period
+      # in MODE_A rather than letting this be rediscovered.
+      #
+      # Both sublayers off and macEcho on: this is the baseline every other run
+      # is a delta against. A MAC echo measures RxDone -> TX fire and nothing
+      # else, which is what section 4.3's servable-slot rule needs and cannot
+      # get from a command the application answers.
+      - lambda: 'id(rol_2)->start_mode_test(300, 1100, 1, 1, true, false, false, true);'
+  - platform: template
+    name: "Mode Test A — with MAC-1 counter (node 2)"
+    id: rol_2_modetest_a_counter
+    entity_category: diagnostic
+    on_press:
+      # Identical grid, counter ON. The DIFFERENCE against the baseline is
+      # MAC-1's cost — measured, not estimated. Run them back to back.
+      - lambda: 'id(rol_2)->start_mode_test(300, 1100, 1, 1, true, true, false, true);'
+  - platform: template
+    name: "Mode Test A — with MAC-1 + MAC-2 (node 2)"
+    id: rol_2_modetest_a_crypto
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->start_mode_test(300, 1100, 1, 1, true, true, true, true);'
+  - platform: template
+    name: "Mode Test B — timed windows (node 2)"
+    id: rol_2_modetest_b
+    entity_category: diagnostic
+    on_press:
+      # In MODE_B the incommensurability rule INVERTS: the period must be
+      # exactly the round and phase-locked to the node's slot. That is the mode.
+      - lambda: 'id(rol_2)->start_mode_test(300, 1500, 2, 1, true, false, false, true);'
+  - platform: template
+    name: "Mode Test Stop (node 2)"
+    id: rol_2_modetest_stop
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->stop_mode_test();'
+
+  # HW-2, the B3 blocker: sweep the ARM instant late in 500 us steps until
+  # reception fails. The failure edge gives T_detect directly, because a window
+  # armed `l` late catches the frame iff l <= G. BENCH NODE ONLY — the node
+  # refuses this outright otherwise, since it deliberately mis-arms windows.
+  #
+  # Run one press per offset and read the funnel in the report. The early edge
+  # (negative offsets) returns G independently, and the two must sum to
+  # N*T_sym - T_detect; SweepAnalysis.h does that arithmetic.
+  - platform: template
+    name: "Mode Sweep +4 ms (node 2, BENCH ONLY)"
+    id: rol_2_modesweep_p4
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->start_mode_test(120, 1100, 4, 1, true, false, false, true, 4000);'
+  - platform: template
+    name: "Mode Sweep +12 ms (node 2, BENCH ONLY)"
+    id: rol_2_modesweep_p12
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->start_mode_test(120, 1100, 4, 1, true, false, false, true, 12000);'
+  - platform: template
+    name: "Mode Sweep -12 ms (node 2, BENCH ONLY)"
+    id: rol_2_modesweep_m12
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->start_mode_test(120, 1100, 4, 1, true, false, false, true, -12000);'
+
 sensor:
   - platform: uptime
     name: '${devicename} Uptime'

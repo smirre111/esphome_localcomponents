@@ -30,6 +30,9 @@ typedef struct LoraHeader LoraHeader;
 typedef struct DriftTest DriftTest;
 typedef struct MacControl MacControl;
 typedef struct GridSync GridSync;
+typedef struct ModeTest ModeTest;
+typedef struct Hist Hist;
+typedef struct ModeTestReport ModeTestReport;
 typedef struct LoraClientOperationMessage LoraClientOperationMessage;
 typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
@@ -56,6 +59,20 @@ typedef enum _MacControl__Kind {
   MAC_CONTROL__KIND__MAC_CONFIG = 3
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(MAC_CONTROL__KIND)
 } MacControl__Kind;
+typedef enum _ModeTest__Mode {
+  /*
+   * leave the node's mode alone
+   */
+  MODE_TEST__MODE__MODE_UNSPEC = 0,
+  MODE_TEST__MODE__MODE_A = 1,
+  MODE_TEST__MODE__MODE_B = 2,
+  MODE_TEST__MODE__MODE_C = 3,
+  /*
+   * deliberate ARM error, for T_detect (bench only)
+   */
+  MODE_TEST__MODE__MODE_SWEEP = 4
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(MODE_TEST__MODE)
+} ModeTest__Mode;
 typedef enum _CovOperation {
   COV_OPERATION__CMD_OPEN = 0,
   COV_OPERATION__CMD_CLOSE = 1,
@@ -707,6 +724,206 @@ struct  GridSync
     , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
+/*
+ * ---------------------------------------------------------------------------
+ * ModeTest — the on-hardware validation mode (test-plan.md section 10).
+ * Distinct from DriftTest, which measures one thing (relative clock rate) with
+ * the power profile DISABLED. ModeTest runs under the PRODUCTION profile by
+ * default and reports the frame funnel, the window decisions and four timing
+ * distributions, so a mode's claims can be checked against the mode as it
+ * actually ships.
+ * The frames it produces are MAC CONTROL frames: MAC-0 counts, timestamps and
+ * (with macEcho) answers them, and they never reach mac.on_payload. No
+ * application code runs, so there is nothing to make inert.
+ * ---------------------------------------------------------------------------
+ */
+struct  ModeTest
+{
+  ProtobufCMessage base;
+  protobuf_c_boolean enable;
+  /*
+   * 0 = the node's default. The NODE caps this and ends the test on its own
+   * one-shot timer: every task loop blocks with portMAX_DELAY, so a poll
+   * would not end it, and a hub that goes away must not strand the node.
+   */
+  uint32_t durations;
+  ModeTest__Mode mode;
+  /*
+   * Integer milliseconds, and for MODE_A/MODE_SWEEP it must be INCOMMENSURATE
+   * with the node's RX interval. Commensurate periods phase-lock: a frame
+   * that lands in an RX-off gap does so forever. Observed at 1000 ms against
+   * 500 ms windows — ~300 frames sent, zero heard.
+   */
+  uint32_t gridperiodms;
+  /*
+   * 1..17 — exercises B-1's per-frame TX policy
+   */
+  uint32_t copies;
+  /*
+   * pad to N bytes: sweep time-on-air
+   */
+  uint32_t payloadpadto;
+  /*
+   * DEFAULT TRUE, and the difference from DriftTest. The report echoes it so
+   * a number measured with sleep disabled can never be quoted later as a
+   * production number.
+   */
+  protobuf_c_boolean keeppowerprofile;
+  /*
+   * partial reports; 0 = final only
+   */
+  uint32_t reporteverys;
+  /*
+   * The hub's monotonic mark index, and the ruler. Deliberately NOT msgid:
+   * msgid is also the AEAD nonce input and the replay-filter key, so the test
+   * could not retransmit without disturbing both. A frame lost to the air
+   * leaves a GAP here instead of shifting every later sample.
+   */
+  uint32_t seq;
+  /*
+   * MODE_SWEEP only
+   */
+  int32_t armoffsetus;
+  /*
+   * Sublayers (mac-layer.md section 4). BOTH DEFAULT OFF here, unlike the
+   * production default: turning one on and re-running the identical grid is
+   * what makes that sublayer's cost a measured delta rather than an estimate.
+   */
+  /*
+   * MAC-1
+   */
+  protobuf_c_boolean enablecounter;
+  /*
+   * MAC-2
+   */
+  protobuf_c_boolean enablecrypto;
+  /*
+   * MAC-0 replies, no application round trip
+   */
+  protobuf_c_boolean macecho;
+};
+#define MODE_TEST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&mode_test__descriptor) \
+    , 0, 0, MODE_TEST__MODE__MODE_UNSPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+
+/*
+ * Five order statistics and a count. NOT a full histogram, and deliberately not
+ * a mean: section 12.3 expects the RxDone latency to be multi-modal, because
+ * production scales 40-240 MHz and the motor's PM lock moves the frequency
+ * mid-operation. A mean would hide exactly the thing being looked for.
+ */
+struct  Hist
+{
+  ProtobufCMessage base;
+  int32_t min;
+  int32_t p50;
+  int32_t p95;
+  int32_t p99;
+  int32_t max;
+  uint32_t n;
+};
+#define HIST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&hist__descriptor) \
+    , 0, 0, 0, 0, 0, 0 }
+
+
+struct  ModeTestReport
+{
+  ProtobufCMessage base;
+  uint32_t seqfirst;
+  uint32_t seqlast;
+  uint32_t elapseds;
+  uint32_t mode;
+  protobuf_c_boolean powerprofileproduction;
+  /*
+   * The frame funnel, one counter per stage (mac-layer.md section 6.1).
+   * Stage 0 (offered) is the hub's and stage 1 (on air) is a witness
+   * receiver's; neither can be known here, which is the acknowledged gap I2.
+   * All of these come from raw radio events, never from mode state (I1).
+   */
+  /*
+   * RxDone or RxTimeout fired
+   */
+  uint32_t detected;
+  uint32_t crcvalid;
+  /*
+   * MAC-0 filter passed
+   */
+  uint32_t addressed;
+  /*
+   * MAC-1, when enableCounter
+   */
+  uint32_t counteraccepted;
+  /*
+   * MAC-2, when enableCrypto
+   */
+  uint32_t micvalid;
+  uint32_t crcerrors;
+  uint32_t duplicates;
+  uint32_t micfailures;
+  /*
+   * Derived from `seq`, so it stands even with MAC-1 off.
+   */
+  uint32_t seqgaps;
+  /*
+   * The mode's own decisions, reported as values UNDER TEST rather than as
+   * evidence that the mode worked.
+   */
+  uint32_t windowsarmed;
+  uint32_t windowshit;
+  uint32_t windowsempty;
+  uint32_t missedmarks;
+  uint32_t demotions;
+  uint32_t promotions;
+  /*
+   * Microseconds.
+   */
+  /*
+   * T0_measured - T0_predicted
+   */
+  Hist *phaseerrus;
+  /*
+   * t_arm_actual - t_arm_target
+   */
+  Hist *armresidualus;
+  /*
+   * MAC echo only: t_reply_fire - t_rxdone
+   */
+  Hist *turnaroundus;
+  /*
+   * esp_timer one-shot under light sleep
+   */
+  Hist *oneshoterrorus;
+  int32_t ppmestimate;
+  uint32_t ppmsamples;
+  int32_t measuredperiodus;
+  int32_t rssimin;
+  int32_t rssimean;
+  int32_t snrmin;
+  int32_t snrmean;
+  uint64_t sleepus;
+  uint64_t wallus;
+  uint32_t rtcslowsrc;
+  uint32_t tickratehz;
+  uint32_t cpufreqmhz;
+  /*
+   * Which sublayers this run used. They travel WITH the numbers for the same
+   * reason powerProfileProduction does: a KPI measured at MAC-0 must never be
+   * quoted later as a MAC-2 number by accident.
+   */
+  protobuf_c_boolean counteron;
+  protobuf_c_boolean cryptoon;
+  /*
+   * Why an arm was refused, when it was. 0 = it was not.
+   */
+  uint32_t armrefusal;
+};
+#define MODE_TEST_REPORT__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&mode_test_report__descriptor) \
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+
 typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET = 0,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION = 10,
@@ -720,6 +937,7 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST = 18,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL = 20,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC = 21,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST = 22,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
@@ -756,6 +974,12 @@ struct  LoraClientOperationMessage
      * safe to ship to a hub ahead of the nodes.
      */
     MacControl *maccontrol;
+    /*
+     * Bench-only on-hardware validation mode. Like DriftTest, a node that
+     * does not know this field ignores it, so it is safe to ship to a hub
+     * ahead of the nodes.
+     */
+    ModeTest *modetest;
     LoraCoverOperation *operation;
     ScheduleConfig *schedule;
     /*
@@ -832,6 +1056,7 @@ typedef enum {
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK = 15,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON = 16,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL = 20,
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT = 22,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_RESPONSE_MESSAGE__PROTO__CASE)
 } LoraClientResponseMessage__ProtoCase;
@@ -862,6 +1087,12 @@ struct  LoraClientResponseMessage
      * turnaround measured that way silently includes application dispatch.
      */
     MacControl *maccontrol;
+    /*
+     * ModeTest results. Recomputed off-node from these raw counters rather
+     * than pretty-printed on it (I1), so the node never gets to decide what
+     * its own numbers mean.
+     */
+    ModeTestReport *modetestreport;
     CoverPosition *position;
     ClientRegister *register_;
     ClientBattery *state;
@@ -1157,6 +1388,63 @@ GridSync *
 void   grid_sync__free_unpacked
                      (GridSync *message,
                       ProtobufCAllocator *allocator);
+/* ModeTest methods */
+void   mode_test__init
+                     (ModeTest         *message);
+size_t mode_test__get_packed_size
+                     (const ModeTest   *message);
+size_t mode_test__pack
+                     (const ModeTest   *message,
+                      uint8_t             *out);
+size_t mode_test__pack_to_buffer
+                     (const ModeTest   *message,
+                      ProtobufCBuffer     *buffer);
+ModeTest *
+       mode_test__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   mode_test__free_unpacked
+                     (ModeTest *message,
+                      ProtobufCAllocator *allocator);
+/* Hist methods */
+void   hist__init
+                     (Hist         *message);
+size_t hist__get_packed_size
+                     (const Hist   *message);
+size_t hist__pack
+                     (const Hist   *message,
+                      uint8_t             *out);
+size_t hist__pack_to_buffer
+                     (const Hist   *message,
+                      ProtobufCBuffer     *buffer);
+Hist *
+       hist__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   hist__free_unpacked
+                     (Hist *message,
+                      ProtobufCAllocator *allocator);
+/* ModeTestReport methods */
+void   mode_test_report__init
+                     (ModeTestReport         *message);
+size_t mode_test_report__get_packed_size
+                     (const ModeTestReport   *message);
+size_t mode_test_report__pack
+                     (const ModeTestReport   *message,
+                      uint8_t             *out);
+size_t mode_test_report__pack_to_buffer
+                     (const ModeTestReport   *message,
+                      ProtobufCBuffer     *buffer);
+ModeTestReport *
+       mode_test_report__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   mode_test_report__free_unpacked
+                     (ModeTestReport *message,
+                      ProtobufCAllocator *allocator);
 /* LoraClientOperationMessage methods */
 void   lora_client_operation_message__init
                      (LoraClientOperationMessage         *message);
@@ -1318,6 +1606,15 @@ typedef void (*MacControl_Closure)
 typedef void (*GridSync_Closure)
                  (const GridSync *message,
                   void *closure_data);
+typedef void (*ModeTest_Closure)
+                 (const ModeTest *message,
+                  void *closure_data);
+typedef void (*Hist_Closure)
+                 (const Hist *message,
+                  void *closure_data);
+typedef void (*ModeTestReport_Closure)
+                 (const ModeTestReport *message,
+                  void *closure_data);
 typedef void (*LoraClientOperationMessage_Closure)
                  (const LoraClientOperationMessage *message,
                   void *closure_data);
@@ -1365,6 +1662,10 @@ extern const ProtobufCMessageDescriptor drift_test__descriptor;
 extern const ProtobufCMessageDescriptor mac_control__descriptor;
 extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
 extern const ProtobufCMessageDescriptor grid_sync__descriptor;
+extern const ProtobufCMessageDescriptor mode_test__descriptor;
+extern const ProtobufCEnumDescriptor    mode_test__mode__descriptor;
+extern const ProtobufCMessageDescriptor hist__descriptor;
+extern const ProtobufCMessageDescriptor mode_test_report__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_operation_message__descriptor;
 extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;

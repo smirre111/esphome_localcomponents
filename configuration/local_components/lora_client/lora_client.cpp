@@ -2,6 +2,9 @@
 // Shared with the node firmware — the AEAD wire format now lives in exactly
 // one place. See the banner in FrameCrypto.h.
 #include "esphome/components/lora_client/FrameCrypto.h"
+// The funnel rate arithmetic, so a ModeTest report is recomputed on the hub
+// rather than trusted from the node (test-plan.md I1).
+#include "esphome/components/lora_client/MacFunnel.h"
 #include "esphome/components/lora_client/Scheduler.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
 
@@ -1294,6 +1297,84 @@ namespace esphome
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL &&
                msg->maccontrol)
         this->handle_mac_echo_(msg->maccontrol);
+      // ModeTest results. Also MAC-layer: never forwarded to a cover.
+      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT &&
+               msg->modetestreport)
+        this->handle_mode_test_report_(msg->modetestreport);
+    }
+
+    // The report is RECOMPUTED here, not on the node.
+    //
+    // Independence claim I1 (test-plan.md section 10.4): the node is the one
+    // thing that cannot be trusted to judge its own reception, so it ships raw
+    // counters and every rate in mac-layer.md section 6 is derived off-node.
+    // MacFunnel.h owns that arithmetic and is compiled into both ends, so the
+    // rates here are the same function the node would have used — just not the
+    // node's opinion of them.
+    void LORAListener::handle_mode_test_report_(const ::ModeTestReport *rep)
+    {
+      if (rep == nullptr)
+        return;
+
+      macfunnel::Counters c{};
+      c.detected         = rep->detected;
+      c.crc_valid        = rep->crcvalid;
+      c.addressed        = rep->addressed;
+      c.counter_accepted = rep->counteraccepted;
+      c.mic_valid        = rep->micvalid;
+      c.duplicates       = rep->duplicates;
+      c.mic_failures     = rep->micfailures;
+      c.windows_armed    = rep->windowsarmed;
+      c.windows_hit      = rep->windowshit;
+
+      // seqGaps is the honest denominator here. The node cannot know how many
+      // marks were OFFERED (that is the hub's number) or how many reached the
+      // air (that is a witness receiver's, which is gap I2), but first..last
+      // plus the gaps in between is a lower bound on what was sent, and it does
+      // not depend on MAC-1 being enabled.
+      const uint32_t expected = (rep->seqlast >= rep->seqfirst)
+                              ? (rep->seqlast - rep->seqfirst + 1) : 0;
+
+      // `expected` is the denominator, not this->mt_seq_. The hub's own count
+      // includes marks it queued before the node started listening and after it
+      // stopped; dividing by that would report the node's late arrival as
+      // packet loss. Over the window the node actually observed, first..last is
+      // the honest span. What neither number can supply is how many frames
+      // reached the AIR — that needs a witness receiver, and its absence is the
+      // acknowledged gap I2, not something to paper over with a hub-side count.
+
+      char buf[512];
+      std::snprintf(buf, sizeof(buf),
+          "mode=%u prod=%d counter=%d crypto=%d | seq %u..%u exp %u gaps %u | "
+          "detected %u crcValid %u addressed %u counterAcc %u micValid %u | "
+          "FER_link %u ppm WMR %u ppm DUP %u ppm MIC_FAIL %u ppm | "
+          "phaseErr p50 %d p99 %d max %d n %u | turnaround p50 %d p99 %d n %u | "
+          "armResidual p99 %d | oneShot p99 %d | tick %u Hz cpu %u MHz "
+          "elapsed %u s refusal %u",
+          (unsigned) rep->mode, (int) rep->powerprofileproduction,
+          (int) rep->counteron, (int) rep->cryptoon,
+          (unsigned) rep->seqfirst, (unsigned) rep->seqlast,
+          (unsigned) expected, (unsigned) rep->seqgaps,
+          (unsigned) rep->detected, (unsigned) rep->crcvalid,
+          (unsigned) rep->addressed, (unsigned) rep->counteraccepted,
+          (unsigned) rep->micvalid,
+          (unsigned) macfunnel::ferLinkPpm(c, expected),
+          (unsigned) macfunnel::wmrPpm(c),
+          (unsigned) macfunnel::dupPpm(c), (unsigned) macfunnel::micFailPpm(c),
+          rep->phaseerrus ? rep->phaseerrus->p50 : 0,
+          rep->phaseerrus ? rep->phaseerrus->p99 : 0,
+          rep->phaseerrus ? rep->phaseerrus->max : 0,
+          rep->phaseerrus ? (unsigned) rep->phaseerrus->n : 0u,
+          rep->turnaroundus ? rep->turnaroundus->p50 : 0,
+          rep->turnaroundus ? rep->turnaroundus->p99 : 0,
+          rep->turnaroundus ? (unsigned) rep->turnaroundus->n : 0u,
+          rep->armresidualus ? rep->armresidualus->p99 : 0,
+          rep->oneshoterrorus ? rep->oneshoterrorus->p99 : 0,
+          (unsigned) rep->tickratehz, (unsigned) rep->cpufreqmhz,
+          (unsigned) rep->elapseds, (unsigned) rep->armrefusal);
+
+      this->last_mode_test_report_ = buf;
+      ESP_LOGW(TAG, "[%s] ModeTest REPORT: %s", this->get_name().c_str(), buf);
     }
 
     void LORAListener::set_response(uint8_t *data, size_t len)
@@ -2217,6 +2298,186 @@ namespace esphome
 
       // Build the next one now, in the 99% of the period that is idle.
       self->build_drift_frame_(true);
+    }
+
+    // ---- ModeTest ----------------------------------------------------
+    //
+    // Structurally identical to the drift test above, and that is the point:
+    // the two behaviours encoded in drift_timer_cb_ were paid for on hardware
+    // and are not worth rediscovering.
+    //
+    // Where it differs: every frame carries the FULL request, not just a tick.
+    // The node arms on the first ModeTest it hears, and it is in windowed RX
+    // when the test starts — a ~29 ms window every 500 ms — so it will miss
+    // most of them. A frame that only said "tick" would leave a node that
+    // missed the first one waiting for a repeat that never comes.
+    void LORAListener::build_mode_test_frame_(bool enable)
+    {
+      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = this->incrTxMessageId();
+      header.burstindex    = 0;
+      header.burstcount    = 0;
+      op_message.header    = &header;
+
+      ModeTest mt = MODE_TEST__INIT;
+      mt.enable           = enable;
+      mt.durations        = this->mt_duration_s_;
+      mt.mode             = (ModeTest__Mode) this->mt_mode_;
+      mt.gridperiodms     = this->mt_grid_ms_;
+      mt.copies           = this->mt_copies_;
+      mt.keeppowerprofile = this->mt_keep_power_profile_;
+      mt.enablecounter    = this->mt_enable_counter_;
+      mt.enablecrypto     = this->mt_enable_crypto_;
+      mt.macecho          = this->mt_mac_echo_;
+      mt.armoffsetus      = this->mt_arm_offset_us_;
+      // The ruler mark, separate from msgid. msgid is also the AEAD nonce input
+      // and the replay-filter key, so the test must be able to retransmit
+      // without touching either; seq is free to be a plain monotonic index, and
+      // a frame lost to the air leaves a GAP in it rather than shifting every
+      // later sample.
+      mt.seq              = this->mt_seq_++;
+
+      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+      op_message.modetest = &mt;
+
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      // Encrypted, like every other command, and for the same two reasons the
+      // drift frame is: the node rejects unencrypted commands once a session
+      // exists, and exempting this one would let an unauthenticated frame pin a
+      // node in a test mode. The node refuses to ARM without a session anyway
+      // (ModeTestPolicy::armRefusal), so this is the second of two locks.
+      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      {
+        if (len <= sizeof(this->mt_frame_))
+        {
+          memcpy(this->mt_frame_, buf, len);
+          this->mt_frame_len_ = len;
+        }
+        else
+        {
+          ESP_LOGE(TAG, "[%s] ModeTest frame too large (%u B)",
+                   this->get_name().c_str(), (unsigned) len);
+          this->mt_frame_len_ = 0;
+        }
+        free(buf);
+      }
+      else
+      {
+        this->mt_frame_len_ = 0;
+      }
+    }
+
+    void LORAListener::mode_test_timer_cb_(void *arg)
+    {
+      auto *self = static_cast<LORAListener *>(arg);
+      if (!self->mode_test_active_ || self->mt_frame_len_ == 0)
+        return;
+
+      // The normal transmit queue, with a per-frame copy count. Never
+      // sendPacketOnce() from here — see the banner on build_mode_test_frame_.
+      self->parent_->send(self->mt_frame_, self->mt_frame_len_,
+                          {/*copies=*/(int) self->mt_copies_, /*stride_ms=*/0});
+
+      // Build the next one now, in the idle part of the period.
+      self->build_mode_test_frame_(true);
+    }
+
+    void LORAListener::start_mode_test(uint32_t duration_s, uint32_t grid_ms,
+                                       uint32_t mode, uint32_t copies,
+                                       bool keep_power_profile,
+                                       bool enable_counter, bool enable_crypto,
+                                       bool mac_echo, int32_t arm_offset_us)
+    {
+      if (this->parent_ == nullptr)
+        return;
+
+      if (grid_ms < 200)
+        grid_ms = 200;
+      if (copies < 1)  copies = 1;
+      if (copies > 17) copies = 17;
+
+      this->mode_test_active_      = true;
+      this->mt_duration_s_         = duration_s;
+      this->mt_grid_ms_            = grid_ms;
+      this->mt_mode_               = mode;
+      this->mt_copies_             = copies;
+      this->mt_keep_power_profile_ = keep_power_profile;
+      this->mt_enable_counter_     = enable_counter;
+      this->mt_enable_crypto_      = enable_crypto;
+      this->mt_mac_echo_           = mac_echo;
+      this->mt_arm_offset_us_      = arm_offset_us;
+      this->mt_seq_                = 0;
+      this->last_mode_test_report_.clear();
+
+      ESP_LOGI(TAG, "[%s] ModeTest START: %u s, mode %u, grid %u ms, %u copies, "
+                    "counter %d crypto %d echo %d production-profile %d",
+               this->get_name().c_str(), (unsigned) duration_s, (unsigned) mode,
+               (unsigned) grid_ms, (unsigned) copies, (int) enable_counter,
+               (int) enable_crypto, (int) mac_echo, (int) keep_power_profile);
+
+      // The START goes out as a NORMAL full burst, whatever `copies` says for
+      // the grid frames. The node is still in windowed RX — a ~29 ms window
+      // every 500 ms, a 5.9 % duty cycle — so a single-copy START has roughly a
+      // 6 % chance of being heard. The drift test learned this the hard way:
+      // the node received nothing at all for eight minutes.
+      this->build_mode_test_frame_(true);
+      if (this->mt_frame_len_ > 0)
+        this->parent_->send(this->mt_frame_, this->mt_frame_len_);
+
+      if (this->mode_test_timer_ == nullptr)
+      {
+        const esp_timer_create_args_t args = {
+            .callback = &LORAListener::mode_test_timer_cb_,
+            .arg      = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name     = "modetestgrid",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_create(&args, &this->mode_test_timer_);
+      }
+      esp_timer_stop(this->mode_test_timer_);
+
+      // Let the bursted START land before the grid begins. One burst round is
+      // 1.5 s; 3 s is comfortable margin.
+      this->set_timeout("modetest_grid_arm", 3000, [this, grid_ms]() {
+        if (!this->mode_test_active_)
+          return;
+        this->build_mode_test_frame_(true);
+        esp_timer_start_periodic(this->mode_test_timer_,
+                                 (uint64_t) grid_ms * 1000);
+      });
+
+      // The hub stops itself too. The node owns its own deadline and will end
+      // the test regardless, but a hub that kept transmitting into a node that
+      // had already stopped would look like a link failure in the next test.
+      this->set_timeout("modetest_stop", (duration_s + 5) * 1000,
+                        [this]() { this->stop_mode_test(); });
+    }
+
+    void LORAListener::stop_mode_test()
+    {
+      if (!this->mode_test_active_)
+        return;
+      this->mode_test_active_ = false;
+
+      this->cancel_timeout("modetest_grid_arm");
+      this->cancel_timeout("modetest_stop");
+      if (this->mode_test_timer_ != nullptr)
+        esp_timer_stop(this->mode_test_timer_);
+
+      // One last frame with enable=false, so a node that is still running ends
+      // now rather than at its own deadline.
+      this->build_mode_test_frame_(false);
+      if (this->mt_frame_len_ > 0)
+        this->parent_->send(this->mt_frame_, this->mt_frame_len_);
+
+      ESP_LOGI(TAG, "[%s] ModeTest STOP (%u marks sent)",
+               this->get_name().c_str(), (unsigned) this->mt_seq_);
     }
 
     void LORAListener::build_drift_frame_(bool enable)

@@ -596,6 +596,21 @@ carries the argument on its own.
 
 ## 10. `ModeTest` — the on-hardware test mode
 
+**Built.** `ModeTestPolicy.h` (shared, drift-gated) holds every decision below
+and has 24 host tests; `ModeTest` / `Hist` / `ModeTestReport` are on the wire in
+both directions; `CmdDispatcher::handleModeTest` arms, runs and restores;
+`LORAListener::start_mode_test` drives the grid; and `loradevices.yml` exposes
+eight buttons — a MAC-0 baseline, the same run with MAC-1, the same again with
+MAC-2, a Mode B run, a stop, and three bench-only sweep offsets.
+
+Two things are deliberately **not** built and are called out where they belong:
+the witness receiver (§10.5, which is gap I2 — nothing on either end can say how
+many frames reached the air), and the sample sinks for `armResidualUs` and
+`oneShotErrorUs`, which exist as `noteModeTest*` entry points on `CmdDispatcher`
+but are not yet called from the arming and one-shot paths. Their histograms will
+report `n = 0` until they are, which is honest rather than empty.
+
+
 ### 10.1 Why not extend `DriftTest`
 
 `DriftTest` is the right precedent and the wrong vehicle. It is a good design —

@@ -928,7 +928,18 @@ DIO0 on the hub or a scope.
 
 **Specified in full in `test-plan.md`** — per-mode host tests (§4–§8 there), the
 on-hardware `ModeTest` mode (§10 there), and the mapping from each §12 open
-measurement below to the bench procedure that closes it. Summary:
+measurement below to the bench procedure that closes it.
+
+**`ModeTest` is built** (test-plan.md §10): policy header with 24 tests, wire
+messages both directions, node-side arm/run/restore, hub-side grid driver, and
+eight buttons in `loradevices.yml` including the three bench-only sweep offsets
+HW-2 needs. The arm rules are the load-bearing part — a node with no session
+refuses, and `MODE_SWEEP` is refused off the bench — and so is the restore,
+which puts back the node's **mode and slot** as well as the power profile.
+DriftTest never had to think about that; a node left in Mode B against a hub
+that has forgotten the grid stops answering and looks healthy while it does.
+
+Summary of the host tests:
 
 Host tests, in the style of the existing dependency-free policy headers:
 

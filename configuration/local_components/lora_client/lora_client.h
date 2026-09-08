@@ -25,6 +25,7 @@
 
 struct NodeWakeBeacon;
 struct MacControl;                  // MAC-0 ping / echo, taken by pointer
+struct ModeTestReport;              // ModeTest results, taken by pointer
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
 
 namespace esphome
@@ -210,6 +211,27 @@ namespace esphome
       void stop_drift_test();
       bool drift_test_active() const { return this->drift_test_active_; }
 
+      // ModeTest — the on-hardware validation mode (test-plan.md section 10).
+      //
+      // Same shape as the drift test, and deliberately so: the two lessons that
+      // shape drift_timer_cb_ were paid for on hardware and apply unchanged
+      // here. The pre-built frame goes through the NORMAL transmit queue, never
+      // sendPacketOnce() from a timer callback — that bypasses TxDone handling
+      // and the return-to-RX in the tracker loop, and left the SX1278 stuck in
+      // TX with the hub silent until restarted (2026-08-31). And the NEXT frame
+      // is built immediately after each send, in the idle 99% of the period, so
+      // packing cannot leak into the interval being measured.
+      void start_mode_test(uint32_t duration_s, uint32_t grid_ms, uint32_t mode,
+                           uint32_t copies, bool keep_power_profile,
+                           bool enable_counter, bool enable_crypto,
+                           bool mac_echo, int32_t arm_offset_us = 0);
+      void stop_mode_test();
+      bool mode_test_active() const { return this->mode_test_active_; }
+      // The report the node sent back, verbatim. Empty until one arrives.
+      const std::string &last_mode_test_report() const {
+        return this->last_mode_test_report_;
+      }
+
       // --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------
       //
       // The hub half of the MAC control frame. Emits a MacControl PING on a
@@ -278,6 +300,9 @@ namespace esphome
       // Builds the NEXT frame into drift_frame_, so the timer callback only
       // transmits. Packing must not happen inside the interval being measured.
       void build_drift_frame_(bool enable);
+      void build_mode_test_frame_(bool enable);
+      static void mode_test_timer_cb_(void *arg);
+      void handle_mode_test_report_(const ::ModeTestReport *rep);
       static void drift_timer_cb_(void *arg);
 
       // Same shape as the drift frame, and for the same reason: the NEXT frame
@@ -350,6 +375,26 @@ namespace esphome
       esp_timer_handle_t drift_timer_{nullptr};
       uint8_t  drift_frame_[128]{};
       size_t   drift_frame_len_{0};
+
+      // ModeTest state. Mirrors the drift test's, plus the parameters the node
+      // needs on every frame (the node arms on the first one it hears, so every
+      // frame carries the full request — a node that missed the first is not
+      // left waiting for a repeat that never comes).
+      bool     mode_test_active_{false};
+      uint32_t mt_duration_s_{0};
+      uint32_t mt_grid_ms_{0};
+      uint32_t mt_mode_{0};
+      uint32_t mt_copies_{1};
+      bool     mt_keep_power_profile_{true};
+      bool     mt_enable_counter_{false};
+      bool     mt_enable_crypto_{false};
+      bool     mt_mac_echo_{false};
+      int32_t  mt_arm_offset_us_{0};
+      uint32_t mt_seq_{0};
+      esp_timer_handle_t mode_test_timer_{nullptr};
+      uint8_t  mt_frame_[160]{};
+      size_t   mt_frame_len_{0};
+      std::string last_mode_test_report_{};
 
       bool     mac_ping_active_{false};
       bool     mac_ping_want_echo_{true};
