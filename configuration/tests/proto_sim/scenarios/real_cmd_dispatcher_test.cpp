@@ -7,6 +7,8 @@
 // directly and inspect the resulting state + TX buffers.
 
 #include <gtest/gtest.h>
+
+#include "AckCache.h"
 #include <iostream>
 #include "nvs.h"
 #include <chrono>
@@ -2851,4 +2853,121 @@ TEST_F(RealNodeFixture, EnoughMissedMarksDemoteUnilaterally) {
         << "staying in a window the hub no longer transmits into is the unsafe "
            "direction; dropping to Mode A is always safe";
     EXPECT_EQ(disp.expectedT0Us(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// B4 — a byte-identical retransmit is answered, not dropped
+// ---------------------------------------------------------------------------
+//
+// The hub packs a tracked command ONCE and retransmits the stored bytes, so a
+// retry carries the SAME msgid. The node's replay filter admits only
+// msgid > rx_id_, so before this the retry was dropped in silence and no ack
+// could ever be regenerated: the hub retried four times, gave up, and tore the
+// session down. Shipping the hub's pack-once half alone made the retry path
+// strictly WORSE than the fresh-msgid behaviour it replaced.
+//
+// The whole difficulty is that Mode A sends seventeen copies of every command,
+// so sixteen duplicates per command are expected and must stay silent. The
+// discriminator is time — see AckCache.h.
+
+namespace {
+int drain_acks(CmdDispatcher &d) {
+    int n = 0;
+    CmdDispatcher::tx_command_t c{};
+    while (xQueueReceive(d.txCmdQueueNew, &c, 0) == pdTRUE)
+        if (c.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_ACK) ++n;
+    return n;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, AnAcceptedSysopIsAcked) {
+    auto op = pack_sysop_op(/*msgid=*/900, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
+    EXPECT_EQ(drain_acks(disp), 1);
+}
+
+TEST_F(RealNodeFixture, TheOtherSixteenBurstCopiesStaySilent) {
+    // The trap the cache exists for. A naive cached ack answers all sixteen —
+    // sixteen uplinks per command, on a battery node, for a command that
+    // already succeeded. That is worse than the bug it fixes.
+    auto op = pack_sysop_op(/*msgid=*/901, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
+    ASSERT_EQ(drain_acks(disp), 1) << "the first copy is acked";
+
+    for (int copy = 2; copy <= 17; ++copy)
+        disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
+
+    EXPECT_EQ(drain_acks(disp), 0)
+        << "every duplicate inside the burst span must be silent";
+}
+
+TEST_F(RealNodeFixture, ADuplicateOfADifferentCommandIsNotAReAck) {
+    // The cache holds one command. A duplicate whose msgid is not the cached
+    // one is an ordinary replay and must be dropped, not answered.
+    auto a = pack_sysop_op(/*msgid=*/910, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    ASSERT_EQ(drain_acks(disp), 1);
+
+    // An OLD msgid the node has already moved past.
+    auto stale = pack_sysop_op(/*msgid=*/905, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(stale.data(), static_cast<int>(stale.size()));
+    EXPECT_EQ(drain_acks(disp), 0);
+}
+
+TEST_F(RealNodeFixture, APlaintextDuplicateNeverMakesTheNodeTransmit) {
+    // The security half. Recovering a lost ack must not become an
+    // unauthenticated uplink trigger: an attacker who observed a msgid could
+    // otherwise replay it in plaintext to make the node transmit on demand.
+    // These frames are plaintext (no session in this fixture), so even a
+    // duplicate that is old enough to be a genuine retry must stay silent.
+    auto op = pack_sysop_op(/*msgid=*/920, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
+    ASSERT_EQ(drain_acks(disp), 1);
+
+    // Past the burst span, so classify() would say ReAck on an encrypted frame.
+    std::this_thread::sleep_for(
+        std::chrono::microseconds(ackcache::kBurstSpanUs + 50000));
+
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
+    EXPECT_EQ(drain_acks(disp), 0)
+        << "a plaintext duplicate must never produce an uplink, however old";
+}
+
+TEST_F(RealNodeFixture, AckingACommandArmsTheReAckCache) {
+    // Wiring half 1: sendCommandAck populates the cache. It is recorded there
+    // rather than at the three handler call sites so a handler added later
+    // cannot forget to do it — this asserts that placement holds.
+    EXPECT_FALSE(disp.ackCacheForTest().valid) << "nothing acked yet";
+
+    auto op = pack_sysop_op(/*msgid=*/930, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
+    ASSERT_EQ(drain_acks(disp), 1);
+
+    EXPECT_TRUE(disp.ackCacheForTest().valid);
+    EXPECT_EQ(disp.ackCacheForTest().msgid, 930u);
+    EXPECT_EQ(disp.ackCacheForTest().reacks, 0);
+}
+
+TEST_F(RealNodeFixture, TheArmedCacheWouldReAckOnceTheBurstSpanHasPassed) {
+    // Wiring half 2: the cache the dispatcher actually built yields ReAck at
+    // the right time. Together with the test above and ack_cache_test.cpp this
+    // leaves exactly one unverified link — the `&& was_encrypted` conjunction
+    // and the sendCommandAck call inside it — because producing an encrypted
+    // duplicate needs a hub-side AES-GCM helper the host fixture does not have.
+    // Stated here rather than left implicit.
+    auto op = pack_sysop_op(/*msgid=*/931, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
+    ASSERT_EQ(drain_acks(disp), 1);
+    const ackcache::Cache &c = disp.ackCacheForTest();
+    ASSERT_TRUE(c.valid);
+
+    const int64_t armed_at = c.first_seen_us;
+    EXPECT_EQ(ackcache::classify(c, 931, armed_at + 1000),
+              ackcache::Decision::SilentCopy) << "immediately: a burst copy";
+    EXPECT_EQ(ackcache::classify(c, 931, armed_at + ackcache::kBurstSpanUs - 1),
+              ackcache::Decision::SilentCopy) << "still inside the burst";
+    EXPECT_EQ(ackcache::classify(c, 931, armed_at + ackcache::kBurstSpanUs),
+              ackcache::Decision::ReAck) << "past it: a genuine retry";
+    EXPECT_EQ(ackcache::classify(c, 999, armed_at + ackcache::kBurstSpanUs),
+              ackcache::Decision::NotADuplicate) << "a different command";
 }
