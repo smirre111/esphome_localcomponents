@@ -627,6 +627,9 @@ namespace esphome
       void handle_register_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
       bool admit_frame_(::LoraClientResponseMessage *rcv_message);
       void handle_encrypted_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
+      // Move the replay counter. Called only for a frame that has been
+      // authenticated, or one that arrived before any session existed.
+      void commit_rx_msgid_(const ::LoraClientResponseMessage *rcv_message);
       void dispatch_payload_(::LoraClientResponseMessage *msg);
       void confirm_session_();
 

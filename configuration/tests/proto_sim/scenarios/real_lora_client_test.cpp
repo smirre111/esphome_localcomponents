@@ -618,6 +618,82 @@ TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
     esphome::shim_hooks::set_active_clock(nullptr);
 }
 
+TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
+    // The hub's mirror of the node's counter ratchet.
+    //
+    // admit_frame_ accepts any forward jump inside (rx, rx + 1024] and used to
+    // ASSIGN rx there, before a byte had been authenticated — and setRxMessageId
+    // persists, so the damage outlived a reboot. Anyone in radio range can read
+    // the plaintext LoraHeader off a real uplink and send one frame at
+    // msgid + 1000 claiming to be the node. Every genuine uplink after that was
+    // logged as "duplicate or old message ID" and dropped, so the hub saw the
+    // node as silent: no acks, retries exhausted, session torn down. The forged
+    // frame never had to be acted on.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(rol.session_confirmed_) << "the attack only applies to a live session";
+
+    const uint32_t rx_after_login = rol.frame_counter_.rx_message_id;
+
+    // One forged plaintext frame, near the top of the acceptance window.
+    auto forged = real_helpers::serialize_avail(/*sender=*/18,
+                                                /*msg_id=*/rx_after_login + 1000);
+    rol.set_response(forged.data(), forged.size());
+
+    EXPECT_EQ(rol.frame_counter_.rx_message_id, rx_after_login)
+        << "an unauthenticated uplink must not move the hub's replay counter";
+
+    // And the node's next real frame — the very next msgid — is still accepted.
+    proto_sim::LoraClientResponseMessage inner;
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = 2;
+    inner.header.senderAddress = 18;
+    inner.header.msgId         = rx_after_login + 1;
+    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Avail;
+    inner.avail.available      = true;
+
+    auto plain = proto_sim::serialize_resp_payload(inner);
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
+                                inner.header.senderAddress, inner.header.msgId, aad);
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
+    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
+                                          plain.data(), plain.size());
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = inner.header;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.ciphertext = enc.ciphertext;
+    auto real_frame = proto_sim::serialize_resp(outer);
+    rol.set_response(real_frame.data(), real_frame.size());
+
+    EXPECT_EQ(rol.frame_counter_.rx_message_id, rx_after_login + 1)
+        << "the node's genuine next uplink must still be accepted — the forged "
+           "frame must not have wedged the link";
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
 TEST(RealLoraClient, TimeSyncIsEncrypted) {
     // The node only trusts an authenticated downlink once it has a session, so
     // a plaintext TimeSync would be both droppable and spoofable — a spoofed

@@ -910,7 +910,16 @@ namespace esphome
             rcv_message->header->msgid > this->frame_counter_.rx_message_id &&
             rcv_message->header->msgid <= this->frame_counter_.rx_message_id + kMsgIdWindow)
         {
-          this->setRxMessageId(rcv_message->header->msgid);
+          // CHECKED here, COMMITTED later — see commit_rx_msgid_().
+          //
+          // This used to assign (and persist) the counter right here, before a
+          // single byte had been authenticated. The window is a ratchet, so one
+          // forged uplink at msgid = rx + 1024 pushed the hub's expectation past
+          // everything the node would legitimately send next, and every real
+          // frame was then dropped as "duplicate or old" until the next login.
+          // The frame did not have to be acted on to wedge the link; it only had
+          // to be admitted. The node has the mirror of this rule in admitFrame().
+          //
           // NOTE: login is NOT acknowledged here.  A plaintext status frame (e.g.
           // a position report during boot homing) does not prove the node holds
           // the session key.  Marking login acked on any msgid-bump and then
@@ -926,6 +935,20 @@ namespace esphome
       }
 
       return true;
+    }
+
+    // Advance the replay counter, once the frame has earned it.
+    //
+    // Split out of admit_frame_ so that only two kinds of frame can move it:
+    // one the hub has AUTHENTICATED (a successful GCM tag check), and one that
+    // arrived while no session existed, where there is nothing to authenticate
+    // with and the counter is the only sequencing there is. A plaintext frame
+    // arriving while the session IS confirmed is still processed exactly as
+    // before — it just cannot ratchet the counter on its way through.
+    void LORAListener::commit_rx_msgid_(const LoraClientResponseMessage *m)
+    {
+      if (m && m->header)
+        this->setRxMessageId(m->header->msgid);
     }
 
     // A successful decrypt proves the node holds the matching base nonce, so
@@ -1072,6 +1095,10 @@ namespace esphome
           free(plaintext);
           return;
         }
+
+        // The tag verified: this frame is the node's, so its msgid is real and
+        // the replay counter may finally move.
+        this->commit_rx_msgid_(rcv_message);
 
         // A successful decrypt proves the node holds the matching base nonce —
         // the encrypted session is confirmed both ways.  Only now do we treat
@@ -1417,6 +1444,8 @@ namespace esphome
       {
         // The node's prand is deliberately ignored: send_login() mints a fresh
         // one, so a replayed login cannot pin the counters.
+        if (!this->session_confirmed_)
+          this->commit_rx_msgid_(rcv_message);
         this->send_login();
         return;
       }
@@ -1428,7 +1457,12 @@ namespace esphome
         return;
       }
 
-      // Plaintext path.
+      // Plaintext path. The counter moves only while no session is confirmed:
+      // before the handshake there is nothing to authenticate with and the
+      // msgid is the only sequencing the hub has, but once the node is proven
+      // to hold the key, an unauthenticated frame must not be able to move it.
+      if (!this->session_confirmed_)
+        this->commit_rx_msgid_(rcv_message);
       this->dispatch_payload_(rcv_message);
       for (size_t i = 0; i < this->nodes_.size(); i++)
         this->nodes_[i]->set_response(data, len);

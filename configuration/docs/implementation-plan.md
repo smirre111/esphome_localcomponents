@@ -1061,11 +1061,12 @@ on hardware**.
 
 ---
 
-## 11b. Link security — the node authenticates two downlink types out of nine
+## 11b. Link security — the node authenticated two downlink types out of nine
 
-Found by the interaction review, 2026-09. `CmdDispatcher.cpp`'s plaintext
-rejection names exactly `CMD_OPERATION` and `CMD_SYSOP`. Every other handler
-runs with no authentication check:
+Found by the interaction review, 2026-09. **Fixed 2026-09 in the same pass; the
+history is kept because the shape of the mistake is the lesson.**
+`CmdDispatcher.cpp`'s plaintext rejection named exactly `CMD_OPERATION` and
+`CMD_SYSOP`. Every other handler ran with no authentication check:
 
 `ScheduleConfig`, `TimeSync`, `CoverConfig`, `ClientConfig`, `GridSync`,
 `ModeTest`, `DriftTest`, `BaseNonceExchange`.
@@ -1085,31 +1086,52 @@ reads `destAddress` and `msgid` directly and needs only
   gate is a MAC match, and the MAC is broadcast in the plaintext `ClientRegister`.
 - **`TimeSync`** calls `settimeofday` from an unauthenticated frame.
 
-Two further consequences of applying the replay window to *plaintext* frames
-before authentication: one injected frame at `msgid = observed + 1024` ratchets
-`rx_id_` ahead and every legitimate command is rejected until the next LOGIN —
-and the hub has the mirror hole, advancing `rx_message_id_` before decryption
-and persisting it.
+### What shipped
 
-Separately, **`ModeTest` arming bypasses the rule `MacControl` enforces.**
-`mac-layer.md` §4 states the arming frame "must have arrived AUTHENTICATED — a
+| fix | where | test |
+|---|---|---|
+| The rejection is now **default-deny**: with a base nonce held for the sender, every `cmd_case` except `CMD_LOGIN` must have arrived encrypted. Naming the allowed types instead of the refused ones is what makes a tenth message type safe to add. | `CmdDispatcher::admitFrame` | `APlaintextScheduleIsRefusedOnceASessionExists` |
+| `CMD_LOGIN` is the one exemption, and it is exactly one: `LoginMsg` **carries** the base nonce, so it is the whole bootstrap. The hub clears `session_confirmed_` before sending it precisely so it goes out in the clear, which is what lets a node whose nonce diverged recover. `BaseNonceExchange` is a *rotation*, sent while the session is confirmed and therefore already encrypted, so it needs no exemption. | same | `LoginItselfStaysAcceptedInPlaintext` |
+| The gate runs **before the replay window**, not after. The window is a ratchet — it assigns `rx_id_` on the way through — so one forged frame at `msgid + 1024` wedged the link until the next LOGIN even though the frame itself was refused. Refusing first means a forged frame cannot touch the counter. | same | `AnUnauthenticatedFrameCannotRatchetTheReplayCounter` (verified to fail with the gate in its old position) |
+| `destAddress` / `destSubnet` are assigned **after** every gate, so a frame that will be refused can no longer retarget the node's uplinks. | same | covered by the above |
+| The hub had the mirror hole: `admit_frame_` assigned *and persisted* `rx_message_id` before decryption. The counter is now **checked** there and **committed** in two places only — after a successful GCM tag check, or, while no session is confirmed, on the plaintext path where there is nothing to authenticate with. | `lora_client.cpp`, `commit_rx_msgid_()` | `AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter` (verified to fail with the assignment restored) |
+| `ModeTest` arming now requires an authenticated frame. `modetest::NodeContext` gained `frame_authenticated`, `ArmRefusal::NotAuthenticated` is checked **first**, and `handleModeTest` passes `frame_authenticated_` in — the same value `applyMacConfig_` already used. | `ModeTestPolicy.h`, `CmdDispatcher.cpp` | `mode_test_policy_test.cpp` |
+| The F-30 login rate limit is a `CmdDispatcher` member, not a function-static. One node per process on hardware, but in the host harness one test's login silenced the next test's for five real seconds — which made a security test pass while measuring the limiter. | `CmdDispatcher.h` | see test-plan §3 |
+
+`ModeTest` mattered because `mac-layer.md` §4 already stated the rule the code
+did not enforce — the arming frame "must have arrived AUTHENTICATED — a
 plaintext frame asking to turn authentication off answers its own question".
-`applyMacConfig_` passes `frame_authenticated_` into `macsublayers::armRefusal`;
-`handleModeTest` builds a `NodeContext` with **no authentication field at all**,
-and `ModeTestPolicy.h` has no such member. It then writes
-`sublayers_.counter_enabled` and `sublayers_.crypto_enabled` — the exact two
-variables `applyMacConfig_` guards — from proto3 fields defaulting to `false`.
-A plaintext `ModeTest{enable=true}` against a node with a live session disables
-MAC-1 and MAC-2 and, because `keepPowerProfile` is a proto3 bool defaulting to
-false despite its comment saying "DEFAULT TRUE", pins the CPU at 240 MHz with
-light sleep off.
+`applyMacConfig_` passed `frame_authenticated_` into `macsublayers::armRefusal`;
+`handleModeTest` built a `NodeContext` with **no authentication field at all**,
+then wrote `sublayers_.counter_enabled` and `sublayers_.crypto_enabled` — the
+exact two variables `applyMacConfig_` guards. A plaintext `ModeTest{enable=true}`
+against a node with a live session disabled MAC-1 and MAC-2.
 
-**What is sound:** the nonce design itself. `send_login()` mints a fresh base
-nonce *and* zeroes both counters together; `send_base_nonce_exchange()` rotates
-without resetting; the node matches both exactly, and the uplink/downlink
-direction bit closes the remaining collision. **No GCM nonce reuse was found.**
-The weakness is entirely in *who may install a nonce* and *which frames must be
-authenticated*.
+### What is still open
+
+- **`keepPowerProfile` is a proto3 `bool` defaulting to `false`** despite its
+  comment saying "DEFAULT TRUE", so a `ModeTest` that omits it pins the CPU at
+  240 MHz with light sleep off. Now unreachable without authentication, but the
+  field still reads as the opposite of its documentation.
+- **Phase and drift samples are still taken from unauthenticated frames.** The
+  sampling sits above the plaintext gate because it keys off arrival time, which
+  is not a claim of authority — but an attacker in range can still bias the
+  phase fit and the mark-hit counter that holds off demotion. Bounded
+  (`phaseTrustworthy()` requires every sample inside the guard, so poisoning it
+  demotes the node rather than desynchronising it silently), and untested.
+- **A node that has never been provisioned accepts plaintext `ClientConfig`.**
+  Inherent to bootstrap: the gate's test is "do we hold a base nonce for this
+  sender", so a factory-fresh node is deliberately unaffected. The MAC check
+  inside the handler is the only gate there, and the MAC is broadcast in the
+  plaintext `ClientRegister`. Closing it needs a provisioning secret, which is
+  a protocol change, not a patch.
+
+**What was sound all along:** the nonce design itself. `send_login()` mints a
+fresh base nonce *and* zeroes both counters together; `send_base_nonce_exchange()`
+rotates without resetting; the node matches both exactly, and the
+uplink/downlink direction bit closes the remaining collision. **No GCM nonce
+reuse was found.** The weakness was entirely in *who may install a nonce* and
+*which frames must be authenticated*.
 
 ## 11a. Wiring gaps — code that exists and nothing calls
 

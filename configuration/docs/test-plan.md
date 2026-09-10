@@ -121,8 +121,24 @@ From `tests/proto_sim/README.md`, all learned the hard way:
 - **Run the suite through `ctest`, not by executing a test binary directly.**
   `gtest_discover_tests` gives each case its own process; running the binary
   puts every case in one process, where the file-level node statics documented
-  below leak between them. Same commit, same binary: 0 failures under ctest, 12
-  under a direct run. The direct-run failures are the artefact.
+  below leak between them. Same commit, same binary: 0 failures under ctest, 11
+  under a direct run. The direct-run failures are the artefact — *except* when
+  the leaking state is inside production code, where the leak is a design
+  smell worth fixing rather than an artefact to route around. `handleLogin`'s
+  F-30 rate-limit window was a **function-static**: one node per process on the
+  hardware, so harmless there, but in the harness the FIRST test to log in
+  silenced every later login for five real seconds. The plaintext-rejection
+  security tests then passed alone and failed together, and read as a
+  regression in the gate. It is a `CmdDispatcher` member now, so it dies with
+  the object. **A test that passes alone and fails in the binary is telling you
+  where the global state is; find it before assuming the test is wrong.**
+- **The simulated `rx_us` a test hands to `onReceiveNew` is not the clock
+  production code reads.** `esp_timer_get_time()` on the host is
+  `CLOCK_MONOTONIC`, so two frames "100 ms apart" in test coordinates land in
+  the same real millisecond. Any production path with its own time-based gate
+  — the F-30 login limiter, `AckCache`'s re-ack window — sees zero elapsed
+  time regardless of the `rx_us` values. Seed the precondition directly
+  (`setBaseNonceForTest`) rather than trying to walk the real clock.
 - **There is no `settimeofday` shim.** The node clock under host test is real
   wall time and cannot be stepped. Any test involving schedule timing builds its
   entries relative to *now*. **This bites Mode C**: RX1/RX2 offsets must be

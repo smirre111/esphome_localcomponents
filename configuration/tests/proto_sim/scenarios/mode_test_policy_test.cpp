@@ -17,6 +17,7 @@ using namespace modetest;
 namespace {
 NodeContext armable() {
     NodeContext c;
+    c.frame_authenticated = true;
     c.has_session    = true;
     c.is_bench_node  = false;
     c.battery_mv     = 4000;
@@ -313,4 +314,43 @@ TEST(ModeTestPolicy, TheDefaultsAreTheProductionConfiguration) {
     EXPECT_TRUE(s.counter_enabled);
     EXPECT_TRUE(s.crypto_enabled);
     EXPECT_TRUE(s.deep_sleep_allowed);
+}
+
+// ---------------------------------------------------------------------------
+// The arming frame must itself have been authenticated
+// ---------------------------------------------------------------------------
+
+TEST(ModeTestPolicy, APlaintextArmIsRefusedEvenWithALiveSession) {
+    // mac-layer.md §4: "a plaintext frame asking to turn authentication off
+    // answers its own question." MacSublayers::armRefusal has always taken this
+    // parameter; ModeTest's did not, and handleModeTest then wrote the SAME two
+    // sublayer variables applyMacConfig_ guards — counter_enabled and
+    // crypto_enabled — from proto3 fields defaulting to false. A plaintext
+    // ModeTest against a node with a live session therefore disabled MAC-1 and
+    // MAC-2, and pinned the CPU at 240 MHz with light sleep off because
+    // keepPowerProfile is a proto3 bool defaulting to false despite its comment
+    // saying "DEFAULT TRUE".
+    NodeContext c = armable();
+    c.frame_authenticated = false;
+    EXPECT_EQ(armRefusal(modeA(), c), ArmRefusal::NotAuthenticated);
+}
+
+TEST(ModeTestPolicy, AuthenticationIsCheckedBeforeAnythingElse) {
+    // Same reasoning as the session check: a caller must not be able to probe
+    // which of its fields the node dislikes without holding a key.
+    NodeContext c = armable();
+    c.frame_authenticated = false;
+    c.has_session         = false;
+    c.battery_mv          = 3000;
+    Request r = modeA(1000);          // also commensurate
+    r.copies  = 99;                   // also out of range
+    EXPECT_EQ(armRefusal(r, c), ArmRefusal::NotAuthenticated);
+}
+
+TEST(ModeTestPolicy, TheDefaultContextRefusesRatherThanArms) {
+    // A NodeContext that forgets to set the flag must refuse. Same direction as
+    // every other default in these headers: the zeroed value is the safe one.
+    NodeContext fresh;
+    EXPECT_FALSE(fresh.frame_authenticated);
+    EXPECT_EQ(armRefusal(modeA(), fresh), ArmRefusal::NotAuthenticated);
 }

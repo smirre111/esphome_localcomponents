@@ -94,7 +94,8 @@ constexpr bool periodMattersFor(Mode m)
 
 enum class ArmRefusal : uint8_t {
     None = 0,
-    NoSession,          // unauthenticated arm — see the banner
+    NotAuthenticated,   // the arming frame was plaintext — see NodeContext
+    NoSession,          // no session at all — see the banner
     SweepOffBench,      // MODE_SWEEP deliberately mis-arms windows
     CommensurateGrid,   // would measure nothing; see periodsAreCommensurate
     BatteryTooLow,      // a test that flattens the node teaches nothing
@@ -104,6 +105,21 @@ enum class ArmRefusal : uint8_t {
 
 // What the node knows about itself when the arm request lands.
 struct NodeContext {
+    // Did the ARMING frame itself arrive authenticated?
+    //
+    // mac-layer.md §4 states this is not optional: "a plaintext frame asking to
+    // turn authentication off answers its own question". MacSublayers::armRefusal
+    // has carried the equivalent parameter from the start; this one did not, and
+    // handleModeTest then wrote sublayers_.counter_enabled and
+    // sublayers_.crypto_enabled — the exact two variables applyMacConfig_ guards
+    // — from proto3 fields that default to false. A plaintext ModeTest against a
+    // node with a live session disabled MAC-1 and MAC-2 and, because
+    // keepPowerProfile is a proto3 bool defaulting to false despite its comment
+    // saying "DEFAULT TRUE", pinned the CPU at 240 MHz with light sleep off.
+    //
+    // Defaults to false, so a NodeContext that forgets to set it refuses rather
+    // than arms — the same direction as every other default in these headers.
+    bool     frame_authenticated{false};
     bool     has_session{false};
     bool     is_bench_node{false};
     uint32_t battery_mv{4000};
@@ -131,9 +147,12 @@ static constexpr uint32_t kMaxCopies = 17;
 
 constexpr ArmRefusal armRefusal(const Request &r, const NodeContext &ctx)
 {
-    // Session first. It is the rule that exists to be hard to bypass, so it is
-    // checked before anything an attacker controls could make the function
-    // return early for a friendlier reason.
+    // Authentication first, then session. Both are rules that exist to be hard
+    // to bypass, so they are checked before anything an attacker controls could
+    // make the function return early for a friendlier reason — otherwise a
+    // caller could probe which of its fields the node dislikes without ever
+    // holding a key.
+    if (!ctx.frame_authenticated)               return ArmRefusal::NotAuthenticated;
     if (!ctx.has_session)                       return ArmRefusal::NoSession;
     if (r.mode == Mode::Sweep && !ctx.is_bench_node)
                                                 return ArmRefusal::SweepOffBench;

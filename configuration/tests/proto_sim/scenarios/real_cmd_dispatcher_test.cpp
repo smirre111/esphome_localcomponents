@@ -3097,3 +3097,90 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
                       /*rx_us=*/1'040'000);
     EXPECT_EQ(disp.phaseStats().n, 1u);
 }
+
+// ---------------------------------------------------------------------------
+// Once a session exists, every command must be encrypted
+// ---------------------------------------------------------------------------
+//
+// The plaintext rejection named CMD_OPERATION and CMD_SYSOP only, so seven
+// other authority-bearing downlinks were accepted unauthenticated by a node
+// with a live session. The LoraHeader is plaintext on every frame, so an
+// attacker in radio range reads destAddress and msgid directly and needs only
+// msgid in (rx_id_, rx_id_ + 1024].
+//
+// The session is established the production way — a LoginMsg, which CARRIES the
+// base nonce — rather than by reaching into set_base_nonce(). That matters:
+// login is the one exemption in the new rule, so establishing the session this
+// way also proves the exemption still works.
+
+TEST_F(RealNodeFixture, APlaintextScheduleIsRefusedOnceASessionExists) {
+    // The worst of them. ScheduleConfig replaces the schedule WHOLESALE — it is
+    // idempotent by design — so one unauthenticated frame saying "open at
+    // 03:00, every day" opens every blind every night. A physical-security
+    // bypass with no key.
+    auto login = pack_login_op(/*msgid=*/800, /*nonce=*/0xABCDEF01);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 1'000'000);
+
+    const uint32_t before = disp.macFunnel().addressed;
+    auto sched = pack_schedule_op(/*msgid=*/801, /*version=*/0xBEEF,
+                                  NODE_MODE__MODE_INTERACTIVE);
+    disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()), 1'100'000);
+
+    // It reached the address filter (so this is not an addressing accident) and
+    // was then refused for being plaintext.
+    EXPECT_GT(disp.macFunnel().addressed, before);
+    EXPECT_NE(sys.getSchedVersion(), 0xBEEFu)
+        << "an unauthenticated frame must not be able to rewrite the schedule";
+}
+
+TEST_F(RealNodeFixture, AnUnauthenticatedFrameCannotRatchetTheReplayCounter) {
+    // The gate has to run BEFORE the replay window, not merely exist.
+    //
+    // The replay check accepts any forward jump inside (rx_id_, rx_id_ + 1024]
+    // and ASSIGNS rx_id_ on the way through. While the plaintext rejection sat
+    // after it, an attacker did not need to get a command executed to do
+    // damage: one injected frame at msgid = observed + 1024 pushed the counter
+    // past everything the hub had queued, and every legitimate command was
+    // then rejected as a replay until the next LOGIN. The frame was refused
+    // and the link was still wedged.
+    disp.setBaseNonceForTest(kHubAddr, 0xABCDEF01);
+
+    const uint32_t before = disp.rxMsgIdForTest();
+    auto sched = pack_schedule_op(/*msgid=*/before + 1000, /*version=*/0xBEEF,
+                                  NODE_MODE__MODE_INTERACTIVE);
+    disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()), 1'100'000);
+
+    EXPECT_EQ(disp.rxMsgIdForTest(), before)
+        << "a plaintext frame must be refused before it can touch the counter";
+    EXPECT_NE(sys.getSchedVersion(), 0xBEEFu);
+}
+
+TEST_F(RealNodeFixture, LoginItselfStaysAcceptedInPlaintext) {
+    // The single exemption, and it has to be exactly one: LoginMsg carries the
+    // base nonce, so it IS the bootstrap. The hub clears session_confirmed_
+    // before sending it precisely so it goes out in the clear — which is what
+    // lets a node whose nonce has diverged recover. Refusing it would make the
+    // link unrecoverable after any nonce divergence.
+    //
+    // "A session already exists" is seeded directly rather than by sending a
+    // first LoginMsg. handleLogin() rate-limits logins to one per 5 s (F-30)
+    // off the REAL monotonic clock, which does not advance with the rx_us the
+    // test hands in: two logins 100 ms apart on the simulated clock land in the
+    // same real millisecond, so the second is dropped by the limiter and the
+    // test would be measuring F-30, not the security gate.
+    disp.setBaseNonceForTest(kHubAddr, 0x11223344);
+    uint32_t bn = 0;
+    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, bn));
+    ASSERT_EQ(bn, 0x11223344u) << "precondition: a session exists";
+
+    // Now the recovery case: the hub has lost its state and re-logs in, in the
+    // clear. Every other plaintext command from this peer is refused at this
+    // point (see APlaintextScheduleIsRefusedOnceASessionExists); LOGIN must not
+    // be, or the link can never recover from a nonce divergence.
+    auto login = pack_login_op(/*msgid=*/811, /*nonce=*/0x55667788);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 2'100'000);
+
+    EXPECT_TRUE(disp.getBaseNonceForTest(kHubAddr, bn));
+    EXPECT_EQ(bn, 0x55667788u)
+        << "plaintext login is the recovery path and must never be refused";
+}
