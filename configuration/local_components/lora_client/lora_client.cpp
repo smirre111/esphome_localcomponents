@@ -327,9 +327,6 @@ namespace esphome
     static constexpr uint32_t kBeaconSlotIndex  = timedgrid::kSlotCount - 1;
     // 350 s at 1.5 s per round, i.e. half the +/-20 ppm ceiling.
     static constexpr uint32_t kBeaconEveryRounds = 233;
-    // The node replies at T0 + this rather than "immediately"; must be >= the
-    // measured DRAIN + build time, which is HW-7's number.
-    static constexpr uint32_t kUplinkOffsetUs   = 60000;
 
     void LORAListener::setup()
     {
@@ -950,6 +947,9 @@ namespace esphome
       {
         this->last_uplink_t0_us_  = this->parent_->last_rx_t0_us();
         this->last_uplink_unc_us_ = this->parent_->rx_stamp_uncertainty_us();
+        // §4.6: the same stamp answers a second question — did this uplink land
+        // where the grid says this node transmits?
+        this->noteUplinkPlacement_(this->last_uplink_t0_us_);
       }
 
       return true;
@@ -1539,7 +1539,7 @@ namespace esphome
         gs.resyncmaxs       = timedgrid::maxResyncIntervalS(20) / 2;   // half the
                                                                        // +/-20 ppm
                                                                        // ceiling
-        gs.uloffsetus       = kUplinkOffsetUs;
+        gs.uloffsetus       = LORAListener::kUplinkOffsetUs;
 
         // This frame's own position. It is what the node anchors on, so it must
         // describe where the frame will ACTUALLY be transmitted — which, while
@@ -1605,6 +1605,11 @@ namespace esphome
         this->parent_->startGrid();
         this->set_grid_aligned(true);
         this->send_grid_sync(true);
+        // Confidence starts at zero every time the grid is (re)published: the
+        // node has to earn single-shot again from observed uplinks.
+        this->belief_               = timedmode::HubBelief{};
+        this->last_in_slot_us_      = 0;
+        this->have_in_slot_confirm_ = false;
         ESP_LOGW(TAG, "[%s] timed mode ON — grid published, slot %u, alignment on",
                  this->get_name().c_str(), (unsigned) this->grid_slot_);
       }
@@ -1639,10 +1644,32 @@ namespace esphome
     }
 
     void LORAListener::send_aligned_(const uint8_t *buf, size_t len,
-                                     const TxPolicy &policy)
+                                     const TxPolicy &in_policy)
     {
       if (buf == nullptr || len == 0)
         return;
+
+      // §4.6, rules 1-4. ONE copy instead of seventeen, but only while the hub
+      // has independent evidence that this node is where the grid says it is:
+      // three consecutive uplinks observed in slot, confirmed within the last
+      // minute, no reboot or session change since, firmware known, and no
+      // single shot currently unacked. Any of those missing and this is the
+      // burst it always was — the policy is written as a list of reasons to
+      // fall BACK, so a state nobody thought about costs airtime, not a command.
+      TxPolicy policy = in_policy;
+      const bool single_shot =
+          (policy.copies == 0) &&    // the caller has not asked for a shape
+          (timedmode::txPolicyFor(this->hubBeliefNow_()) ==
+           timedmode::TxPolicy::SingleShot);
+      if (single_shot)
+      {
+        policy.copies = 1;
+        ESP_LOGI(TAG, "[%s] single shot: %u in-slot uplinks, confirmed %us ago",
+                 this->get_name().c_str(),
+                 (unsigned) this->belief_.in_slot_acks,
+                 (unsigned) this->hubBeliefNow_().confirmation_age_s);
+      }
+      this->op_sent_single_shot_ = single_shot;
 
       // The next mark that is CLEAR of the hub's own burst, not simply the next
       // mark. A 17-copy burst denies 31 of the 32 slots in its round (measured;
@@ -1806,6 +1833,16 @@ namespace esphome
           this->do_login_and_arm_retry_();
           return;
         }
+        // Rule 4: a single shot that went unacked puts this node back on bursts
+        // immediately, and stays that way until a fresh in-slot uplink. One
+        // frame is the whole exposure — the retry below is already a burst.
+        if (this->op_sent_single_shot_ && !this->belief_.single_shot_unacked)
+        {
+          this->belief_.single_shot_unacked = true;
+          ESP_LOGW(TAG, "[%s] single shot unacked — back to bursts until "
+                        "the node is confirmed again", this->get_name().c_str());
+        }
+
         // NOT tx_tracked_op_(): that re-packs from live state with a fresh
         // msgid. op_last_msgid_ deliberately does NOT move — the retry IS the
         // original command, and the ack window must keep accepting its id.
@@ -2056,6 +2093,12 @@ namespace esphome
         base = esp_random();
         this->pending_login_nonce_ = base;
       }
+
+      // §4.6 rule: a new session invalidates the hub's confidence. The
+      // counters reset here, the AEAD keying changes, and the node may have
+      // rebooted — none of which is compatible with still believing its
+      // uplinks land in slot. It earns single-shot back from observation.
+      this->belief_.session_changed = true;
 
       this->frame_counter_.tx_message_id = 0;
       this->frame_counter_.rx_message_id = 0;
@@ -2984,6 +3027,76 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                  (unsigned) this->schedule_version());
         this->set_timeout("schedule_push", 2000, [this]() { this->send_schedule_config(); });
       }
+    }
+
+    // §4.6, the hub half: an uplink OBSERVED IN ITS SLOT, not a claim.
+    //
+    // The node cannot answer this about itself. It knows when it transmitted
+    // and it knows the grid it was told about, so its answer is a restatement
+    // of its own belief — "a beacon saying I am ready says nothing about where
+    // its window actually landed" (TimedModePolicy.h). The hub measures the
+    // arrival against ITS OWN grid, which is the only independent evidence
+    // that the two clocks agree well enough to stop sending seventeen copies.
+    //
+    // The comparison is against the node's uplink INSTANT — its mark plus the
+    // uplink offset the hub itself published in GridSync — and the tolerance is
+    // the same guard the node's phase tracking uses, so "in slot" means the
+    // same thing at both ends.
+    void LORAListener::noteUplinkPlacement_(int64_t t0_uplink_us)
+    {
+      if (this->parent_ == nullptr || t0_uplink_us <= 0)
+        return;
+      // No grid, nothing to be in slot of. Deliberately does NOT reset the
+      // count: a node that has not been given a grid is not failing to hit it.
+      if (!this->grid_aligned_ || !this->parent_->gridStarted())
+        return;
+
+      // Where the node's mark for this uplink was. Subtract the offset first,
+      // then find the nearest mark: an uplink a hair early belongs to the mark
+      // ahead of it, and taking the NEXT mark would charge it a whole round.
+      const int64_t mark_x = t0_uplink_us - (int64_t) LORAListener::kUplinkOffsetUs;
+      const int64_t next   = this->parent_->nextT0ForSlotUs(this->grid_slot_, mark_x);
+      const int64_t prev   = next - (int64_t) timedgrid::kRoundUs;
+      const int64_t mark   = ((next - mark_x) <= (mark_x - prev)) ? next : prev;
+      const int64_t err    = mark_x - mark;
+
+      const bool in_slot = (err <= (int64_t) timedgrid::kGuardUs) &&
+                           (err >= -(int64_t) timedgrid::kGuardUs);
+
+      if (!in_slot)
+      {
+        if (this->belief_.in_slot_acks != 0)
+          ESP_LOGW(TAG, "[%s] uplink %lld us out of slot %u — confidence reset",
+                   this->get_name().c_str(), (long long) err,
+                   (unsigned) this->grid_slot_);
+        this->belief_.in_slot_acks = 0;
+        return;
+      }
+
+      if (this->belief_.in_slot_acks < 0xFFFFFFFFu)
+        this->belief_.in_slot_acks++;
+      this->last_in_slot_us_      = esp_timer_get_time();
+      this->have_in_slot_confirm_ = true;
+      // A confirmation is exactly what these three were waiting for.
+      this->belief_.rebooted_since_confirm = false;
+      this->belief_.session_changed        = false;
+      this->belief_.single_shot_unacked    = false;
+      ESP_LOGD(TAG, "[%s] uplink in slot %u (err %lld us), %u consecutive",
+               this->get_name().c_str(), (unsigned) this->grid_slot_,
+               (long long) err, (unsigned) this->belief_.in_slot_acks);
+    }
+
+    timedmode::HubBelief LORAListener::hubBeliefNow_() const
+    {
+      timedmode::HubBelief b = this->belief_;
+      b.grid_enabled   = this->timed_mode_enabled_ && this->grid_aligned_;
+      // Known only once the node has told us, in a beacon we decrypted.
+      b.firmware_known = (this->node_fw_version_ != 0);
+      b.confirmation_age_s =
+          !this->have_in_slot_confirm_
+              ? 0xFFFFFFFFu
+              : (uint32_t) ((esp_timer_get_time() - this->last_in_slot_us_) / 1000000);
+      return b;
     }
 
     // C2: place a reply inside the node's RX1 window.

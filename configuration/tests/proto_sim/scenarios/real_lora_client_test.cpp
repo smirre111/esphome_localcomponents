@@ -755,6 +755,89 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     esphome::shim_hooks::set_active_clock(nullptr);
 }
 
+// ---------------------------------------------------------------------------
+// §4.6 — the hub's half: one copy instead of seventeen, once it has EVIDENCE
+// ---------------------------------------------------------------------------
+namespace {
+namespace real_helpers {
+
+// Feed the listener one uplink whose T0 lands exactly where the grid says this
+// node transmits: its mark plus the uplink offset the hub itself publishes.
+void feed_in_slot_uplink(RealHubHarness& h, uint32_t msgid, int64_t err_us = 0) {
+    const int64_t mark = h.tracker.nextT0ForSlotUs(h.rol.grid_slot(),
+                                                   h.tracker.gridAnchorUs());
+    h.tracker.last_rx_t0_us_v = mark + (int64_t) LORAClient::kUplinkOffsetUs + err_us;
+    auto up = serialize_avail(/*sender=*/18, msgid);
+    h.rol.set_response(up.data(), up.size());
+}
+
+}  // namespace real_helpers
+}  // namespace
+
+TEST(RealLoraClient, ThreeInSlotUplinksEarnASingleCopyDownlink) {
+    // TimedModePolicy.h's txPolicyFor() and HubBelief had NO production caller.
+    // The entire airtime saving of Mode B is in that function — 17 copies down
+    // to 1 — so a hub that never asked it paid Mode A's cost for Mode B's
+    // narrower window, which is the worst of both.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    // Learned from a beacon in production; the policy refuses single-shot to a
+    // node whose firmware it does not know.
+    h.rol.node_fw_version_ = 0x00010203;
+
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.tracker.gridStarted());
+
+    // Two uplinks is not enough — kPromotionUplinks is three, and the point of
+    // the count is that one lucky arrival proves nothing.
+    feed_in_slot_uplink(h, 1);
+    feed_in_slot_uplink(h, 2);
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst);
+
+    feed_in_slot_uplink(h, 3);
+    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+              timedmode::TxPolicy::SingleShot)
+        << "three in-slot uplinks, confirmed just now, firmware known";
+
+    // And the belief has to reach the radio, which is the half that was missing.
+    h.tracker.last_copies = 0;
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                               COV_OPERATION__CMD_OPEN, 0.0f);
+    h.clock.tick(2000);   // let send_aligned_'s grid deferral fire
+    EXPECT_EQ(h.tracker.last_copies, 1)
+        << "the downlink must go out as ONE placed copy, not a 17-copy burst";
+}
+
+TEST(RealLoraClient, AnUplinkOutsideTheSlotResetsTheHubsConfidence) {
+    // The count is CONSECUTIVE for a reason: a node whose clock has drifted out
+    // of its slot is exactly the node a single shot would miss, and it is also
+    // the node most likely to have hit its slot three times before that.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+
+    feed_in_slot_uplink(h, 1);
+    feed_in_slot_uplink(h, 2);
+    feed_in_slot_uplink(h, 3);
+    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+              timedmode::TxPolicy::SingleShot);
+
+    // One arrival a guard-and-a-half out of place.
+    feed_in_slot_uplink(h, 4, /*err_us=*/(int64_t) timedgrid::kGuardUs + 1000);
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst)
+        << "one out-of-slot uplink must cost the whole count, not one from it";
+
+    h.tracker.last_copies = 1;
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                               COV_OPERATION__CMD_OPEN, 0.0f);
+    h.clock.tick(2000);
+    EXPECT_NE(h.tracker.last_copies, 1)
+        << "and the radio must be back on bursts, not merely the belief";
+}
+
 TEST(RealLoraClient, TimeSyncIsEncrypted) {
     // The node only trusts an authenticated downlink once it has a session, so
     // a plaintext TimeSync would be both droppable and spoofable — a spoofed

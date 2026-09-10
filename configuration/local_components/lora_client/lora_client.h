@@ -1,6 +1,7 @@
 #pragma once
 
 #include <esp_timer.h>
+#include "esphome/components/lora_client/TimedModePolicy.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -286,6 +287,12 @@ namespace esphome
       // the hub's own receive stamp as the shared origin. False when there is
       // no usable stamp, so the caller falls back to today's burst.
       bool send_into_rx1_(const uint8_t *buf, size_t len);
+      // §4.6: did this uplink land where the grid says this node transmits?
+      // Called with the node's own T0, from admit_frame_.
+      void noteUplinkPlacement_(int64_t t0_uplink_us);
+      // belief_ with confirmation_age_s filled in from the clock — the one
+      // field that is a function of now rather than of an event.
+      timedmode::HubBelief hubBeliefNow_() const;
       // Broadcast withdrawal, addressed to every node at once. Deliberately
       // separate: after a restart the hub may not yet know which nodes exist.
       void broadcast_grid_demote();
@@ -307,6 +314,16 @@ namespace esphome
       // `armOffsetUs`, and until now the hub emitted none.
       void enable_timed_mode(bool on);
       bool timed_mode_enabled() const { return this->timed_mode_enabled_; }
+      // §4.6's hub belief, as the policy sees it. Read-only: every field is
+      // maintained from an observed event, and a setter would be the "claim"
+      // the whole section exists to reject.
+      timedmode::HubBelief hubBelief() const { return this->hubBeliefNow_(); }
+      // The node replies at its mark + this rather than "immediately"; must be
+      // >= the measured DRAIN + build time, which is HW-7's number. Published
+      // to the node in GridSync.ulOffsetUs and used by the hub to decide
+      // whether an uplink arrived in slot, so the two must be the same number —
+      // it lives on the class rather than in the .cpp for that reason.
+      static constexpr uint32_t kUplinkOffsetUs = 60000;
 
       void set_grid_aligned(bool v) { this->grid_aligned_ = v; }
       bool grid_aligned() const     { return this->grid_aligned_; }
@@ -393,6 +410,34 @@ namespace esphome
       bool     grid_aligned_{false};
       // B3 opt-in; see enable_timed_mode().
       bool     timed_mode_enabled_{false};
+
+      // §4.6's hub half. TimedModePolicy.h defines HubBelief and txPolicyFor()
+      // and had no production caller at all: the rule "send ONE copy once the
+      // node's uplinks are observed in their slot" was written, tested and
+      // never asked. The whole airtime saving of Mode B is in that sentence —
+      // 17 copies to 1 — so leaving it unasked meant Mode B cost the same as
+      // Mode A and bought only a narrower window.
+      //
+      // Every field is maintained from a real event; nothing here is a claim
+      // the node makes about itself, which is the distinction §4.6 turns on.
+      timedmode::HubBelief belief_{};
+      // When this node's uplink was last OBSERVED in its slot. Feeds
+      // confirmation_age_s, which is what expires the confidence.
+      //
+      // An explicit flag rather than `last_in_slot_us_ != 0`, for the same
+      // reason the tracker's have_poll_baseline_ exists: esp_timer_get_time()
+      // starts near zero, so a sentinel of 0 is indistinguishable from a
+      // confirmation that arrived early — and under the host harness, where
+      // the clock starts AT zero, it is not even unlikely. The first version
+      // of this code used the sentinel and the confirmation age came back as
+      // 0xFFFFFFFF forever, which reads as "never confirmed" and silently
+      // pinned the hub to bursts.
+      bool     have_in_slot_confirm_{false};
+      int64_t  last_in_slot_us_{0};
+      // Whether the frame currently awaiting an ack went out as a single copy.
+      // Rule 4 bounds the exposure to ONE frame: the first retry of a single
+      // shot puts the node back on bursts until it is confirmed again.
+      bool     op_sent_single_shot_{false};
 
       bool     drift_test_active_{false};
       uint32_t drift_test_duration_s_{0};
