@@ -16,6 +16,7 @@
 // are exactly what goes on the air.
 #include "blinds.pb-c.h"
 #include "TimedGrid.h"
+#include "ClassAWindows.h"
 
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
@@ -689,6 +690,66 @@ TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
     EXPECT_EQ(rol.frame_counter_.rx_message_id, rx_after_login + 1)
         << "the node's genuine next uplink must still be accepted — the forged "
            "frame must not have wedged the link";
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
+    // C2's hub half. The node's Class A windows hang off ITS OWN uplink, so the
+    // hub's reply has to be placed from the stamp of that node's uplink — and
+    // the tracker's stamp is global: one radio, one variable, overwritten by
+    // every frame from every node. send_into_rx1_() read it 750 ms after the
+    // uplink that triggered the reply, so on a 32-node fleet the common case was
+    // aiming one copy — no burst to save it — at a window derived from someone
+    // else's transmit.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+
+    LORATracker tracker;
+    LORAClient  rol_1, rol_2;
+    rol_1.set_name("rol_1"); rol_1.set_short_address(17); rol_1.set_subnet_address(2);
+    rol_2.set_name("rol_2"); rol_2.set_short_address(18); rol_2.set_subnet_address(2);
+    RealTimeClock time; time.set_now(0, /*valid=*/false);
+    rol_1.set_time(&time); rol_2.set_time(&time);
+    tracker.register_client(&rol_1);
+    tracker.register_client(&rol_2);
+    rol_1.registered_ = true;
+    rol_2.registered_ = true;
+
+    // Node 17 transmits. The tracker stamps it; both listeners see the frame,
+    // only rol_1 admits it.
+    constexpr int64_t kT0Node17 = 100'000;
+    tracker.last_rx_t0_us_v = kT0Node17;
+    tracker.rx_uncertainty_v = 250;
+    auto from_17 = real_helpers::serialize_avail(/*sender=*/17, /*msg_id=*/1);
+    rol_1.set_response(from_17.data(), from_17.size());
+    rol_2.set_response(from_17.data(), from_17.size());
+
+    // Node 18 transmits 300 ms later, inside the window before the hub replies
+    // to node 17. This is the frame that used to decide where node 17's reply
+    // went.
+    constexpr int64_t kT0Node18 = 400'000;
+    tracker.last_rx_t0_us_v = kT0Node18;
+    auto from_18 = real_helpers::serialize_avail(/*sender=*/18, /*msg_id=*/1);
+    rol_1.set_response(from_18.data(), from_18.size());
+    rol_2.set_response(from_18.data(), from_18.size());
+
+    EXPECT_EQ(rol_1.last_uplink_t0_us_, kT0Node17)
+        << "a frame from another node must not become this node's window origin";
+    EXPECT_EQ(rol_2.last_uplink_t0_us_, kT0Node18);
+
+    // Now the reply to node 17.
+    std::vector<uint8_t> payload{1, 2, 3, 4};
+    ASSERT_TRUE(rol_1.send_into_rx1_(payload.data(), payload.size()));
+    EXPECT_EQ(tracker.last_earliest_us,
+              kT0Node17 + (int64_t) classa::kRx1DelayUs)
+        << "RX1 must be placed from node 17's uplink, not from node 18's";
+    EXPECT_EQ(tracker.last_copies, 1)
+        << "a burst is the opposite construction to a single placed copy";
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);

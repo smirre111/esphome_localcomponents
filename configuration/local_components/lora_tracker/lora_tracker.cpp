@@ -352,7 +352,15 @@ namespace esphome
     {
       this->drainHandoffQueue_();
 
-      const uint8_t slot = this->tx_queue_.pop(now_us);
+      // Released up to kPrepareLeadUs EARLY, and with the instant it was
+      // scheduled for. A queue that hands a placed frame over only once its
+      // instant has passed can never fire on it: the caller inherits the whole
+      // prepare cost and B5's prepare/fire split has nothing left to hold back.
+      // firePacket()'s not_before_us was written for exactly this and had one
+      // call site, hardcoded to 0 — the split was built and never used.
+      int64_t fire_at_us = 0;
+      const uint8_t slot =
+          this->tx_queue_.popDue(now_us, kPrepareLeadUs, fire_at_us);
       if (slot == txqueue::kInvalidSlot)
         return false;
 
@@ -369,15 +377,20 @@ namespace esphome
       const uint32_t stride_ms = (rx_buffer->tx_stride_ms > 0)
                                  ? rx_buffer->tx_stride_ms
                                  : (uint32_t) this->txIntervalMs;
+      // From the instant the frame will actually LEAVE, not from now: with a
+      // placed frame those differ by up to kPrepareLeadUs, and this number is
+      // what another caller consults to decide whether the channel is free.
+      const int64_t tx_start_us = (fire_at_us > now_us) ? fire_at_us : now_us;
       this->burst_busy_until_us_ =
-          now_us + (int64_t) (copies - 1) * (int64_t) stride_ms * 1000
+          tx_start_us + (int64_t) (copies - 1) * (int64_t) stride_ms * 1000
                  + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) rx_buffer->length)
                  + (int64_t) loratiming::kPreambleToT0Us
                  + (int64_t) this->responseWindowMs * 1000;
 
       lora_tx_busy_ = true;
       this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
-                            rx_buffer->tx_copies, rx_buffer->tx_stride_ms);
+                            rx_buffer->tx_copies, rx_buffer->tx_stride_ms,
+                            fire_at_us);
       lora_tx_busy_ = false;
 
       if (rx_buffer->length > 0)
@@ -435,7 +448,9 @@ namespace esphome
         }
         else
         {
-          const int64_t delta_us = next_us - now_us;
+          // Wake kPrepareLeadUs early, or the frame is popped only after its
+          // instant has passed and there is nothing left to place it with.
+          const int64_t delta_us = next_us - now_us - kPrepareLeadUs;
           wait_ticks = (delta_us <= 0) ? 0
                                        : pdMS_TO_TICKS(delta_us / 1000 + 1);
         }
@@ -626,7 +641,7 @@ namespace esphome
     }
 
     void LORATracker::sendPacketBurst(uint8_t *data, size_t len, int copies,
-                                      uint32_t stride_ms)
+                                      uint32_t stride_ms, int64_t not_before_us)
     {
 
       // const TickType_t xFrequency = pdMS_TO_TICKS(142); // For RX /TX config 3x RX + 7x TX
@@ -664,17 +679,22 @@ namespace esphome
           if (cbuf)
           {
             lora_client_operation_message__pack(burstMsg, cbuf);
-            this->sendPacketBytes(cbuf, clen);
+            // Only copy 0 is placed. The rest are paced by vTaskDelayUntil at
+            // the burst stride, which is the construction they have always had
+            // — and a placed frame is a SINGLE copy anyway (C2's RX1 reply),
+            // so for it this loop runs once.
+            this->sendPacketAt(cbuf, clen, (cnt == 0) ? not_before_us : 0);
             free(cbuf);
           }
           else
           {
-            this->sendPacketBytes(data, len); // OOM fallback: unindexed copy
+            // OOM fallback: unindexed copy, still placed.
+            this->sendPacketAt(data, len, (cnt == 0) ? not_before_us : 0);
           }
         }
         else
         {
-          this->sendPacketBytes(data, len);
+          this->sendPacketAt(data, len, (cnt == 0) ? not_before_us : 0);
         }
         // sendPacketBytes((uint8_t *)&curTime, sizeof(curTime));
 
@@ -841,11 +861,16 @@ namespace esphome
 
     void LORATracker::sendPacketBytes(uint8_t *data, size_t len)
     {
+      this->sendPacketAt(data, len, /*not_before_us=*/0);
+    }
+
+    void LORATracker::sendPacketAt(uint8_t *data, size_t len, int64_t not_before_us)
+    {
       // Logging BEFORE the mutex, for the same reason as in firePacket.
       ESP_LOGI(TAG, "Sending packet of length %d", len);
 
       this->preparePacket(data, len);
-      this->firePacket(/*not_before_us=*/0);
+      this->firePacket(not_before_us);
     }
 
     void LORATracker::register_client(LORAClient *client)

@@ -99,16 +99,36 @@ class Queue
     // those alike would spin.
     uint8_t pop(int64_t now_us)
     {
+        int64_t ignored = 0;
+        return popDue(now_us, /*lead_us=*/0, ignored);
+    }
+
+    // pop(), but willing to release a frame `lead_us` BEFORE its instant, and
+    // reporting the instant it was scheduled for.
+    //
+    // Both halves are needed to place a frame precisely. A queue that releases
+    // a frame only once its instant has passed can never fire ON it — the
+    // caller inherits the whole prepare cost (idle, preamble, FIFO clock-in)
+    // plus a task wake, and B5's prepare/fire split has nothing to hold back.
+    // Releasing early hands the caller the slack to prepare in, and
+    // earliest_us_out is what it then fires against.
+    //
+    // earliest_us_out is 0 for a frame with no placement, which is the signal
+    // to fire immediately rather than to wait for instant zero.
+    uint8_t popDue(int64_t now_us, int64_t lead_us, int64_t &earliest_us_out)
+    {
+        earliest_us_out = 0;
         int8_t best = -1;
         for (uint8_t i = 0; i < kMaxEntries; ++i)
         {
             const Entry &e = entries_[i];
-            if (!e.used || e.earliest_us > now_us) continue;
+            if (!e.used || e.earliest_us > now_us + lead_us) continue;
             if (best < 0 || better_(e, entries_[best])) best = (int8_t) i;
         }
         if (best < 0) return kInvalidSlot;
 
         const uint8_t slot = entries_[best].slot;
+        earliest_us_out    = entries_[best].earliest_us;
         entries_[best] = Entry{};
         this->count_--;
         return slot;

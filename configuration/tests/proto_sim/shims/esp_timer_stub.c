@@ -71,6 +71,17 @@ esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer, uint64_t period_us)
     return ESP_OK;
 }
 
+// Declared in esp_timer.h since the shim was written and never defined, so any
+// test that called it failed to LINK rather than to compile — the error names
+// the test, not the missing shim, which is a slow way to find out.
+void proto_sim_timer_reset(void) {
+    for (int i = 0; i < TIMER_MAX; i++) {
+        g_timers[i].armed = 0;
+        g_timers[i].used  = 0;
+    }
+    g_now_us = 0;
+}
+
 esp_err_t esp_timer_stop(esp_timer_handle_t timer) {
     if (!timer) return ESP_ERR_INVALID_ARG;
     timer->armed = 0;

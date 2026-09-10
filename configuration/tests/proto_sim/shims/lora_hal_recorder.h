@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "esp_timer.h"   // the harness clock lora_tx is stamped against
+
 // ---------------------------------------------------------------------------
 // A recording stand-in for the SX1278 driver, so the REAL lora_tracker.cpp can
 // be compiled and linked by the host suite.
@@ -25,6 +27,7 @@ namespace lorahal {
 struct Recorder {
     std::vector<std::string>          calls;
     std::vector<std::vector<uint8_t>> packets;   // one entry per endPacket
+    std::vector<int64_t>              tx_us;     // when each of them fired
     std::vector<uint8_t>              staging;   // bytes since the last beginPacket
 
     void note(const char* fn) {
@@ -38,6 +41,11 @@ struct Recorder {
         const std::string name(fn);
         if (name == "lora_tx") {
             packets.push_back(staging);
+            // lora_tx IS the fire instant, so this is the only honest place to
+            // record WHEN a frame went out. Without it a test can assert which
+            // bytes were sent and never that they were sent on time, which is
+            // the whole of B5.
+            tx_us.push_back(esp_timer_get_time());
             staging.clear();
         } else if (name == "lora_beginPacket") {
             staging.clear();
@@ -61,7 +69,7 @@ struct Recorder {
     void queueRx(std::vector<uint8_t> frame) { inbox.push_back(std::move(frame)); }
 
     void reset() {
-        calls.clear(); packets.clear(); staging.clear(); inbox.clear();
+        calls.clear(); packets.clear(); tx_us.clear(); staging.clear(); inbox.clear();
         txdone_us = 0;
     }
 };

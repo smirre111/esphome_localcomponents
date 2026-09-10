@@ -383,9 +383,49 @@ TEST(RealTrackerTx, ADeferredFrameIsHeldAndTheWaitIsBounded) {
     EXPECT_EQ(t.nextTxEligibleUs(0), 3'000'000)
         << "and the task knows exactly how long to sleep";
 
-    EXPECT_FALSE(t.serviceTxQueue(2'999'999));
-    EXPECT_TRUE(t.serviceTxQueue(3'000'000)) << "eligible at the instant, not after";
+    // Released kPrepareLeadUs EARLY, and not one microsecond earlier than that.
+    // The lead is what firePacket then busy-waits out: a frame handed over only
+    // once its instant had passed could never be fired ON it, because the whole
+    // prepare — idle, preamble, FIFO clock-in — would still be ahead of it.
+    const int64_t lead = LORATracker::kPrepareLeadUs;
+    EXPECT_FALSE(t.serviceTxQueue(3'000'000 - lead - 1));
+    EXPECT_TRUE(t.serviceTxQueue(3'000'000 - lead))
+        << "eligible one prepare-lead before the instant, not after it";
     EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+}
+
+TEST(RealTrackerTx, APlacedFrameFiresAtItsInstantNotWhenItIsPopped) {
+    // B5's gate, end to end. preparePacket/firePacket were built, tested and
+    // then called from exactly one site with not_before_us hardcoded to 0, so
+    // the split existed and placed nothing: every frame still fired whenever
+    // the queue got round to it, carrying the full prepare cost — idle,
+    // preamble, FIFO clock-in — in front of the one register write that is the
+    // actual fire instant.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    TxProbe t;
+    t.init();
+
+    constexpr int64_t kTarget = 3'000'000;
+    const int64_t     lead    = LORATracker::kPrepareLeadUs;
+
+    auto f = tagged(0xB5);
+    TxPolicy placed;
+    placed.copies      = 1;      // a placed frame is one copy; a burst is the
+    placed.stride_ms   = 0;      // opposite construction
+    placed.earliest_us = kTarget;
+    t.send(f.data(), f.size(), placed);
+
+    // The task wakes one prepare-lead early and services the queue there. The
+    // harness clock has to agree with the instant handed in, because firePacket
+    // busy-waits against esp_timer_get_time() and delayMicroseconds advances it.
+    proto_sim_timer_set_now_us(kTarget - lead);
+    ASSERT_TRUE(t.serviceTxQueue(kTarget - lead));
+
+    ASSERT_EQ(lorahal::rec().tx_us.size(), (size_t) 1);
+    EXPECT_EQ(lorahal::rec().tx_us[0], kTarget)
+        << "the frame must leave at the instant it was placed for, not at the "
+           "instant the scheduler happened to release it";
 }
 
 TEST(RealTrackerTx, AnEligibleFrameOvertakesADeferredOneAheadOfIt) {

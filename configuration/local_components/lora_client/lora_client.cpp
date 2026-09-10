@@ -934,6 +934,24 @@ namespace esphome
         }
       }
 
+      // C2: this node's own uplink is the origin of its Class A windows, and
+      // the ONLY moment the hub can attribute the tracker's receive stamp to a
+      // particular node is right here, while the frame that produced it is the
+      // one being admitted.
+      //
+      // send_into_rx1_() used to read parent_->last_rx_t0_us() directly, 750 ms
+      // after the uplink that triggered the reply. That stamp is TRACKER-GLOBAL:
+      // one radio, one variable, overwritten by every frame from every node. On
+      // a 32-node fleet another node transmitting inside that 750 ms window is
+      // the common case, and the reply is a single copy with no burst to save
+      // it — so the hub aimed one frame at a window derived from someone else's
+      // uplink and the node heard nothing.
+      if (this->parent_ != nullptr)
+      {
+        this->last_uplink_t0_us_  = this->parent_->last_rx_t0_us();
+        this->last_uplink_unc_us_ = this->parent_->rx_stamp_uncertainty_us();
+      }
+
       return true;
     }
 
@@ -2993,7 +3011,10 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       if (this->parent_ == nullptr || buf == nullptr || len == 0)
         return false;
 
-      const int64_t t0_uplink = this->parent_->last_rx_t0_us();
+      // This node's own last uplink, captured in admit_frame_ — never the
+      // tracker's live stamp, which by now belongs to whichever node
+      // transmitted most recently.
+      const int64_t t0_uplink = this->last_uplink_t0_us_;
       if (t0_uplink <= 0)
         return false;
 
@@ -3022,7 +3043,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                     "(hub stamp +/-%u us)",
                this->get_name().c_str(), (long long) t0_uplink,
                (long long) target,
-               (unsigned) this->parent_->rx_stamp_uncertainty_us());
+               (unsigned) this->last_uplink_unc_us_);
       return true;
     }
 

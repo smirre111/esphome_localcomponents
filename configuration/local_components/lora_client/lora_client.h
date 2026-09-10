@@ -562,6 +562,14 @@ namespace esphome
       // uint32_t tx_message_id_{0};
       FrameCounter frame_counter_{0, 0};
 
+      // C2: when THIS node's most recent admitted uplink left the air (T0, the
+      // SFD end), and how uncertain that stamp is. Captured in admit_frame_,
+      // because that is the only moment the tracker's single global receive
+      // stamp is known to belong to this node. 0 = no usable origin, in which
+      // case send_into_rx1_() declines and the caller falls back to the burst.
+      int64_t  last_uplink_t0_us_{0};
+      uint32_t last_uplink_unc_us_{0};
+
       char address_str_[MAC_ADDR_STR_LEN]{}; // 18 bytes: "AA:BB:CC:DD:EE:FF\0"
 
       // Login state — cleared on every hub reboot or enterSleep(); set when the

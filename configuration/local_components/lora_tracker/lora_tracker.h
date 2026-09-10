@@ -186,8 +186,16 @@ namespace esphome
       void send(uint8_t *data, size_t len) { this->send(data, len, TxPolicy{}); }
       void send(uint8_t *data, size_t len, const TxPolicy &policy);
       void sendPacketOnce(uint8_t *data, size_t len);
+      // How early the scheduler releases a PLACED frame so the caller has time
+      // to prepare before firing. It has to cover one FreeRTOS tick of wake
+      // jitter (1 ms at the hub's CONFIG_FREERTOS_HZ = 1000) plus the SPI
+      // prepare, and it is what firePacket then busy-waits out. Well inside
+      // kMaxFireBusyWaitUs, which is the ceiling for a MISCOMPUTED instant, not
+      // a budget to spend.
+      static constexpr int64_t kPrepareLeadUs = 5000;
+
       void sendPacketBurst(uint8_t *data, size_t len, int copies = 0,
-                           uint32_t stride_ms = 0);
+                           uint32_t stride_ms = 0, int64_t not_before_us = 0);
 
       // Drift test: emit ONE copy instead of txSlotsPerRound.
       //
@@ -200,6 +208,10 @@ namespace esphome
       //
       // 0 restores the normal 17-copy burst.
       void sendPacketBytes(uint8_t *data, size_t len);
+      // sendPacketBytes with a fire instant: prepare now, fire at not_before_us.
+      // 0 means fire as soon as the payload is in the FIFO, which is what
+      // sendPacketBytes does.
+      void sendPacketAt(uint8_t *data, size_t len, int64_t not_before_us);
 
       // B5's prepare/fire split. See the banner above preparePacket in the
       // .cpp for why the radio mutex spans the pair.
