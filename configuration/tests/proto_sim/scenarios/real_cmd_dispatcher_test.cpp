@@ -3184,3 +3184,69 @@ TEST_F(RealNodeFixture, LoginItselfStaysAcceptedInPlaintext) {
     EXPECT_EQ(bn, 0x55667788u)
         << "plaintext login is the recovery path and must never be refused";
 }
+
+// ---------------------------------------------------------------------------
+// C2 — the wiring, not the arithmetic
+// ---------------------------------------------------------------------------
+//
+// ClassAWindows.h had a full test suite and noteUplinkSent() had none, which is
+// the §11a shape: the sequencing was right and what fed it was not. These three
+// pin the feed.
+
+TEST_F(RealNodeFixture, ClassAWindowsOnlyOpenForAnAutomaticModeNode) {
+    // An interactive node is awake with the free-running Mode A window, which is
+    // wider and already open. Class A exists to buy a SLEEPING node a reply
+    // without any clock agreement; taking over the shared one-shot timer for an
+    // awake node just moves its windows somewhere less useful.
+    sys.setAutoMode(false);
+    disp.noteUplinkSent(/*t_txdone_us=*/5'000'000, /*uplink_len=*/60);
+    EXPECT_FALSE(disp.classAActive())
+        << "an interactive node must not place windows off its own uplink";
+
+    sys.setAutoMode(true);
+    disp.noteUplinkSent(/*t_txdone_us=*/5'000'000, /*uplink_len=*/60);
+    EXPECT_TRUE(disp.classAActive());
+}
+
+TEST_F(RealNodeFixture, AGridBeatsClassAWindows) {
+    // Mode B's marks ARE the schedule. Both mechanisms drive the same one-shot,
+    // so letting an uplink activate Class A while a grid is adopted means
+    // whichever ran last wins and the node's mark rate collapses for reasons no
+    // beacon field explains.
+    sys.setAutoMode(true);
+    auto grid = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/900);
+    disp.onReceiveNew(grid.data(), static_cast<int>(grid.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    disp.noteUplinkSent(/*t_txdone_us=*/5'000'000, /*uplink_len=*/60);
+    EXPECT_FALSE(disp.classAActive())
+        << "a node on the hub's grid must not be pulled onto its own uplink";
+}
+
+TEST_F(RealNodeFixture, TheWindowHangsOffT0NotOffTxDone) {
+    // T0_uplink is TxDone minus the frame's OWN air time. Using TxDone directly
+    // is wrong by n_sym(len)*T_sym — 18.4 ms to 92.2 ms across this fleet's
+    // frame sizes — so short frames work and long ones fail, which reads as
+    // interference rather than as arithmetic.
+    sys.setAutoMode(true);
+    const int64_t txdone = 5'000'000;
+    disp.noteUplinkSent(txdone, /*uplink_len=*/60);
+    ASSERT_TRUE(disp.classAActive());
+
+    const int64_t t0   = classa::t0UplinkUs(txdone, 60);
+    // rx1OpenUs already carries the PROTOCOL lead (T_pre + G before the
+    // window's own T0); the lead the caller passes is the SOFTWARE one, the
+    // ~1 ms between the timer callback and the radio actually listening. Two
+    // different leads, both subtracted, exactly as Mode B does it.
+    const int64_t open = classa::rx1OpenUs(t0);
+    const int64_t kSoftwareLeadUs = 1000;
+    const int64_t now   = t0 + 100'000;
+    const int64_t delay = disp.classAArmDelayUs(now, kSoftwareLeadUs);
+    EXPECT_EQ(now + delay + kSoftwareLeadUs, open)
+        << "the arm must be placed from T0_uplink, not from TxDone";
+
+    // And the same length dependence, stated as the failure it caused.
+    EXPECT_NE(t0, classa::t0UplinkUs(txdone, 20))
+        << "T0 must depend on the frame length, or the error is invisible until "
+           "a long frame is sent";
+}
