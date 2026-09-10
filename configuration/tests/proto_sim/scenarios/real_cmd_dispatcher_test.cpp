@@ -3250,3 +3250,30 @@ TEST_F(RealNodeFixture, TheWindowHangsOffT0NotOffTxDone) {
         << "T0 must depend on the frame length, or the error is invisible until "
            "a long frame is sent";
 }
+
+TEST_F(RealNodeFixture, TheClassASequenceStopsBeingActiveWhenItIsOver) {
+    // "Active" has to mean "there is a window still to open". It used to stay
+    // true until the next uplink, so every Mode A window that received anything
+    // — for hours — was reported into a finished sequence, and armNextRxWindow
+    // kept taking the Class A branch first and relied on a delay of zero to
+    // fall through to the mode that actually applied. Both worked. Neither was
+    // true, and a state that lies is the thing every other bug in this file
+    // grew out of.
+    sys.setAutoMode(true);
+    disp.noteUplinkSent(/*t_txdone_us=*/5'000'000, /*uplink_len=*/60);
+    ASSERT_TRUE(disp.classAActive());
+
+    // RX1 heard something: the reply arrived, so RX2 is pointless and the
+    // sequence is done.
+    disp.noteClassAWindowResult(/*had_data=*/true);
+    EXPECT_FALSE(disp.classAActive())
+        << "a reply in RX1 ends the sequence";
+
+    // The other path: RX1 empty leaves RX2 to open, and only then is it over.
+    disp.noteUplinkSent(/*t_txdone_us=*/9'000'000, /*uplink_len=*/60);
+    ASSERT_TRUE(disp.classAActive());
+    disp.noteClassAWindowResult(/*had_data=*/false);
+    EXPECT_TRUE(disp.classAActive()) << "RX2 is still to come";
+    disp.noteClassAWindowResult(/*had_data=*/false);
+    EXPECT_FALSE(disp.classAActive()) << "and after RX2 there is nothing left";
+}
