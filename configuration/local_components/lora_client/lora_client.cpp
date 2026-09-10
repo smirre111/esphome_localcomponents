@@ -1671,32 +1671,42 @@ namespace esphome
       }
       this->op_sent_single_shot_ = single_shot;
 
-      // The next mark that is CLEAR of the hub's own burst, not simply the next
-      // mark. A 17-copy burst denies 31 of the 32 slots in its round (measured;
-      // section 4.5), so aiming at the next T0 would place this frame inside a
-      // burst roughly whenever one is running — the node would hear the burst
-      // it is not addressed by and nothing it is.
-      const uint32_t delay_ms =
-          this->grid_aligned_ ? this->parent_->msUntilNextClearT0(this->grid_slot_)
-                              : 0u;
-
-      if (delay_ms == 0)
+      if (!this->grid_aligned_ || !this->parent_->gridStarted())
       {
         this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
         return;
       }
 
-      std::vector<uint8_t> owned(buf, buf + len);
-      ESP_LOGD(TAG, "[%s] deferring %u B to slot %u T0 in %u ms",
-               this->get_name().c_str(), (unsigned) len,
-               (unsigned) this->grid_slot_, (unsigned) delay_ms);
+      // The next mark that is CLEAR of the hub's own burst, not simply the next
+      // mark. A 17-copy burst denies 31 of the 32 slots in its round (measured;
+      // section 4.5), so aiming at the next T0 would place this frame inside a
+      // burst roughly whenever one is running — the node would hear the burst
+      // it is not addressed by and nothing it is.
+      //
+      // Handed to the TRANSMIT QUEUE as earliest_us rather than held here in an
+      // ESPHome timeout. Two reasons, and the second is the one that mattered:
+      //
+      //   * The queue owns the radio, so it can FIRE at the mark (B5's
+      //     prepare/fire split) instead of merely handing the frame over near
+      //     it. A set_timeout could only ever deliver it to the back of the
+      //     queue at roughly the right time.
+      //   * The named timeout meant a second command for the same node before
+      //     the first had fired REPLACED it — a dropped command, silently,
+      //     whenever two arrived inside one round. Placing the second at the
+      //     FOLLOWING mark keeps both: one frame per mark is the invariant that
+      //     was wanted, and dropping was never the way to get it.
+      const int64_t now = esp_timer_get_time();
+      int64_t t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now);
+      if (t0 <= this->last_placed_t0_us_)
+        t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_,
+                                                 this->last_placed_t0_us_ + 1);
+      this->last_placed_t0_us_ = t0;
 
-      // Named timeout: a second command for the same node before the first has
-      // fired replaces it rather than queueing two frames into one slot.
-      this->set_timeout("grid_tx", delay_ms,
-                        [this, owned = std::move(owned), policy]() mutable {
-                          this->parent_->send(owned.data(), owned.size(), policy);
-                        });
+      policy.earliest_us = t0;
+      ESP_LOGD(TAG, "[%s] placing %u B at slot %u T0, %lld ms out",
+               this->get_name().c_str(), (unsigned) len,
+               (unsigned) this->grid_slot_, (long long) ((t0 - now) / 1000));
+      this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
     }
 
     uint32_t LORAListener::tx_tracked_op_()

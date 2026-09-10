@@ -438,6 +438,10 @@ namespace esphome
       // Rule 4 bounds the exposure to ONE frame: the first retry of a single
       // shot puts the node back on bursts until it is confirmed again.
       bool     op_sent_single_shot_{false};
+      // The mark the last placed downlink for this node was aimed at, so a
+      // second command inside the same round goes to the FOLLOWING mark instead
+      // of on top of the first. 0 = nothing placed yet.
+      int64_t  last_placed_t0_us_{0};
 
       bool     drift_test_active_{false};
       uint32_t drift_test_duration_s_{0};

@@ -1541,18 +1541,46 @@ TEST(GridAligned, WithAlignmentOnTheFrameIsDeferredToT0) {
     h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
 
     uint8_t frame[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    const size_t before = h.tracker.sent_copies.size();
     h.rol.send_aligned_for_test(frame, sizeof(frame));
 
-    if (h.tracker.msUntilNextT0(h.rol.grid_slot()) == 0) {
-        EXPECT_EQ(h.tracker.sent_copies.size(), before + 1u);
-    } else {
-        EXPECT_EQ(h.tracker.sent_copies.size(), before)
-            << "an aligned frame must wait for its slot";
-        h.clock.tick(2000);   // past any slot T0 in the round
-        EXPECT_GT(h.tracker.sent_copies.size(), before)
-            << "and must actually go out once the slot arrives";
-    }
+    // The frame is handed to the transmit queue IMMEDIATELY, carrying the mark
+    // it is to be fired at. It used to be held here in an ESPHome timeout and
+    // handed over near the right time, which could only ever deliver it to the
+    // back of the queue — the queue owns the radio, so only the queue can fire
+    // it ON the mark (B5). What "deferred" means, therefore, is the instant
+    // that travels with it, not whether send() has been called yet.
+    const int64_t expected =
+        h.tracker.nextClearT0ForSlotUs(h.rol.grid_slot(), h.tracker.sim_now_us);
+    EXPECT_EQ(h.tracker.last_earliest_us, expected)
+        << "an aligned frame must be placed at its own next clear mark";
+    EXPECT_GT(h.tracker.last_earliest_us, h.tracker.sim_now_us)
+        << "and that mark must be in the future, or nothing was placed at all";
+}
+
+TEST(GridAligned, ASecondCommandInTheSameRoundGoesToTheNextMark) {
+    // The old deferral was a NAMED ESPHome timeout, so a second command for the
+    // same node before the first had fired replaced it: a dropped command,
+    // silently, whenever two arrived inside one round. One frame per mark was
+    // the right invariant; dropping was never the way to get it.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
+
+    uint8_t first[4] = {1, 2, 3, 4};
+    h.rol.send_aligned_for_test(first, sizeof(first));
+    const int64_t mark1 = h.tracker.last_earliest_us;
+
+    uint8_t second[4] = {5, 6, 7, 8};
+    h.rol.send_aligned_for_test(second, sizeof(second));
+    const int64_t mark2 = h.tracker.last_earliest_us;
+
+    EXPECT_EQ(h.tracker.sent_copies.size(), (size_t) 2)
+        << "both commands must reach the radio; neither may be replaced";
+    EXPECT_GT(mark2, mark1) << "the second must be placed at a LATER mark";
+    EXPECT_EQ(mark2 - mark1, (int64_t) timedgrid::kRoundUs)
+        << "and the next mark for this node is exactly one round on";
 }
 
 TEST(GridAligned, TheDeferredFrameSurvivesTheCallersFree) {

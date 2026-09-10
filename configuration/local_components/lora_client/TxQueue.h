@@ -177,6 +177,19 @@ class Queue
 //
 // A burst occupies 1450 ms and sendTask then blocks a further 400 ms — 1850 ms
 // against a 1500 ms round — so one round is not enough to clear it.
+//
+// SUPERSEDED IN PRACTICE, and kept for the reasoning rather than the number.
+// LORATracker::nextClearT0ForSlotUs() answers the same question from the
+// MEASURED busy instant — burst_busy_until_us_, which already includes the last
+// copy's air time and the response window — and lands the frame on the node's
+// own next clear mark instead of on a fixed two-round approximation of it.
+// send_aligned_() calls that, so every placed downlink is already deferred past
+// a running burst.
+//
+// Deliberately NOT given a caller to close the §11a row: a producer that
+// deferred by a fixed two rounds where a measured instant is available would be
+// worse than the code it replaced, and "has a caller" was never the point of
+// that list. The rule is implemented; this is the derivation.
 static constexpr uint32_t kDeferRounds = 2;
 
 constexpr int64_t deferUntilUs(int64_t now_us, uint32_t round_us)
