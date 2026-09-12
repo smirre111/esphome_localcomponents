@@ -319,6 +319,31 @@ button:
       # exactly the round and phase-locked to the node's slot. That is the mode.
       - lambda: 'id(rol_2)->start_mode_test(300, 1500, 2, 1, true, false, false, true);'
   - platform: template
+    name: "Mode Test B — bootstrap burst (node 2)"
+    id: rol_2_modetest_b_burst
+    entity_category: diagnostic
+    on_press:
+      # EIGHT COPIES, and the reason is the measurement of 2026-09-12.
+      #
+      # A node that is not yet promoted listens on a FREE-RUNNING 500 ms window,
+      # and every grid-placed frame sits at a multiple of the 1500 ms round —
+      # so gcd(1500, 500) = 500 and the marks occupy exactly ONE phase mod 500,
+      # forever. Against a 29.44 ms window that is a ~5.9 % chance of the phase
+      # being catchable at all, and if it is not, the node hears no mark for the
+      # whole run: single-copy Mode B measured `detected 2` in 300 s and
+      # returned windows 0/0.
+      #
+      # Eight copies at the 88 ms stride span ~704 ms, which is longer than the
+      # 500 ms window period, so at least one copy ALWAYS lands in a window
+      # whatever the phase. The node backs the copy index out
+      # (drift::kCopySpacingUs) and recovers copy 0's T0, so a caught copy is
+      # still a sample about the MARK — that path exists for exactly this case.
+      #
+      # This is the bootstrap instrument, not a production setting: it is how a
+      # cold node accumulates the 8 in-guard phase samples
+      # phaseTrustworthy() needs before timedRxActive() will arm anything.
+      - lambda: 'id(rol_2)->start_mode_test(300, 1500, 2, 8, true, false, false, true);'
+  - platform: template
     name: "Mode Test Stop (node 2)"
     id: rol_2_modetest_stop
     entity_category: diagnostic
