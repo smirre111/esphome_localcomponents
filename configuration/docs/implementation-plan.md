@@ -1811,3 +1811,64 @@ or a meter, and 12.6 is a deployment decision rather than a measurement.
    nowhere.
 9. **The hub's `CONFIG_FREERTOS_HZ`.** §10 correctly notes 88 ms is consistent
    with 1000/500/250/125 Hz, but §2.3 quotes the 1 ms hub figure as fact.
+   **NODE HALF MEASURED 2026-09-12: 100 Hz, with the CPU at 240 MHz under the
+   production profile.** The hub half is still open and the procedure written
+   for it cannot close it — `ModeTestReport.tickRateHz` is a field the NODE
+   fills, so no `ModeTest` run can report the hub's rate. It needs an
+   observable that does not exist yet.
+
+---
+
+### 12a. Measured 2026-09-12 — session 1
+
+The first hardware numbers this project has had. Recorded here rather than
+appended to the items above where they replace an assumption outright.
+
+**The node's receive duty cycle: 5.4–6.5 %, against 5.888 % predicted.**
+Stated throughout as "~29 ms every 500 ms, a 5.9 % duty cycle" with no
+measurement behind it. `kWindowUs`/`rxInterval` = 29440/500000 = 5.888 %;
+measured 15 catches of 279 marks (5.4 % across all marks, 6.47 % across the
+observed `seq` span), at RSSI −36 / SNR 5.5, every caught frame passing CRC,
+address and MIC. The §4.x battery arithmetic that rests on this figure stands.
+
+**Phase-locking is governed by the gcd, not by divisibility — and two periods
+in this design had it wrong in the same way.** Marks land at
+`(k · period) mod interval`, a lattice of step `gcd(period, interval)` holding
+`interval/gcd` phases, fixed for the life of the run. A lattice of step `g`
+intersects every window of width `w` regardless of offset only when `g ≤ w`.
+
+| where | was | gcd | result |
+|---|---|---|---|
+| ModeTest Mode A grid | 1100 ms, believed safe | 100 ms | 5 fixed phases — **277 marks, 1 heard (0.36 %)** |
+| node free-running listen | 1500/3 = 500 ms | 500 ms | 1 fixed phase — **1689 sent, 1 heard (0.06 %)** |
+
+Both now enforced: `ModeTestPolicy.h`'s `periodsPhaseLock` refuses the first,
+and a `static_assert` on `gcd(round, interval) ≤ kWindowUs` refuses the second.
+Grid period moved to 1093 ms (gcd 1 ms); listen interval to 470 ms (gcd 10 ms,
+duty 5.9 % → 6.3 %, paid only by nodes not yet promoted).
+
+**Bursting does not defeat a fixed listening phase.** Copies are discrete
+events one 88 ms stride apart, not a contiguous transmission, so a 29.44 ms
+window parked in an inter-copy gap stays there however many copies are sent.
+This was tested directly at 8 copies and is why §12.8 could not be attempted.
+
+**§12.8 (HW-8) did not fail — it could not run**, and the distinction matters
+because a failure there would have condemned the ARM mechanism. Mode B reported
+`windows 0/0` with `oneShot n 0`: no window armed, so no one-shot fired, so the
+histogram has no samples. The chain was `phaseErr n 1 = 346 288 µs` against a
+±14 080 µs guard → `phaseTrustworthy()` false → `timedRxActive()` false. Two
+causes, both now understood: the listening phase above, and phase samples being
+committed for **any** addressed frame rather than only for frames placed on a
+mark (a bursted ScheduleConfig is measured against the nearest mark, error
+bounded only by half a round, and `outside_guard` is a latch — so one unplaced
+frame poisons promotion permanently). The second is **not yet fixed**: the
+obvious gate breaks 13 tests that encode the current contract, because the
+burst-copy back-out exists precisely to sample bursted frames. It needs a
+decision about whether the hub must *place* every downlink while a grid runs
+(B1's gate says it should) or the node must distinguish placed from unplaced.
+
+**Four defects sat in front of the ten measurements**, each invisible to the
+host suite: `setRtcSlowSrc()` had no caller anywhere, so Mode B had never been
+reachable on hardware; a provisioned node and a freshly flashed hub deadlocked
+REGISTER against LoginMsg indefinitely; and the two gcd errors above. See
+`bench-runbook.md` for the operational detail.
