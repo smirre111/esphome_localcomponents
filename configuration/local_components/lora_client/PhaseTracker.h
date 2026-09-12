@@ -40,6 +40,34 @@ namespace phase
 // hear anything.
 enum class RtcSlowSrc : uint8_t { Unknown = 0, InternalRc = 1, Crystal = 2, Ext8MD256 = 3 };
 
+// Map the SoC's own RTC-slow mux value onto the enum above.
+//
+// THE TWO ENUMERATIONS DO NOT AGREE, and a cast is therefore a live bug rather
+// than a shortcut. ESP-IDF's soc_rtc_slow_clk_src_t (soc/clk_tree_defs.h) is
+// numbered to match the register field:
+//
+//     RC_SLOW = 0    XTAL32K = 1    RC_FAST_D256 = 2
+//
+// while RtcSlowSrc above is numbered for the wire. So a cast turns XTAL32K
+// into InternalRc, and — the dangerous direction — RC_FAST_D256 into Crystal.
+// That second one reports rtcSlowSrc = 2 to the hub, passes every gate that
+// asks for the crystal, and runs Mode B on a divided internal oscillator: the
+// exact failure the gate exists to prevent, wearing the gate's own pass value.
+//
+// Takes a plain integer rather than the IDF type so this header stays
+// dependency-free and the mapping is testable on the host, where neither the
+// IDF enum nor the register exists.
+constexpr RtcSlowSrc rtcSlowSrcFromSocValue(uint8_t soc_value)
+{
+    switch (soc_value)
+    {
+        case 0:  return RtcSlowSrc::InternalRc;   // SOC_RTC_SLOW_CLK_SRC_RC_SLOW
+        case 1:  return RtcSlowSrc::Crystal;      // SOC_RTC_SLOW_CLK_SRC_XTAL32K
+        case 2:  return RtcSlowSrc::Ext8MD256;    // SOC_RTC_SLOW_CLK_SRC_RC_FAST_D256
+        default: return RtcSlowSrc::Unknown;      // incl. SOC_RTC_SLOW_CLK_SRC_INVALID
+    }
+}
+
 struct Sample
 {
     int64_t t0_measured_us{0};   // recovered SFD end, node clock

@@ -121,3 +121,56 @@ TEST(PhaseTracker, RtcSourceGatesModeBAndUnknownIsNotTheCrystal) {
     EXPECT_NE(RtcSlowSrc::Unknown, RtcSlowSrc::Crystal);
     EXPECT_NE(RtcSlowSrc::InternalRc, RtcSlowSrc::Crystal);
 }
+
+// --------------------------------------------------------------------------
+// rtcSlowSrcFromSocValue — the SoC mux value is NOT the wire value.
+//
+// These exist because the field had no producer at all: setRtcSlowSrc() was
+// never called, rtc_slow_src_ stayed Unknown, and Mode B was unreachable on
+// every real board. The obvious fix — cast the IDF enum — is a worse bug than
+// the one it fixes, and the third case below is the one that matters.
+// --------------------------------------------------------------------------
+
+TEST(RtcSlowSrcMapping, TheCrystalIsSocValueOneNotTwo) {
+    // SOC_RTC_SLOW_CLK_SRC_XTAL32K == 1. A cast would call this InternalRc and
+    // gate Mode B off on a board that is correctly populated.
+    EXPECT_EQ(rtcSlowSrcFromSocValue(1), RtcSlowSrc::Crystal);
+    EXPECT_NE(rtcSlowSrcFromSocValue(1), RtcSlowSrc::InternalRc);
+}
+
+TEST(RtcSlowSrcMapping, SocValueZeroIsTheInternalRc) {
+    // SOC_RTC_SLOW_CLK_SRC_RC_SLOW == 0, which a cast would read as Unknown.
+    // Both gate Mode B off, so this one is cosmetic — but it is the value a
+    // board whose crystal failed to start actually reports, and calling it
+    // "unknown" would send a bench session looking for a missing report
+    // instead of a dead crystal.
+    EXPECT_EQ(rtcSlowSrcFromSocValue(0), RtcSlowSrc::InternalRc);
+}
+
+TEST(RtcSlowSrcMapping, RcFastD256IsNeverMistakenForTheCrystal) {
+    // THE DANGEROUS ONE. SOC_RTC_SLOW_CLK_SRC_RC_FAST_D256 == 2, and
+    // RtcSlowSrc::Crystal == 2. A cast reports the divided internal
+    // oscillator to the hub as the external crystal, passes every gate that
+    // asks for the crystal, and runs Mode B on a ~5 % clock — while the
+    // diagnostic entity reads the exact value that means "healthy".
+    EXPECT_EQ(rtcSlowSrcFromSocValue(2), RtcSlowSrc::Ext8MD256);
+    EXPECT_NE(rtcSlowSrcFromSocValue(2), RtcSlowSrc::Crystal);
+}
+
+TEST(RtcSlowSrcMapping, AnUnrecognisedMuxValueFailsClosed) {
+    // SOC_RTC_SLOW_CLK_SRC_INVALID and anything past it. Unknown is not the
+    // crystal, so Mode B stays off rather than running on a clock nobody
+    // identified.
+    EXPECT_EQ(rtcSlowSrcFromSocValue(3), RtcSlowSrc::Unknown);
+    EXPECT_EQ(rtcSlowSrcFromSocValue(255), RtcSlowSrc::Unknown);
+    EXPECT_NE(rtcSlowSrcFromSocValue(3), RtcSlowSrc::Crystal);
+}
+
+TEST(RtcSlowSrcMapping, OnlyOneSocValueEverUnlocksModeB) {
+    // The whole point of the gate: exactly one mux reading may promote.
+    int crystal_count = 0;
+    for (int v = 0; v <= 255; ++v)
+        if (rtcSlowSrcFromSocValue(static_cast<uint8_t>(v)) == RtcSlowSrc::Crystal)
+            ++crystal_count;
+    EXPECT_EQ(crystal_count, 1);
+}
