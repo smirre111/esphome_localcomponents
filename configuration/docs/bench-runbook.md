@@ -1,6 +1,7 @@
 # Bench runbook — the ten hardware measurements
 
 **Operational companion to `test-plan.md` §10.6 and `implementation-plan.md` §12.**
+**To start the session that runs this: `bench-session-prompt.md`.**
 Those two say *what* each measurement is and *why* it matters, and they remain
 authoritative on both. This document says **what to do at the bench, in what
 order, and what result closes the item.** It adds no new claims about the
