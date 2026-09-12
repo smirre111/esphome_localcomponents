@@ -2231,7 +2231,7 @@ TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
     op.header = &hdr;
 
     DriftTest dt = DRIFT_TEST__INIT;
-    dt.enable = true; dt.durations = 60; dt.gridperiodms = 1100;
+    dt.enable = true; dt.durations = 60; dt.gridperiodms = 1093;
     op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST;
     op.drifttest = &dt;
 
@@ -3474,7 +3474,7 @@ std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgi
 }
 
 std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
-                                         uint32_t grid_period_ms = 1100) {
+                                         uint32_t grid_period_ms = 1093) {
     ModeTest mt = MODE_TEST__INIT;
     mt.enable           = true;
     mt.durations        = 60;
@@ -3500,7 +3500,7 @@ std::vector<uint8_t> encrypted_mode_test_default_profile(uint32_t msgid) {
     mt.enable       = true;
     mt.durations    = 60;
     mt.mode         = MODE_TEST__MODE__MODE_A;
-    mt.gridperiodms = 1100;
+    mt.gridperiodms = 1093;
     mt.copies       = 1;
     // droppowerprofile deliberately NOT set.
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -4281,7 +4281,7 @@ TEST_F(RealNodeFixture, DroppingThePowerProfileIsAnExplicitAct) {
     mt.enable           = true;
     mt.durations        = 60;
     mt.mode             = MODE_TEST__MODE__MODE_A;
-    mt.gridperiodms     = 1100;
+    mt.gridperiodms     = 1093;
     mt.copies           = 1;
     mt.droppowerprofile = true;
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;

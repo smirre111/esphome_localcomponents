@@ -280,16 +280,22 @@ button:
     id: rol_2_modetest_a
     entity_category: diagnostic
     on_press:
-      # 1100 ms for the same reason as the drift test: a period commensurate
-      # with the node's 500 ms RX interval phase-locks, and a frame that lands
-      # in an RX-off gap does so forever. The node REJECTS a commensurate period
-      # in MODE_A rather than letting this be rediscovered.
+      # 1093 ms, NOT 1100. MEASURED 2026-09-12: at 1100 ms the hub sent 277
+      # marks and the node detected ONE. Phase-locking is governed by the gcd,
+      # not by divisibility — marks land at (k * grid) mod 500, a lattice of
+      # step gcd(grid, 500) that never grows. 1100 gives gcd 100 ms, i.e. five
+      # fixed phases forever; against a 29.44 ms window they cover 147 ms of
+      # the 500 ms interval, so ~71 % of runs hear nothing at all and the rest
+      # hear 1 mark in 5. 1093 gives gcd 1 ms: the phase walks 93 ms per mark
+      # and sweeps every residue. The node now REFUSES the phase-locked case
+      # (ModeTestPolicy.h periodsPhaseLock) instead of measuring an empty
+      # denominator.
       #
       # Both sublayers off and macEcho on: this is the baseline every other run
       # is a delta against. A MAC echo measures RxDone -> TX fire and nothing
       # else, which is what section 4.3's servable-slot rule needs and cannot
       # get from a command the application answers.
-      - lambda: 'id(rol_2)->start_mode_test(300, 1100, 1, 1, true, false, false, true);'
+      - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, false, false, true);'
   - platform: template
     name: "Mode Test A — with MAC-1 counter (node 2)"
     id: rol_2_modetest_a_counter
@@ -297,13 +303,13 @@ button:
     on_press:
       # Identical grid, counter ON. The DIFFERENCE against the baseline is
       # MAC-1's cost — measured, not estimated. Run them back to back.
-      - lambda: 'id(rol_2)->start_mode_test(300, 1100, 1, 1, true, true, false, true);'
+      - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, true, false, true);'
   - platform: template
     name: "Mode Test A — with MAC-1 + MAC-2 (node 2)"
     id: rol_2_modetest_a_crypto
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_mode_test(300, 1100, 1, 1, true, true, true, true);'
+      - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, true, true, true);'
   - platform: template
     name: "Mode Test B — timed windows (node 2)"
     id: rol_2_modetest_b

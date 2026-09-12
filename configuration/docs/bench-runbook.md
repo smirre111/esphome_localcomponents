@@ -7,9 +7,37 @@ authoritative on both. This document says **what to do at the bench, in what
 order, and what result closes the item.** It adds no new claims about the
 design; where a number is a gate, the gate is quoted from the plan.
 
-**Everything below is unmeasured.** The host suite is green at 927 and says
-nothing about a roof. Ten items are open, of which one is not a measurement at
-all (HW-6) and two need an external instrument (HW-1's mean, HW-4).
+**Session 1 ran 2026-09-12.** The host suite is green at 937. Ten items are
+open, of which one is not a measurement at all (HW-6) and two need an external
+instrument (HW-1's mean, HW-4).
+
+**Four defects sat in front of the ten**, each invisible to the host suite:
+
+1. **`setRtcSlowSrc()` had no caller anywhere in the firmware**, so
+   `rtc_slow_src_` stayed `Unknown` on every build ever made ->
+   `Demotion::BadClockSource` -> `timedRxActive()` false. **Mode B had never
+   once been reachable on hardware.** It failed closed, which is why nothing
+   ever reported it.
+2. **A provisioned node and a freshly flashed hub deadlock**, trading REGISTER
+   against LoginMsg forever at RSSI -36. A hub reflash creates that state every
+   time, and no measurement can run without a session.
+3. **1100 ms is phase-locked too** — see the grid-period rule in section 2.
+   Measured: 277 marks sent, `detected 1`.
+4. **Phase samples are committed for ANY addressed frame**, not only for frames
+   that arrived on a mark, and `outside_guard` is a LATCH. One bursted
+   ScheduleConfig yields a sample up to +/-750 ms out and poisons
+   `phaseTrustworthy()` permanently. This is why HW-8 returned `windows 0/0`
+   with `oneShot n 0`.
+
+**Numbers now measured rather than assumed:**
+
+| quantity | was | measured |
+|---|---|---|
+| node RX duty cycle | "~29 ms every 500 ms, a 5.9 % duty cycle" — never measured | **5.4-6.5 %**: 15 of 279 marks at a swept period, against 29440/500000 = 5.888 % predicted |
+| `rtcSlowSrc` | asserted from the schematic | **2**, external crystal, from the beacon |
+| node `CONFIG_FREERTOS_HZ` | 100 expected | **100 Hz** confirmed |
+| node CPU, production profile | 240 MHz assumed | **240 MHz** confirmed |
+| link margin, bench distance | unmeasured | **RSSI -36 dBm, SNR 5.5-5.75 dB**, and every detected frame passed CRC, address and MIC |
 
 ---
 
@@ -109,7 +137,7 @@ bench unit).
 
 | Button | What it runs |
 |---|---|
-| Mode Test A — MAC-0 baseline | `(300, 1100, 1, 1, true, false, false, true)` — the delta every other run is measured against |
+| Mode Test A — MAC-0 baseline | `(300, 1093, 1, 1, true, false, false, true)` — the delta every other run is measured against. **1093, not 1100** — see the grid-period rule below |
 | Mode Test A — with MAC-1 counter | same grid, counter on. **Run back to back with the baseline**; the difference is MAC-1's cost |
 | Mode Test A — with MAC-1 + MAC-2 | adds crypto |
 | Mode Test B — timed windows | `(300, 1500, 2, ...)` |
@@ -118,10 +146,27 @@ bench unit).
 
 **Two grid-period rules that are not interchangeable**, and the node enforces
 both:
-- **Mode A: 1100 ms, never 1500.** A period commensurate with the node's 500 ms
-  RX interval phase-locks, and a frame landing in an RX-off gap does so
-  *forever*. The node rejects a commensurate period in `MODE_A` rather than let
-  this be rediscovered.
+- **Mode A: 1093 ms. NOT 1100 — that was wrong, and measured to be wrong.**
+  A period phase-locked against the node's 500 ms RX interval means a frame
+  landing in an RX-off gap does so *forever*. The old rule tested
+  divisibility, so 1100 passed it and was documented as the safe value. The
+  governing quantity is the **gcd**: marks land at `(k · grid) mod 500`, a
+  lattice of step `gcd(grid, 500)` holding `500/gcd` phases, fixed for the
+  life of the run.
+
+  | grid | gcd | distinct phases | measured |
+  |---|---|---|---|
+  | 1000 ms | 500 ms | 1 | ~300 sent, 0 heard (historic) |
+  | **1100 ms** | 100 ms | 5 | **277 sent, `detected 1` (0.36 %)** |
+  | **1093 ms** | 1 ms | 500 (sweeps) | **279 sent, `detected 15` (5.4 %)** |
+
+  Five phases 100 ms apart against a 29.44 ms window cover 147 ms of the
+  500 ms interval, so whether *any* mark is ever heard is decided by a
+  boot-time offset — about 71 % of runs at 1100 ms hear nothing at all.
+  The condition for a lattice of step `g` to intersect every window of width
+  `w` regardless of offset is `g ≤ w`, and that is now what the node
+  enforces (`ModeTestPolicy.h`'s `periodsPhaseLock`, against
+  `NodeContext::rx_window_us`). 1100 ms is refused.
 - **Mode B: exactly the round (1500 ms), phase-locked to the node's slot.** In
   Mode B the rule inverts — that alignment *is* the mode.
 
@@ -166,11 +211,20 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
 ## 3. The runs
 
 ### HW-9 — hub tick rate (confirmation, free)
-1. Boot both ends; read `tickRateHz` from the ModeTest report of any run.
-2. **Closes when** the hub reports 1000, matching the pinned value in
-   `loradevices.yml`. The node's is `CONFIG_FREERTOS_HZ=100` and is the reason
-   `lora_reset()`'s `pdMS_TO_TICKS(1)` was zero ticks — expect 100 there and do
-   not "fix" it.
+**NODE HALF CLOSED. The procedure below was wrong and is struck through.**
+
+1. ~~Boot both ends; read `tickRateHz` from the ModeTest report of any run.~~
+   `ModeTestReport.tickRateHz` is a field the **NODE** fills, so no ModeTest
+   run can report the hub's tick rate. HW-9 as written cannot close the hub
+   half at all.
+2. **Node half: CLOSED 2026-09-12** — `tick 100 Hz cpu 240 MHz`.
+   `CONFIG_FREERTOS_HZ=100` is the reason `lora_reset()`'s `pdMS_TO_TICKS(1)`
+   was zero ticks — expect 100 there and do not "fix" it. The 240 MHz
+   separately confirms the production profile's pinned CPU frequency.
+3. **Hub half: still open**, and it needs an observable that does not exist
+   yet — the hub's own `configTICK_RATE_HZ` at boot, through `dump_config()`
+   or a diagnostic entity. The value is pinned in `loradevices.yml`; what is
+   unconfirmed is that the build honours the pin.
 
 ### HW-10 — hub RX-stamp uncertainty (an hour, no setup)
 1. Run an ordinary traffic mix for an hour. No special mode.

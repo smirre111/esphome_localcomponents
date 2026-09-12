@@ -77,12 +77,62 @@ constexpr uint32_t testDurationS(uint32_t requested)
 // to the node's slot; that IS the mode. So the rule applies to MODE_A and
 // MODE_SWEEP only, and it is enforced at arm time rather than left for an
 // operator to rediscover.
-constexpr bool periodsAreCommensurate(uint32_t grid_period_ms, uint32_t rx_interval_ms)
+//
+// MEASURED 2026-09-12, and it refutes the paragraph above. The old test was
+// `(a % b) == 0` — divisibility — and 1100 ms passes it, which is why 1100 was
+// believed safe. It is not. Phase-locking is governed by the GCD, not by
+// divisibility.
+//
+// Mark k lands at phase (k * grid) mod rx_interval. Those phases form a lattice
+// of step g = gcd(grid, rx_interval), with exactly rx_interval/g distinct
+// values, and that set NEVER GROWS — it is fixed for the life of the run
+// whatever the anchor. So:
+//
+//   grid 1000, rx 500 -> g = 500 -> 1 phase    (the observed "300 sent, 0 heard")
+//   grid 1100, rx 500 -> g = 100 -> 5 phases   (believed safe; it is not)
+//   grid 1093, rx 500 -> g = 1   -> 500 phases (sweeps, which is what is wanted)
+//
+// A window is kWindowUs = 29 440 us wide out of a 500 ms interval. For a mark
+// to be heard, some lattice phase must fall INSIDE that window, and whether one
+// does depends on an arbitrary boot-time offset. At g = 100 ms the 5 phases
+// cover 5 x 29.44 = 147 ms of the 500 ms interval, so roughly 71 % of runs hear
+// NOTHING AT ALL — which is exactly what the bench measured: 277 marks sent,
+// `detected 1`.
+//
+// The condition for a lattice of step g to intersect EVERY window of width w,
+// regardless of offset, is g <= w. So the test is the gcd against the window,
+// and the window has to be passed in rather than assumed — this header stays
+// independent of the grid geometry (see the kSymbolTimeoutSymbols note in
+// TimedGrid.h, which is where a widened window would change it).
+constexpr uint32_t gcdU32(uint32_t a, uint32_t b)
+{
+    while (b != 0)
+    {
+        const uint32_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+constexpr bool periodsPhaseLock(uint32_t grid_period_ms, uint32_t rx_interval_ms,
+                                uint32_t window_us)
 {
     if (grid_period_ms == 0 || rx_interval_ms == 0) return false;
-    const uint32_t a = (grid_period_ms > rx_interval_ms) ? grid_period_ms : rx_interval_ms;
-    const uint32_t b = (grid_period_ms > rx_interval_ms) ? rx_interval_ms : grid_period_ms;
-    return (a % b) == 0;
+    // Microseconds throughout: a gcd taken in milliseconds cannot be compared
+    // against a window expressed in microseconds, and the window is 29.44 ms —
+    // not a whole number of milliseconds.
+    const uint32_t g_us = gcdU32(grid_period_ms * 1000u, rx_interval_ms * 1000u);
+    return g_us > window_us;
+}
+
+// Kept as the old NAME so no caller silently changes meaning, but it now asks
+// the right question. Divisibility was a special case of it: a % b == 0 implies
+// gcd == b == rx_interval, which is far larger than any window.
+constexpr bool periodsAreCommensurate(uint32_t grid_period_ms, uint32_t rx_interval_ms,
+                                      uint32_t window_us)
+{
+    return periodsPhaseLock(grid_period_ms, rx_interval_ms, window_us);
 }
 
 constexpr bool periodMattersFor(Mode m)
@@ -180,6 +230,11 @@ struct NodeContext {
     bool     has_adopted_grid{false};
     uint32_t battery_mv{4000};
     uint32_t rx_interval_ms{500};
+    // The RX window width, so periodsPhaseLock can compare a gcd against it.
+    // Passed in rather than included, because this header is dependency-free on
+    // purpose and the window lives in TimedGrid.h (kWindowUs = 29 440 us, and
+    // a widened kSymbolTimeoutSymbols would change it).
+    uint32_t rx_window_us{29440};
 };
 
 // The request, as far as the decision is concerned.
@@ -224,7 +279,8 @@ constexpr ArmRefusal armRefusal(const Request &r, const NodeContext &ctx)
     if (periodMattersFor(r.mode))
     {
         if (r.grid_period_ms == 0)              return ArmRefusal::NoGridPeriod;
-        if (periodsAreCommensurate(r.grid_period_ms, ctx.rx_interval_ms))
+        if (periodsAreCommensurate(r.grid_period_ms, ctx.rx_interval_ms,
+                                   ctx.rx_window_us))
                                                 return ArmRefusal::CommensurateGrid;
     }
     return ArmRefusal::None;

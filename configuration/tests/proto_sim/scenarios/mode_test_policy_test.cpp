@@ -28,7 +28,7 @@ NodeContext armable() {
     c.rx_interval_ms = 500;
     return c;
 }
-Request modeA(uint32_t period_ms = 1100) {
+Request modeA(uint32_t period_ms = 1093) {
     Request r;
     r.mode           = Mode::A;
     r.grid_period_ms = period_ms;
@@ -63,15 +63,46 @@ TEST(ModeTestPolicy, TheCeilingIsTighterThanDriftTests) {
 TEST(ModeTestPolicy, ACommensurateGridPeriodIsRefusedInModeA) {
     // 1000 ms against 500 ms windows phase-locks: a frame that lands in an
     // RX-off gap does so forever. Observed on DriftTest — ~300 frames sent,
-    // zero heard. This is the whole reason DriftTest runs at 1100 ms.
+    // zero heard.
     EXPECT_EQ(armRefusal(modeA(1000), armable()), ArmRefusal::CommensurateGrid);
     EXPECT_EQ(armRefusal(modeA(500),  armable()), ArmRefusal::CommensurateGrid);
     EXPECT_EQ(armRefusal(modeA(1500), armable()), ArmRefusal::CommensurateGrid);
     EXPECT_EQ(armRefusal(modeA(250),  armable()), ArmRefusal::CommensurateGrid)
         << "the divisor direction counts too";
+}
 
-    EXPECT_EQ(armRefusal(modeA(1100), armable()), ArmRefusal::None)
-        << "DriftTest's period, chosen for exactly this reason";
+TEST(ModeTestPolicy, ElevenHundredMsIsAlsoPhaseLockedAndWasMeasuredToBe) {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and the bench refuted it on
+    // 2026-09-12: 277 marks sent at 1100 ms, `detected 1`.
+    //
+    // The old rule was divisibility, 1100 % 500 = 100 != 0, so 1100 passed and
+    // was documented as the safe value "chosen for exactly this reason".
+    // Phase-locking is governed by the GCD instead. Marks land at
+    // (k * grid) mod rx, a lattice of step gcd(grid, rx) that never grows:
+    //
+    //   1000 / 500 -> gcd 500 -> 1 phase
+    //   1100 / 500 -> gcd 100 -> 5 phases, {0, 100, 200, 300, 400} ms, forever
+    //
+    // Five phases 100 ms apart against a 29.44 ms window cover 147 ms of the
+    // 500 ms interval, so whether ANY mark is ever heard is decided by a
+    // boot-time offset — and about 71 % of runs hear nothing at all. That is
+    // not a grid period, it is a coin flip.
+    EXPECT_EQ(armRefusal(modeA(1100), armable()), ArmRefusal::CommensurateGrid)
+        << "1100 ms is phase-locked onto 5 fixed phases, not swept. It was "
+           "measured hearing 1 of 277 marks";
+}
+
+TEST(ModeTestPolicy, APeriodWhoseGcdFitsInsideTheWindowIsAccepted) {
+    // The condition for a lattice of step g to intersect EVERY window of width
+    // w regardless of offset is g <= w. The window is 29 440 us, so a period
+    // whose gcd with the RX interval is 29 ms or less always sweeps into it.
+    EXPECT_EQ(armRefusal(modeA(1093), armable()), ArmRefusal::None)
+        << "gcd(1093, 500) = 1 ms: the phase walks 93 ms per mark and visits "
+           "every residue";
+    EXPECT_EQ(armRefusal(modeA(1470), armable()), ArmRefusal::None)
+        << "gcd(1470, 500) = 10 ms, comfortably inside the window";
+    EXPECT_EQ(armRefusal(modeA(1125), armable()), ArmRefusal::CommensurateGrid)
+        << "gcd(1125, 500) = 125 ms: four fixed phases, no better than 1100";
 }
 
 TEST(ModeTestPolicy, ModeBRequiresTheCommensuratePeriodItWouldOtherwiseRefuse) {
@@ -90,12 +121,40 @@ TEST(ModeTestPolicy, ModeBRequiresTheCommensuratePeriodItWouldOtherwiseRefuse) {
 }
 
 TEST(ModeTestPolicy, CommensurabilityIsSymmetricAndZeroSafe) {
-    EXPECT_TRUE(periodsAreCommensurate(1000, 500));
-    EXPECT_TRUE(periodsAreCommensurate(500, 1000));
-    EXPECT_TRUE(periodsAreCommensurate(500, 500));
-    EXPECT_FALSE(periodsAreCommensurate(1100, 500));
-    EXPECT_FALSE(periodsAreCommensurate(0, 500)) << "no period is not a phase lock";
-    EXPECT_FALSE(periodsAreCommensurate(1000, 0));
+    constexpr uint32_t w = 29440;   // kWindowUs
+    EXPECT_TRUE(periodsAreCommensurate(1000, 500, w));
+    EXPECT_TRUE(periodsAreCommensurate(500, 1000, w));
+    EXPECT_TRUE(periodsAreCommensurate(500, 500, w));
+    EXPECT_TRUE(periodsAreCommensurate(1100, 500, w))
+        << "measured: 1 of 277 marks heard";
+    EXPECT_FALSE(periodsAreCommensurate(0, 500, w)) << "no period is not a phase lock";
+    EXPECT_FALSE(periodsAreCommensurate(1000, 0, w));
+}
+
+TEST(ModeTestPolicy, ThePhaseLockTestIsTheGcdAgainstTheWindow) {
+    // Stated as the geometry rather than as a restatement of the expression:
+    // count the distinct phases a period actually produces, and check the
+    // verdict agrees with whether that lattice can reach into the window.
+    constexpr uint32_t rx = 500;
+    constexpr uint32_t w  = 29440;
+
+    for (uint32_t grid : {500u, 1000u, 1093u, 1100u, 1125u, 1470u, 1500u}) {
+        // Distinct phases, found by walking the marks rather than by gcd.
+        bool seen[rx] = {};
+        uint32_t distinct = 0;
+        for (uint32_t k = 0; k < 4 * rx; ++k) {
+            const uint32_t phase = (uint64_t) k * grid % rx;
+            if (!seen[phase]) { seen[phase] = true; ++distinct; }
+        }
+        // The lattice step is the interval divided by how many phases it holds.
+        const uint32_t step_us = (rx / distinct) * 1000u;
+        const bool lattice_too_coarse = step_us > w;
+
+        EXPECT_EQ(periodsPhaseLock(grid, rx, w), lattice_too_coarse)
+            << "grid " << grid << " ms produces " << distinct
+            << " distinct phases, a lattice of step " << step_us
+            << " us against a " << w << " us window";
+    }
 }
 
 TEST(ModeTestPolicy, AModeThatNeedsARulerIsRefusedWithoutOne) {
@@ -135,7 +194,7 @@ TEST(ModeTestPolicy, SweepIsRefusedOffTheBench) {
     // deployed node that is just a node that stops hearing the hub.
     Request r;
     r.mode           = Mode::Sweep;
-    r.grid_period_ms = 1100;
+    r.grid_period_ms = 1093;
     r.copies         = 1;
 
     EXPECT_EQ(armRefusal(r, armable()), ArmRefusal::SweepOffBench);
@@ -392,7 +451,7 @@ TEST(ModeTestPolicy, SweepNeedsBothTheBenchAndAGrid) {
     c.has_adopted_grid = false;
     Request r;
     r.mode           = Mode::Sweep;
-    r.grid_period_ms = 1100;
+    r.grid_period_ms = 1093;
     r.copies         = 1;
     EXPECT_EQ(armRefusal(r, c), ArmRefusal::NoGrid);
 
