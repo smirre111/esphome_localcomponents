@@ -579,3 +579,80 @@ TEST_F(E2E, TheNodesBusyWindowCountReachesTheHubOnItsAck) {
     settle();
     EXPECT_EQ(rol.node_rx_busy_skips().count, 9u);
 }
+
+// ---------------------------------------------------------------------------
+TEST_F(E2E, AReflashedHubAndAProvisionedNodeConvergeOnASession) {
+    // THE FIXTURE GAP THIS FILE HAD, and it is the reason the register/login
+    // deadlock reached the bench (fixed in lora_client.cpp's send_login; the
+    // flag-level statement is Seam.AProvisionedNodeAndAFreshlyBootedHubMustNot
+    // LoopRegisterAgainstLogin).
+    //
+    // SetUp() asserts "a provisioned, registered node: the state a fleet is in
+    // for all but the first minute of its life" and sets BOTH registered_ and
+    // config_synced_ true. The first is fair. The second quietly assumes away
+    // a steady-state case: config_synced_ is cleared on every HUB boot, so a
+    // provisioned fleet node talking to a hub that has just rebooted or been
+    // reflashed runs with config_synced_ == false. That is not bootstrap, and
+    // the bootstrap tests do not cover it either — they register an
+    // UNPROVISIONED node (needs_config = true), which takes the inline
+    // plaintext-push branch and sets config_synced_ immediately.
+    //
+    // So the one combination nothing exercised was: provisioned node, unsynced
+    // hub. Every deployed hub reflash produces it.
+    //
+    // What this asserts is CONVERGENCE, which is the property settle() cannot
+    // assert for itself: it is bounded at 8 rounds and returns quietly when
+    // nothing has settled, so a loop that never converges looks exactly like a
+    // link that went idle.
+    rol.config_synced_ = false;
+
+    // The node registers, as it does after any reset. Give the hub the MAC the
+    // node actually reports, or the register is ignored and the test passes or
+    // fails for a reason unrelated to the loop.
+    disp.sendRegister();
+    while (disp.runOneTxCommand()) {}
+    auto first = lif.drain_tx_queue();
+    ASSERT_FALSE(first.empty());
+    {
+        auto *r = lora_client_response_message__unpack(NULL, first.back().size(),
+                                                       first.back().data());
+        ASSERT_NE(r, nullptr);
+        ASSERT_EQ(r->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER);
+        rol.set_address(r->register_->mac_addr);
+        lora_client_response_message__free_unpacked(r, NULL);
+    }
+    rol.set_response(first.back().data(), first.back().size());
+
+    // Now let both ends talk. Counting REGISTERs rather than rounds, because
+    // the failure is not slowness — it is that each side keeps answering the
+    // other forever, one REGISTER per cycle.
+    int registers = 0;
+    for (int round = 0; round < 12; ++round) {
+        pumpDown();
+        while (disp.runOneTxCommand()) {}
+        for (auto &frame : lif.drain_tx_queue()) {
+            auto *r = lora_client_response_message__unpack(NULL, frame.size(),
+                                                           frame.data());
+            if (r != nullptr) {
+                if (r->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
+                    ++registers;
+                lora_client_response_message__free_unpacked(r, NULL);
+            }
+            rol.set_response(frame.data(), frame.size());
+        }
+        if (rol.config_synced_) break;
+        rol.send_login();
+    }
+
+    EXPECT_LE(registers, 1)
+        << "the node re-registered " << registers << " times. More than one is "
+           "the deadlock: the hub deferred a provisioned node's config push, "
+           "then asked it to re-register, which the node answers WITHOUT "
+           "acking the login — so the session that the deferred push waits for "
+           "can never confirm, and both ends do this forever";
+
+    EXPECT_TRUE(rol.config_synced_)
+        << "a hub that has pushed nothing this boot must end up synced; while "
+           "config_synced_ stays false the node is asked to re-register on "
+           "every single login";
+}

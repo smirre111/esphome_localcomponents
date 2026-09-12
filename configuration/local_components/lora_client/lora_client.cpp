@@ -2552,7 +2552,39 @@ namespace esphome
       // OTA flashed into the hub — without needing to reboot.  Once config is
       // pushed (config_synced_ becomes true) subsequent logins clear this flag,
       // so the handshake converges after a single register cycle.
-      login.request_register = !this->config_synced_;
+      //
+      // ...UNLESS a config push is already deferred and waiting for this very
+      // session (config_push_pending_, set by handle_register_ for a node that
+      // reports itself PROVISIONED). Asking that node to re-register is a
+      // deadlock, and it hangs the whole link:
+      //
+      //   handle_register_  provisioned -> defer the push, config_synced_ stays false
+      //   send_login        request_register = !config_synced_ = TRUE
+      //   node              "CMD_LOGIN requests re-register" -> plaintext REGISTER,
+      //                     and by design it does NOT store the nonce or ack the
+      //                     login, because it expects the NEXT login to carry
+      //                     request_register = false
+      //   handle_register_  provisioned -> defer again, config_synced_ still false
+      //   ...forever, at the node's 5 s login rate limit
+      //
+      // The node's expectation is correct and documented at CmdDispatcher.cpp's
+      // request_register branch: a REGISTER is answered by a config push and
+      // then a clean login. But the hub only pushes inline when the node reports
+      // needs_config; for a provisioned node it defers to confirm_session_(),
+      // which can never run, because confirming the session requires the
+      // encrypted login ack that request_register just told the node to skip.
+      //
+      // So while a push is pending, ask for a login and nothing else. The
+      // session confirms, confirm_session_() sends the deferred push encrypted
+      // (the only way a provisioned node will accept it) and sets
+      // config_synced_. The resume-path guarantee in confirm_session_() is
+      // unaffected: it fires when config is unsynced with NO pending push,
+      // where request_register is still exactly what is wanted.
+      //
+      // Observed at the bench: node 2 provisioned, hub freshly flashed (which
+      // clears config_synced_), looping register <-> login for 8+ minutes with
+      // a healthy radio at RSSI -36. No measurement can run without a session.
+      login.request_register = !this->config_synced_ && !this->config_push_pending_;
       op_message.login = &login;
 
       uint8_t *txBuf;

@@ -401,3 +401,119 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
            "the key the node got over the encrypted channel";
     EXPECT_EQ(disp.pendingStateForTest().bits, mask);
 }
+
+// ---------------------------------------------------------------------------
+TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin) {
+    // THE DEADLOCK THAT COST THE FIRST BENCH SESSION ITS FIRST HOUR.
+    //
+    // Observed live: node 2 provisioned, hub freshly flashed, radio healthy at
+    // RSSI -36 / SNR 5.75 — and the two ends traded REGISTER against LoginMsg
+    // for eight minutes without ever establishing a session. Every measurement
+    // in bench-runbook.md needs a session, so nothing could run at all.
+    //
+    // The cycle, with each step being correct in isolation:
+    //
+    //   handle_register_  the node reports itself PROVISIONED, so the config
+    //                     push is DEFERRED to confirm_session_() — a provisioned
+    //                     node refuses plaintext config, so this is right — and
+    //                     config_synced_ stays false
+    //   send_login        request_register = !config_synced_ = true
+    //   the node          answers request_register with a plaintext REGISTER and,
+    //                     BY DESIGN, does not store the nonce or ack the login:
+    //                     it expects the next login to carry the flag clear
+    //   handle_register_  provisioned again -> defer again -> still unsynced
+    //
+    // confirm_session_() is the only place that clears config_push_pending_ and
+    // sets config_synced_, and it runs only on an encrypted uplink — which
+    // request_register just told the node not to send. Neither end is wrong
+    // about its own job; the hub is asking a provisioned node to re-register
+    // while waiting for the session that re-registering tears down.
+    //
+    // This is a seam test because neither half can see it. The hub's own tests
+    // assert that request_register follows config_synced_ (it does). The node's
+    // own tests assert that request_register produces a REGISTER (it does).
+    // Only the two together loop.
+    proto_sim_timer_set_now_us(1'000'000);
+
+    ASSERT_TRUE(disp.isProvisioned())
+        << "the bench node holds an address, which is what makes the hub defer "
+           "rather than push in the clear";
+    ASSERT_FALSE(rol.config_synced_)
+        << "a freshly booted or flashed hub has pushed nothing this boot — "
+           "this is the state the deadlock needs, and a hub reflash creates it";
+
+    // The node's real REGISTER, into the real hub.
+    disp.sendRegister();
+    // sendRegister() only sets the pending status; runOneTxCommand() is the
+    // node's real transmit body, which is what actually builds the frame.
+    while (disp.runOneTxCommand()) {}
+    auto up = lif.drain_tx_queue();
+    ASSERT_FALSE(up.empty()) << "the node must have transmitted a REGISTER";
+
+    // The hub only accepts a REGISTER whose MAC matches the one it is
+    // configured for, so take the MAC from the node's own frame rather than
+    // assuming the fixture's. Getting this wrong makes the hub IGNORE the
+    // register and the test then fails for a setup reason that looks like the
+    // defect.
+    {
+        auto *r = lora_client_response_message__unpack(NULL, up.back().size(),
+                                                       up.back().data());
+        ASSERT_NE(r, nullptr);
+        ASSERT_EQ(r->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER);
+        rol.set_address(r->register_->mac_addr);
+        lora_client_response_message__free_unpacked(r, NULL);
+    }
+
+    rol.set_response(up.back().data(), up.back().size());
+
+    // The hub defers, as it should for a provisioned node.
+    EXPECT_TRUE(rol.config_push_pending_)
+        << "a provisioned node's config push must wait for encryption";
+    EXPECT_FALSE(rol.config_synced_)
+        << "and a push that has not happened must not be recorded as one that "
+           "did — config_synced_ is set in confirm_session_(), not here";
+
+    // The login that follows. THE FLAG IS THE WHOLE TEST.
+    rol.send_login();
+    const auto login = lastDownlink();
+    ASSERT_FALSE(login.empty()) << "send_login must have emitted a LoginMsg";
+
+    auto *msg = lora_client_operation_message__unpack(NULL, login.size(), login.data());
+    ASSERT_NE(msg, nullptr) << "the LoginMsg goes out in the clear and must unpack";
+    ASSERT_EQ(msg->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN);
+    const bool asked_to_reregister = msg->login->request_register;
+    lora_client_operation_message__free_unpacked(msg, NULL);
+
+    EXPECT_FALSE(asked_to_reregister)
+        << "while a config push is pending, the hub must ask for a LOGIN and "
+           "nothing else. request_register here is the deadlock: the node "
+           "answers it with a REGISTER instead of the encrypted ack that "
+           "confirm_session_() needs to send the pending push";
+
+    // And the node's actual reaction, which is the half the hub cannot assert.
+    lif.drain_tx_queue();   // ignore anything queued before this point
+    deliverAtT0(login, esp_timer_get_time() + 100'000);
+    while (disp.runOneTxCommand()) {}
+
+    uint32_t nonce = 0;
+    EXPECT_TRUE(disp.getBaseNonceForTest(1, nonce))
+        << "the node must ADOPT the hub's base nonce, which is what lets it "
+           "encrypt the uplink that confirms the session. Answering with a "
+           "REGISTER instead leaves it with no nonce and the link wedged";
+
+    const auto after = lif.drain_tx_queue();
+    bool sent_register = false;
+    for (const auto &f : after) {
+        // The node's REGISTER is a RESPONSE message, not an operation: it is
+        // what set_response() on the hub consumes.
+        auto *m = lora_client_response_message__unpack(NULL, f.size(), f.data());
+        if (m == nullptr) continue;
+        if (m->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
+            sent_register = true;
+        lora_client_response_message__free_unpacked(m, NULL);
+    }
+    EXPECT_FALSE(sent_register)
+        << "a second REGISTER here IS the loop: it returns the hub to "
+           "handle_register_, which defers again, and the two ends never "
+           "converge";
+}
