@@ -1508,7 +1508,8 @@ namespace esphome
           "windows %u/%u | "
           "FER_link %u ppm WMR %u ppm DUP %u ppm MIC_FAIL %u ppm | "
           "phaseErr p50 %d p99 %d max %d n %u | turnaround p50 %d p99 %d n %u | "
-          "armResidual p99 %d | oneShot p99 %d | tick %u Hz cpu %u MHz "
+          "armResidual p99 %d | oneShot p99 %d n %u | rtcSlowSrc %u | "
+          "tick %u Hz cpu %u MHz "
           "elapsed %u s refusal %u",
           (unsigned) rep->mode, (int) rep->powerprofileproduction,
           (int) rep->counteron, (int) rep->cryptoon,
@@ -1537,6 +1538,17 @@ namespace esphome
           rep->turnaroundus ? (unsigned) rep->turnaroundus->n : 0u,
           rep->armresidualus ? rep->armresidualus->p99 : 0,
           rep->oneshoterrorus ? rep->oneshoterrorus->p99 : 0,
+          // HW-8's miss count is windowsArmed - n, and there is no dedicated
+          // miss field: n is the number of one-shots that actually FIRED, so
+          // without it a bounded p99 says nothing about how many windows the
+          // timer silently never opened. A single miss fails that gate.
+          rep->oneshoterrorus ? (unsigned) rep->oneshoterrorus->n : 0u,
+          // Gates Mode B entirely (test-plan.md 10.7). It was consumed into
+          // belief_ and never printed or published, so bench-runbook.md 0's
+          // "confirm rtcSlowSrc from the beacon, not the schematic" had no
+          // observable to read. 2 = external crystal; anything else means this
+          // run's Mode B numbers describe a node that could not hold phase.
+          (unsigned) rep->rtcslowsrc,
           (unsigned) rep->tickratehz, (unsigned) rep->cpufreqmhz,
           (unsigned) rep->elapseds, (unsigned) rep->armrefusal);
 
