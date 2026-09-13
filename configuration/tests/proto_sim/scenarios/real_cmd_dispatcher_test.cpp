@@ -4806,3 +4806,66 @@ TEST_F(RealNodeFixture, ABeaconBeyondHalfASlotPitchChangesNothing) {
         << "beyond half a pitch the frame is nearer a neighbouring slot than our mark";
     EXPECT_EQ(disp.clockRatePpbForTest(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Residual rate: what the node's CORRECTED prediction still drifts at
+//
+// Mode B's pass line (|residual| < 20 ppm) is judged on this, not on the raw
+// node-vs-hub rate. Marks here come from a TRUTH grid: a node whose clock agrees
+// with the hub must show a flat residual, a node 60 ppm off (and not yet
+// corrected) must show +60. Learning a rate makes the prediction exact - that is
+// the learning tests' job; this one pins that the residual measures the
+// PREDICTION error and nothing else.
+// ---------------------------------------------------------------------------
+
+namespace {
+void armModeBWithGrid(CmdDispatcher &disp) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    auto start = encrypted_mode_test(MODE_TEST__MODE__MODE_B, /*msgid=*/3,
+                                     /*grid_period_ms=*/1500, /*seq=*/0);
+    disp.onReceiveNew(start.data(), static_cast<int>(start.size()));
+}
+
+void feedModeBMarks(CmdDispatcher &disp, const gridstate::State &truth) {
+    uint32_t msgid = 4;
+    for (uint32_t r = 10; r < 70; ++r) {
+        auto mark = encrypted_mode_test(MODE_TEST__MODE__MODE_B, msgid++, 1500,
+                                        /*seq=*/r);
+        const int64_t rx = gridstate::t0ForRound(truth, r)
+                         + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) mark.size());
+        disp.onReceiveNew(mark.data(), static_cast<int>(mark.size()), rx);
+    }
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, AModeBResidualIsFlatWhenThePredictionMatchesTheClock) {
+    armModeBWithGrid(disp);
+    ASSERT_TRUE(disp.gridState().active) << "precondition: Mode B needs an adopted grid";
+    ASSERT_TRUE(disp.modeTestActive())   << "precondition: the Mode B test must be armed";
+
+    gridstate::State truth = disp.gridState();   // the node clock agrees with the hub
+    feedModeBMarks(disp, truth);
+
+    EXPECT_EQ(disp.modeTestResidualSamplesForTest(), 60u) << "one sample per Mode B mark";
+    EXPECT_NEAR(disp.modeTestResidualPpmForTest(), 0, 1)
+        << "a prediction that matches the clock leaves no residual drift";
+}
+
+TEST_F(RealNodeFixture, AModeBResidualShowsTheDriftAnUncorrectedPredictionLeaves) {
+    armModeBWithGrid(disp);
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_TRUE(disp.modeTestActive());
+    ASSERT_EQ(disp.gridState().rate_ppb, 0) << "precondition: nothing learned yet";
+
+    gridstate::State truth = disp.gridState();
+    truth.rate_ppb = 60000;                      // the node clock is +60 ppm off
+    feedModeBMarks(disp, truth);
+
+    EXPECT_EQ(disp.modeTestResidualSamplesForTest(), 60u);
+    EXPECT_NEAR(disp.modeTestResidualPpmForTest(), 60, 2)
+        << "an uncorrected +60 ppm clock leaves +60 ppm of residual drift - the "
+           "number Mode B's pass line is read from";
+}

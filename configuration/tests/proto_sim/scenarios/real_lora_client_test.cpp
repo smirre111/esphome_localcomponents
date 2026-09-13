@@ -2527,6 +2527,8 @@ TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
     rep.ppmestimate      = -13;
     rep.ppmsamples       = 187;
     rep.measuredperiodus = 1499981;
+    rep.residualppm      = 7;
+    rep.residualsamples  = 41;
 
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = esphome::lora_tracker::kHubAddress;
@@ -2563,6 +2565,10 @@ TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
     EXPECT_EQ(s.ppm_estimate, -13);
     EXPECT_EQ(s.ppm_samples, 187u);
     EXPECT_EQ(s.measured_period_us, 1499981);
+    // Mode B pass line: the residual after clock discipline, kept apart from
+    // the raw rate above.
+    EXPECT_EQ(s.residual_ppm, 7);
+    EXPECT_EQ(s.residual_samples, 41u);
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);

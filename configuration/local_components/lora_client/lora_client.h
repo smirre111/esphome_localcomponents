@@ -324,6 +324,9 @@ namespace esphome
         int32_t  ppm_estimate{0};
         uint32_t ppm_samples{0};
         int32_t  measured_period_us{0};
+        // Residual rate after the node clock discipline: Mode B pass line.
+        int32_t  residual_ppm{0};
+        uint32_t residual_samples{0};
       };
       const ModeTestSummary &mode_test_summary() const {
         return this->mode_test_summary_;

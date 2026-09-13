@@ -1134,10 +1134,20 @@ struct  ModeTestReport
    * Why an arm was refused, when it was. 0 = it was not.
    */
   uint32_t armrefusal;
+  /*
+   * MAC-0 clock discipline, Mode B only. The rate the node's CORRECTED
+   * prediction still drifts at: a run-scoped fit of (measured T0 minus the
+   * rate-corrected predicted T0) over the run's marks. Mode B's pass line,
+   * |residualPpm| < 20, is judged on this; ppmEstimate above stays the RAW
+   * node-vs-hub rate, a hardware finding with no pass line. 0 / 0 until three
+   * marks were heard with a grid active.
+   */
+  int32_t residualppm;
+  uint32_t residualsamples;
 };
 #define MODE_TEST_REPORT__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&mode_test_report__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 typedef enum {

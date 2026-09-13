@@ -3357,7 +3357,7 @@ const ProtobufCMessageDescriptor hist__descriptor =
   (ProtobufCMessageInit) hist__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[39] =
+static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[41] =
 {
   {
     "seqFirst",
@@ -3827,6 +3827,30 @@ static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[39] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "residualPpm",
+    58,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_INT32,
+    0,   /* quantifier_offset */
+    offsetof(ModeTestReport, residualppm),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "residualSamples",
+    59,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ModeTestReport, residualsamples),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned mode_test_report__field_indices_by_name[] = {
   7,   /* field[7] = addressed */
@@ -3853,6 +3877,8 @@ static const unsigned mode_test_report__field_indices_by_name[] = {
   24,   /* field[24] = ppmEstimate */
   25,   /* field[25] = ppmSamples */
   19,   /* field[19] = promotions */
+  39,   /* field[39] = residualPpm */
+  40,   /* field[40] = residualSamples */
   28,   /* field[28] = rssiMean */
   27,   /* field[27] = rssiMin */
   33,   /* field[33] = rtcSlowSrc */
@@ -3877,7 +3903,7 @@ static const ProtobufCIntRange mode_test_report__number_ranges[6 + 1] =
   { 30, 20 },
   { 40, 24 },
   { 50, 31 },
-  { 0, 39 }
+  { 0, 41 }
 };
 const ProtobufCMessageDescriptor mode_test_report__descriptor =
 {
@@ -3887,7 +3913,7 @@ const ProtobufCMessageDescriptor mode_test_report__descriptor =
   "ModeTestReport",
   "",
   sizeof(ModeTestReport),
-  39,
+  41,
   mode_test_report__field_descriptors,
   mode_test_report__field_indices_by_name,
   6,  mode_test_report__number_ranges,

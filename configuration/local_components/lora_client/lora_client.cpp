@@ -1585,7 +1585,7 @@ namespace esphome
           "phaseErr p50 %d p99 %d max %d n %u | turnaround p50 %d p99 %d n %u | "
           "armResidual p99 %d | oneShot p99 %d n %u | rtcSlowSrc %u | "
           "tick %u Hz cpu %u MHz "
-          "elapsed %u s refusal %u | ppm %d n %u period %d us",
+          "elapsed %u s refusal %u | ppm %d n %u period %d us | residual %d ppm n %u",
           (unsigned) rep->mode, (int) rep->powerprofileproduction,
           (int) rep->counteron, (int) rep->cryptoon,
           (unsigned) rep->seqfirst, (unsigned) rep->seqlast,
@@ -1631,7 +1631,10 @@ namespace esphome
           // the wire and nowhere else — and the node did not fill it at all
           // until the run-scoped fit existed.
           (int) rep->ppmestimate, (unsigned) rep->ppmsamples,
-          (int) rep->measuredperiodus);
+          (int) rep->measuredperiodus,
+          // Mode B pass line (|residual| < 20): the drift left after the node
+          // applies its learned rate. ppm above stays the RAW rate.
+          (int) rep->residualppm, (unsigned) rep->residualsamples);
 
       // The same numbers, kept as numbers. The log line above is for a human
       // reading a console; these are for Home Assistant, where B3's gate lives:
@@ -1655,6 +1658,8 @@ namespace esphome
       sum.ppm_estimate             = rep->ppmestimate;
       sum.ppm_samples              = rep->ppmsamples;
       sum.measured_period_us       = rep->measuredperiodus;
+      sum.residual_ppm             = rep->residualppm;
+      sum.residual_samples         = rep->residualsamples;
       this->mode_test_summary_     = sum;
 
       this->last_mode_test_report_ = buf;
