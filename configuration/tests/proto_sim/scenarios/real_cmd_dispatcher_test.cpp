@@ -3474,9 +3474,14 @@ std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgi
 }
 
 std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
-                                         uint32_t grid_period_ms = 1093) {
+                                         uint32_t grid_period_ms = 1093,
+                                         uint32_t seq = 0) {
     ModeTest mt = MODE_TEST__INIT;
     mt.enable           = true;
+    // 0 is the START. The hub resets its sequence immediately before building
+    // it, so every later frame in the same test — each mark, and the STOP —
+    // carries seq >= 1.
+    mt.seq              = seq;
     mt.durations        = 60;
     mt.mode             = mode;
     mt.gridperiodms     = grid_period_ms;
@@ -4615,4 +4620,37 @@ TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
     EXPECT_FALSE(disp.classAActive())
         << "the hub said its queue is empty, so there is nothing for RX1 or "
            "RX2 to catch";
+}
+
+TEST_F(RealNodeFixture, ALateMarkAfterTheDeadlineDoesNotArmANewTest) {
+    // MEASURED 2026-09-13. The node ends its test at its own deadline; the hub
+    // keeps sending marks until duration_s + 5 s. A mark landing in that gap
+    // found no test running and, with nothing to tell it from a START, armed a
+    // brand-new one — the bench saw a second report, `seq 278..278, elapsed
+    // 2 s`, straight after a genuine Mode A run.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    auto start = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2);
+    disp.onReceiveNew(start.data(), static_cast<int>(start.size()));
+    ASSERT_TRUE(disp.modeTestActive()) << "a seq-0 START must arm";
+
+    auto off = encrypted_mode_test_off(/*msgid=*/3);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    ASSERT_FALSE(disp.modeTestActive()) << "and the test must be over before the late mark";
+
+    // The late mark: identical in every field to a START except its seq.
+    auto late = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/4,
+                                    /*grid_period_ms=*/1093, /*seq=*/278);
+    disp.onReceiveNew(late.data(), static_cast<int>(late.size()));
+    EXPECT_FALSE(disp.modeTestActive())
+        << "a mark (seq 278) arriving after the test ended must not start a new "
+           "one. It re-arms the power profile and timed-RX state of a node whose "
+           "run has already been reported";
+
+    // And the guard must not have eaten the legitimate case.
+    auto restart = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/5);
+    disp.onReceiveNew(restart.data(), static_cast<int>(restart.size()));
+    EXPECT_TRUE(disp.modeTestActive())
+        << "a fresh seq-0 START after that must still arm";
 }
