@@ -2522,6 +2522,11 @@ TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
     rep.phaseerrus    = &phase;
     rep.turnaroundus  = &turn;
     rep.powerprofileproduction = true;
+    // Mode B's goal: the run's clock rate. Distinct, non-round values so a
+    // field copied into the wrong slot cannot pass by coincidence.
+    rep.ppmestimate      = -13;
+    rep.ppmsamples       = 187;
+    rep.measuredperiodus = 1499981;
 
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = esphome::lora_tracker::kHubAddress;
@@ -2553,6 +2558,11 @@ TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
     // the honest denominator: the hub's own count would report the node's late
     // arrival as packet loss. 94 of 100, so 6 %.
     EXPECT_EQ(s.fer_link_ppm, 60000u);
+    // The run's clock rate must reach the summary: it is what Mode B is judged
+    // on, and until now it travelled on the wire and was read by nothing.
+    EXPECT_EQ(s.ppm_estimate, -13);
+    EXPECT_EQ(s.ppm_samples, 187u);
+    EXPECT_EQ(s.measured_period_us, 1499981);
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);
@@ -2939,4 +2949,118 @@ TEST(BeaconMissed, ABeaconClearsItBecauseThePredictionMovesWithIt) {
     h.rol.noteBeaconEpochForTest(static_cast<uint32_t>(1600 + LORAClient::kBeaconOverdueGraceS + 1));
     EXPECT_FALSE(h.rol.node_overdue())
         << "it turned up; the next verdict is due one check-in interval later";
+}
+
+TEST(GridAligned, AModeBTestMarkLandsOnTheNodesGridMark) {
+    // D4. MEASURED 2026-09-13: Mode B test marks left whenever the hub's
+    // esp_timer fired, so they sat at a fixed, arbitrary phase against the
+    // grid — all 14 phase samples at -651 ms, ~46 guard bands out.
+    // phaseTrustworthy() could never pass, timed RX never armed, and HW-8 had
+    // no one-shot samples. The test's own marks made Mode B unreachable.
+    //
+    // Same contract as SendAlignedHandsTheFrameToTheQueueWithItsMark: the T0
+    // the node sees must be a mark of THIS node's slot, and in the future.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
+    proto_sim_timer_set_now_us(h.tracker.sim_now_us);
+
+    h.rol.start_mode_test(/*duration_s=*/300, /*grid_ms=*/1500, /*mode=*/2,
+                          /*copies=*/1, /*keep_power_profile=*/true,
+                          /*enable_counter=*/false, /*enable_crypto=*/false,
+                          /*mac_echo=*/true, /*arm_offset_us=*/0);
+    h.rol.mode_test_tick_for_test();
+
+    const int64_t fire    = h.tracker.last_earliest_us;
+    ASSERT_GT(fire, 0) << "a Mode B mark must be PLACED, not sent whenever the timer fired";
+    const int64_t seen_t0 = fire + (int64_t) loratiming::kPreambleToT0Us;
+    EXPECT_EQ(h.tracker.nextT0ForSlotUs(h.rol.grid_slot(), seen_t0 - 1), seen_t0)
+        << "the mark's T0 must land ON a mark of this node's slot";
+    EXPECT_GT(seen_t0, h.tracker.sim_now_us) << "and in the future";
+
+    // A second tick must not aim at the same mark.
+    h.rol.mode_test_tick_for_test();
+    EXPECT_GT(h.tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us, seen_t0)
+        << "one mark per grid mark: a jittered tick must move on, not double up";
+    h.rol.stop_mode_test();
+}
+
+TEST(GridAligned, AModeATestMarkStaysUnplaced) {
+    // The other half of D4, and deliberate: Mode A's swept 1093 ms period is
+    // what lets a free-running window catch it at all. Placing it on the grid
+    // would re-create the phase lock the period was chosen to break.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
+    proto_sim_timer_set_now_us(h.tracker.sim_now_us);
+
+    h.rol.start_mode_test(300, 1093, /*mode=*/1, 1, true, false, false, true, 0);
+    h.rol.mode_test_tick_for_test();
+    EXPECT_EQ(h.tracker.last_earliest_us, 0)
+        << "a Mode A mark must go out unplaced";
+    h.rol.stop_mode_test();
+}
+
+// ---------------------------------------------------------------------------
+// (a') — hearing the node beats the sleep model
+// ---------------------------------------------------------------------------
+TEST(RealLoraClient, AHeardNodeIsAwakeForItsListeningWindowNotForTheModel) {
+    // MEASURED 2026-09-13: "Login retry deferred 21250 s — node asleep until
+    // then", logged moments after that node's REGISTER. The model was purely
+    // last-recorded-sleep + sleep_duration, so one lost LoginMsg after any
+    // recorded sleep would have stalled the session for up to six hours.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    constexpr uint32_t kNow = 1'789'000'000u;
+    h.time.set_now(kNow, /*valid=*/true);
+    h.rol.last_sleep_epoch_ = kNow - 100;          // told to sleep 100 s ago
+    h.rol.node_mode_        = 0;                   // interactive
+    ASSERT_FALSE(h.rol.timed_mode_enabled()) << "precondition: no grid";
+
+    ASSERT_GT(h.rol.ms_until_node_awake_for_test(), 0u)
+        << "precondition: 100 s into a 6 h sleep the model says asleep";
+
+    auto reg = serialize_register(kMacRol2, /*needs_config=*/false);
+    h.rol.set_response(reg.data(), reg.size());
+
+    EXPECT_EQ(h.rol.ms_until_node_awake_for_test(), 0u)
+        << "a REGISTER from this node's MAC proves it is awake NOW; retries must "
+           "not be stretched to a modelled wake six hours away";
+
+    // Still inside the interactive window: still awake.
+    h.time.set_now(kNow + 1799, true);
+    EXPECT_EQ(h.rol.ms_until_node_awake_for_test(), 0u)
+        << "an interactive node keeps listening for its interactive timeout";
+
+    // Past it: the model governs again.
+    h.time.set_now(kNow + 1801, true);
+    EXPECT_GT(h.rol.ms_until_node_awake_for_test(), 0u)
+        << "once the listening window is over, hearing it no longer says anything";
+}
+
+TEST(RealLoraClient, AHeardClassANodeIsAwakeOnlyThroughItsReceiveWindows) {
+    // Mode C listens only in RX1/RX2 after its own uplink, then sleeps. Treating
+    // a heard Class A node as awake for the interactive half hour would retry
+    // into a sleeping node — the airtime the sleep gate exists to save.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    constexpr uint32_t kNow = 1'789'000'000u;
+    h.time.set_now(kNow, /*valid=*/true);
+    h.rol.last_sleep_epoch_   = kNow - 100;
+    h.rol.node_mode_          = (uint32_t) NODE_MODE__MODE_AUTO;
+    ASSERT_FALSE(h.rol.timed_mode_enabled()) << "precondition: no grid, so Class A";
+
+    auto reg = serialize_register(kMacRol2, /*needs_config=*/false);
+    h.rol.set_response(reg.data(), reg.size());
+
+    h.time.set_now(kNow + 2, true);
+    EXPECT_EQ(h.rol.ms_until_node_awake_for_test(), 0u)
+        << "inside RX2 the node is still listening";
+    h.time.set_now(kNow + 4, true);
+    EXPECT_GT(h.rol.ms_until_node_awake_for_test(), 0u)
+        << "after RX2 a Class A node is asleep again, however recently it spoke";
 }

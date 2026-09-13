@@ -319,6 +319,11 @@ namespace esphome
         int32_t  phase_p99_us{0};
         int32_t  turnaround_p99_us{0};
         bool     power_profile_production{true};
+        // The run's clock rate, node against hub. Mode B's pass criterion is
+        // stated in these; see implementation-plan.md §12a.
+        int32_t  ppm_estimate{0};
+        uint32_t ppm_samples{0};
+        int32_t  measured_period_us{0};
       };
       const ModeTestSummary &mode_test_summary() const {
         return this->mode_test_summary_;
@@ -466,6 +471,10 @@ namespace esphome
 
       // Test seam: send_aligned_ is protected, and the alignment POLICY is the
       // part worth testing directly rather than only through a full command.
+      // (a'): the sleep model's answer, for tests.
+      uint32_t ms_until_node_awake_for_test() const { return ms_until_node_awake_(); }
+      // D4: fire one ModeTest mark exactly as the esp_timer would.
+      void mode_test_tick_for_test() { mode_test_timer_cb_(this); }
       void send_aligned_for_test(const uint8_t *buf, size_t len) {
         this->send_aligned_(buf, len);
       }
@@ -634,6 +643,10 @@ namespace esphome
       bool     mt_mac_echo_{false};
       int32_t  mt_arm_offset_us_{0};
       uint32_t mt_seq_{0};
+      // D4: the last grid mark a Mode B test mark was aimed at. Owned by the
+      // esp_timer task that sends the marks — deliberately not
+      // last_placed_t0_us_, which belongs to the ESPHome loop.
+      int64_t  mt_last_mark_t0_us_{0};
       esp_timer_handle_t mode_test_timer_{nullptr};
       uint8_t  mt_frame_[160]{};
       size_t   mt_frame_len_{0};
@@ -816,6 +829,10 @@ namespace esphome
       // Login state — cleared on every hub reboot or enterSleep(); set when the
       // node sends a valid message after the login challenge.
       uint32_t last_sleep_epoch_{0};   // Unix epoch when enterSleep() was last called
+      // (a'): Unix epoch of the last ACCEPTED uplink from this node — a REGISTER
+      // for its MAC or an authenticated frame. See is_node_awake_().
+      uint32_t last_heard_epoch_{0};
+      void     note_node_heard_();
       bool     login_acked_{false};
       // True once the hub has successfully DECRYPTED a frame from this node,
       // proving the node holds the matching AES-GCM base nonce.  The hub encrypts

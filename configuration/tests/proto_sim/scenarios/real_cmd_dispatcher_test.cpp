@@ -4654,3 +4654,40 @@ TEST_F(RealNodeFixture, ALateMarkAfterTheDeadlineDoesNotArmANewTest) {
     EXPECT_TRUE(disp.modeTestActive())
         << "a fresh seq-0 START after that must still arm";
 }
+
+TEST_F(RealNodeFixture, AModeTestRunMeasuresTheNodesClockRateFromItsMarks) {
+    // Mode B's goal is a clock rate within the crystal's rating, measured under
+    // the production power profile. Before this, nothing fed a rate estimate
+    // during a ModeTest — drift_fit_ is DriftTest's alone — so every ModeTest
+    // report carried ppmEstimate = 0 and the goal could not be read off a run.
+    //
+    // Synthetic marks at a known +50 ppm: the node clock runs slow, so each
+    // mark k arrives at k * period * (1 + 50e-6) on it. Marks 3 and 7 are
+    // never heard, which is the ordinary case at a ~6 % catch rate and what the
+    // nearest-index rule exists for.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    constexpr uint32_t kPeriodMs = 1093;
+    auto start = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2, kPeriodMs);
+    disp.onReceiveNew(start.data(), static_cast<int>(start.size()));
+    ASSERT_TRUE(disp.modeTestActive());
+
+    constexpr double  kPpm  = 50.0;
+    constexpr int64_t kBase = 5'000'000'000LL;   // absolute node clock, large on purpose
+    uint32_t msgid = 3, heard = 0;
+    for (uint32_t k = 0; k <= 200; ++k) {
+        if (k == 3 || k == 7) continue;
+        const int64_t rx = kBase +
+            (int64_t) ((double) k * kPeriodMs * 1000.0 * (1.0 + kPpm * 1e-6));
+        auto mark = encrypted_mode_test(MODE_TEST__MODE__MODE_A, msgid++, kPeriodMs,
+                                        /*seq=*/k + 1);
+        disp.onReceiveNew(mark.data(), static_cast<int>(mark.size()), rx);
+        ++heard;
+    }
+
+    EXPECT_EQ(disp.modeTestPpmSamplesForTest(), heard)
+        << "one sample per heard mark";
+    EXPECT_NEAR(disp.modeTestPpmForTest(), (int32_t) kPpm, 1)
+        << "the run's marks must recover the clock rate they were generated at";
+}

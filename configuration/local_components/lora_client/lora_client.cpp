@@ -587,8 +587,46 @@ namespace esphome
       return this->last_beacon_epoch_ < wake_at;
     }
 
+    void LORAListener::note_node_heard_()
+    {
+      if (this->time != nullptr && this->time->now().is_valid())
+        this->last_heard_epoch_ = static_cast<uint32_t>(this->time->now().timestamp);
+    }
+
     bool LORAListener::is_node_awake_() const
     {
+      // (a'): HEARING THE NODE BEATS THE MODEL.
+      //
+      // MEASURED 2026-09-13: the hub logged "Login retry deferred 21250 s — node
+      // asleep until then" moments after that very node's REGISTER. The model
+      // below is purely clock-based — last recorded sleep + sleep_duration_ —
+      // and nothing told it the node had just transmitted, so one lost LoginMsg
+      // after any recorded sleep would stall the session for up to six hours.
+      //
+      // A heard uplink means "awake for THIS node's listening window", and the
+      // window depends on the mode, which is the part a single rule gets wrong:
+      //   * A / B (interactive, timed grid): the node keeps listening for its
+      //     interactive timeout after it transmits.
+      //   * C (Class A — auto mode without a grid): it listens only in RX1/RX2
+      //     after its own uplink, then sleeps. Treating it as awake for half an
+      //     hour would retry into a sleeping node, which is the airtime the
+      //     sleep gate exists to save. RX2 closes kRx2DelayUs + one window after
+      //     the uplink; 3 s is that rounded up to this model's 1 s resolution.
+      //
+      // Only a hearing NEWER than the last recorded sleep counts: a node heard
+      // before it was told to sleep is not evidence about now.
+      if (this->last_heard_epoch_ != 0 && this->last_heard_epoch_ >= this->last_sleep_epoch_ &&
+          this->time != nullptr && this->time->now().is_valid())
+      {
+        const bool class_a =
+            (this->node_mode_ == (uint32_t) NODE_MODE__MODE_AUTO) &&
+            !(this->timed_mode_enabled_ && this->grid_aligned_);
+        static constexpr uint32_t kClassAAwakeS = 3;
+        const uint32_t window_s = class_a ? kClassAAwakeS : this->interactive_timeout_;
+        const auto now = static_cast<uint32_t>(this->time->now().timestamp);
+        if (now < this->last_heard_epoch_ + window_s)
+          return true;
+      }
       const uint32_t wake_at = this->next_wake_epoch_();
       if (wake_at == 0)
         return true;                    // cannot tell — assume awake
@@ -821,6 +859,8 @@ namespace esphome
 
         ESP_LOGI(TAG, "%s, Registered with LORA server", this->get_name().c_str());
         this->registered_ = true;
+        // (a'): a REGISTER from THIS node's MAC is proof it is awake right now.
+        this->note_node_heard_();
 
         // §4.6 rule 3: any hub uncertainty means burst. A REGISTER is the hub's
         // actual notification that this node has restarted — it is the first
@@ -1253,6 +1293,11 @@ namespace esphome
         // A successful decrypt proves the node holds the matching base nonce —
         // the encrypted session is confirmed both ways.  Only now do we treat
         // login as acknowledged and allow the hub to encrypt downlink commands.
+        //
+        // (a'): an AUTHENTICATED uplink is also proof the node is awake right
+        // now — stamped only past the GCM check, so a forged or foreign frame
+        // cannot move the sleep model.
+        this->note_node_heard_();
         this->confirm_session_();
 
         // The inner is now payload-only (no header).  Unpack it, resolve the F-4
@@ -1540,7 +1585,7 @@ namespace esphome
           "phaseErr p50 %d p99 %d max %d n %u | turnaround p50 %d p99 %d n %u | "
           "armResidual p99 %d | oneShot p99 %d n %u | rtcSlowSrc %u | "
           "tick %u Hz cpu %u MHz "
-          "elapsed %u s refusal %u",
+          "elapsed %u s refusal %u | ppm %d n %u period %d us",
           (unsigned) rep->mode, (int) rep->powerprofileproduction,
           (int) rep->counteron, (int) rep->cryptoon,
           (unsigned) rep->seqfirst, (unsigned) rep->seqlast,
@@ -1580,7 +1625,13 @@ namespace esphome
           // run's Mode B numbers describe a node that could not hold phase.
           (unsigned) rep->rtcslowsrc,
           (unsigned) rep->tickratehz, (unsigned) rep->cpufreqmhz,
-          (unsigned) rep->elapseds, (unsigned) rep->armrefusal);
+          (unsigned) rep->elapseds, (unsigned) rep->armrefusal,
+          // Mode B's goal as a number: the node's clock rate against this hub,
+          // under the run's power profile. Printed because it was carried on
+          // the wire and nowhere else — and the node did not fill it at all
+          // until the run-scoped fit existed.
+          (int) rep->ppmestimate, (unsigned) rep->ppmsamples,
+          (int) rep->measuredperiodus);
 
       // The same numbers, kept as numbers. The log line above is for a human
       // reading a console; these are for Home Assistant, where B3's gate lives:
@@ -1601,6 +1652,9 @@ namespace esphome
       sum.phase_p99_us             = rep->phaseerrus ? rep->phaseerrus->p99 : 0;
       sum.turnaround_p99_us        = rep->turnaroundus ? rep->turnaroundus->p99 : 0;
       sum.power_profile_production = rep->powerprofileproduction;
+      sum.ppm_estimate             = rep->ppmestimate;
+      sum.ppm_samples              = rep->ppmsamples;
+      sum.measured_period_us       = rep->measuredperiodus;
       this->mode_test_summary_     = sum;
 
       this->last_mode_test_report_ = buf;
@@ -3050,8 +3104,40 @@ namespace esphome
 
       // The normal transmit queue, with a per-frame copy count. Never
       // sendPacketOnce() from here — see the banner on build_mode_test_frame_.
-      self->parent_->send(self->mt_frame_, self->mt_frame_len_,
-                          {/*copies=*/(int) self->mt_copies_, /*stride_ms=*/0});
+      TxPolicy p{/*copies=*/(int) self->mt_copies_, /*stride_ms=*/0};
+
+      // D4: IN MODE B THE MARK GOES ON THE NODE'S GRID MARK.
+      //
+      // MEASURED 2026-09-13. Marks used to leave whenever this timer fired, so
+      // in Mode B they sat at an arbitrary, fixed phase against the grid —
+      // every one of 14 phase samples at -651 ms, ~46 guard bands out.
+      // phaseTrustworthy() could never pass, timed RX never armed (`windows
+      // 0/0`), and HW-8's one-shot histogram stayed empty: the test's own marks
+      // were the frames that made Mode B unreachable.
+      //
+      // Aimed the way send_aligned_ aims — the next mark CLEAR of the hub's own
+      // bursts — but tracked here in mt_last_mark_t0_us_ rather than in
+      // last_placed_t0_us_: this callback runs in the esp_timer task, and that
+      // member belongs to the ESPHome loop. The timer period IS the round, so
+      // consecutive ticks land on consecutive marks; the guard keeps a jittered
+      // tick from aiming two marks at one.
+      //
+      // Mode A stays unplaced on purpose: its swept period (1093 ms) is what
+      // lets a free-running window catch it at all.
+      if (self->mt_mode_ == 2 && self->parent_->gridStarted())
+      {
+        const int64_t now = esp_timer_get_time();
+        int64_t t0 = self->parent_->nextClearT0ForSlotUs(self->grid_slot_, now);
+        if (t0 <= self->mt_last_mark_t0_us_)
+          t0 = self->parent_->nextClearT0ForSlotUs(self->grid_slot_,
+                                                   self->mt_last_mark_t0_us_ + 1);
+        if (t0 > 0)
+        {
+          p.earliest_us = loratiming::fireInstantUs(t0, 0);
+          self->mt_last_mark_t0_us_ = t0;
+        }
+      }
+      self->parent_->send(self->mt_frame_, self->mt_frame_len_, p);
 
       // Build the next one now, in the idle part of the period.
       self->build_mode_test_frame_(true);
@@ -3082,6 +3168,7 @@ namespace esphome
       this->mt_mac_echo_           = mac_echo;
       this->mt_arm_offset_us_      = arm_offset_us;
       this->mt_seq_                = 0;
+      this->mt_last_mark_t0_us_    = 0;
       this->last_mode_test_report_.clear();
 
       ESP_LOGI(TAG, "[%s] ModeTest START: %u s, mode %u, grid %u ms, %u copies, "
