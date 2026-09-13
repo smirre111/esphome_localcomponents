@@ -1083,6 +1083,36 @@ namespace esphome
         // can the node authenticate an encrypted downlink.
         this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
 
+        // D1: give a node its grid back on every confirmed session.
+        //
+        // MEASURED 2026-09-13. GridSync used to be sent from enable_timed_mode()
+        // only — i.e. when someone flipped the switch in Home Assistant. A node
+        // that rebooted (power cycle, flash, brownout) lost its grid with its
+        // RAM and never got it back: it heard every GridBeacon and dropped each
+        // one, because a beacon only re-anchors a grid the node already holds
+        // (handleGridBeacon returns on !grid_.active). Three Mode B presses on
+        // the bench were refused for "no adopted grid" while Timed Mode showed
+        // ON.
+        //
+        // Once per session, not periodically — deliberately. A rebooted node
+        // always logs in again, so this reaches it at the first moment it can
+        // authenticate the frame, which is the only moment it can adopt the
+        // fleet key the GridSync carries. A periodic GridSync would leave a
+        // rebooted node in Mode A for up to a beacon interval and would spend a
+        // burst per node per interval on top of the beacon, which is the
+        // airtime §4.4's broadcast design exists to save.
+        //
+        // After the TimeSync and before the schedule push, so this frame's own
+        // processing finishes first and the three do not pile onto one round.
+        if (this->timed_mode_enabled_ && this->parent_ != nullptr &&
+            this->parent_->gridStarted())
+        {
+          this->set_timeout("gridsync_relogin", 1250, [this]() {
+            if (this->timed_mode_enabled_)
+              this->send_grid_sync(true);
+          });
+        }
+
         // F1: push the schedule here TOO, not only from handle_beacon_().
         //
         // The beacon is a single unbursted, unacknowledged frame. When it was

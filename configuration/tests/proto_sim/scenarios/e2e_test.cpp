@@ -48,6 +48,7 @@
 #include "LoraTiming.h"
 #include "GridState.h"
 #include "PendingData.h"
+#include "ModeTestPolicy.h"
 
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
@@ -655,4 +656,72 @@ TEST_F(E2E, AReflashedHubAndAProvisionedNodeConvergeOnASession) {
         << "a hub that has pushed nothing this boot must end up synced; while "
            "config_synced_ stays false the node is asked to re-register on "
            "every single login";
+}
+
+// ---------------------------------------------------------------------------
+TEST_F(E2E, ARefusedArmReachesTheHubAsARefusal) {
+    // MEASURED 2026-09-13: three Mode B presses on the bench were refused by
+    // the node for "no adopted grid" — and the hub showed nothing at all. The
+    // node logged REFUSED and returned, so `arm refusal`, the number the bench
+    // procedure says to read FIRST, kept the previous run's 0, and a run that
+    // never happened looked like a run whose report was lost. Visible only on
+    // the serial console.
+    bringUpSession();
+    ASSERT_FALSE(disp.gridState().active)
+        << "no Timed Mode, so no grid: Mode B must be refused";
+
+    rol.start_mode_test(/*duration_s=*/300, /*grid_ms=*/1500, /*mode=*/2,
+                        /*copies=*/1, /*keep_power_profile=*/true,
+                        /*enable_counter=*/false, /*enable_crypto=*/false,
+                        /*mac_echo=*/true, /*arm_offset_us=*/0);
+    settle();
+    rol.stop_mode_test();
+
+    const auto &s = rol.mode_test_summary();
+    ASSERT_TRUE(s.valid)
+        << "a refused arm must still produce a report the hub receives — "
+           "otherwise a refusal is indistinguishable from a lost report";
+    EXPECT_EQ(s.arm_refusal, (uint32_t) modetest::ArmRefusal::NoGrid)
+        << "and it must carry the node's actual reason";
+    EXPECT_EQ(s.mode, 0u)
+        << "mode 0: nothing ran. Reporting the previous run's mode alongside a "
+           "refusal is the misreading 'read mode actually run first' prevents";
+    EXPECT_EQ(s.windows_armed, 0u);
+    EXPECT_EQ(s.elapsed_s, 0u);
+}
+
+// ---------------------------------------------------------------------------
+TEST_F(E2E, ANodeThatLogsInWhileTimedModeIsOnGetsTheGrid) {
+    // D1. MEASURED 2026-09-13: a node that rebooted lost its grid and never
+    // got it back, because GridSync was sent only when the Timed Mode switch
+    // was flipped. It heard every GridBeacon and dropped each one — a beacon
+    // only re-anchors a grid the node already holds.
+    //
+    // Timed Mode was switched on while this node was not listening, and the
+    // GridSync that toggle sent is LOST — the bench case exactly: node 2
+    // rebooted long after the switch was flipped, so it never heard that frame
+    // at all. The grid is running, the node is not on it, and the only way back
+    // is the session it is about to establish.
+    //
+    // Losing the frame matters to what this test can see. Delivered, a
+    // pre-session GridSync IS adopted — but it went out before any session key
+    // existed, so it carries no fleet key, and a first draft that did not drop
+    // it passed its grid assertion without the fix and caught only the key.
+    rol.enable_timed_mode(true);
+    ASSERT_FALSE(radio.hub_to_node_frames().empty());
+    drop_downlink_.push_back(radio.hub_to_node_frames().size() - 1);
+    settle();
+    ASSERT_FALSE(disp.gridState().active)
+        << "precondition: the node must not have the grid before its session";
+
+    bringUpSession();
+    tick(2000);          // past the deferred GridSync
+    settle();
+
+    EXPECT_TRUE(disp.gridState().active)
+        << "a node that logs in while Timed Mode is on must adopt the grid from "
+           "that session. Without it, a rebooted node stays refused for Mode B "
+           "until someone toggles the switch";
+    EXPECT_TRUE(disp.hasNetKey())
+        << "and the fleet key, which only an encrypted GridSync carries";
 }

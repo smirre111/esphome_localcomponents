@@ -1867,6 +1867,28 @@ burst-copy back-out exists precisely to sample bursted frames. It needs a
 decision about whether the hub must *place* every downlink while a grid runs
 (B1's gate says it should) or the node must distinguish placed from unplaced.
 
+**Recorded, not changed (decision D3, 2026-09-13): the hub persists its frame
+counters on every transmit.** `incrTxMessageId()` and `setRxMessageId()` call
+`save_state_()` on every frame, production commands included — not only
+ModeTest. What is known: ESPHome buffers preference saves in RAM and commits
+them at most every `flash_write_interval` (30 min), so this is not a flash
+write per frame; the restored `tx_id` gets +64 on boot; no base nonce is
+persisted, and both login and the base-nonce exchange reset the counters to 0,
+so the restored counter appears to be used by nothing before it is reset. Two
+things are wrong regardless: during ModeTest the save runs from the `esp_timer`
+task while the ESPHome loop owns the preference backend (the log lines are
+tagged `[esp_timer]`), and a per-transmit write is not acceptable for
+production. **Policy: acceptable for bench testing, not for production.** No
+code change until there is evidence of whether the counter is needed — the
+proposed evidence is a host test showing a hub reboot mid-session recovers
+without the saved counters.
+
+**Side finding, no action:** a node that receives a GridSync *before* it has a
+session adopts the grid but not the fleet key, because a pre-session GridSync
+is not encrypted and only an encrypted one carries the key. Such a node is on
+the grid but cannot verify a beacon's MAC until its next session's GridSync,
+which D1 now sends.
+
 **Four defects sat in front of the ten measurements**, each invisible to the
 host suite: `setRtcSlowSrc()` had no caller anywhere, so Mode B had never been
 reachable on hardware; a provisioned node and a freshly flashed hub deadlocked
