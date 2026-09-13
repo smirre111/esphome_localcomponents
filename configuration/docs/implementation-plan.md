@@ -1934,6 +1934,41 @@ timebase against hub timebase — so it includes both clocks; the 20 ppm line is
 applied to that relative figure. DriftTest's +8 ppm (sleep disabled) remains the
 comparison that isolates what light sleep itself costs.
 
+**MEASURED 2026-09-13 — the light-sleep step was software, and is removed (node
+fw 1.0.66).** Sign convention, verified in code: **positive ppm = node clock
+FAST** (the fit is `add(nominal hub time, node rx time)`; `DriftEstimator.h` said
+"slow" and was wrong until 1.0.66). All runs node 2, Mode B, production profile,
+900 s:
+
+| fw | node timebase | ppm (n) | measured period | phase p50 / p99 / max | true FER |
+|---|---|---|---|---|---|
+| 1.0.64 | esp_timer | +60 (36) | 1 500 091 us | +16.9 / – / +41.7 ms | 0 / 36 |
+| 1.0.65 | esp_timer minus modelled nominal-period over-count | **+202** (35) | 1 500 303 us | +101 / +189 / +189 ms | 0 / 35 |
+| **1.0.66** | **re-anchored to RTC ticks × measured period at every sleep exit** | **+9** (36) | **1 500 014 us** | **+5.6 / +10.2 / +10.2 ms** | **0 / 36** (95 % bound ≈ 8 %) |
+
+* **Cause.** ESP-IDF 6.0 advances esp_timer after each light sleep from RTC
+  ticks with the NOMINAL 32 kHz period (`sleep_modes.c`, ext-XTAL branch),
+  truncated per sleep, although it calibrates the crystal at boot. Node 2's
+  crystal is **−139.4 ppm** (60 s recalibration; boot −144.6). The nominal-period
+  term alone predicts a SLOW node; the node read FAST, so IDF's per-sleep
+  bookkeeping carries further error. 1.0.65 subtracted only the modelled term
+  and moved the rate by exactly that amount (+60 → +202).
+* **Measured directly in 1.0.66** (esp_timer against crystal time, per minute):
+  +19 ppm idle, +58 ppm in a login minute, **−30 to −37 ppm during this Mode B
+  test**. The error depends on workload and changes sign, so no fixed correction
+  can hold it. Re-anchoring absolutely at every sleep exit cannot accumulate it.
+* **Result against the pass line:** clock rate **+9 ppm, |ppm| < 20: pass**, equal
+  to sleep off (+9) and DriftTest (+8) — light sleep now costs 0 ppm. Phase max
+  10.2 ms stays inside the ±14 080 us guard over the whole run. Residual ppm was
+  not visible: the running hub build predates the residual field in its log.
+* **Not passed: mode engaged / HW-8.** `windows 0/0` again — the node never armed
+  a timed window, so HW-8 still could not run (not a failure). The hub's
+  single-shot refusal read **2 = RebootedSinceConfirm** throughout: the node
+  rebooted into 1.0.66 and has not earned a confirmation since.
+* The +51 ppm "per-sleep compensation error" suspected under HW-5 above is this
+  mechanism; the beacon-interval conclusion drawn from +60 ppm no longer applies
+  at +9 ppm (guard exit ≈ 14 080 / 9 ≈ 26 min, beyond the 5.8 min interval).
+
 **Recorded, not changed (decision D3, 2026-09-13): the hub persists its frame
 counters on every transmit.** `incrTxMessageId()` and `setRxMessageId()` call
 `save_state_()` on every frame, production commands included — not only
