@@ -1,9 +1,8 @@
-// SleepClockCorrection.h: the node's correction for what ESP-IDF 6.0 adds to
-// esp_timer on each light sleep (nominal 32 kHz period, truncated per sleep)
-// against what the measured crystal really took.
+// SleepClockCorrection.h: the node's MAC-0 timebase across light sleep.
+// Sleep time comes from the RTC tick counter (32 kHz crystal x measured
+// period); after each sleep node time is re-anchored to it absolutely.
 //
-// The numbers are node 2's: +60 ppm under auto light sleep, +9 ppm with sleep
-// off. A crystal 55 ppm fast measures 16 000 000 / 1.000055 = 15 999 120 Q19.
+// Node 2's crystal measured -139.4 ppm: period 16 002 235 Q19.
 
 #include <gtest/gtest.h>
 
@@ -15,85 +14,78 @@
 using namespace sleepclock;
 
 namespace {
-constexpr uint32_t kFast55 = 15999120u;   // 55 ppm fast
-constexpr uint32_t kSlow55 = 16000880u;   // 55 ppm slow
-
-// The true duration of `ticks`, in Q19 us, for a crystal of the given period.
-int64_t trueQ19(uint64_t ticks, uint32_t period) { return (int64_t) (ticks * period); }
+constexpr uint32_t kNode2 = 16002235u;   // -139.4 ppm, slow
 }  // namespace
-
-TEST(SleepClockCorrection, IdfAddsTheNominalPeriodTruncated) {
-    EXPECT_EQ(idfAddedUs(0), 0);
-    EXPECT_EQ(idfAddedUs(1), 30) << "30.517578125 us truncated";
-    EXPECT_EQ(idfAddedUs(32768), 1000000) << "one nominal second is exact";
-}
 
 TEST(SleepClockCorrection, CrystalErrorFromTheMeasuredPeriod) {
     EXPECT_EQ(crystalErrorPpb(kNominalPeriodQ19), 0);
-    EXPECT_NEAR(crystalErrorPpb(kFast55), 55003, 1);
-    EXPECT_NEAR(crystalErrorPpb(kSlow55), -54997, 1);
-    EXPECT_EQ(crystalErrorPpb(0), 0) << "no calibration read: no claim";
+    EXPECT_NEAR(crystalErrorPpb(kNode2), -139667, 1);
+    EXPECT_NEAR(crystalErrorPpb(15999120u), 55003, 1);
+    EXPECT_EQ(crystalErrorPpb(0), 0);
 }
 
-TEST(SleepClockCorrection, AFastCrystalMakesEspTimerRunAheadByItsPpmOfSleep) {
-    Accumulator a;
-    a.noteSleep(32768, kFast55);           // one nominal second asleep
-    EXPECT_EQ(a.overcount_us, 55) << "880 x 32768 / 2^19 = 55.0 us ahead";
-    EXPECT_EQ(a.nodeTimeUs(2000000), 2000000 - 55) << "node time takes the lead back out";
+TEST(SleepClockCorrection, TicksBecomeCrystalTimeWithTheMeasuredPeriod) {
+    RtcTimebase tb;
+    tb.start(/*ticks=*/1000, /*us=*/5000000, kNode2);
+    EXPECT_EQ(tb.usAt(1000), 5000000);
+    // One nominal second of ticks on a crystal 139.7 ppm slow took longer.
+    EXPECT_EQ(tb.usAt(1000 + 32768), 5000000 + 1000139);
 }
 
-TEST(SleepClockCorrection, ASlowCrystalMakesEspTimerFallBehind) {
-    Accumulator a;
-    a.noteSleep(32768, kSlow55);
-    EXPECT_EQ(a.overcount_us, -55);
-    EXPECT_EQ(a.nodeTimeUs(2000000), 2000000 + 55);
+TEST(SleepClockCorrection, ConvertsFromTheBaseSoLongUptimesDoNotOverflow) {
+    RtcTimebase tb;
+    const uint64_t ticks_at_100_days = 32768ull * 86400ull * 100ull;
+    tb.start(ticks_at_100_days, 0, kNode2);
+    const uint64_t day = 32768ull * 86400ull;
+    // 86 400 s x (1 + 139.7e-6) = 86 412.07 s
+    EXPECT_NEAR((double) tb.usAt(ticks_at_100_days + day), 86412067000.0, 2000.0);
 }
 
-TEST(SleepClockCorrection, APerfectCrystalStillLosesTheTruncation) {
-    // 10 000 one-tick sleeps: IDF adds 30 us each, the crystal took 30.5176.
-    Accumulator a;
-    for (int i = 0; i < 10000; ++i) a.noteSleep(1, kNominalPeriodQ19);
-    // lost = 10 000 x 0.517578125 = 5175.78 us -> overcount floor(-5175.78)
-    EXPECT_EQ(a.overcount_us, -5176)
-        << "esp_timer falls behind by the truncated fractions; node time adds them back";
+TEST(SleepClockCorrection, ARecalibrationDoesNotMoveTheClock) {
+    RtcTimebase tb;
+    tb.start(0, 0, 16002314u);                       // boot calibration
+    const uint64_t t60 = 32768ull * 60ull;
+    const int64_t before = tb.usAt(t60);
+    tb.rebase(t60, kNode2);                          // 60 s recalibration
+    EXPECT_EQ(tb.usAt(t60), before) << "no jump at the instant the period changes";
+    EXPECT_EQ(tb.usAt(t60 + 32768) - before, 1000139) << "the new period applies afterwards";
 }
 
-TEST(SleepClockCorrection, SubMicrosecondErrorsAccumulateInsteadOfVanishing) {
-    // 100 000 sleeps of 10 ticks: each sleep's crystal error is 0.017 us, far
-    // under one. Truncating per sleep would report zero forever.
-    Accumulator a;
-    for (int i = 0; i < 100000; ++i) a.noteSleep(10, kFast55);
-    const int64_t expect_q19 =
-        100000 * ((idfAddedUs(10) << kCalFractBits) - trueQ19(10, kFast55));
-    EXPECT_EQ(a.overcount_us, expect_q19 >> kCalFractBits);
-    EXPECT_NE(a.overcount_us, 0);
+TEST(SleepClockCorrection, OffsetAndEspTimerErrorAreMeasuredFromThePair) {
+    EXPECT_EQ(offsetFor(/*rtc_us=*/10000500, /*esp=*/10000000), 500);
+    // esp_timer gained 190 ms on the crystal over 1000 s: offset fell by 190 000 us.
+    EXPECT_EQ(espTimerErrorPpm(0, -190000, 1000000000), 190);
+    EXPECT_EQ(espTimerErrorPpm(0, 139000, 1000000000), -139);
+    EXPECT_EQ(espTimerErrorPpm(0, -1, 0), 0) << "no span, no claim";
 }
 
-TEST(SleepClockCorrection, NoCalibrationCountsTheSleepButCorrectsNothing) {
-    Accumulator a;
-    a.noteSleep(32768, 0);
-    EXPECT_EQ(a.overcount_us, 0);
-    EXPECT_EQ(a.sleeps, 1u);
-    EXPECT_EQ(a.slept_ticks, 32768u);
-}
+// The failure that motivated it: IDF's per-sleep bookkeeping is off by some
+// amount the node cannot see (here +42 us a sleep, the size the +202 ppm run
+// implies). Re-anchoring after each sleep must land node time on the crystal
+// after 4000 sleeps - to within one tick's quantisation, not 4000 x 42 us.
+TEST(SleepClockCorrection, ReanchoringAfterEverySleepCannotAccumulateIdfError) {
+    RtcTimebase tb;
+    tb.start(0, 0, kNode2);
 
-// The run that motivated it: 900 s, ~93% asleep in 30 ms sleeps, crystal +55
-// ppm. esp_timer is advanced exactly as IDF does it; node time must land on the
-// crystal's own elapsed time to within a microsecond, and the whole ~+46 ms
-// esp_timer lead must be gone.
-TEST(SleepClockCorrection, ANineHundredSecondProductionRunLandsOnTheCrystal) {
-    Accumulator a;
-    int64_t esp_timer_q19 = 0;   // what IDF advanced esp_timer by, in Q19
-    int64_t truth_q19     = 0;
-    const uint64_t ticks_per_sleep = 983;        // ~30 ms
-    const int sleeps = 25540;                    // ~837 s asleep of 900
-    for (int i = 0; i < sleeps; ++i) {
-        esp_timer_q19 += idfAddedUs(ticks_per_sleep) << kCalFractBits;
-        truth_q19     += trueQ19(ticks_per_sleep, kFast55);
-        a.noteSleep(ticks_per_sleep, kFast55);
+    uint64_t ticks = 0;           // the RTC counter: runs through everything
+    int64_t  esp   = 0;           // esp_timer, as IDF maintains it
+    int64_t  offset = 0;
+    constexpr int64_t kIdfErrorPerSleepUs = 42;
+    for (int i = 0; i < 4000; ++i) {
+        // awake 7 ms: both clocks run (esp_timer on the 40 MHz crystal)
+        const uint64_t awake_ticks = 229;
+        esp   += (int64_t) ((awake_ticks * kNode2) >> kCalFractBits);
+        ticks += awake_ticks;
+        // asleep 215 ms: esp_timer stopped, then set by IDF - with its error
+        const uint64_t sleep_ticks = 7045;
+        esp   += (int64_t) ((sleep_ticks * kNominalPeriodQ19) >> kCalFractBits) + kIdfErrorPerSleepUs;
+        ticks += sleep_ticks;
+        // exit hook: one pair, absolute re-anchor
+        offset = offsetFor(tb.usAt(ticks), esp);
     }
-    const int64_t esp_us   = esp_timer_q19 >> kCalFractBits;
-    const int64_t truth_us = truth_q19 >> kCalFractBits;
-    EXPECT_GT(esp_us - truth_us, 20000) << "precondition: uncorrected, esp_timer is tens of ms ahead";
-    EXPECT_LE(std::llabs(a.nodeTimeUs(esp_us) - truth_us), 1);
+    const int64_t node_us  = esp + offset;
+    const int64_t crystal  = tb.usAt(ticks);
+    // +42 us x 4000 sleeps against -140 ppm of nominal-period loss: ~44 ms.
+    EXPECT_GT(std::llabs(esp - crystal), 20000) << "precondition: esp_timer alone is far off";
+    EXPECT_LE(std::llabs(node_us - crystal), 31) << "node time is crystal time to one tick";
 }
