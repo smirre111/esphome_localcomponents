@@ -344,6 +344,40 @@ button:
       # phaseTrustworthy() needs before timedRxActive() will arm anything.
       - lambda: 'id(rol_2)->start_mode_test(300, 1500, 2, 8, true, false, false, true);'
   - platform: template
+    name: "Mode Test A — long, MAC-0 baseline (node 2)"
+    id: rol_2_modetest_a_long
+    entity_category: diagnostic
+    on_press:
+      # Mode A's MAC-0 numbers: ppm and FER_link. 900 s is the node's cap. At the
+      # measured 5.4-6.5 % free-running catch rate a 1093 ms grid gives ~45
+      # marks, past the >= 30 samples over >= 200 s a rate needs. The 300 s
+      # buttons give ~16, which cannot carry a ppm figure.
+      - lambda: 'id(rol_2)->start_mode_test(900, 1093, 1, 1, true, false, false, true);'
+  - platform: template
+    name: "Mode Test B — long, production profile (node 2)"
+    id: rol_2_modetest_b_long_prod
+    entity_category: diagnostic
+    on_press:
+      # HW-5 and half of HW-3, and the run Mode B's pass line is read from:
+      # |ppm| < 20 under the PRODUCTION profile (auto light sleep, 32.768 kHz
+      # crystal). 900 s is the node's cap (kMaxDurationS). At the free-running
+      # ~6 % catch rate that is ~35 marks over ~900 s — past the >= 30 samples
+      # over >= 200 s the rate needs to mean anything. The 300 s runs gave 12.
+      - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, true, false, false, true);'
+  - platform: template
+    name: "Mode Test B — long, sleep off (node 2)"
+    id: rol_2_modetest_b_long_measuring
+    entity_category: diagnostic
+    on_press:
+      # IDENTICAL to the button above except keepPowerProfile = false: no light
+      # sleep, CPU pinned at 240 MHz. Run back to back with it. Measured
+      # 2026-09-13 under the production profile: phase p50 +8.5 ms, max
+      # +17.6 ms (outside the 14 080 us guard), ppm +58 on 12 samples. If the
+      # bias and the tail vanish here, they are light-sleep wake latency (HW-3's
+      # delta); if the ppm drops toward DriftTest's +8, light sleep is costing
+      # the rate and Mode B fails at the root. Draws ~11 mA while it runs.
+      - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, false, false, false, true);'
+  - platform: template
     name: "Mode Test Stop (node 2)"
     id: rol_2_modetest_stop
     entity_category: diagnostic

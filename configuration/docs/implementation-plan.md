@@ -1867,6 +1867,42 @@ burst-copy back-out exists precisely to sample bursted frames. It needs a
 decision about whether the hub must *place* every downlink while a grid runs
 (B1's gate says it should) or the node must distinguish placed from unplaced.
 
+**MEASURED 2026-09-13 — §12.5 (HW-5) answered, and it breaks the beacon
+interval.** Two back-to-back 900 s Mode B runs on node 2 (fw 1.0.64), identical
+except for the power profile, rate from the run-scoped fit over the test's own
+marks:
+
+| run | profile | samples | phase p50 / max | ppm | measured period |
+|---|---|---|---|---|---|
+| (i) | **production** (auto light sleep) | 36 over ~868 s | +16.9 / +41.7 ms | **+60** | 1 500 091 us |
+| (ii) | **sleep off** (240 MHz pinned) | 39 over ~885 s | +50.4 / +55.2 ms | **+9** | 1 500 015 us |
+
+* **Light sleep costs ~+51 ppm.** Sleep off agrees with DriftTest's +8 ppm
+  (also sleep disabled) to within 1 ppm, so the ruler is sound and the
+  difference is the power profile. Slow-clock calibration is already at its
+  fine setting (`RTC_CLK_CAL_CYCLES=3000`, recalibrated every 100 light-sleep
+  cycles), so the leading suspect is a per-sleep-cycle compensation error
+  multiplied by many short tickless sleeps — unconfirmed.
+* **The phase error is accumulated drift, not wake-latency jitter.** (ii)'s
+  offset grows by exactly 9 ppm × 900 s ≈ 8 ms with a ~5 ms spread; (i)'s
+  60 ppm × 900 s ≈ 54 ms matches its p50 climbing from +8.5 ms (a 300 s run)
+  to +16.9 ms and its max to +41.7 ms.
+* **The ±20 ppm assumption behind the 5.8 min beacon interval does not hold
+  under the production profile.** At +60 ppm a node leaves the ±14 080 us guard
+  in 14 080 / 60 ≈ **235 s**, shorter than the beacon interval — a beacon cannot
+  re-anchor a node already outside the guard (`reanchorIsSane`), so phase never
+  becomes trustworthy, windows never arm, and HW-8 stays unreachable. This is
+  the root of every `windows 0/0` today once D4 put the marks on the grid.
+* `FER_link` ≈ 93 % in both runs is listening duty, not loss: an unpromoted
+  node listens on a free-running window ~6 % of the time.
+
+**FER per mode is reported as the funnel's stage 2→3, `1 − crc_valid /
+detected`** — mac-layer.md §6.1's "true FER": collision and interference only,
+comparable across modes, and measurable on-node without the witness receiver.
+FER_link and WMR are reported beside it, never instead of it. With detected ==
+crc_valid in every run so far it is 0 — stated with its sample count and a 95 %
+upper bound (≈ 3/n), because 0 of 36 is not 0 %.
+
 **Mode B's goal and pass line (decided 2026-09-13).** Mode B exists to hold
 the node's clock rate within the crystal's rating while the node runs the
 production power profile (auto light sleep, 32.768 kHz crystal).
