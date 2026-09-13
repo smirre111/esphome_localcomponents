@@ -674,3 +674,21 @@ TEST(GridStateRate, TheRateAwareAnchorSolveRoundTrips) {
             << "rate " << rate << ": the anchor recovered from a frame must be the one that predicted it";
     }
 }
+
+TEST(GridStateRate, TheLearningHelpersHoldTheirBoundaries) {
+    const uint32_t pitch = timedgrid::kSlotPitchUs;   // 46 875 us
+    EXPECT_TRUE(beaconErrLearnable(23437, pitch));
+    EXPECT_TRUE(beaconErrLearnable(-23437, pitch));
+    EXPECT_FALSE(beaconErrLearnable(23438, pitch));
+    EXPECT_FALSE(beaconErrLearnable(-23438, pitch));
+
+    EXPECT_EQ(residualRatePpb(5000, 59LL * 1000000), 0)
+        << "under a minute, drift cannot be told from timestamp jitter";
+    EXPECT_EQ(residualRatePpb(20970, 349500000), 60000)
+        << "20 970 us over one 5.8 min beacon interval is +60 ppm";
+    EXPECT_EQ(residualRatePpb(-20970, 349500000), -60000);
+
+    EXPECT_EQ(clampRatePpb(300000), 200000);
+    EXPECT_EQ(clampRatePpb(-300000), -200000);
+    EXPECT_EQ(clampRatePpb(60000), 60000);
+}

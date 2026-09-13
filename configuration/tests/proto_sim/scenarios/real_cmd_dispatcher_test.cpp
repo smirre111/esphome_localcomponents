@@ -4691,3 +4691,118 @@ TEST_F(RealNodeFixture, AModeTestRunMeasuresTheNodesClockRateFromItsMarks) {
     EXPECT_NEAR(disp.modeTestPpmForTest(), (int32_t) kPpm, 1)
         << "the run's marks must recover the clock rate they were generated at";
 }
+
+// ---------------------------------------------------------------------------
+// MAC-0 clock discipline: learning the rate from beacons
+//
+// MEASURED 2026-09-13: under the production power profile node 2 counts +60 ppm
+// against the hub. Arrivals below are generated from a TRUTH grid - the adopted
+// grid with rate_ppb = 60 000 - and the node has to discover that rate itself.
+// ---------------------------------------------------------------------------
+
+namespace {
+int64_t rx_for_truth(const gridstate::State &truth, uint32_t round, uint32_t len) {
+    return gridstate::beaconT0ForRound(truth, round) + (int64_t) loratiming::t0ToRxDoneUs(len);
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, ANodeLearnsItsClockRateFromBeaconsAndComesBackInsideTheGuard) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/100);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.clockRatePpbForTest(), 0);
+
+    gridstate::State truth = disp.gridState();
+    truth.rate_ppb = 60000;
+    const uint32_t bslot = truth.params.beacon_slot;
+    uint32_t msgid = 1;
+
+    // Beacon 1 (round 233): about 21 ms out - beyond the guard, inside half a pitch.
+    {
+        const int64_t predicted = gridstate::beaconT0ForRound(disp.gridState(), 233);
+        const int64_t true_t0   = gridstate::beaconT0ForRound(truth, 233);
+        ASSERT_GT(true_t0 - predicted, (int64_t) timedgrid::kGuardUs)
+            << "precondition: the first beacon must be outside the guard, as on the bench";
+        auto b = build_grid_beacon(233, bslot, msgid++);
+        disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                          rx_for_truth(truth, 233, (uint32_t) b.size()));
+        EXPECT_EQ(gridstate::beaconT0ForRound(disp.gridState(), 233), true_t0)
+            << "a beacon inside half a pitch must re-anchor, even outside the guard";
+    }
+    // Beacon 2 (round 466): the residual over 349.5 s reveals the rate.
+    {
+        auto b = build_grid_beacon(466, bslot, msgid++);
+        disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                          rx_for_truth(truth, 466, (uint32_t) b.size()));
+        EXPECT_NEAR(disp.clockRatePpbForTest(), 60000, 200)
+            << "two beacons 233 rounds apart must reveal +60 ppm";
+        EXPECT_EQ(disp.gridState().rate_ppb, disp.clockRatePpbForTest());
+        EXPECT_EQ(disp.phaseStats().n, 0u)
+            << "a rate update resets phase stats, so no pre-update sample can latch outside_guard";
+    }
+    // Beacon 3 (round 699): the learned rate now predicts it.
+    {
+        const int64_t predicted = gridstate::beaconT0ForRound(disp.gridState(), 699);
+        const int64_t true_t0   = gridstate::beaconT0ForRound(truth, 699);
+        EXPECT_LE(std::llabs(true_t0 - predicted), (int64_t) timedgrid::kGuardUs)
+            << "after learning, the next beacon must land inside the guard";
+        EXPECT_LE(std::llabs(true_t0 - predicted), 500)
+            << "and not merely inside it: the rate is exact, so the residual is rounding";
+        auto b = build_grid_beacon(699, bslot, msgid++);
+        disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                          rx_for_truth(truth, 699, (uint32_t) b.size()));
+        EXPECT_GE(disp.phaseStats().n, 1u)
+            << "a beacon inside the guard is a promotion sample again";
+        EXPECT_EQ(disp.phaseStats().outside_guard, 0u);
+    }
+}
+
+TEST_F(RealNodeFixture, ALearnedRateSurvivesAGridWithdrawalAndReadoption) {
+    auto gs = build_grid_sync(true, 4, 100);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    // Precondition. Without it a GridSync dropped by the replay window leaves no
+    // grid, every beacon is ignored, and the test fails far from its cause.
+    ASSERT_TRUE(disp.gridState().active);
+    gridstate::State truth = disp.gridState();
+    truth.rate_ppb = 60000;
+    const uint32_t bslot = truth.params.beacon_slot;
+    for (uint32_t i = 1; i <= 2; ++i) {
+        auto b = build_grid_beacon(233 * i, bslot, i);
+        disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                          rx_for_truth(truth, 233 * i, (uint32_t) b.size()));
+    }
+    ASSERT_NEAR(disp.clockRatePpbForTest(), 60000, 200);
+
+    // Withdraw the grid (grid_.clear() runs), then adopt a new one.
+    auto off = build_grid_sync(false, 4, 101);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    ASSERT_FALSE(disp.gridState().active);
+    auto again = build_grid_sync(true, 9, 102);
+    disp.onReceiveNew(again.data(), static_cast<int>(again.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    EXPECT_NEAR(disp.clockRatePpbForTest(), 60000, 200)
+        << "the rate describes this node clock, not the grid: a withdrawal must not erase it";
+    EXPECT_EQ(disp.gridState().rate_ppb, disp.clockRatePpbForTest())
+        << "and a new grid must predict with it from the first mark";
+}
+
+TEST_F(RealNodeFixture, ABeaconBeyondHalfASlotPitchChangesNothing) {
+    auto gs = build_grid_sync(true, 4, 100);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    // Precondition, and the reason it is here: with msgid 2200 this test used to
+    // PASS WITHOUT A GRID. The replay window dropped the GridSync, the beacon
+    // handler returned on !grid_.active, and "anchor unchanged, rate 0" held
+    // trivially.
+    ASSERT_TRUE(disp.gridState().active);
+    const gridstate::State before = disp.gridState();
+    const int64_t half = (int64_t) before.params.pitch_us / 2;
+
+    auto b = build_grid_beacon(233, before.params.beacon_slot, 1);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_beacon(before, 233, half + 600, (uint32_t) b.size()));
+
+    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us)
+        << "beyond half a pitch the frame is nearer a neighbouring slot than our mark";
+    EXPECT_EQ(disp.clockRatePpbForTest(), 0);
+}

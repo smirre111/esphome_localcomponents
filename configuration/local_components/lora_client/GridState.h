@@ -379,14 +379,52 @@ constexpr UplinkAim aimUplink(const State &st, int64_t now_us,
 // away. The bound stays even once the beacon carries a fleet-key MAC: a MAC
 // proves the sender held the key, and every node in the fleet holds it too.
 //
-// The rule: correct only by what fits inside the guard band. A larger error is
-// not drift — one round at +/-20 ppm is 30 us, and a whole resyncMaxS of it
-// still fits inside G — so it is either a foreign frame or a node that has
-// already lost the grid. Both are cases for DEMOTING rather than for chasing
-// the anchor, which is what the phase tracker's own criteria then do.
+// The rule for a PHASE SAMPLE that feeds promotion: inside the guard band.
+//
+// REFUTED 2026-09-13, and only the second half of the old reasoning: it said a
+// larger error "is not drift — one round at +/-20 ppm is 30 us, and a whole
+// resyncMaxS of it still fits inside G". Measured under the production power
+// profile the node clock runs +60 ppm against the hub, so a beacon interval
+// (5.8 min) accumulates ~21 ms — outside G, and still drift. A guard-only rule
+// discarded exactly the beacons that could have corrected it.
+//
+// So there are now two bounds with two jobs. This one still gates the sample
+// promotion is judged on. beaconErrLearnable() below gates re-anchoring and rate
+// learning, with a capture wide enough to hold a beacon interval of real drift.
 constexpr bool reanchorIsSane(int64_t err_us, uint32_t guard_us)
 {
     return err_us <= (int64_t) guard_us && err_us >= -(int64_t) guard_us;
+}
+
+// The capture for LEARNING and re-anchoring from a beacon: half a slot pitch.
+//
+// Wider than the guard because drift between beacons can exceed the guard
+// (measured: ~21 ms per 5.8 min at +60 ppm), and a node must be able to
+// correct from exactly those beacons. No wider than half a pitch, because
+// beyond that the frame is closer to a neighbouring slot than to our own
+// mark and the error no longer identifies which mark it belongs to.
+constexpr bool beaconErrLearnable(int64_t err_us, uint32_t pitch_us)
+{
+    const int64_t half = (int64_t) pitch_us / 2;
+    return err_us <= half && err_us >= -half;
+}
+
+// The residual rate one beacon reveals, ppb: its error over the hub-clock span
+// since the last accepted beacon, whose re-anchor had zeroed the error. 0 when
+// the span is too short to tell drift from timestamp jitter.
+constexpr int32_t kRateMaxPpb = 200000;              // +/-200 ppm clamp
+constexpr int64_t kRateMinSpanUs = 60LL * 1000000;   // one minute
+constexpr int32_t residualRatePpb(int64_t err_us, int64_t hub_span_us)
+{
+    if (hub_span_us < kRateMinSpanUs) return 0;
+    return (int32_t) ((err_us * kRateDen) / hub_span_us);
+}
+
+constexpr int32_t clampRatePpb(int64_t ppb)
+{
+    if (ppb >  kRateMaxPpb) return  kRateMaxPpb;
+    if (ppb < -kRateMaxPpb) return -kRateMaxPpb;
+    return (int32_t) ppb;
 }
 
 }  // namespace gridstate
