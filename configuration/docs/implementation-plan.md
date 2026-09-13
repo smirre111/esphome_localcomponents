@@ -1896,6 +1896,19 @@ marks:
 * `FER_link` ≈ 93 % in both runs is listening duty, not loss: an unpromoted
   node listens on a free-running window ~6 % of the time.
 
+**MEASURED 2026-09-13 — Mode A, MAC-0 closed.** One 900 s run, grid 1093 ms,
+production profile, counter 0 crypto 0:
+
+| Mode A, MAC-0 | value |
+|---|---|
+| raw ppm | **+65**, n = 51 over ~862 s (1 093 070 us against 1 093 000) |
+| true FER (stage 2→3) | **0 of 51** — 95 % upper bound ≈ 5.9 % |
+| FER_link | 93.5 % — listening duty: 51 of 828 caught, 6.2 % against 6.26 % predicted |
+| WMR | not applicable — Mode A arms no timed windows |
+
+The raw rate agrees with Mode B's +60 under the same profile: it belongs to
+the node clock under light sleep, not to a mode.
+
 **FER per mode is reported as the funnel's stage 2→3, `1 − crc_valid /
 detected`** — mac-layer.md §6.1's "true FER": collision and interference only,
 comparable across modes, and measurable on-node without the witness receiver.
