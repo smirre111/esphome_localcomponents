@@ -539,6 +539,16 @@ if(EXISTS ${BLINDS_ESP_MAIN}/include/DriftEstimator.h)
     gtest_discover_tests(drift_estimator_test)
 endif()
 
+# SleepClockCorrection.h removes what ESP-IDF 6.0 adds to esp_timer on each light
+# sleep (nominal 32 kHz period, truncated) from the node's MAC-0 timebase. The
+# measured +51 ppm step between sleep on and off rests on this arithmetic.
+if(EXISTS ${BLINDS_ESP_MAIN}/include/SleepClockCorrection.h)
+    add_executable(sleep_clock_correction_test scenarios/sleep_clock_correction_test.cpp)
+    target_include_directories(sleep_clock_correction_test PRIVATE ${BLINDS_ESP_MAIN}/include)
+    target_link_libraries(sleep_clock_correction_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(sleep_clock_correction_test)
+endif()
+
 # ScheduleText.h is the compact schedule format. A parser is the one place a
 # typo becomes silent data loss, so it is dependency-free and tested here — the
 # entity version of schedule editing could not be mistyped, and this format only
