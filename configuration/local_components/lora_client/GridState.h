@@ -83,15 +83,60 @@ constexpr int64_t solveAnchorUs(int64_t t0_measured_us, uint32_t tx_round,
          - (int64_t) tx_slot  * (int64_t) p.pitch_us;
 }
 
+// --- MAC-0 clock discipline: the node rate against the hub ------------------
+//
+// MEASURED 2026-09-13: under the production power profile (auto light sleep)
+// node 2 counts +60 ppm against the hub; with sleep disabled, +9. Every function
+// below used to step the grid in whole hub-clock rounds, which is exact only if
+// the two clocks agree. At +60 ppm the node leaves the +/-14 080 us guard in
+// about 235 s, inside one 5.8 min beacon interval, and never comes back.
+//
+// rate_ppb is how many MORE microseconds the node counts per hub microsecond, in
+// parts per billion: positive when a hub-clock span looks longer on the node.
+// That is the sign of the run-scoped fit (+60 ppm) and of the positive, growing
+// phase error seen on the bench. A span measured on the hub clock is stretched
+// onto the node clock by exactly that factor; with rate_ppb == 0 every result
+// below is bit-identical to the fixed-round arithmetic it replaces.
+constexpr int64_t kRateDen = 1000000000LL;
+
+// The same solve for a node that already holds a rate: the declared position is
+// a hub-clock span, so it is stretched before it is subtracted.
+constexpr int64_t solveAnchorUs(int64_t t0_measured_us, uint32_t tx_round,
+                                uint32_t tx_slot, const Params &p, int32_t rate_ppb)
+{
+    const int64_t span = (int64_t) tx_round * (int64_t) p.round_us
+                       + (int64_t) tx_slot  * (int64_t) p.pitch_us;
+    return t0_measured_us - (span + (span * (int64_t) rate_ppb) / kRateDen);
+}
+
 struct State
 {
     bool     active{false};
     Params   params{};
     int64_t  anchor_us{0};
     uint32_t last_round{0};
+    // The node rate against the hub, ppb (see kRateDen). 0 until something has
+    // measured it, which reproduces the fixed-round grid exactly.
+    int32_t  rate_ppb{0};
 
     void clear() { *this = State{}; }
 };
+
+// A span on the hub clock, as the node clock counts it.
+//
+// Overflow: a span stays below about 2.6e12 us for a month of uptime; times a
+// rate clamped to +/-200 ppm (2e5 ppb) that is 5.2e17, inside int64.
+constexpr int64_t stretchUs(const State &st, int64_t hub_span_us)
+{
+    return hub_span_us + (hub_span_us * (int64_t) st.rate_ppb) / kRateDen;
+}
+
+// The inverse, to first order in the rate. Used ONLY to seed the exact searches
+// below, never as an answer: its error is rate squared and the searches remove it.
+constexpr int64_t unstretchUs(const State &st, int64_t node_span_us)
+{
+    return node_span_us - (node_span_us * (int64_t) st.rate_ppb) / kRateDen;
+}
 
 // When the receiver opens for a given mark: T0 - (T_pre + G), plus the HW-2
 // sweep offset. The offset is added rather than folded into the arm lead so
@@ -107,8 +152,8 @@ constexpr int64_t armInstantUs(const State &st, int64_t t0_us)
 constexpr int64_t t0ForRound(const State &st, uint32_t round)
 {
     return st.anchor_us
-         + (int64_t) round * (int64_t) st.params.round_us
-         + (int64_t) st.params.slot_index * (int64_t) st.params.pitch_us;
+         + stretchUs(st, (int64_t) round * (int64_t) st.params.round_us
+                       + (int64_t) st.params.slot_index * (int64_t) st.params.pitch_us);
 }
 
 // The first T0 at or after `now`. Same explicit negative branch as the hub's
@@ -120,9 +165,15 @@ constexpr int64_t nextT0Us(const State &st, int64_t now_us)
     if (!st.active) return now_us;
     const int64_t base  = t0ForRound(st, 0);
     const int64_t round = (int64_t) st.params.round_us;
-    const int64_t delta = now_us - base;
-    if (delta <= 0) return base;
-    return base + ((delta + round - 1) / round) * round;
+    if (now_us <= base || round == 0) return base;
+    // Seeded from the nominal answer, then made exact: the smallest round whose
+    // T0 is at or after now. With rate_ppb == 0 the seed is already exact and
+    // neither loop runs.
+    int64_t r = (unstretchUs(st, now_us - base) + round - 1) / round;
+    if (r < 0) r = 0;
+    while (r > 0 && t0ForRound(st, (uint32_t) (r - 1)) >= now_us) --r;
+    while (t0ForRound(st, (uint32_t) r) < now_us) ++r;
+    return t0ForRound(st, (uint32_t) r);
 }
 
 // How long from `now` until the one-shot that arms the radio should fire.
@@ -165,18 +216,24 @@ constexpr bool isBeaconRound(const State &st, uint32_t round)
 // transmits in rather than 0.
 constexpr uint32_t roundForT0(const State &st, int64_t t0_us)
 {
-    const int64_t rel = t0_us - st.anchor_us
-                      - (int64_t) st.params.slot_index * (int64_t) st.params.pitch_us;
-    if (rel < 0 || st.params.round_us == 0) return 0;
-    return (uint32_t) (rel / (int64_t) st.params.round_us);
+    if (st.params.round_us == 0) return 0;
+    const int64_t base = t0ForRound(st, 0);
+    if (t0_us < base) return 0;
+    const int64_t round = (int64_t) st.params.round_us;
+    // Seeded, then exact: the largest round whose T0 is at or before t0_us.
+    int64_t r = unstretchUs(st, t0_us - base) / round;
+    if (r < 0) r = 0;
+    while (r > 0 && t0ForRound(st, (uint32_t) r) > t0_us) --r;
+    while (t0ForRound(st, (uint32_t) (r + 1)) <= t0_us) ++r;
+    return (uint32_t) r;
 }
 
 // The BEACON's T0 in a given round — the beacon slot's phase, not this node's.
 constexpr int64_t beaconT0ForRound(const State &st, uint32_t round)
 {
     return st.anchor_us
-         + (int64_t) round * (int64_t) st.params.round_us
-         + (int64_t) st.params.beacon_slot * (int64_t) st.params.pitch_us;
+         + stretchUs(st, (int64_t) round * (int64_t) st.params.round_us
+                       + (int64_t) st.params.beacon_slot * (int64_t) st.params.pitch_us);
 }
 
 // The first beacon T0 at or after `now`. Same explicit negative branch as
@@ -189,7 +246,13 @@ constexpr int64_t nextBeaconT0Us(const State &st, int64_t now_us)
                          * (int64_t) st.params.beacon_every_rounds;
     const int64_t base   = beaconT0ForRound(st, 0);
     if (now_us <= base) return base;
-    return base + ((now_us - base + stride - 1) / stride) * stride;
+    const int64_t every  = (int64_t) st.params.beacon_every_rounds;
+    // Seeded, then exact: the first beacon round whose T0 is at or after now.
+    int64_t k = (unstretchUs(st, now_us - base) + stride - 1) / stride;
+    if (k < 0) k = 0;
+    while (k > 0 && beaconT0ForRound(st, (uint32_t) ((k - 1) * every)) >= now_us) --k;
+    while (beaconT0ForRound(st, (uint32_t) (k * every)) < now_us) ++k;
+    return beaconT0ForRound(st, (uint32_t) (k * every));
 }
 
 enum class WindowKind : uint8_t { Own, Beacon };
@@ -282,11 +345,23 @@ constexpr UplinkAim aimUplink(const State &st, int64_t now_us,
     // directly rather than by stepping: the first n whose CAD start has not
     // already passed. Truncating division rounds towards zero, so the negative
     // branch is explicit for the same reason it is in nextT0Us().
-    const int64_t base  = t0ForRound(st, 0) + (int64_t) st.params.ul_offset_us;
-    const int64_t round = (int64_t) st.params.round_us;
-    const int64_t need  = now_us + lead_us - base;
-    const int64_t n     = (need <= 0) ? 0 : ((need + round - 1) / round);
-    const int64_t t0    = base + n * round;
+    // The published offset is a hub-clock span like the round, so it is
+    // stretched with it: uplink mark n sits at anchor + stretch(n * round + slot
+    // offset + ul_offset). With rate_ppb == 0 this is exactly base + n * round.
+    const int64_t round  = (int64_t) st.params.round_us;
+    const int64_t offset = (int64_t) st.params.slot_index * (int64_t) st.params.pitch_us
+                         + (int64_t) st.params.ul_offset_us;
+    const int64_t target = now_us + lead_us;
+    const int64_t base   = st.anchor_us + stretchUs(st, offset);
+    int64_t n = 0;
+    if (target > base)
+    {
+        n = (unstretchUs(st, target - base) + round - 1) / round;
+        if (n < 0) n = 0;
+        while (n > 0 && st.anchor_us + stretchUs(st, (n - 1) * round + offset) >= target) --n;
+        while (st.anchor_us + stretchUs(st, n * round + offset) < target) ++n;
+    }
+    const int64_t t0    = st.anchor_us + stretchUs(st, n * round + offset);
     const int64_t start = t0 - lead_us;
 
     if (start - now_us > max_wait_us)

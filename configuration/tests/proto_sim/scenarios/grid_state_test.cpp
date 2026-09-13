@@ -542,3 +542,135 @@ TEST(GridState, TurnaroundLongerThanTheOffsetMissesEveryMark) {
     for (int64_t turnaround : {70'000, 100'000, 500'000})
         EXPECT_FALSE(aimUplink(st, mark + turnaround, kLead, kMaxWait).aimed);
 }
+
+// ---------------------------------------------------------------------------
+// MAC-0 clock discipline: the rate term
+//
+// MEASURED 2026-09-13: node 2 counts +60 ppm against the hub under the production
+// power profile (auto light sleep), +9 with sleep disabled. A grid that steps in
+// whole hub-clock rounds leaves the +/-14 080 us guard in about 235 s at +60 ppm,
+// inside one beacon interval. rate_ppb stretches every hub-clock span onto the
+// node clock; these tests pin that it does so exactly, and that at rate 0 nothing
+// changes at all.
+// ---------------------------------------------------------------------------
+
+namespace {
+State withRate(int32_t rate_ppb, uint32_t slot = 3, int64_t anchor = 1'000'000) {
+    State st = aimable(slot, anchor);
+    st.rate_ppb = rate_ppb;
+    return st;
+}
+}  // namespace
+
+TEST(GridStateRate, ZeroRateIsBitIdenticalToTheFixedRoundGrid) {
+    // The whole change must be invisible until something sets a rate: every
+    // test above and every node in the field runs at rate 0 today.
+    const State st = withRate(0);
+    const int64_t R = st.params.round_us, P = st.params.pitch_us;
+    const int64_t base = st.anchor_us + (int64_t) st.params.slot_index * P;
+    for (uint32_t r : {0u, 1u, 2u, 233u, 600u, 57600u})
+        EXPECT_EQ(t0ForRound(st, r), base + (int64_t) r * R) << "round " << r;
+    for (int64_t now : {base - 5, base, base + 1, base + R - 1, base + R, base + 7 * R + 3})
+    {
+        const int64_t d = now - base;
+        const int64_t expect = (d <= 0) ? base : base + ((d + R - 1) / R) * R;
+        EXPECT_EQ(nextT0Us(st, now), expect) << "now " << now;
+    }
+    for (int64_t t0 : {base, base + 1, base + R - 1, base + 5 * R})
+        EXPECT_EQ(roundForT0(st, t0), (uint32_t) ((t0 - base) / R)) << "t0 " << t0;
+}
+
+TEST(GridStateRate, RoundAndT0StayExactInversesWithARate) {
+    for (int32_t rate : {60000, -60000, 200000, -200000})
+    {
+        const State st = withRate(rate);
+        for (uint32_t r : {1u, 2u, 599u, 600u, 57600u})
+        {
+            const int64_t t0 = t0ForRound(st, r);
+            EXPECT_EQ(roundForT0(st, t0), r)       << "rate " << rate << " round " << r;
+            EXPECT_EQ(roundForT0(st, t0 - 1), r - 1) << "rate " << rate << " just before round " << r;
+        }
+    }
+}
+
+TEST(GridStateRate, SixtyPpmMovesRound600ByExactly54Ms) {
+    // 600 rounds x 1.5 s = 900 s of hub time; 60 ppm of that is 54 000 us. This is
+    // the drift the bench measured over a 900 s run with no correction.
+    const int64_t nominal   = t0ForRound(withRate(0), 600);
+    const int64_t corrected = t0ForRound(withRate(60000), 600);
+    const int64_t span = 600LL * (int64_t) withRate(0).params.round_us
+                       + (int64_t) withRate(0).params.slot_index * (int64_t) withRate(0).params.pitch_us;
+    EXPECT_EQ(corrected - nominal, (span * 60000) / 1000000000LL);
+    EXPECT_NEAR((double) (corrected - nominal), 54000.0, 20.0)
+        << "positive rate: the node counts more microseconds, so its marks come later";
+}
+
+TEST(GridStateRate, TheNextMarkIsNeverInThePastAndNeverSkipsOne) {
+    // Probed AT each mark and one microsecond either side of it, because a search
+    // seeded from a first-order inverse is exactly the kind of code that is right
+    // everywhere except at the boundary.
+    for (int32_t rate : {60000, -60000, 200000, -200000})
+    {
+        const State st = withRate(rate);
+        for (uint32_t r : {1u, 2u, 3u, 600u, 601u, 57600u})
+        {
+            const int64_t mark = t0ForRound(st, r);
+            for (int64_t now : {mark - 1, mark, mark + 1})
+            {
+                const int64_t next = nextT0Us(st, now);
+                EXPECT_GE(next, now) << "rate " << rate << " round " << r;
+                const uint32_t nr = roundForT0(st, next);
+                EXPECT_EQ(t0ForRound(st, nr), next) << "the answer must be a mark";
+                if (nr > 0)
+                    EXPECT_LT(t0ForRound(st, nr - 1), now) << "and the FIRST mark at or after now";
+            }
+        }
+    }
+}
+
+TEST(GridStateRate, TheNextBeaconIsNeverInThePastAndNeverSkipsOne) {
+    for (int32_t rate : {60000, -60000})
+    {
+        const State st = withRate(rate);
+        const uint32_t every = st.params.beacon_every_rounds;
+        ASSERT_GT(every, 0u);
+        for (uint32_t k : {1u, 2u, 40u})
+        {
+            const int64_t mark = beaconT0ForRound(st, k * every);
+            for (int64_t now : {mark - 1, mark, mark + 1})
+            {
+                const int64_t next = nextBeaconT0Us(st, now);
+                EXPECT_GE(next, now) << "rate " << rate << " beacon " << k;
+                EXPECT_TRUE(next == mark || next == beaconT0ForRound(st, (k + 1) * every))
+                    << "the answer must be this beacon or the next one, not a later one";
+            }
+        }
+    }
+}
+
+TEST(GridStateRate, AnAimedUplinkLandsOnAStretchedMark) {
+    const State st = withRate(60000);
+    const int64_t R = st.params.round_us;
+    const int64_t offset = (int64_t) st.params.slot_index * (int64_t) st.params.pitch_us
+                         + (int64_t) st.params.ul_offset_us;
+    // Deep into the run, where a fixed-round aim would be ~54 ms off.
+    const int64_t now = t0ForRound(st, 600) + 5000;
+    const UplinkAim a = aimUplink(st, now, kLead, kMaxWait);
+    ASSERT_TRUE(a.aimed);
+    EXPECT_GE(a.cad_start_us, now) << "never aimed into the past";
+    bool on_mark = false;
+    for (int64_t n = 595; n <= 605; ++n)
+        if (a.t0_us == st.anchor_us + stretchUs(st, n * R + offset)) on_mark = true;
+    EXPECT_TRUE(on_mark) << "the aim must be an uplink mark on the node clock";
+}
+
+TEST(GridStateRate, TheRateAwareAnchorSolveRoundTrips) {
+    for (int32_t rate : {0, 60000, -60000})
+    {
+        State st = withRate(rate, /*slot=*/5, /*anchor=*/7'777'777);
+        const uint32_t tx_round = 432;
+        const int64_t t0 = t0ForRound(st, tx_round);
+        EXPECT_EQ(solveAnchorUs(t0, tx_round, st.params.slot_index, st.params, rate), st.anchor_us)
+            << "rate " << rate << ": the anchor recovered from a frame must be the one that predicted it";
+    }
+}
