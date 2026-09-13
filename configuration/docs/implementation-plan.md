@@ -1909,6 +1909,22 @@ production profile, counter 0 crypto 0:
 The raw rate agrees with Mode B's +60 under the same profile: it belongs to
 the node clock under light sleep, not to a mode.
 
+**Re-measured 2026-09-13 on node fw 1.0.66** (node timebase re-anchored to the
+32 kHz crystal at every sleep exit — see the Mode B section below). Same button,
+same profile, 900 s, Timed Mode off:
+
+| Mode A, MAC-0, fw 1.0.66 | value |
+|---|---|
+| raw ppm | **+10**, n = 49 (1 093 011 us against 1 093 000) — was +65 on 1.0.64 |
+| true FER (stage 2→3) | **0 of 50** — 95 % upper bound ≈ 6 % |
+| FER_link | 93.6 % — listening duty |
+| counterAcc / micValid | 49 / 50 — one rejection with the counter check off, unexplained |
+
+esp_timer against crystal time during this run: **+19 to +29 ppm per minute**
+(Mode B's run: −30 to −37). The per-mode sign difference is IDF's light-sleep
+bookkeeping, which the re-anchored timebase no longer inherits. Mode A and
+Mode B now agree at +10 / +9 ppm with sleep off (+9) and DriftTest (+8).
+
 **FER per mode is reported as the funnel's stage 2→3, `1 − crc_valid /
 detected`** — mac-layer.md §6.1's "true FER": collision and interference only,
 comparable across modes, and measurable on-node without the witness receiver.
@@ -1957,10 +1973,13 @@ FAST** (the fit is `add(nominal hub time, node rx time)`; `DriftEstimator.h` sai
   +19 ppm idle, +58 ppm in a login minute, **−30 to −37 ppm during this Mode B
   test**. The error depends on workload and changes sign, so no fixed correction
   can hold it. Re-anchoring absolutely at every sleep exit cannot accumulate it.
-* **Result against the pass line:** clock rate **+9 ppm, |ppm| < 20: pass**, equal
-  to sleep off (+9) and DriftTest (+8) — light sleep now costs 0 ppm. Phase max
-  10.2 ms stays inside the ±14 080 us guard over the whole run. Residual ppm was
-  not visible: the running hub build predates the residual field in its log.
+* **Raw rate (hardware finding, no pass line): +9 ppm**, equal to sleep off (+9)
+  and DriftTest (+8) — light sleep now costs 0 ppm. Phase max 10.2 ms stays
+  inside the ±14 080 us guard over the whole run.
+* **Mode B pass NOT demonstrated.** The pass line judges the RESIDUAL rate and
+  is valid only with windows armed > 0 and zero HW-8 misses. The residual was
+  not visible (the running hub build predates the residual field in its log),
+  and windows armed was 0/0.
 * **Not passed: mode engaged / HW-8.** `windows 0/0` again — the node never armed
   a timed window, so HW-8 still could not run (not a failure). The hub's
   single-shot refusal read **2 = RebootedSinceConfirm** throughout: the node
