@@ -1867,6 +1867,24 @@ burst-copy back-out exists precisely to sample bursted frames. It needs a
 decision about whether the hub must *place* every downlink while a grid runs
 (B1's gate says it should) or the node must distinguish placed from unplaced.
 
+**Mode B's goal and pass line (decided 2026-09-13).** Mode B exists to hold
+the node's clock rate within the crystal's rating while the node runs the
+production power profile (auto light sleep, 32.768 kHz crystal).
+
+| criterion | pass when | why it gates |
+|---|---|---|
+| **clock rate** | **\|ppmEstimate\| < 20 ppm**, node vs hub, `prod=1` | the goal itself |
+| mode engaged | `mode actually run` = 2, `arm refusal` = 0, `windows armed` > 0 | a rate from a node that never left Mode A describes Mode A |
+| ARM mechanism (HW-8) | `oneShot` bounded and `windowsArmed − oneShot n` = **0** | every armed window rests on it; one miss fails the gate |
+| sample quality | `ppmSamples` >= 30 over >= 200 s | a short or sparse baseline gives a rate dominated by timestamp jitter |
+
+The rate is measured by the node from the run's own ModeTest marks (a
+run-scoped `LongFit` of mark T0 against nearest-index × period), because
+nothing else fed a rate estimate during a ModeTest. It is relative — node
+timebase against hub timebase — so it includes both clocks; the 20 ppm line is
+applied to that relative figure. DriftTest's +8 ppm (sleep disabled) remains the
+comparison that isolates what light sleep itself costs.
+
 **Recorded, not changed (decision D3, 2026-09-13): the hub persists its frame
 counters on every transmit.** `incrTxMessageId()` and `setRxMessageId()` call
 `save_state_()` on every frame, production commands included — not only

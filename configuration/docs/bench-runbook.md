@@ -257,6 +257,10 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
    conditions.
 
 ### HW-5 — ppm under the production power profile
+**This is Mode B's pass criterion (decided 2026-09-13): |ppm| < 20, read from
+the `ppm … n … period` fields of a Mode B ModeTest REPORT with `prod=1`, valid
+only when `mode actually run` = 2, `windows armed` > 0, the HW-8 miss count is
+0, and `ppmSamples` >= 30 over >= 200 s.** See implementation-plan.md §12a.
 1. **Confirm B0 has landed on this build first.** Without the GPIO wake source
    the fit is worthless, not merely noisy.
 2. The default run — `dropPowerProfile` unset — *is* this measurement.
