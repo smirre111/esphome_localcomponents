@@ -500,6 +500,39 @@ TEST(RealTrackerTx, APlacedBurstPlacesEveryCopyOnItsOwnStride) {
                "arithmetic every node uses to recover copy 0";
 }
 
+TEST(RealTrackerTx, OnlyAFramePlacedOnAMarkSaysSoOnEveryCopy) {
+    // LoraHeader.onMark is the node's only licence to commit a frame's arrival
+    // as a phase sample (measured 2026-09-14: one unplaced frame, 463 ms off the
+    // mark, kept node 2 out of Mode B for a whole run). It must survive the
+    // per-copy re-stamp, and it must never be claimed for an unplaced frame.
+    struct Case { int64_t not_before; bool on_mark; bool expect; const char *what; };
+    const Case cases[] = {
+        {5'002'000, true,  true,  "placed on a mark"},
+        {0,         true,  false, "asked for, but unplaced"},
+        {5'002'000, false, false, "placed, but not on a mark (Class A)"},
+    };
+    for (const Case &c : cases) {
+        lorahal::rec().reset();
+        proto_sim_timer_reset();
+        proto_sim_timer_set_now_us(5'000'000);
+        LORATracker t;
+        auto frame = packedOperationFrame();
+        t.sendPacketBurst(frame.data(), frame.size(), /*copies=*/2, /*stride_ms=*/40,
+                          c.not_before, c.on_mark);
+
+        ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 2) << c.what;
+        for (size_t i = 0; i < 2; ++i) {
+            const auto &p = lorahal::rec().packets[i];
+            LoraClientOperationMessage *m =
+                lora_client_operation_message__unpack(NULL, p.size(), p.data());
+            ASSERT_NE(m, nullptr);
+            ASSERT_NE(m->header, nullptr);
+            EXPECT_EQ((bool) m->header->onmark, c.expect) << c.what << ", copy " << i;
+            lora_client_operation_message__free_unpacked(m, NULL);
+        }
+    }
+}
+
 TEST(RealTrackerTx, AnEligibleFrameOvertakesADeferredOneAheadOfIt) {
     // "Not before round n+2, and behind nothing else" — the sentence section
     // 4.5 says the old API could not express.

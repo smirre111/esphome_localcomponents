@@ -139,6 +139,8 @@ struct LoraHeader {
     // Burst scheduling (hub -> node); burstCount == 0 means single-shot.
     uint32_t burstIndex{0};
     uint32_t burstCount{0};
+    // Copy 0 placed on the destination node's grid mark (proto field 8).
+    bool     onMark{false};
 };
 
 struct LoraCoverOperation {

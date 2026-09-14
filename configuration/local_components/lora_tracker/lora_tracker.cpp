@@ -430,7 +430,7 @@ namespace esphome
       lora_tx_busy_ = true;
       this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
                             rx_buffer->tx_copies, rx_buffer->tx_stride_ms,
-                            fire_at_us);
+                            fire_at_us, rx_buffer->tx_on_mark != 0);
       lora_tx_busy_ = false;
 
       if (rx_buffer->length > 0)
@@ -924,6 +924,7 @@ namespace esphome
         rx_buffer->tx_priority    = policy.priority;
         rx_buffer->tx_supersede_key = policy.supersede_key;
         rx_buffer->tx_supersede_gen = policy.supersede_gen;
+        rx_buffer->tx_on_mark       = policy.on_mark ? 1 : 0;
 
         // Recorded HERE, at the moment the frame is accepted, not when it
         // reaches the front. A second command queued while the first is still
@@ -946,7 +947,8 @@ namespace esphome
     }
 
     void LORATracker::sendPacketBurst(uint8_t *data, size_t len, int copies,
-                                      uint32_t stride_ms, int64_t not_before_us)
+                                      uint32_t stride_ms, int64_t not_before_us,
+                                      bool on_mark)
     {
 
       // const TickType_t xFrequency = pdMS_TO_TICKS(142); // For RX /TX config 3x RX + 7x TX
@@ -985,7 +987,13 @@ namespace esphome
           lora_client_operation_message__unpack(NULL, len, data);
       const bool canStamp = (burstMsg != nullptr && burstMsg->header != nullptr);
       if (canStamp)
+      {
         burstMsg->header->burstcount = burstCopies;
+        // Whether copy 0 sits on the destination's grid mark — the node's only
+        // licence to read this frame's arrival as a phase sample. Never claimed
+        // for an unplaced frame, whatever the caller asked.
+        burstMsg->header->onmark = (on_mark && not_before_us > 0) ? 1 : 0;
+      }
 
       // for (int cnt = 0; cnt < 7; cnt++)
       for (int cnt = 0; cnt < burstCopies; cnt++)

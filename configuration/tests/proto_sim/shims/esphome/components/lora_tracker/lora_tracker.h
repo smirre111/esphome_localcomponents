@@ -37,6 +37,8 @@ struct TxPolicy {
     // higher generation is queued under the same key. 0 = takes no part.
     uint32_t supersede_key{0};
     uint32_t supersede_gen{0};
+    // earliest_us is the destination's grid mark (header onMark), mirrored.
+    bool     on_mark{false};
 };
 
 
@@ -104,6 +106,7 @@ public:
     uint32_t             last_supersede_gen{0};
     std::vector<uint32_t> sent_supersede_gen;
     std::vector<int64_t> sent_earliest_us;
+    bool                 last_on_mark{false};
     // The sim's "now" for grid arithmetic. Production reads esp_timer_get_time();
     // a test sets this instead so the answer is deterministic.
     int64_t sim_now_us{0};

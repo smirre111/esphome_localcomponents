@@ -657,10 +657,24 @@ struct  LoraHeader
    */
   uint32_t burstindex;
   uint32_t burstcount;
+  /*
+   * Copy 0 of this frame was PLACED on the destination node's grid mark
+   * (hub -> node). Only such a frame is a phase measurement: the node commits
+   * a phase sample for it and for nothing else. An unplaced frame — a Mode A
+   * burst, the ModeTest START, a Class A reply aimed at RX1/RX2 — lands
+   * anywhere in the round, and one sample from it latches outside_guard and
+   * keeps the node out of Mode B until its grid is re-adopted. Measured
+   * 2026-09-14: the ModeTest START landed 463 ms off the mark, and two 900 s
+   * Mode B runs armed no window at all.
+   * Stamped with burstIndex, after encryption, outside the AAD — the same
+   * standing as burstIndex. Flipping it on a genuine frame can only add a bad
+   * sample (which demotes) or withhold a good one; it cannot move the anchor.
+   */
+  protobuf_c_boolean onmark;
 };
 #define LORA_HEADER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_header__descriptor) \
-    , 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*

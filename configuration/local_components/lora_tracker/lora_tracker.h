@@ -59,6 +59,7 @@ typedef struct
   // reaches the front, by which time the caller that queued it is long gone.
   uint32_t tx_supersede_key;  // 0 = supersedes nothing, superseded by nothing
   uint32_t tx_supersede_gen;
+  uint8_t  tx_on_mark;        // TxPolicy::on_mark, stamped into the header
 } rx_buffer_t;
 
 // Statistics
@@ -114,6 +115,12 @@ namespace esphome
     // frame except a tracked cover op or sysop.
     uint32_t supersede_key{0};
     uint32_t supersede_gen{0};
+
+    // earliest_us is the destination node's GRID MARK, not merely some instant.
+    // Stamped into LoraHeader.onMark, which is the only thing that lets the node
+    // commit the frame's arrival as a phase sample. A Class A reply is placed
+    // too, but on the node's uplink, not on its mark — it must leave this false.
+    bool     on_mark{false};
   };
 
 
@@ -310,7 +317,8 @@ namespace esphome
       int defaultBurstCopies() const { return this->txSlotsPerRound; }
 
       void sendPacketBurst(uint8_t *data, size_t len, int copies = 0,
-                           uint32_t stride_ms = 0, int64_t not_before_us = 0);
+                           uint32_t stride_ms = 0, int64_t not_before_us = 0,
+                           bool on_mark = false);
 
       // Drift test: emit ONE copy instead of txSlotsPerRound.
       //

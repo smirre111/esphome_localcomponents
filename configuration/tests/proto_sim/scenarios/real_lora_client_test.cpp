@@ -1047,6 +1047,10 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     EXPECT_EQ(seen_t0, kT0Node17 + (int64_t) classa::kRx1DelayUs)
         << "and it lands on the design point, guard G inside the open edge — "
            "placed from node 17's uplink, not from node 18's";
+    EXPECT_FALSE(tracker.last_on_mark)
+        << "placed on the node's UPLINK, not on its grid mark: read as a phase "
+           "sample it is hundreds of ms of error and latches the node out of "
+           "Mode B";
 
     // The margin the design promises, stated so a future edit that eats it
     // fails here rather than in the field. The guard is measured to the first
@@ -2634,6 +2638,9 @@ TEST(PlacedDownlinks, ATimeSyncIsPlacedButAlwaysABurst) {
     ASSERT_GT(h.tracker.sent_earliest_us.size(), before);
 
     EXPECT_GT(h.tracker.last_earliest_us, 0) << "placed";
+    EXPECT_TRUE(h.tracker.last_on_mark)
+        << "placed on the node's own mark, so it must say so: that flag is the "
+           "node's only licence to read its arrival as a phase sample";
     EXPECT_NE(h.tracker.last_copies, 1)
         << "an unacked frame must not be reduced to one copy: nothing would "
            "ever learn it was lost";

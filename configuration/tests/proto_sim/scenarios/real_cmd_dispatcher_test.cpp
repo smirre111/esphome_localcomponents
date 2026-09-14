@@ -428,7 +428,7 @@ namespace {
 // sysop is a plain ClientOperation enum field on the operation message, not a
 // nested message — see blinds.proto field 11.
 std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what,
-                                   uint32_t burst_index = 0) {
+                                   uint32_t burst_index = 0, bool on_mark = true) {
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     LoraHeader hdr               = LORA_HEADER__INIT;
     hdr.destaddress   = kNodeAddr;
@@ -439,6 +439,10 @@ std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what,
     // and the number every phase path has to back out before it stamps a mark.
     hdr.burstindex    = burst_index;
     hdr.burstcount    = 17;
+    // Placed on this node's mark: the tests that feed a phase sample through
+    // this helper model the hub's placed frames. See the onMark tests for the
+    // unplaced case.
+    hdr.onmark        = on_mark;
     op.header         = &hdr;
 
     op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
@@ -2378,6 +2382,7 @@ std::vector<uint8_t> build_mac_ping(uint32_t seq, bool want_echo,
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;          // the hub
     hdr.msgid         = msgid;
+    hdr.onmark        = true;       // a phase sample in the tests that time it
 
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind     = MAC_CONTROL__KIND__MAC_PING;
@@ -2725,6 +2730,7 @@ std::vector<uint8_t> build_grid_sync(bool enable, uint32_t slot, uint32_t msgid,
     hdr.msgid         = msgid;
     hdr.burstindex    = burst_index;
     hdr.burstcount    = 17;
+    hdr.onmark        = true;   // the hub places a GridSync on the node's mark
 
     GridSync gs = GRID_SYNC__INIT;
     gs.enable            = enable;
@@ -3531,6 +3537,7 @@ std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgi
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = msgid;
+    hdr.onmark        = true;   // placed, as the hub places a session downlink
 
     EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
     ep.tag.data        = enc.tag.data();
@@ -4435,6 +4442,44 @@ TEST_F(RealNodeFixture, ABurstCopyIsStampedAsCopyZero) {
     EXPECT_LT(std::abs((long) disp.phaseStats().last_us), 2000L);
 }
 
+TEST_F(RealNodeFixture, AnUnplacedFrameIsNotAPhaseSample) {
+    // Measured 2026-09-14 on node 2: two 900 s Mode B production runs armed no
+    // window (windows 0/0) although every ModeTest mark read inside the guard
+    // (p99 9 377 us). The ModeTest START is unplaced and arrived 463 ms off the
+    // mark; committed as a phase error it latched outside_guard, and
+    // phaseTrustworthy() — zero samples outside, required — held the node on
+    // NoPhase for the whole run. A Mode A burst or a Class A reply does the same.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/720);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.phaseStats().n, 0u);
+
+    const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+
+    // Unplaced: 463 ms after the mark, as the START was.
+    auto unplaced = pack_sysop_op(/*msgid=*/721, CLIENT_OPERATION__CMD_STATUS,
+                                  /*burst_index=*/0, /*on_mark=*/false);
+    const int64_t rx_u = mark + 463000
+                       + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) unplaced.size());
+    disp.noteDriftSample(rx_u);
+    disp.onReceiveNew(unplaced.data(), static_cast<int>(unplaced.size()), rx_u);
+
+    EXPECT_EQ(disp.phaseStats().n, 0u)
+        << "a frame the hub did not place on this node's mark says nothing about "
+           "where the mark is";
+    EXPECT_EQ(disp.phaseStats().outside_guard, 0u);
+
+    // Placed, one round later and on the mark: that one IS the measurement.
+    auto placed = pack_sysop_op(/*msgid=*/722, CLIENT_OPERATION__CMD_STATUS);
+    const int64_t rx_p = mark + (int64_t) timedgrid::kRoundUs
+                       + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) placed.size());
+    disp.noteDriftSample(rx_p);
+    disp.onReceiveNew(placed.data(), static_cast<int>(placed.size()), rx_p);
+
+    ASSERT_EQ(disp.phaseStats().n, 1u);
+    EXPECT_EQ(disp.phaseStats().outside_guard, 0u);
+}
+
 TEST_F(RealNodeFixture, APlaintextFrameCannotFeedThePhaseFit) {
     // 11b's second open item. The sample used to be committed with the address
     // filter, above the plaintext gate, so anything in radio range could bias
@@ -4735,10 +4780,17 @@ TEST_F(RealNodeFixture, AModeTestRunMeasuresTheNodesClockRateFromItsMarks) {
     uint32_t msgid = 3, heard = 0;
     for (uint32_t k = 0; k <= 200; ++k) {
         if (k == 3 || k == 7) continue;
-        const int64_t rx = kBase +
-            (int64_t) ((double) k * kPeriodMs * 1000.0 * (1.0 + kPpm * 1e-6));
         auto mark = encrypted_mode_test(MODE_TEST__MODE__MODE_A, msgid++, kPeriodMs,
                                         /*seq=*/k + 1);
+        // The mark's T0 is on the rate; its RxDone is one air time later. The
+        // node subtracts the air time of the frame it actually received, and
+        // that length is not constant here: msgid and seq each gain a varint
+        // byte at 128. Generating RxDone without it put a step into the
+        // recovered T0 mid-run, and the fit read 36 ppm for 50 as soon as the
+        // header grew by the onMark field.
+        const int64_t rx = kBase +
+            (int64_t) ((double) k * kPeriodMs * 1000.0 * (1.0 + kPpm * 1e-6)) +
+            (int64_t) loratiming::t0ToRxDoneUs((uint32_t) mark.size());
         disp.onReceiveNew(mark.data(), static_cast<int>(mark.size()), rx);
         ++heard;
     }

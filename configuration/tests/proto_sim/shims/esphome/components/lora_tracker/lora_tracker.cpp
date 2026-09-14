@@ -7,6 +7,7 @@
 #include "sim/messages.h"
 #include "sim/sim_radio.h"
 #include "TimedGrid.h"
+#include "blinds.pb-c.h"
 
 #include <cstring>
 #include <psa/crypto.h>
@@ -127,6 +128,7 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     last_supersede_key = policy.supersede_key;
     last_supersede_gen = policy.supersede_gen;
     sent_supersede_gen.push_back(policy.supersede_gen);
+    last_on_mark = policy.on_mark;
 
     // A simulated drop happens AFTER the policy is recorded and BEFORE anything
     // reaches the air: production drops in send() too, having already computed
@@ -140,6 +142,21 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     if (!r) return true;
     proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode,
                           std::vector<uint8_t>(data, data + len)};
+
+    // Production stamps LoraHeader.onMark in sendPacketBurst's per-copy
+    // re-stamp; mirrored here, or a seam test would deliver a placed frame the
+    // node refuses to measure. Same rule: never for an unplaced frame.
+    if (policy.on_mark && policy.earliest_us > 0) {
+        if (::LoraClientOperationMessage* m =
+                lora_client_operation_message__unpack(NULL, len, data)) {
+            if (m->header != nullptr) {
+                m->header->onmark = 1;
+                f.bytes.resize(lora_client_operation_message__get_packed_size(m));
+                lora_client_operation_message__pack(m, f.bytes.data());
+            }
+            lora_client_operation_message__free_unpacked(m, NULL);
+        }
+    }
 
     const int n = expand_bursts
                       ? (policy.copies > 0 ? policy.copies : default_copies)

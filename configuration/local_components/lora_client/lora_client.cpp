@@ -2134,6 +2134,7 @@ namespace esphome
       // TxPolicy::earliest_us; d_tx_ramp is 0 for the reason given in
       // send_into_class_a_window_.
       policy.earliest_us = loratiming::fireInstantUs(t0, 0);
+      policy.on_mark     = true;   // t0 IS this node's mark: a phase measurement
       ESP_LOGD(TAG, "[%s] placing %u B at slot %u T0, %lld ms out",
                this->get_name().c_str(), (unsigned) len,
                (unsigned) this->grid_slot_, (long long) ((t0 - now) / 1000));
@@ -3140,6 +3141,7 @@ namespace esphome
         if (t0 > 0)
         {
           p.earliest_us = loratiming::fireInstantUs(t0, 0);
+          p.on_mark     = true;   // the node's own mark: its phase sample
           self->mt_last_mark_t0_us_ = t0;
         }
       }
