@@ -1998,7 +1998,20 @@ kept Mode B from engaging; the pass line (residual |ppm| < 20 with windows armed
 | 18:03 | 1.0.67 / `caddbca` | −29 242 / −25 803 us (36) | 0/0 | +9 / +9 (36) | 0 / 37 | hub burst copies 1.. paced from before copy 0's placement wait (fixed `27176ed`) |
 | 18:26 | 1.0.67 / `27176ed` | **+4 296 / +9 377 us (36)** | 0/0 | — | 0 / 37 | node committed the UNPLACED ModeTest START (463 ms off the mark) as a phase sample → `outside_guard` latched → NoPhase (fixed: `LoraHeader.onMark`, hub `a74ac64`, node 1.0.68 `238d925`) |
 | 18:59 | 1.0.68 / `a74ac64` | — (START not heard) | — | — | — | **first Mode B promotion on hardware** ("Grid arming on" after 3.5 min), then no mark heard: an open window was re-armed 1 us out (fixed node 1.0.69 `a19b2ce`); the missed START left the node ignoring every mark (fixed `21b801b`) |
-| 19:53 | 1.0.69 / `a74ac64` | −321 686 / −317 108 us (37) | 0/0 | +9 / +9 (37) | 0 / 38 | GridSync placed inside the TimeSync burst queued just before it, sent ~320 ms after the mark it declared; the node anchored to that (fix in progress: placement reservations) |
+| 19:53 | 1.0.69 / `a74ac64` | −321 686 / −317 108 us (37) | 0/0 | +9 / +9 (37) | 0 / 38 | GridSync placed inside the TimeSync burst queued just before it, sent ~320 ms after the mark it declared; the node anchored to that (fixed: placement reservations, hub `361f2a9`) |
+| **20:16** | **1.0.69 / `361f2a9`** | **+3 953 / +6 930 us (177), max +9 092** | **168/168** | 38 (?) / **not readable** (177) | 2 / 180 | **Mode B engaged and measured.** Promoted 3 min in; every armed window caught its mark (WMR 0 ppm). HW-8: oneShot n 170 ≥ windows armed 168 (the two extra are beacon windows) → **0 misses**. Not yet a pass: the hub's 512-byte report line truncated before the residual |
+
+* **20:16 in detail.** oneShot error p99 **12 994 us**, armResidual p99 **13 661 us** —
+  inside the 14 080 us guard but with ~0.4 ms to spare; a margin this thin is a
+  finding in itself. seq 5..596, 415 gaps: 168 windows over the ~469 rounds after
+  promotion is about **one round in three** — windows that opened were all hit, but
+  most rounds opened none (next defect). The raw rate field read 38 ppm while
+  measured period read 1 500 014 us (+9 ppm); both come from the same fit, so one of
+  the two is being reported wrongly — unresolved. Hub: 21 of 604 placed marks left
+  0.3–1.3 s past their mark and were correctly sent without `onMark`.
+* **Correction to the 18:59 reading.** A quiet node log during a running ModeTest is
+  not deafness: marks are not logged individually while a test is active. The 18:59
+  run had no test running, so its silence after promotion stands.
 
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
