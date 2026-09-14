@@ -2066,10 +2066,47 @@ node clock.
   before the 60 s crystal recalibration, carries the unsettled clock's error into every mark.
   The same hub's GridSync adopted at 297 s put marks within ~1 ms. Fixed in 1.0.75 (`0d32861`):
   such an anchor is provisional and re-solved from the first stamped frame after settling —
-  not yet shown on hardware.
+  shown on hardware in the run below.
 * MAC-1 items seen: counterAcc 595 of 597 (the two late marks after the deadline).
 * **MAC-0 across modes is now complete:** A +10 ppm / FER 0 of 50; B residual −1 ppm /
   FER 0 of 597; C wake timing +12 ppm / FER 0 of 4. Next per the layer order: MAC-1.
+
+**MEASURED 2026-09-14 23:57 – 2026-09-15 00:13 — Mode B, MAC-0, grid adopted in the boot
+minute: PASS.** Node 2, fw 1.0.75, hub `2097467`, production profile, 900 s. The node was
+flashed and the GridSync arrived **9.5 s** after boot, before the 60 s recalibration.
+
+| Mode B, MAC-0 (boot-minute grid) | value |
+|---|---|
+| provisional anchor | marked at 9.5 s; recal at 61.3 s; **re-solved at 84.0 s, moved −7 917 us** |
+| promotion | at 97.4 s, 13.4 s after the test's first mark (8 samples, 7 frames, 18–678 us) |
+| windows armed / hit | 591 / **583** (WMR 13 536 ppm) |
+| **HW-8:** oneShot n vs windows armed | **593 ≥ 591 → 0 missed one-shots**; oneShot p99 −349 us |
+| armResidual p99 | 303 us |
+| phaseErr p50 / p99 / max | +789 / +2 793 / +6 829 us, n 590 — inside the 14 080 us guard |
+| raw clock rate | +10 ppm, n 590, period 1 500 015 us |
+| **residual rate — pass line \|ppm\| < 20** | **−1 ppm — pass** |
+| detected / CRC-valid / addressed | 593 / 593 / 593 of 597 sent — **true FER 0**; FER_link 6 700 ppm (7 gaps) |
+| counterAcc / micValid | 590 / 591 |
+| hub copies late on their stamp (> 1 ms) | 8, at 1.02–1.89 ms |
+| beacon rate update | +9 665 ppb at 642.8 s, the first of this boot — node stayed in Mode B |
+
+* **The boot-minute fix works on hardware:** the −8 ms anchor error was measured and
+  removed (−7 917 us) before promotion, and every sample from 84 s to 276 s read < 2.2 ms.
+* **Phase drifts +10 ppm until the first rate beacon.** A freshly booted node has no rate:
+  per-sample error climbed from ~0.7 ms at 280 s to 3.0–4.0 ms at 550–641 s (≈ 10 us/s,
+  the raw rate), and fell to 18–680 us from the rate update at 642.8 s on. The 1.0.74 run
+  did not show it because that node already had a rate from an earlier beacon. Bounded by
+  the beacon period (233 rounds, 350 s → ≤ 3.5 ms at 10 ppm), inside the guard, but it
+  uses a quarter of it. Candidate: apply the rate the phase fit already measures
+  instead of waiting for the beacon.
+* **Not explained yet: 8 windows armed with no frame, and 4 frames lost** (1.0.74: 1 and
+  0). Neither the 8 late hub copies (≤ 1.9 ms, inside the guard) nor the drift (≤ 4 ms)
+  can move a frame out of a window, and the node logs no line per empty window, so they
+  cannot be placed in time from this capture. The single +6 829 us sample at 276.4 s
+  (msgid 133; its neighbour read +2 196 us) is also unexplained. Next capture logs empty
+  windows with their mark.
+* After the deadline the hub stopped sending marks, and the node demoted after 3 misses
+  at 980 s. This is expected for a ModeTest grid.
 
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
