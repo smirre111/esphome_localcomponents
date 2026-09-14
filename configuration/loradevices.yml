@@ -158,7 +158,13 @@ lora_client:
     #
     # Node 1 deliberately stays at 6 h — it has no serial, so it cannot provide
     # the observability this spends battery on, and its pack is the weaker one.
-    checkin_interval: 1h
+    #
+    # 15 min for Mode C MAC-0 measurement (2026-09-14): every check-in is one
+    # wake-clock sample and one Class A funnel report, so four times the data
+    # per hour. A wake with sleepOk costs ~3 s, so 96 wakes/day is ~290 s awake.
+    # Per-pair resolution is +-5 ms / 900 s = +-5.6 ppm; the run's fit averages
+    # it down. Return to 1h when the measurement campaign ends.
+    checkin_interval: 15min
     catchup_window: 0min
     # Two events eight minutes apart so one run observes both a first entry
     # into auto mode AND a wake out of deep sleep with the RTC markers already
