@@ -49,6 +49,8 @@ HubBelief confident() {
     b.phase_spread_us = 0;
     b.phase_samples   = kPromotionPhaseSamples;
     b.rtc_src         = RtcSlowSrc::Crystal;
+    // The node's own decision, which single-shot follows.
+    b.node_timed_rx   = true;
     return b;
 }
 }  // namespace
@@ -105,13 +107,14 @@ TEST(TimedModePolicy, PhaseErrorOutsideTheGuardDemotes) {
     }
 }
 
-TEST(TimedModePolicy, PromotionRequiresAnUplinkObservedInItsSlot) {
-    // A node claiming readiness is not evidence about where its window landed.
-    for (uint32_t n = 0; n < kPromotionUplinks; ++n) {
+TEST(TimedModePolicy, PromotionDoesNotWaitForTheHubsInSlotCount) {
+    // Decided 2026-09-14: the node is the authority. A ModeTest sends no
+    // uplinks, so a promotion gated on the hub's in-slot count never happened.
+    for (uint32_t n = 0; n <= kPromotionUplinks; ++n) {
         NodeState s = healthy();
         s.in_slot_uplinks = n;
-        EXPECT_EQ(modeFor(s, kResyncMaxS, kGuardUs), Mode::A) << n;
-        EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::NotConfirmed);
+        EXPECT_EQ(modeFor(s, kResyncMaxS, kGuardUs), Mode::B) << n;
+        EXPECT_NE(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::NotConfirmed) << n;
     }
 }
 
@@ -159,27 +162,11 @@ TEST(TimedModePolicy, AnyUncertaintyMeansBurst) {
         {"stale",          [] { auto b = confident();
                                 b.confirmation_age_s = kResyncMaxS + 1; return b; }()},
         {"prior miss",     [] { auto b = confident(); b.single_shot_unacked = true; return b; }()},
-        // The phase report, and every way of not having a usable one.
+        // The phase report, and the node's own decision it carries. The
+        // measurement is judged by the node (phaseTrustworthy), which reports
+        // the result; the hub no longer re-judges it.
         {"no phase report", [] { auto b = confident(); b.phase_reported = false; return b; }()},
-        {"too few samples", [] { auto b = confident();
-                                 b.phase_samples = kPromotionPhaseSamples - 1; return b; }()},
-        {"phase late",      [] { auto b = confident();
-                                 b.phase_err_us = (int32_t) kGuardUs + 1; return b; }()},
-        {"phase early",     [] { auto b = confident();
-                                 b.phase_err_us = -(int32_t) kGuardUs - 1; return b; }()},
-        // Spread, not just the mean: two clusters one pitch apart average to
-        // something innocent, and this is the case that exposes them.
-        {"phase bimodal",   [] { auto b = confident(); b.phase_err_us = 0;
-                                 b.phase_spread_us = (int32_t) kGuardUs + 1; return b; }()},
-        // The node's own trustworthiness test, not an approximation: a tight
-        // cluster offset by most of a guard band passes both the mean and the
-        // spread while every frame in it lands near the edge of the window.
-        {"samples outside guard", [] { auto b = confident();
-                                 b.phase_outside_guard = 1; return b; }()},
-        {"internal RC",     [] { auto b = confident();
-                                 b.rtc_src = RtcSlowSrc::InternalRc; return b; }()},
-        {"unknown clock",   [] { auto b = confident();
-                                 b.rtc_src = RtcSlowSrc::Unknown; return b; }()},
+        {"node not in Mode B", [] { auto b = confident(); b.node_timed_rx = false; return b; }()},
     };
     for (auto &c : cases)
         EXPECT_EQ(txPolicyFor(c.b, kGuardUs, kResyncMaxS), TxPolicy::Burst) << c.what;
@@ -225,9 +212,9 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
     // an echo can be stale in either direction. A report that was true when it
     // was made is exactly how the dangerous combination arises.
     for (bool h_reported : {false, true})
-    for (uint32_t h_samples : {0u, kPromotionPhaseSamples})
-    for (int32_t h_err : {0, (int32_t) kGuardUs + 1})
-    for (uint32_t h_out : {0u, 1u})
+    // The node's reported decision, swept independently of the node's actual
+    // state: the report is an echo and can be stale either way.
+    for (bool h_node : {false, true})
     {
         NodeState n;
         n.rtc_src = src; n.grid_enabled = grid; n.phase_valid = phase_valid;
@@ -240,9 +227,10 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
         h.rebooted_since_confirm = reboot; h.session_changed = sess;
         h.beacon_missed = beacon; h.firmware_known = fw;
         h.single_shot_unacked = false;
-        h.phase_reported = h_reported; h.phase_samples = h_samples;
-        h.phase_err_us = h_err; h.phase_spread_us = 0;
-        h.phase_outside_guard = h_out;
+        h.phase_reported = h_reported; h.phase_samples = kPromotionPhaseSamples;
+        h.phase_err_us = 0; h.phase_spread_us = 0;
+        h.phase_outside_guard = 0;
+        h.node_timed_rx = h_node;
         // The hub learns the clock source from the same beacon, so this one
         // tracks the node rather than being swept separately.
         h.rtc_src = src;
@@ -350,16 +338,8 @@ TEST(TimedModePolicy, EveryRefusalReasonIsReachableAndNamesItsOwnCondition) {
                      with([](HubBelief &b) { b.single_shot_unacked = true; })});
     cases.push_back({"no phase report", TxRefusal::NoPhaseReport,
                      with([](HubBelief &b) { b.phase_reported = false; })});
-    cases.push_back({"internal RC", TxRefusal::BadClockSource,
-                     with([](HubBelief &b) { b.rtc_src = RtcSlowSrc::InternalRc; })});
-    cases.push_back({"too few samples", TxRefusal::TooFewSamples,
-                     with([](HubBelief &b) { b.phase_samples = kPromotionPhaseSamples - 1; })});
-    cases.push_back({"mean out of guard", TxRefusal::PhaseOutOfGuard,
-                     with([](HubBelief &b) { b.phase_err_us = (int32_t) kGuardUs + 1; })});
-    cases.push_back({"bimodal", TxRefusal::SpreadTooWide,
-                     with([](HubBelief &b) { b.phase_spread_us = (int32_t) kGuardUs + 1; })});
-    cases.push_back({"samples outside", TxRefusal::SamplesOutOfGuard,
-                     with([](HubBelief &b) { b.phase_outside_guard = 1; })});
+    cases.push_back({"node not in Mode B", TxRefusal::NodeNotTimed,
+                     with([](HubBelief &b) { b.node_timed_rx = false; })});
     cases.push_back({"stale confirmation", TxRefusal::ConfirmationStale,
                      with([](HubBelief &b) { b.confirmation_age_s = kResyncMaxS + 1; })});
 
@@ -378,7 +358,14 @@ TEST(TimedModePolicy, EveryRefusalReasonIsReachableAndNamesItsOwnCondition) {
     std::set<TxRefusal> produced;
     for (const auto &c : cases) produced.insert(c.want);
     produced.insert(TxRefusal::NoPublishedMaxAge);
-    for (uint8_t v = 1; v <= (uint8_t) TxRefusal::ConfirmationStale; ++v) {
+    // 8-12 are retired (2026-09-14): kept in the enum so published numbers keep
+    // their meaning, never returned now that the node's decision covers them.
+    const std::set<uint8_t> retired = {8, 9, 10, 11, 12};
+    for (uint8_t v = 1; v <= (uint8_t) TxRefusal::NodeNotTimed; ++v) {
+        if (retired.count(v)) {
+            EXPECT_EQ(produced.count((TxRefusal) v), 0u) << "retired value " << (int) v;
+            continue;
+        }
         EXPECT_EQ(produced.count((TxRefusal) v), 1u)
             << "TxRefusal value " << (int) v << " is never produced by any case "
                "in this test — either the ladder gained a rung without a case, "
@@ -413,6 +400,7 @@ TEST(TimedModePolicy, TheAnswerAndTheReasonCannotDisagree) {
     push([](HubBelief &b) { b.phase_err_us = -((int32_t) kGuardUs) - 1; });
     push([](HubBelief &b) { b.phase_spread_us = (int32_t) kGuardUs + 1; });
     push([](HubBelief &b) { b.phase_outside_guard = 3; });
+    push([](HubBelief &b) { b.node_timed_rx = false; });
     push([](HubBelief &b) { b.confirmation_age_s = kResyncMaxS + 1; });
 
     for (uint32_t max_age : {0u, 60u, (uint32_t) kResyncMaxS}) {

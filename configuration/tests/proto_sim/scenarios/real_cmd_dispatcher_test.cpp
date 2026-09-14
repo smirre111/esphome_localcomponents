@@ -4511,76 +4511,57 @@ void bringNodeToTheEdgeOfPromotion(CmdDispatcher &disp, uint32_t samples = 8) {
 
 }  // namespace
 
-TEST_F(RealNodeFixture, WithoutTheHubsConfirmationTheNodeStaysInModeA) {
-    // §4.6's NotConfirmed criterion, which until U-4 could not fire: the field
-    // it reads was hardcoded to the value that satisfies it.
-    //
-    // The node MUST NOT promote on its own evidence. Where its uplink landed is
-    // produced by its own transmit path — CAD, a burst-end deferral, a random
-    // backoff — and the question is where the frame ARRIVED. "A beacon saying I
-    // am ready says nothing about where its window actually landed."
+// THE NODE IS THE AUTHORITY (decided 2026-09-14). Promotion used to wait for the
+// hub's count of in-slot uplinks, which a ModeTest can never earn — it sends no
+// uplinks — so on the bench no window was ever armed (windows 0/0). The node
+// promotes on its own phase evidence and reports the decision; the hub follows.
+
+TEST_F(RealNodeFixture, TheNodePromotesOnItsOwnPhaseEvidence) {
     bringNodeToTheEdgeOfPromotion(disp);
 
     ASSERT_TRUE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs))
-        << "precondition: everything EXCEPT the hub's confirmation is in place";
-    EXPECT_EQ(disp.hubInSlotUplinks(), 0u) << "the hub has not confirmed one";
-    EXPECT_FALSE(disp.timedRxActive())
-        << "a node with a perfect phase baseline and no hub confirmation must "
-           "stay in Mode A — this is the criterion that was disabled";
-}
-
-TEST_F(RealNodeFixture, TheHubsConfirmationOnATimeSyncIsWhatPromotesTheNode) {
-    // The positive case, asserted here for the first time anywhere: the node
-    // DOES enter Mode B, and what tips it is the hub's count arriving on a
-    // TimeSync.
-    bringNodeToTheEdgeOfPromotion(disp);
-    ASSERT_FALSE(disp.timedRxActive());
-
-    auto ts = pack_timesync_op(/*msgid=*/2000, /*epoch=*/1787000000ULL,
-                               /*utcoffset=*/0, /*dstnext=*/0,
-                               /*in_slot_uplinks=*/timedmode::kPromotionUplinks);
-    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
-
-    EXPECT_EQ(disp.hubInSlotUplinks(), timedmode::kPromotionUplinks);
+        << "precondition: a trustworthy phase baseline";
+    EXPECT_EQ(disp.hubInSlotUplinks(), 0u) << "and no confirmation from the hub at all";
     EXPECT_TRUE(disp.timedRxActive())
-        << "grid, crystal, a trustworthy phase and the hub's confirmation — "
-           "there is no reason left to fall back, so the node arms one window "
-           "per round instead of three";
+        << "grid, crystal and a trustworthy phase: the node knows its window "
+           "will be open, and promotes without waiting on the hub";
+    EXPECT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::None);
 }
 
-TEST_F(RealNodeFixture, OneConfirmationShortIsStillModeA) {
-    // The threshold, not merely non-zero. kPromotionUplinks is 3 because one
-    // in-slot arrival can be luck.
-    bringNodeToTheEdgeOfPromotion(disp);
-
-    auto ts = pack_timesync_op(/*msgid=*/2001, /*epoch=*/1787000000ULL,
-                               /*utcoffset=*/0, /*dstnext=*/0,
-                               /*in_slot_uplinks=*/timedmode::kPromotionUplinks - 1);
-    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
-
-    EXPECT_EQ(disp.hubInSlotUplinks(), timedmode::kPromotionUplinks - 1);
+TEST_F(RealNodeFixture, ABaselineOneSampleShortStaysInModeA) {
+    // The node's own threshold: phaseTrustworthy wants kPromotionPhaseSamples.
+    bringNodeToTheEdgeOfPromotion(disp, /*samples=*/timedmode::kPromotionPhaseSamples - 1);
     EXPECT_FALSE(disp.timedRxActive());
+    EXPECT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::NoPhase);
 }
 
-TEST_F(RealNodeFixture, AHubThatStopsConfirmingTakesThePromotionBack) {
-    // The count is the hub's current belief, not a latch. noteUplinkPlacement_
-    // resets it to 0 on an uplink that lands outside the slot, and the node has
-    // to follow that down — otherwise a node that drifts out of its slot keeps
-    // arming one window per round on the strength of a confirmation that has
-    // since been withdrawn, and Mode B's single copy lands in a closed window.
+TEST_F(RealNodeFixture, TheHubsInSlotCountNoLongerDecidesTheNodesMode) {
     bringNodeToTheEdgeOfPromotion(disp);
-    auto good = pack_timesync_op(2002, 1787000000ULL, 0, 0,
-                                 timedmode::kPromotionUplinks);
-    disp.onReceiveNew(good.data(), static_cast<int>(good.size()));
     ASSERT_TRUE(disp.timedRxActive());
 
-    auto withdrawn = pack_timesync_op(2003, 1787000000ULL, 0, 0, /*reset=*/0);
-    disp.onReceiveNew(withdrawn.data(), static_cast<int>(withdrawn.size()));
-
+    // A hub reporting zero in-slot uplinks is still carried as a diagnostic,
+    // but it does not take the node's decision away.
+    auto zero = pack_timesync_op(2003, 1787000000ULL, 0, 0, /*in_slot_uplinks=*/0);
+    disp.onReceiveNew(zero.data(), static_cast<int>(zero.size()));
     EXPECT_EQ(disp.hubInSlotUplinks(), 0u);
-    EXPECT_FALSE(disp.timedRxActive())
-        << "the hub withdrew its confirmation, so the node must go back to "
-           "sweeping three windows rather than trust a stale promotion";
+    EXPECT_TRUE(disp.timedRxActive());
+}
+
+TEST_F(RealNodeFixture, ThePhaseReportCarriesTheNodesOwnDecision) {
+    // The hub follows this, so it must say what the node actually does.
+    {
+        PhaseReport pr = PHASE_REPORT__INIT;
+        disp.setTimedRxEnabled(true);
+        disp.fillPhaseReport(pr);
+        EXPECT_FALSE(pr.timedrxactive) << "no grid yet";
+        EXPECT_NE(pr.demotionreason, (uint32_t) timedmode::Demotion::None)
+            << "and a reason saying why";
+    }
+    bringNodeToTheEdgeOfPromotion(disp);
+    PhaseReport pr = PHASE_REPORT__INIT;
+    disp.fillPhaseReport(pr);
+    EXPECT_TRUE(pr.timedrxactive) << "promoted: the report must say so";
+    EXPECT_EQ(pr.demotionreason, (uint32_t) timedmode::Demotion::None);
 }
 
 // ---------------------------------------------------------------------------

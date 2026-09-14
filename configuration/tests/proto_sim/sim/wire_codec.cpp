@@ -31,6 +31,8 @@ void fill_phase(::PhaseReport &pb, const proto_sim::PhaseReport &m)
     pb.rtcslowsrc   = m.rtcSlowSrc;
     pb.ppmestimate  = m.ppmEstimate;
     pb.ppmsamples   = m.ppmSamples;
+    pb.timedrxactive  = m.timedRxActive;
+    pb.demotionreason = m.demotionReason;
 }
 
 void read_phase(proto_sim::PhaseReport &m, const ::PhaseReport *pb)
@@ -42,6 +44,8 @@ void read_phase(proto_sim::PhaseReport &m, const ::PhaseReport *pb)
     m.rtcSlowSrc   = pb->rtcslowsrc;
     m.ppmEstimate  = pb->ppmestimate;
     m.ppmSamples   = pb->ppmsamples;
+    m.timedRxActive  = pb->timedrxactive;
+    m.demotionReason = pb->demotionreason;
 }
 
 }  // namespace

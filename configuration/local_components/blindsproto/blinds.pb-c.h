@@ -344,10 +344,19 @@ struct  PhaseReport
    * carried, which made it unseeable in a different way.
    */
   uint32_t rxbusyskips;
+  /*
+   * THE NODE'S DECISION (2026-09-14): whether it is in Mode B right now —
+   * arming one timed window per round — and, when not, the Demotion value
+   * that says why. Only the node knows whether its own phase error is small
+   * enough; the hub follows this rather than re-judging the numbers above.
+   * proto3 false = not in Mode B, so an older node keeps the hub bursting.
+   */
+  protobuf_c_boolean timedrxactive;
+  uint32_t demotionreason;
 };
 #define PHASE_REPORT__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&phase_report__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  CommandAck

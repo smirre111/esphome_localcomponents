@@ -101,6 +101,9 @@ struct PhaseReport {
     uint32_t rtcSlowSrc{0};     // 0 unknown, 1 internal RC, 2 crystal
     int32_t  ppmEstimate{0};
     uint32_t ppmSamples{0};
+    // The node's own decision (proto fields 9, 10): in Mode B, and if not, why.
+    bool     timedRxActive{false};
+    uint32_t demotionReason{0};
 };
 
 struct NodeWakeBeacon {

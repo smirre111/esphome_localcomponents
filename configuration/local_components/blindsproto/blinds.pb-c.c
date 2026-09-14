@@ -1594,7 +1594,7 @@ const ProtobufCMessageDescriptor base_nonce_exchange__descriptor =
   (ProtobufCMessageInit) base_nonce_exchange__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor phase_report__field_descriptors[8] =
+static const ProtobufCFieldDescriptor phase_report__field_descriptors[10] =
 {
   {
     "samples",
@@ -1692,8 +1692,33 @@ static const ProtobufCFieldDescriptor phase_report__field_descriptors[8] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "timedRxActive",
+    9,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(PhaseReport, timedrxactive),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "demotionReason",
+    10,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(PhaseReport, demotionreason),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned phase_report__field_indices_by_name[] = {
+  9,   /* field[9] = demotionReason */
   1,   /* field[1] = errUs */
   3,   /* field[3] = outsideGuard */
   5,   /* field[5] = ppmEstimate */
@@ -1702,11 +1727,12 @@ static const unsigned phase_report__field_indices_by_name[] = {
   7,   /* field[7] = rxBusySkips */
   0,   /* field[0] = samples */
   2,   /* field[2] = spreadUs */
+  8,   /* field[8] = timedRxActive */
 };
 static const ProtobufCIntRange phase_report__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 8 }
+  { 0, 10 }
 };
 const ProtobufCMessageDescriptor phase_report__descriptor =
 {
@@ -1716,7 +1742,7 @@ const ProtobufCMessageDescriptor phase_report__descriptor =
   "PhaseReport",
   "",
   sizeof(PhaseReport),
-  8,
+  10,
   phase_report__field_descriptors,
   phase_report__field_indices_by_name,
   1,  phase_report__number_ranges,

@@ -3739,14 +3739,15 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // do with when the node ARMS. See TimedModePolicy.h.
     void LORAListener::notePhaseReportForTest(uint32_t rtc_slow_src, int32_t err_us,
                                               int32_t spread_us, uint32_t samples,
-                                              uint32_t outside_guard)
+                                              uint32_t outside_guard, bool node_timed_rx)
     {
       ::PhaseReport pr = PHASE_REPORT__INIT;
-      pr.rtcslowsrc   = rtc_slow_src;
-      pr.errus        = err_us;
-      pr.spreadus     = spread_us;
-      pr.samples      = samples;
-      pr.outsideguard = outside_guard;
+      pr.rtcslowsrc    = rtc_slow_src;
+      pr.errus         = err_us;
+      pr.spreadus      = spread_us;
+      pr.samples       = samples;
+      pr.outsideguard  = outside_guard;
+      pr.timedrxactive = node_timed_rx;
       this->notePhaseReport_(&pr);
     }
 
@@ -3765,6 +3766,9 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       this->belief_.phase_spread_us     = pr->spreadus;
       this->belief_.phase_samples       = pr->samples;
       this->belief_.phase_outside_guard = pr->outsideguard;
+      // The node's own decision, which single-shot follows (TimedModePolicy.h).
+      this->belief_.node_timed_rx       = pr->timedrxactive;
+      this->belief_.node_demotion       = pr->demotionreason;
       this->belief_.rtc_src =
           (pr->rtcslowsrc == 2u) ? timedmode::RtcSlowSrc::Crystal
         : (pr->rtcslowsrc == 1u) ? timedmode::RtcSlowSrc::InternalRc

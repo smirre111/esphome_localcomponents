@@ -57,7 +57,7 @@ enum class Demotion : uint8_t {
     MissedMarks,       // K consecutive marks with no frame ADDRESSED to me
     SyncStale,         // no addressed frame for resyncMaxS
     NoPhase,           // never measured, or the measurement is out of guard
-    NotConfirmed,      // not enough in-slot uplinks observed yet
+    NotConfirmed,      // RETIRED 2026-09-14: no longer returned (see demotionReason)
     RecentlyDemoted,   // anti-flap hold
 };
 
@@ -159,7 +159,15 @@ constexpr Demotion demotionReason(const NodeState &s, uint32_t resync_max_s,
     if (!s.phase_valid)                                     return Demotion::NoPhase;
     if (s.phase_err_us > (int32_t) guard_us ||
         s.phase_err_us < -(int32_t) guard_us)               return Demotion::NoPhase;
-    if (s.in_slot_uplinks < kPromotionUplinks)              return Demotion::NotConfirmed;
+    // THE NODE IS THE AUTHORITY (decided 2026-09-14). in_slot_uplinks — the
+    // hub's count of uplinks it saw land in this node's slot — gated promotion
+    // here, and on the bench it could never be earned: a ModeTest sends no
+    // uplinks, so the count stayed 0 and no window was ever armed (windows 0/0).
+    // Only the node knows whether its own phase error is small enough to open
+    // one window per round; phase_valid (phaseTrustworthy: enough samples, all
+    // inside the guard, spread inside the guard) and phase_err_us are that
+    // evidence. The node reports its decision to the hub (PhaseReport
+    // timedRxActive), and the hub follows it — see txRefusalFor.
     if (s.s_since_demotion < kRepromotionHoldS)             return Demotion::RecentlyDemoted;
     return Demotion::None;
 }
@@ -201,6 +209,11 @@ struct HubBelief
     // internal RC (~5 %) cannot hold phase between beacons, whatever its last
     // report said.
     RtcSlowSrc rtc_src         = RtcSlowSrc::Unknown;
+    // The node's own DECISION, reported beside its measurement: it is in Mode B
+    // (arming one timed window per round) and, if not, why. Single-shot follows
+    // this — the node is the end that knows whether its window will be open.
+    bool     node_timed_rx          = false;
+    uint32_t node_demotion          = 0;     // Demotion value, for the operator
     bool     rebooted_since_confirm = true;
     bool     session_changed        = false;
     bool     beacon_missed          = false;
@@ -239,13 +252,17 @@ enum class TxRefusal : uint8_t {
     FirmwareUnknown   = 5,   // no decrypted beacon has carried a version
     SingleShotUnacked = 6,   // Rule 4's one-frame exposure
     NoPhaseReport     = 7,
-    BadClockSource    = 8,   // not the external crystal
-    TooFewSamples     = 9,
-    PhaseOutOfGuard   = 10,  // the mean is outside the guard band
-    SpreadTooWide     = 11,  // bimodal: a mean can pass while samples miss
-    SamplesOutOfGuard = 12,  // the node's own count, which must be zero
+    // 8-12 RETIRED 2026-09-14: the hub no longer re-judges the node's phase
+    // measurement; the node's own decision (NodeNotTimed) covers all five.
+    // Kept so the published numbers never change meaning.
+    BadClockSource    = 8,   // retired
+    TooFewSamples     = 9,   // retired
+    PhaseOutOfGuard   = 10,  // retired
+    SpreadTooWide     = 11,  // retired
+    SamplesOutOfGuard = 12,  // retired
     NoPublishedMaxAge = 13,  // the hub published no resyncMaxS: fail closed
     ConfirmationStale = 14,
+    NodeNotTimed      = 15,  // the node reports it is not in Mode B
 };
 
 constexpr TxRefusal txRefusalFor(const HubBelief &b, uint32_t guard_us,
@@ -258,18 +275,14 @@ constexpr TxRefusal txRefusalFor(const HubBelief &b, uint32_t guard_us,
     if (!b.firmware_known)                          return TxRefusal::FirmwareUnknown;
     if (b.single_shot_unacked)                      return TxRefusal::SingleShotUnacked;
 
-    // The node's phase report, and every way of not having one.
+    // The node's phase report, and the node's own decision it carries. The hub
+    // used to re-judge the measurement here (clock source, sample count, mean,
+    // spread, samples outside the guard). The node already applies exactly that
+    // test before it arms a timed window, and it is the only end that knows the
+    // result: so the hub follows the node's decision instead of a copy of it.
+    (void) guard_us;
     if (!b.phase_reported)                          return TxRefusal::NoPhaseReport;
-    if (b.rtc_src != RtcSlowSrc::Crystal)           return TxRefusal::BadClockSource;
-    if (b.phase_samples < kPromotionPhaseSamples)   return TxRefusal::TooFewSamples;
-    if (b.phase_err_us > (int32_t) guard_us ||
-        b.phase_err_us < -(int32_t) guard_us)       return TxRefusal::PhaseOutOfGuard;
-    // Spread, not just the mean: two clusters one slot pitch apart average to
-    // something innocent, and a node whose window is sometimes right and
-    // sometimes a pitch out will drop the single copy on the wrong half.
-    if (b.phase_spread_us > (int32_t) guard_us)     return TxRefusal::SpreadTooWide;
-    // The node's own test, not an approximation of it.
-    if (b.phase_outside_guard != 0)                 return TxRefusal::SamplesOutOfGuard;
+    if (!b.node_timed_rx)                           return TxRefusal::NodeNotTimed;
 
     if (max_age_s == 0)                             return TxRefusal::NoPublishedMaxAge;
     if (b.confirmation_age_s > max_age_s)           return TxRefusal::ConfirmationStale;

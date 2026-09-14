@@ -741,6 +741,7 @@ TEST(RealLoraClient, ADecryptedBeaconIsWhatCarriesThePhaseReport) {
     inner.beacon.phase.spreadUs     = 300;
     inner.beacon.phase.samples      = timedmode::kPromotionPhaseSamples;
     inner.beacon.phase.outsideGuard = 0;
+    inner.beacon.phase.timedRxActive = true;   // the node's own decision: in Mode B
 
     auto plain = proto_sim::serialize_resp_payload(inner);
     uint8_t aad[proto_sim::kHeaderAadLen];
@@ -1079,8 +1080,10 @@ namespace real_helpers {
 void give_phase_report(RealHubHarness& h, int32_t err_us = 0,
                        int32_t spread_us = 0,
                        uint32_t samples = timedmode::kPromotionPhaseSamples,
-                       uint32_t rtc = 2 /*crystal*/) {
-    h.rol.notePhaseReportForTest(rtc, err_us, spread_us, samples);
+                       uint32_t rtc = 2 /*crystal*/,
+                       bool node_timed_rx = true /*the node reports it is in Mode B*/) {
+    h.rol.notePhaseReportForTest(rtc, err_us, spread_us, samples, /*outside_guard=*/0,
+                                 node_timed_rx);
 }
 
 void feed_in_slot_uplink(RealHubHarness& h, uint32_t msgid, int64_t err_us = 0) {
@@ -1364,6 +1367,7 @@ TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
     inner.ack.phase.spreadUs     = 250;
     inner.ack.phase.samples      = timedmode::kPromotionPhaseSamples;
     inner.ack.phase.outsideGuard = 0;
+    inner.ack.phase.timedRxActive = true;   // the node's own decision: in Mode B
 
     auto plain = proto_sim::serialize_resp_payload(inner);
     uint8_t aad[proto_sim::kHeaderAadLen];
@@ -1501,10 +1505,11 @@ TEST(RealLoraClient, APhaseReportEarnsASingleCopyDownlink) {
         << "the downlink must go out as ONE placed copy, not a 17-copy burst";
 }
 
-TEST(RealLoraClient, APoorPhaseReportKeepsTheHubOnBursts) {
-    // The three ways a report can be present and still not be evidence. Each
-    // is a node a single copy would miss, and each is exactly the node most
-    // likely to have looked healthy on the report before it.
+TEST(RealLoraClient, ANodeThatSaysItIsNotInModeBKeepsTheHubOnBursts) {
+    // Decided 2026-09-14: the node is the authority on its own promotion. It
+    // applies the phase test itself (enough samples, all inside the guard,
+    // spread inside the guard, crystal) and reports the DECISION; the hub
+    // follows it rather than re-judging the numbers.
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
@@ -1515,26 +1520,24 @@ TEST(RealLoraClient, APoorPhaseReportKeepsTheHubOnBursts) {
     ASSERT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::SingleShot);
 
-    // Out of guard: the window is landing where the frame is not.
-    give_phase_report(h, /*err_us=*/(int32_t) timedgrid::kGuardUs + 1000);
-    EXPECT_EQ(h.rol.txPolicyNow(),
-              timedmode::TxPolicy::Burst)
-        << "a phase error outside the guard must cost the promotion outright";
+    // The node says it is not in Mode B: its window will not be where a single
+    // copy is aimed.
+    give_phase_report(h, 0, 0, timedmode::kPromotionPhaseSamples, /*rtc=*/2,
+                      /*node_timed_rx=*/false);
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst)
+        << "a node that reports it is not arming timed windows must get bursts";
+    EXPECT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::NodeNotTimed)
+        << "and the published reason says it was the node's own decision";
 
-    // Spread, with a mean that looks perfect. Two clusters a pitch apart
-    // average to zero, and this is the case the mean cannot see.
-    give_phase_report(h, /*err_us=*/0,
-                      /*spread_us=*/(int32_t) timedgrid::kGuardUs + 1000);
-    EXPECT_EQ(h.rol.txPolicyNow(),
-              timedmode::TxPolicy::Burst)
-        << "a mean of zero over a bimodal distribution is not a phase";
+    // Numbers the hub would once have refused no longer override the node:
+    // the node applied its own test before it armed, and says it passed.
+    give_phase_report(h, /*err_us=*/(int32_t) timedgrid::kGuardUs + 1000, 0,
+                      timedmode::kPromotionPhaseSamples, /*rtc=*/2, /*node_timed_rx=*/true);
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot)
+        << "the hub follows the node's decision, not a re-judgement of its numbers";
 
-    // A node that has fallen back to the internal RC cannot hold phase between
-    // beacons, whatever this report says.
-    give_phase_report(h, 0, 0, timedmode::kPromotionPhaseSamples, /*rtc=*/1);
-    EXPECT_EQ(h.rol.txPolicyNow(),
-              timedmode::TxPolicy::Burst);
-
+    give_phase_report(h, 0, 0, timedmode::kPromotionPhaseSamples, /*rtc=*/2,
+                      /*node_timed_rx=*/false);
     h.tracker.last_copies = 1;
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
                                COV_OPERATION__CMD_OPEN, 0.0f);

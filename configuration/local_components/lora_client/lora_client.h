@@ -412,7 +412,8 @@ namespace esphome
       // struct, and this header only forward-declares it.
       void notePhaseReportForTest(uint32_t rtc_slow_src, int32_t err_us,
                                   int32_t spread_us, uint32_t samples,
-                                  uint32_t outside_guard = 0);
+                                  uint32_t outside_guard = 0,
+                                  bool node_timed_rx = true);
 
       // §4.6: did this uplink land where the grid says this node transmits?
       // Called with the node's own T0, from admit_frame_.
