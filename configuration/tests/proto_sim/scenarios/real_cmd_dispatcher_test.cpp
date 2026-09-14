@@ -40,6 +40,7 @@ extern "C" {
 #include <sys/time.h>
 #include <vector>
 #include "GridState.h"
+#include "NodeClock.h"   // settledFlagForTest: the boot-minute anchor tests
 
 using proto_sim::aes_gcm_decrypt;
 using proto_sim::derive_gcm_iv;
@@ -4550,6 +4551,66 @@ TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
            "it was placed on";
     EXPECT_EQ(gridstate::t0ForRound(disp.gridState(), 3),
               kTrueAnchor + 3 * (int64_t) timedgrid::kRoundUs + (int64_t) kSlot * timedgrid::kSlotPitchUs);
+}
+
+TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
+    // Measured 2026-09-14 on node 2: a GridSync adopted 10-14 s after boot left
+    // every later mark 8 ms off; the same GridSync adopted at 297 s put marks
+    // within ~1 ms. The anchor is kept but not trusted until the clock settles.
+    constexpr uint32_t kSlot       = 4;
+    constexpr int64_t  kTrueAnchor = 90'000'000;
+    constexpr int64_t  kBootError  = 8'000;   // the unsettled clock's error
+
+    nodeclock::setSettledForTest(false);
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
+    hdr.msgid = 790; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.firestamped = true; hdr.fireround = 0;
+    hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
+    GridSync g = GRID_SYNC__INIT;
+    g.enable = true; g.slotindex = kSlot; g.slotcount = timedgrid::kSlotCount;
+    g.roundus = timedgrid::kRoundUs; g.pitchus = timedgrid::kSlotPitchUs;
+    g.txround = 0; g.txslot = kSlot;
+    g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
+    g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+
+    const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
+    const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
+    disp.noteDriftSample(gs_rx);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
+        << "precondition: adopted with the boot-minute error";
+
+    // Delivered at the TRUE instant for a hub (round, offset).
+    auto at_truth = [&](uint32_t msgid, uint32_t round) {
+        auto f = pack_stamped_sysop(msgid, round, 300'000);
+        const int64_t t0 = kTrueAnchor + (int64_t) round * timedgrid::kRoundUs + 300'000;
+        const int64_t rx = t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
+        disp.noteDriftSample(rx);
+        disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
+    };
+
+    at_truth(791, 10);
+    EXPECT_EQ(disp.phaseStats().n, 0u) << "no samples against a provisional anchor";
+    EXPECT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
+        << "and no re-solve before the clock has settled";
+
+    nodeclock::setSettledForTest(true);
+    at_truth(792, 12);
+    EXPECT_EQ(disp.gridState().anchor_us, kTrueAnchor)
+        << "the first stamped frame on a settled clock re-solves the anchor";
+    EXPECT_EQ(disp.phaseStats().n, 0u) << "the re-solving frame is not also a sample";
+
+    at_truth(793, 14);
+    ASSERT_EQ(disp.phaseStats().n, 1u);
+    EXPECT_LT(std::abs((long) disp.phaseStats().last_us), 50L)
+        << "and from there the node measures the true grid";
 }
 
 TEST_F(RealNodeFixture, CopiesOfOneFrameCannotVouchForThemselves) {
