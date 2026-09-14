@@ -3536,6 +3536,21 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
                    (unsigned) b->rtcperiodq19, (int) wakeclock::crystalErrorPpm(b->rtcperiodq19),
                    (unsigned) b->prevwakewindows, (unsigned) b->prevwakehits,
                    (unsigned) b->prevwakedetected, (unsigned) b->prevwakecrcvalid);
+
+        // Mode C's pass line: how far off the wake was against what the node
+        // wanted, through this fit. Needs a rate (two samples) and a node that
+        // reports its sleep request.
+        if (sampled && this->wake_fit_.ready() &&
+            b->prevsleeprequestedus != 0 && b->prevsleepappliedus != 0)
+          ESP_LOGW(TAG, "[%s] Wake timing: requested %llu us, applied %llu us (%s) -> "
+                        "error %d ppm against counter %d ppm",
+                   this->get_name().c_str(), (unsigned long long) b->prevsleeprequestedus,
+                   (unsigned long long) b->prevsleepappliedus,
+                   b->prevsleepappliedus == b->prevsleeprequestedus ? "uncorrected" : "corrected",
+                   (int) wakeclock::wakeTimingErrorPpm(b->prevsleeprequestedus,
+                                                       b->prevsleepappliedus,
+                                                       this->wake_fit_.ppm()),
+                   (int) this->wake_fit_.ppm());
       }
 
       // §4.6's promotion evidence. handle_beacon_ runs only for a DECRYPTED

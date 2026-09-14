@@ -616,10 +616,19 @@ struct  NodeWakeBeacon
   uint32_t prevwakehits;
   uint32_t prevwakedetected;
   uint32_t prevwakecrcvalid;
+  /*
+   * Mode C's pass line (wake-timing error |ppm| < 20): the deep sleep before
+   * THIS wake, as the node wanted it and as it was handed to ESP-IDF after the
+   * node's crystal correction. The hub converts the handed-over value through
+   * its own wake-clock fit to the real sleep in hub time, and compares it with
+   * the request. Equal values = no correction applied. 0 = unknown (power-on).
+   */
+  uint64_t prevsleeprequestedus;
+  uint64_t prevsleepappliedus;
 };
 #define NODE_WAKE_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
-    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  LoraHeader

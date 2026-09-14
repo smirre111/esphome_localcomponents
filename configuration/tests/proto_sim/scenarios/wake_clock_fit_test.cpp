@@ -112,6 +112,29 @@ TEST(WakeClockFit, CrystalErrorFromPeriod) {
     EXPECT_EQ(wakeclock::crystalErrorPpm(0), 0);
 }
 
+// --- Wake timing: Mode C's pass line --------------------------------------------
+
+TEST(WakeClockFit, UncorrectedWakeTimingErrorIsTheCounterRate) {
+    EXPECT_EQ(wakeclock::wakeTimingErrorPpm(900'000'000ull, 900'000'000ull, -129), -129)
+        << "request handed over as-is: the wake runs at the crystal counter's rate";
+}
+
+TEST(WakeClockFit, TheNodesCorrectionLeavesOnlyTheCalibrationReference) {
+    // Node 2: crystal -139.7 ppm against its own 40 MHz crystal, which runs
+    // ~+10 ppm against the hub, so the hub sees the counter at ~-129 ppm. The
+    // node shortens the request by its measured period; what remains is the
+    // 40 MHz crystal against the hub.
+    constexpr uint64_t want = 900'000'000ull;
+    const uint64_t applied = want * 16000000ull / 16002235ull;
+    const int32_t err = wakeclock::wakeTimingErrorPpm(want, applied, -129);
+    EXPECT_NEAR(err, 11, 1) << "-129 + 139.7 = ~+11 ppm: inside Mode C's |ppm| < 20";
+}
+
+TEST(WakeClockFit, UnknownSleepClaimsNothing) {
+    EXPECT_EQ(wakeclock::wakeTimingErrorPpm(0, 900'000'000ull, -129), 0);
+    EXPECT_EQ(wakeclock::wakeTimingErrorPpm(900'000'000ull, 0, -129), 0);
+}
+
 // --- BeaconTicks ---------------------------------------------------------------
 
 TEST(BeaconTicks, WalksBackOverTheFramesOwnAirTime) {

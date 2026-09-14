@@ -89,3 +89,32 @@ TEST(SleepClockCorrection, ReanchoringAfterEverySleepCannotAccumulateIdfError) {
     EXPECT_GT(std::llabs(esp - crystal), 20000) << "precondition: esp_timer alone is far off";
     EXPECT_LE(std::llabs(node_us - crystal), 31) << "node time is crystal time to one tick";
 }
+
+// --- Deep sleep request ------------------------------------------------------
+
+TEST(SleepClockCorrection, NoMeasuredPeriodRequestsAsAsked) {
+    EXPECT_EQ(deepSleepRequestUs(900'000'000ull, 0), 900'000'000ull);
+    EXPECT_EQ(deepSleepRequestUs(900'000'000ull, kNominalPeriodQ19), 900'000'000ull);
+}
+
+TEST(SleepClockCorrection, ASlowCrystalIsAskedForLessSoTheRealSleepIsRight) {
+    // Node 2: 15 min wanted. IDF turns the request into ticks at the nominal
+    // period, and the crystal takes longer per tick.
+    constexpr uint64_t want = 900'000'000ull;
+    const uint64_t req = deepSleepRequestUs(want, kNode2);
+    EXPECT_LT(req, want);
+    // What the node really sleeps: ticks at nominal, times the real period.
+    const uint64_t ticks = (req << kCalFractBits) / kNominalPeriodQ19;
+    const uint64_t real  = (ticks * kNode2) >> kCalFractBits;
+    EXPECT_LE((int64_t) (real > want ? real - want : want - real), 100)
+        << "within 100 us of 15 min, where the uncorrected request is 125 ms late";
+    const uint64_t ticks_raw = (want << kCalFractBits) / kNominalPeriodQ19;
+    const uint64_t real_raw  = (ticks_raw * kNode2) >> kCalFractBits;
+    EXPECT_GT(real_raw - want, 120'000u) << "precondition: uncorrected is ~125 ms late";
+}
+
+TEST(SleepClockCorrection, ASixHourSleepDoesNotOverflow) {
+    constexpr uint64_t six_h = 6ull * 3600ull * 1'000'000ull;
+    const uint64_t req = deepSleepRequestUs(six_h, kNode2);
+    EXPECT_NEAR((double) req, (double) six_h * 16000000.0 / 16002235.0, 2.0);
+}

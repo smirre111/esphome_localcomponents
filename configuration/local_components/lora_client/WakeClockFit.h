@@ -104,6 +104,27 @@ struct Fit
     uint32_t spanS() const { return (uint32_t) (last_x_us / 1000000); }
 };
 
+// Mode C's pass line: how late or early the node woke against what it WANTED,
+// in ppm of the sleep, positive = node early (its clock fast, the ModeTest sign).
+//
+//   applied_us  what the node handed ESP-IDF; IDF turns it into ticks at the
+//               nominal period, so it is also the sleep in NOMINAL node us
+//   counter_ppm the fit above: node nominal us against hub us, positive = fast
+//   real sleep in hub us = applied_us / (1 + counter_ppm)
+//   error_ppm            = requested_us / real - 1
+//                        = (1 + counter_ppm) * requested_us / applied_us - 1
+//
+// Uncorrected (applied == requested) this IS the counter rate. With the node's
+// correction it is what is left: the calibration's reference (the 40 MHz
+// crystal) against the hub.
+inline int32_t wakeTimingErrorPpm(uint64_t requested_us, uint64_t applied_us,
+                                  int32_t counter_ppm)
+{
+    if (requested_us == 0 || applied_us == 0) return 0;
+    const double e = (1.0 + counter_ppm * 1e-6) * (double) requested_us / (double) applied_us - 1.0;
+    return (int32_t) (e * 1e6 + (e >= 0 ? 0.5 : -0.5));
+}
+
 // The crystal error a measured period implies, positive = fast: what ppm()
 // should come out as when nothing but the nominal-period conversion is wrong.
 constexpr int32_t crystalErrorPpm(uint32_t period_q19)

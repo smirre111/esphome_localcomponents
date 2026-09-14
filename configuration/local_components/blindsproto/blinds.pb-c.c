@@ -2147,7 +2147,7 @@ const ProtobufCMessageDescriptor schedule_config__descriptor =
   (ProtobufCMessageInit) schedule_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[20] =
+static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[22] =
 {
   {
     "reason",
@@ -2389,6 +2389,30 @@ static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[20] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "prevSleepRequestedUs",
+    34,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevsleeprequestedus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevSleepAppliedUs",
+    35,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevsleepappliedus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned node_wake_beacon__field_indices_by_name[] = {
   6,   /* field[6] = awakeWindow_ms */
@@ -2401,6 +2425,8 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
   5,   /* field[5] = position */
   13,   /* field[13] = prevBeaconMsgId */
   14,   /* field[14] = prevBeaconT0Ticks */
+  21,   /* field[21] = prevSleepAppliedUs */
+  20,   /* field[20] = prevSleepRequestedUs */
   19,   /* field[19] = prevWakeCrcValid */
   18,   /* field[18] = prevWakeDetected */
   17,   /* field[17] = prevWakeHits */
@@ -2416,7 +2442,7 @@ static const ProtobufCIntRange node_wake_beacon__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 26, 12 },
-  { 0, 20 }
+  { 0, 22 }
 };
 const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
 {
@@ -2426,7 +2452,7 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   "NodeWakeBeacon",
   "",
   sizeof(NodeWakeBeacon),
-  20,
+  22,
   node_wake_beacon__field_descriptors,
   node_wake_beacon__field_indices_by_name,
   2,  node_wake_beacon__number_ranges,
