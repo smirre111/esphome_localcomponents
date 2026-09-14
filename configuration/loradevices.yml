@@ -77,7 +77,10 @@ time:
         days_of_week: MON-SUN
         then:
           - loracover.on_sleep_start: rol_1
-          - loracover.on_sleep_start: rol_2
+          # rol_2 (bench node) nightly sleep DISABLED 2026-09-14 for Mode B MAC-0
+          # debugging: the 23:00 sleep ended a 900 s run with no report. Restore
+          # this line when the measurement campaign ends.
+          # - loracover.on_sleep_start: rol_2
 
 
 
