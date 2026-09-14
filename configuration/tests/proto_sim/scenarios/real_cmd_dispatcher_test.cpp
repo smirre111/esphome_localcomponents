@@ -3431,6 +3431,29 @@ TEST_F(RealNodeFixture, TheClassASequenceStopsBeingActiveWhenItIsOver) {
     EXPECT_FALSE(disp.classAActive()) << "and after RX2 there is nothing left";
 }
 
+TEST_F(RealNodeFixture, ClassAWindowsAreCountedInTheFunnel) {
+    // Mode C's FER denominator. The sequence advanced and nothing counted it:
+    // every auto-mode wake on node 2 reported windows 0 / hits 0 (2026-09-14)
+    // while its RX windows plainly opened.
+    sys.setAutoMode(true);
+    const macfunnel::Counters before = disp.macFunnelSnapshot();
+
+    disp.noteUplinkSent(/*t_txdone_us=*/5'000'000, /*uplink_len=*/60);
+    ASSERT_TRUE(disp.classAActive());
+    disp.noteClassAWindowResult(/*had_data=*/false);   // RX1 empty
+    disp.noteClassAWindowResult(/*had_data=*/true);    // RX2 heard a frame
+
+    const macfunnel::Counters after = disp.macFunnelSnapshot();
+    EXPECT_EQ(after.windows_armed - before.windows_armed, 2u) << "RX1 and RX2 both opened";
+    EXPECT_EQ(after.windows_hit - before.windows_hit, 1u) << "only RX2 heard a frame";
+
+    // A result with no sequence running is not a Class A window.
+    ASSERT_FALSE(disp.classAActive());
+    disp.noteClassAWindowResult(/*had_data=*/true);
+    EXPECT_EQ(disp.macFunnelSnapshot().windows_armed, after.windows_armed)
+        << "no Class A sequence, nothing to count";
+}
+
 // ---------------------------------------------------------------------------
 // ModeTest — the mode the node ends up in, not the mode that was asked for.
 //
