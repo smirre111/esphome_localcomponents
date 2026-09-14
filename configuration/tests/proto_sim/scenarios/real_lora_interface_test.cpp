@@ -73,6 +73,10 @@ struct Probe : LoraInterface {
     using LoraInterface::arm_source_;
     using LoraInterface::cont_rx_armed_;
     using LoraInterface::continuous_rx_;
+    // Whether a one-shot is in use, and whether it has fired: together they say
+    // if a task wake belongs to the armed window or to a stale periodic tick.
+    using LoraInterface::grid_timer_running_;
+    using LoraInterface::grid_arm_fire_us_;
 };
 
 struct Iface : public ::testing::Test {
@@ -500,6 +504,69 @@ TEST_F(Iface, ServicingAWindowDispatchesOnTheDriftTestFlag) {
     lif.serviceRxWindow();
     EXPECT_EQ(r().count("lora_receive"), 1u);
     EXPECT_EQ(r().count("lora_rxSingle"), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// A stale periodic tick while a one-shot is armed
+//
+// Measured 2026-09-14, node 2 in Mode C: beacon TxDone 2027 ms, Class A
+// one-shot armed 2127 ms, "Class A RX1: empty (timeout)" at 2167 ms. A tick
+// the periodic timer left in the semaphore before armNextRxWindow stopped it
+// opened a window 140 ms after TxDone; it was booked as RX1, and the real RX1
+// — which caught the reply at T0_uplink + 1 018 654 us — was booked as RX2.
+// ---------------------------------------------------------------------------
+
+TEST_F(Iface, AStaleTickDoesNotOpenAWindowWhileAClassAOneShotIsPending) {
+    lif.arm_source_         = Probe::ArmSource::ClassA;
+    lif.grid_timer_running_ = true;
+    lif.grid_arm_fire_us_   = 0;   // armed, not fired
+
+    lif.serviceRxWindow();
+
+    EXPECT_EQ(r().count("lora_rxSingle"), 0u)
+        << "a wake the one-shot did not cause must not open a window";
+    EXPECT_FALSE(lif.takeClassAWindowOpen())
+        << "and nothing may be booked against the Class A sequence";
+    EXPECT_EQ(lif.staleTicksSkipped(), 1u);
+}
+
+TEST_F(Iface, TheFiredClassAOneShotOpensExactlyOneClassAWindow) {
+    lif.arm_source_         = Probe::ArmSource::ClassA;
+    lif.grid_timer_running_ = true;
+    lif.grid_arm_fire_us_   = 2913000;   // the one-shot fired
+
+    lif.serviceRxWindow();
+
+    EXPECT_EQ(r().count("lora_rxSingle"), 1u);
+    EXPECT_TRUE(lif.takeClassAWindowOpen()) << "this window IS the Class A window";
+    EXPECT_FALSE(lif.takeClassAWindowOpen()) << "and reports one outcome only";
+    EXPECT_EQ(lif.staleTicksSkipped(), 0u);
+}
+
+TEST_F(Iface, AModeAPeriodicTickStillOpensAWindowNotBookedAsClassA) {
+    lif.arm_source_         = Probe::ArmSource::None;
+    lif.grid_timer_running_ = false;
+    lif.grid_arm_fire_us_   = 0;
+
+    lif.serviceRxWindow();
+
+    EXPECT_EQ(r().count("lora_rxSingle"), 1u) << "the free-running window is unchanged";
+    EXPECT_FALSE(lif.takeClassAWindowOpen())
+        << "a free-running window is never a Class A window";
+    EXPECT_EQ(lif.staleTicksSkipped(), 0u);
+}
+
+TEST_F(Iface, AStaleTickIsSkippedWhenModeBGridArmingIsPendingToo) {
+    // Same shared one-shot, same stale tick: an off-grid window counted as an
+    // armed mark would make WMR measure the periodic timer.
+    lif.arm_source_         = Probe::ArmSource::Grid;
+    lif.grid_timer_running_ = true;
+    lif.grid_arm_fire_us_   = 0;
+
+    lif.serviceRxWindow();
+
+    EXPECT_EQ(r().count("lora_rxSingle"), 0u);
+    EXPECT_EQ(lif.staleTicksSkipped(), 1u);
 }
 
 // ---------------------------------------------------------------------------
