@@ -2147,7 +2147,7 @@ const ProtobufCMessageDescriptor schedule_config__descriptor =
   (ProtobufCMessageInit) schedule_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[13] =
+static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[20] =
 {
   {
     "reason",
@@ -2305,6 +2305,90 @@ static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[13] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "prevBeaconMsgId",
+    27,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevbeaconmsgid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevBeaconT0Ticks",
+    28,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevbeacont0ticks),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "rtcPeriodQ19",
+    29,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, rtcperiodq19),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevWakeWindows",
+    30,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevwakewindows),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevWakeHits",
+    31,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevwakehits),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevWakeDetected",
+    32,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevwakedetected),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevWakeCrcValid",
+    33,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevwakecrcvalid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned node_wake_beacon__field_indices_by_name[] = {
   6,   /* field[6] = awakeWindow_ms */
@@ -2315,8 +2399,15 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
   2,   /* field[2] = nodeEpoch */
   12,   /* field[12] = phase */
   5,   /* field[5] = position */
+  13,   /* field[13] = prevBeaconMsgId */
+  14,   /* field[14] = prevBeaconT0Ticks */
+  19,   /* field[19] = prevWakeCrcValid */
+  18,   /* field[18] = prevWakeDetected */
+  17,   /* field[17] = prevWakeHits */
+  16,   /* field[16] = prevWakeWindows */
   0,   /* field[0] = reason */
   11,   /* field[11] = resetReason */
+  15,   /* field[15] = rtcPeriodQ19 */
   1,   /* field[1] = schedVersion */
   8,   /* field[8] = sessionResume */
   4,   /* field[4] = voltage */
@@ -2325,7 +2416,7 @@ static const ProtobufCIntRange node_wake_beacon__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 26, 12 },
-  { 0, 13 }
+  { 0, 20 }
 };
 const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
 {
@@ -2335,7 +2426,7 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   "NodeWakeBeacon",
   "",
   sizeof(NodeWakeBeacon),
-  13,
+  20,
   node_wake_beacon__field_descriptors,
   node_wake_beacon__field_indices_by_name,
   2,  node_wake_beacon__number_ranges,

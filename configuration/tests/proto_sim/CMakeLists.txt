@@ -549,6 +549,16 @@ if(EXISTS ${BLINDS_ESP_MAIN}/include/SleepClockCorrection.h)
     gtest_discover_tests(sleep_clock_correction_test)
 endif()
 
+# Mode C, MAC-0: the wake clock. WakeClockFit.h is the hub's fit (hub tree),
+# BeaconTicks.h the node's tick stamp at a beacon's T0 (node tree); one test
+# covers both ends of the same measurement.
+if(EXISTS ${BLINDS_ESP_MAIN}/include/BeaconTicks.h)
+    add_executable(wake_clock_fit_test scenarios/wake_clock_fit_test.cpp)
+    target_include_directories(wake_clock_fit_test PRIVATE ${SHARED_HDR_DIR} ${BLINDS_ESP_MAIN}/include)
+    target_link_libraries(wake_clock_fit_test PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(wake_clock_fit_test)
+endif()
+
 # ScheduleText.h is the compact schedule format. A parser is the one place a
 # typo becomes silent data loss, so it is dependency-free and tested here — the
 # entity version of schedule editing could not be mistyped, and this format only

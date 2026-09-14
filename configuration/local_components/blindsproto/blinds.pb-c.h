@@ -590,10 +590,36 @@ struct  NodeWakeBeacon
    * owns: 1=POWERON 3=SW 4=INT_WDT 5=TASK_WDT 6=WDT 7=DEEPSLEEP 8=BROWNOUT.
    */
   uint32_t resetreason;
+  /*
+   * --- Mode C, MAC-0: the wake clock ------------------------------------
+   * A Class A node wakes on the RTC timer, which counts the 32 kHz crystal
+   * through deep sleep; ESP-IDF converts the requested sleep to ticks with the
+   * NOMINAL period, so every scheduled wake inherits the crystal's error. The
+   * hub measures it: this beacon reports the RTC tick count at the PREVIOUS
+   * beacon's T0 (the counter runs through sleep and resets only at power-on),
+   * and the hub pairs it with its own receive stamp of that beacon, matched by
+   * msgId. Hub us against ticks x nominal period is the wake clock's rate.
+   * 0 / 0 = no previous beacon since power-on.
+   */
+  uint32_t prevbeaconmsgid;
+  uint64_t prevbeacont0ticks;
+  /*
+   * The node's measured crystal period (Q19 us per tick), for the report: the
+   * rate the hub fits should equal the crystal error this implies.
+   */
+  uint32_t rtcperiodq19;
+  /*
+   * Class A funnel of the PREVIOUS wake, taken at deep-sleep entry: receive
+   * windows opened and hit, frames detected and CRC-valid. Mode C's FER.
+   */
+  uint32_t prevwakewindows;
+  uint32_t prevwakehits;
+  uint32_t prevwakedetected;
+  uint32_t prevwakecrcvalid;
 };
 #define NODE_WAKE_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
-    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0 }
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  LoraHeader

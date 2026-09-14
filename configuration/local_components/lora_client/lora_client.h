@@ -8,6 +8,8 @@
 // placed frame may be handed over, which is what makes a Class A window
 // reachable or not.
 #include "esphome/components/lora_client/TxQueue.h"
+// Mode C wake-clock fit.
+#include "esphome/components/lora_client/WakeClockFit.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -825,6 +827,11 @@ namespace esphome
       // stamp is known to belong to this node. 0 = no usable origin, in which
       // case send_into_class_a_window_() declines and the caller falls back to the burst.
       int64_t  last_uplink_t0_us_{0};
+      // msgId of the frame last_uplink_t0_us_ belongs to.
+      uint32_t last_uplink_msgid_{0};
+      // Mode C, MAC-0: this node's wake-clock rate against the hub, from the
+      // RTC tick counts its beacons report. See WakeClockFit.h.
+      wakeclock::Fit wake_fit_{};
       uint32_t last_uplink_unc_us_{0};
 
       char address_str_[MAC_ADDR_STR_LEN]{}; // 18 bytes: "AA:BB:CC:DD:EE:FF\0"

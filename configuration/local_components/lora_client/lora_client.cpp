@@ -1070,6 +1070,7 @@ namespace esphome
         // was injected into. See the plaintext path in set_response().
         this->plaintext_hwm_      = m->header->msgid;
         this->have_plaintext_hwm_ = true;
+        this->last_uplink_msgid_  = m->header->msgid;
       }
       // The same frame, having earned the counter, has earned the measurement.
       this->noteAuthenticatedUplink_();
@@ -3516,6 +3517,26 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       this->node_sched_version_  = b->schedversion;
       this->node_fw_version_     = b->fwversion;
       this->node_session_resume_ = b->sessionresume;
+
+      // Mode C, MAC-0: the wake clock. This beacon carries the RTC tick count of
+      // the PREVIOUS one; pair it first, then file this beacon's own stamp for
+      // the next. The stamp is used only when it belongs to this frame: a
+      // plaintext frame on a confirmed session does not refresh
+      // last_uplink_t0_us_, and pairing a stale stamp would bias the rate.
+      if (this->parent_ != nullptr && this->last_uplink_t0_us_ > 0 &&
+          this->last_uplink_t0_us_ == this->parent_->last_rx_t0_us())
+      {
+        const bool sampled = this->wake_fit_.addReported(b->prevbeaconmsgid, b->prevbeacont0ticks);
+        this->wake_fit_.noteHeard(this->last_uplink_msgid_, this->last_uplink_t0_us_);
+        if (sampled)
+          ESP_LOGW(TAG, "[%s] Wake clock: n %u span %u s ppm %d | crystal period %u Q19 -> %d ppm "
+                        "| prev wake: windows %u hits %u detected %u crcValid %u",
+                   this->get_name().c_str(), (unsigned) this->wake_fit_.n,
+                   (unsigned) this->wake_fit_.spanS(), (int) this->wake_fit_.ppm(),
+                   (unsigned) b->rtcperiodq19, (int) wakeclock::crystalErrorPpm(b->rtcperiodq19),
+                   (unsigned) b->prevwakewindows, (unsigned) b->prevwakehits,
+                   (unsigned) b->prevwakedetected, (unsigned) b->prevwakecrcvalid);
+      }
 
       // §4.6's promotion evidence. handle_beacon_ runs only for a DECRYPTED
       // beacon, which is what makes this an authenticated observation.
