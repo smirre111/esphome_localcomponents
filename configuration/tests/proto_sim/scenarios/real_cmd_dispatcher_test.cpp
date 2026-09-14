@@ -1262,7 +1262,18 @@ TEST_F(RealNodeFixture, RegisterRetryReSendsWhileUnprovisioned) {
     sys.setAddress(kNodeAddr, kSubnet);
 }
 
-TEST_F(RealNodeFixture, RegisterRetryStopsOnceProvisioned) {
+namespace {
+bool queueHoldsRegister(CmdDispatcher &d) {
+    bool found = false;
+    CmdDispatcher::tx_command_t cmd{};
+    while (xQueueReceive(d.txCmdQueueNew, &cmd, 0) == pdTRUE)
+        if (cmd.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_REGISTER)
+            found = true;
+    return found;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, RegisterRetryStopsOnceProvisionedAndLoggedIn) {
     proto_sim_timer_reset();
     sys.setAddress(0, 0);
     disp.armRegisterRetry();
@@ -1270,22 +1281,64 @@ TEST_F(RealNodeFixture, RegisterRetryStopsOnceProvisioned) {
     CmdDispatcher::tx_command_t drain{};
     while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
 
-    // The hub provisions us.
+    // The hub provisions us, and logs us in: both halves of being reachable.
     sys.setAddress(kNodeAddr, kSubnet);
+    auto login = pack_login_op(/*msgid=*/1, 0x13572468u);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
     proto_sim_timer_fire_all();
 
-    CmdDispatcher::tx_command_t cmd{};
-    EXPECT_EQ(xQueueReceive(disp.txCmdQueueNew, &cmd, 0), pdFALSE)
-        << "a provisioned node must stop re-registering — otherwise every node "
-           "spends radio time and battery on pointless REGISTERs forever";
+    EXPECT_FALSE(queueHoldsRegister(disp))
+        << "a provisioned, logged-in node must stop re-registering — otherwise "
+           "every node spends radio time and battery on pointless REGISTERs forever";
 }
 
-TEST_F(RealNodeFixture, ArmingRetryIsANoOpWhenAlreadyProvisioned) {
-    proto_sim_timer_reset();
+TEST_F(RealNodeFixture, ArmingRetryIsANoOpWhenProvisionedWithASession) {
     sys.setAddress(kNodeAddr, kSubnet);
+    auto login = pack_login_op(/*msgid=*/1, 0x13572468u);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    proto_sim_timer_reset();
     disp.armRegisterRetry();
     EXPECT_EQ(proto_sim_timer_armed_count(), 0)
-        << "nothing to retry when we already have an address";
+        << "nothing to retry when we have an address and a session";
+}
+
+// The 2026-09-13 bench lockout: a PROVISIONED node sends REGISTER (dropping its
+// session), the REGISTER is lost, the hub never logs it in, and the node cannot
+// decrypt anything the hub sends for as long as it stays up.
+TEST_F(RealNodeFixture, AProvisionedNodeWithoutASessionKeepsRegistering) {
+    proto_sim_timer_reset();
+    sys.setAddress(kNodeAddr, kSubnet);
+    uint32_t nonce = 0;
+    ASSERT_FALSE(disp.getBaseNonceForTest(kHubAddr, nonce))
+        << "precondition: no session with the hub";
+
+    disp.sendRegister();              // boot REGISTER - lost on air
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    proto_sim_timer_fire_all();       // no LoginMsg ever came
+
+    EXPECT_TRUE(queueHoldsRegister(disp))
+        << "a provisioned node that has given up its session must keep asking "
+           "for a login, or one lost REGISTER leaves it deaf to the hub";
+}
+
+TEST_F(RealNodeFixture, ALoginEndsTheRegisterRetry) {
+    proto_sim_timer_reset();
+    sys.setAddress(kNodeAddr, kSubnet);
+    disp.sendRegister();
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    auto login = pack_login_op(/*msgid=*/1, 0x2468ACE0u);   // the hub answered
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    proto_sim_timer_fire_all();
+    EXPECT_FALSE(queueHoldsRegister(disp))
+        << "once a login installed a session the retry has nothing left to ask for";
 }
 
 // ---------------------------------------------------------------------------
