@@ -430,6 +430,25 @@ TEST(GridState, AReAnchorInsideTheGuardDoesNotBringTheOpenedWindowBack) {
     EXPECT_EQ(aimed, shifted + (int64_t) timedgrid::kRoundUs);
 }
 
+TEST(GridState, ADeclaredHubInstantRoundTripsThroughTheAnchor) {
+    // The hub stamps (round, offset); the node solves its anchor from one stamped
+    // copy and predicts every later one. With a learned rate the span is
+    // stretched both ways, so the prediction lands back on the measurement.
+    for (int32_t rate : {0, 9000, -140000}) {
+        State st = gridded(3);
+        st.rate_ppb = rate;
+        const int64_t measured = 123'456'789;
+        st.anchor_us = solveAnchorFromHubInstantUs(measured, 40, 977'123, st.params, rate);
+        EXPECT_EQ(t0ForHubInstantUs(st, 40, 977'123), measured) << "rate " << rate;
+        // A later instant is its hub span later, stretched — to within the 1 us
+        // the two truncating stretches can disagree by (each whole span is
+        // stretched on its own, not the difference).
+        EXPECT_NEAR((double) (t0ForHubInstantUs(st, 41, 977'123) - measured),
+                    (double) stretchUs(st, (int64_t) timedgrid::kRoundUs), 1.0)
+            << "rate " << rate;
+    }
+}
+
 TEST(GridState, RoundNumbersAreRecoverableFromAMark) {
     // The number both ends must agree on. The hub declares the round it
     // transmits in precisely so this inverse works out to the same value there.

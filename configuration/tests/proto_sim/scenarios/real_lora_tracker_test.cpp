@@ -523,6 +523,86 @@ TEST(RealTrackerTx, APlacedFrameThatMissedItsMarkIsCountedAndNotOnMark) {
     lora_client_operation_message__free_unpacked(m, NULL);
 }
 
+namespace {
+// The instant a copy declares, as the hub grid describes it.
+int64_t declaredT0(const LORATracker &t, const LoraHeader &h) {
+    return t.gridAnchorUs() + (int64_t) h.fireround * (int64_t) timedgrid::kRoundUs
+         + (int64_t) h.fireoffsetus;
+}
+}  // namespace
+
+TEST(RealTrackerTx, EveryCopyDeclaresTheInstantItActuallyLeft) {
+    // The declared fire instant makes every heard copy a phase sample — placed or
+    // not — so it has to be the instant the copy REALLY left, to the microsecond.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(3'000'000);
+    LORATracker t;
+    t.startGrid();
+    proto_sim_timer_set_now_us(5'123'457);   // an arbitrary, unplaced moment
+
+    auto frame = packedOperationFrame();
+    t.sendPacketBurst(frame.data(), frame.size(), /*copies=*/3, /*stride_ms=*/40);
+
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 3);
+    for (size_t k = 0; k < 3; ++k) {
+        const auto &p = lorahal::rec().packets[k];
+        LoraClientOperationMessage *m = lora_client_operation_message__unpack(NULL, p.size(), p.data());
+        ASSERT_NE(m, nullptr);
+        ASSERT_TRUE((bool) m->header->firestamped) << "copy " << k;
+        EXPECT_EQ(declaredT0(t, *m->header),
+                  lorahal::rec().tx_us[k] + (int64_t) loratiming::kPreambleToT0Us)
+            << "copy " << k << " must declare the T0 it actually went out with";
+        EXPECT_LT(m->header->fireoffsetus, (uint32_t) timedgrid::kRoundUs);
+        lora_client_operation_message__free_unpacked(m, NULL);
+    }
+    EXPECT_EQ(t.stampMisses(), 0u);
+}
+
+TEST(RealTrackerTx, APlacedFrameThatMissedItsMarkDeclaresWhenItReallyLeft) {
+    // Measured 2026-09-14: GridSyncs that left ~320 ms and ~10 ms after their mark
+    // moved the node's grid by that much. Late is now harmless — if it says so.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    LORATracker t;
+    t.startGrid();
+    constexpr int64_t kMark = 5'000'000;
+    proto_sim_timer_set_now_us(kMark + 320'000);
+
+    auto frame = packedOperationFrame();
+    t.sendPacketBurst(frame.data(), frame.size(), /*copies=*/1, /*stride_ms=*/0,
+                      /*not_before_us=*/kMark, /*on_mark=*/true);
+
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    const auto &p = lorahal::rec().packets[0];
+    LoraClientOperationMessage *m = lora_client_operation_message__unpack(NULL, p.size(), p.data());
+    ASSERT_NE(m, nullptr);
+    ASSERT_TRUE((bool) m->header->firestamped);
+    const int64_t declared = declaredT0(t, *m->header);
+    EXPECT_EQ(declared, lorahal::rec().tx_us[0] + (int64_t) loratiming::kPreambleToT0Us);
+    EXPECT_GT(declared, kMark + 320'000) << "the instant it left, not the mark it was placed on";
+    lora_client_operation_message__free_unpacked(m, NULL);
+}
+
+TEST(RealTrackerTx, WithoutAGridNothingIsStamped) {
+    // No anchor means no grid to describe an instant on. Unstamped is the
+    // "no statement" the node already handles; a made-up round would be a lie.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    LORATracker t;
+    ASSERT_FALSE(t.gridStarted());
+    auto frame = packedOperationFrame();
+    t.sendPacketBurst(frame.data(), frame.size(), /*copies=*/1, /*stride_ms=*/0);
+
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    const auto &p = lorahal::rec().packets[0];
+    LoraClientOperationMessage *m = lora_client_operation_message__unpack(NULL, p.size(), p.data());
+    ASSERT_NE(m, nullptr);
+    EXPECT_FALSE((bool) m->header->firestamped);
+    lora_client_operation_message__free_unpacked(m, NULL);
+}
+
 TEST(RealTrackerTx, OnlyAFramePlacedOnAMarkSaysSoOnEveryCopy) {
     // LoraHeader.onMark is the node's only licence to commit a frame's arrival
     // as a phase sample (measured 2026-09-14: one unplaced frame, 463 ms off the

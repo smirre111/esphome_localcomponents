@@ -588,6 +588,20 @@ namespace esphome
       return (uint32_t) (rel / (int64_t) timedgrid::kRoundUs);
     }
 
+    bool LORATracker::fireStampFor_(int64_t t0_us, uint32_t *round, uint32_t *offset_us) const
+    {
+      if (!this->grid_started_)
+        return false;
+      const int64_t rel = t0_us - this->grid_anchor_us_;
+      if (rel < 0)
+        return false;
+      if (round != nullptr)
+        *round = (uint32_t) (rel / (int64_t) timedgrid::kRoundUs);
+      if (offset_us != nullptr)
+        *offset_us = (uint32_t) (rel % (int64_t) timedgrid::kRoundUs);
+      return true;
+    }
+
     uint32_t LORATracker::beaconRoundForT0(int64_t t0_us) const
     {
       return this->roundForSlotT0((uint8_t) timedgrid::kBeaconSlotIndex, t0_us);
@@ -1074,13 +1088,45 @@ namespace esphome
         if (canStamp)
         {
           burstMsg->header->burstindex = cnt;
+
+          // THE DECLARED FIRE INSTANT. Every copy states where its own T0 is on
+          // the hub grid, so every heard copy is a phase sample for the node —
+          // placed or not, on time or late. A copy is stamped only with an
+          // instant it can still reach: its placed instant, or kStampLeadUs from
+          // now if that has passed or it has none. firePacket then waits to it.
+          int64_t fire_at_us = copy_at_us;
+          bool stamped = false;
+          // Not the broadcast beacon: it already declares its own round and slot,
+          // the node reads it on its own path, and the stamp would take it past
+          // kBeaconPayloadBytes — the size its fleet-wide airtime is budgeted on.
+          if (this->grid_started_ &&
+              burstMsg->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON)
+          {
+            const int64_t reachable = esp_timer_get_time() + kStampLeadUs;
+            if (fire_at_us < reachable)
+              fire_at_us = reachable;
+            uint32_t round = 0, offset = 0;
+            stamped = this->fireStampFor_(loratiming::t0FromFireInstantUs(fire_at_us, 0),
+                                          &round, &offset);
+            burstMsg->header->firestamped  = stamped ? 1 : 0;
+            burstMsg->header->fireround    = round;
+            burstMsg->header->fireoffsetus = offset;
+          }
+
           size_t clen  = lora_client_operation_message__get_packed_size(burstMsg);
           uint8_t *cbuf = static_cast<uint8_t *>(malloc(clen));
           if (cbuf)
           {
             lora_client_operation_message__pack(burstMsg, cbuf);
-            this->sendPacketAt(cbuf, clen, copy_at_us);
+            this->sendPacketAt(cbuf, clen, stamped ? fire_at_us : copy_at_us);
             free(cbuf);
+            if (stamped && this->last_fire_us_ - fire_at_us > kStampToleranceUs)
+            {
+              this->tx_stamp_misses_++;
+              ESP_LOGW(TAG, "copy %d left %lld us after its stamped instant (%u so far)",
+                       cnt, (long long) (this->last_fire_us_ - fire_at_us),
+                       (unsigned) this->tx_stamp_misses_);
+            }
           }
           else
           {
@@ -1254,6 +1300,7 @@ namespace esphome
         }
       }
 
+      this->last_fire_us_ = esp_timer_get_time();   // checked against the stamp
       lora_tx();   // THE fire instant
 
       const int ok = lora_waitTxDone();
@@ -1281,8 +1328,11 @@ namespace esphome
 
     void LORATracker::sendPacketAt(uint8_t *data, size_t len, int64_t not_before_us)
     {
-      // Logging BEFORE the mutex, for the same reason as in firePacket.
-      ESP_LOGI(TAG, "Sending packet of length %d", len);
+      // Logging BEFORE the mutex, for the same reason as in firePacket — and
+      // VERBOSE, because a stamped copy's fire instant is already chosen when
+      // this runs: a UART line here (~3.5 ms at 115200 baud, 17 per burst) is
+      // spent out of kStampLeadUs.
+      ESP_LOGV(TAG, "Sending packet of length %d", len);
 
       this->preparePacket(data, len);
       this->firePacket(not_before_us);

@@ -4460,6 +4460,147 @@ TEST_F(RealNodeFixture, ABurstCopyIsStampedAsCopyZero) {
     EXPECT_LT(std::abs((long) disp.phaseStats().last_us), 2000L);
 }
 
+namespace {
+
+// A status request that DECLARES where its T0 is on the hub grid, and is placed
+// on no mark at all.
+std::vector<uint8_t> pack_stamped_sysop(uint32_t msgid, uint32_t fire_round,
+                                        uint32_t fire_offset_us, uint32_t burst_index = 0) {
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = msgid;
+    hdr.burstindex    = burst_index;
+    hdr.burstcount    = 17;
+    hdr.onmark        = false;
+    hdr.firestamped   = true;
+    hdr.fireround     = fire_round;
+    hdr.fireoffsetus  = fire_offset_us;
+    op.header   = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.sysop    = CLIENT_OPERATION__CMD_STATUS;
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+// Deliver a stamped frame `err_us` after the instant it declares.
+void deliverStamped(CmdDispatcher &disp, const std::vector<uint8_t> &f,
+                    uint32_t fire_round, uint32_t fire_offset_us, int64_t err_us) {
+    const int64_t t0 = gridstate::t0ForHubInstantUs(disp.gridState(), fire_round, fire_offset_us);
+    const int64_t rx = t0 + err_us + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(const_cast<uint8_t *>(f.data()), static_cast<int>(f.size()), rx);
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, AStampedFrameIsAPhaseSampleWhereverItWasSent) {
+    // The declared fire instant makes an UNPLACED frame — a LOGIN, a Mode A burst
+    // — as good a phase sample as a mark. Measured 2026-09-14: without it the node
+    // waited ~23 s per lucky mark catch for the eight samples promotion needs.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/740);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // 463 ms into round 20: nowhere near slot 4's mark.
+    auto f = pack_stamped_sysop(/*msgid=*/741, /*round=*/20, /*offset=*/463'000);
+    deliverStamped(disp, f, 20, 463'000, /*err_us=*/1500);
+
+    ASSERT_EQ(disp.phaseStats().n, 1u);
+    EXPECT_EQ(disp.phaseStats().outside_guard, 0u)
+        << "463 ms off the mark, but exactly where the hub said it would be";
+    EXPECT_EQ(disp.phaseStats().last_us, 1500) << "the node's own error, and nothing else";
+}
+
+TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
+    // Measured 2026-09-14: a GridSync placed on slot 4's mark went out ~320 ms
+    // late; solving the anchor from its placement moved every mark by 320 ms.
+    constexpr uint32_t kSlot  = 4;
+    constexpr int64_t  kLate  = 320'000;
+    constexpr int64_t  kTrueAnchor = 90'000'000;   // where the hub grid really is
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
+    hdr.msgid = 750; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.firestamped  = true;
+    hdr.fireround    = 0;
+    hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs + kLate);
+    GridSync g = GRID_SYNC__INIT;
+    g.enable = true; g.slotindex = kSlot; g.slotcount = timedgrid::kSlotCount;
+    g.roundus = timedgrid::kRoundUs; g.pitchus = timedgrid::kSlotPitchUs;
+    g.txround = 0; g.txslot = kSlot;                 // where it was PLACED
+    g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
+    g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+
+    const int64_t actual_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kLate;
+    const int64_t rx = actual_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
+    ASSERT_TRUE(disp.gridState().active);
+
+    EXPECT_EQ(disp.gridState().anchor_us, kTrueAnchor)
+        << "the anchor must follow where the frame declares it LEFT, not the mark "
+           "it was placed on";
+    EXPECT_EQ(gridstate::t0ForRound(disp.gridState(), 3),
+              kTrueAnchor + 3 * (int64_t) timedgrid::kRoundUs + (int64_t) kSlot * timedgrid::kSlotPitchUs);
+}
+
+TEST_F(RealNodeFixture, CopiesOfOneFrameCannotVouchForThemselves) {
+    // Every heard copy of a stamped burst is a sample, but all copies of one frame
+    // share its timing. Promotion needs evidence from more than one transmission.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/760);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    for (uint32_t k = 0; k < 9; ++k) {
+        const uint32_t off = 100'000 + k * 88'000;
+        auto c = pack_stamped_sysop(/*msgid=*/761, /*round=*/30, off, /*burst_index=*/k);
+        deliverStamped(disp, c, 30, off, 800);
+    }
+    ASSERT_GE(disp.phaseStats().n, 9u);
+    EXPECT_EQ(disp.phaseStats().frames, 1u);
+    EXPECT_FALSE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs))
+        << "nine copies of one frame are one measurement of the hub's timing";
+
+    auto other = pack_stamped_sysop(/*msgid=*/762, /*round=*/34, 700'000);
+    deliverStamped(disp, other, 34, 700'000, -600);
+    EXPECT_EQ(disp.phaseStats().frames, 2u);
+    EXPECT_TRUE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs));
+}
+
+TEST_F(RealNodeFixture, ANodePromotesFromItsLoginTrafficInSeconds) {
+    // The ordinary burst traffic after a login — a few frames, three heard copies
+    // each — is enough to promote once every copy declares its instant.
+    disp.setTimedRxEnabled(true);
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/770);
+    const int64_t t0 = 40'000'000;
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()),
+                      t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_FALSE(disp.timedRxActive());
+
+    // Three unplaced bursts within ~6 s of the GridSync, three copies heard of each.
+    const uint32_t first_round = (uint32_t) ((t0 - disp.gridState().anchor_us) / timedgrid::kRoundUs) + 1;
+    for (uint32_t b = 0; b < 3; ++b) {
+        for (uint32_t k = 0; k < 3; ++k) {
+            const uint32_t off = 210'000 + (k * 2) * 88'000;   // copies 0, 2, 4 heard
+            auto c = pack_stamped_sysop(/*msgid=*/780 + b, first_round + 2 * b, off, k * 2);
+            deliverStamped(disp, c, first_round + 2 * b, off, (int64_t) (k * 400) - 400);
+        }
+    }
+    EXPECT_TRUE(disp.timedRxActive())
+        << "nine samples from three frames within six seconds (demotion reason "
+        << (int) disp.demotionReasonNow() << ")";
+}
+
 TEST_F(RealNodeFixture, AnUnplacedFrameIsNotAPhaseSample) {
     // Measured 2026-09-14 on node 2: two 900 s Mode B production runs armed no
     // window (windows 0/0) although every ModeTest mark read inside the guard

@@ -66,6 +66,9 @@ static void fill_header_pb(const LoraHeader& src, ::LoraHeader& dst) {
     dst.burstindex    = src.burstIndex;
     dst.burstcount    = src.burstCount;
     dst.onmark        = src.onMark;
+    dst.firestamped   = src.fireStamped;
+    dst.fireround     = src.fireRound;
+    dst.fireoffsetus  = src.fireOffsetUs;
 }
 
 static void fill_header_from_pb(const ::LoraHeader& src, LoraHeader& dst) {
@@ -76,6 +79,9 @@ static void fill_header_from_pb(const ::LoraHeader& src, LoraHeader& dst) {
     dst.burstIndex    = src.burstindex;
     dst.burstCount    = src.burstcount;
     dst.onMark        = src.onmark;
+    dst.fireStamped   = src.firestamped;
+    dst.fireRound     = src.fireround;
+    dst.fireOffsetUs  = src.fireoffsetus;
 }
 
 // Slim AEAD envelope: only tag + ciphertext travel.

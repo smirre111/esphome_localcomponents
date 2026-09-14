@@ -671,10 +671,27 @@ struct  LoraHeader
    * sample (which demotes) or withhold a good one; it cannot move the anchor.
    */
   protobuf_c_boolean onmark;
+  /*
+   * WHERE THIS COPY'S T0 ACTUALLY IS on the hub's grid (hub -> node), stamped
+   * at transmission: round index since the hub's grid anchor, and the offset
+   * into that round in microseconds. Every copy carries its own instant, so
+   * the node needs neither the burst index nor a placement to use it.
+   * It makes EVERY heard copy of EVERY hub frame a phase sample — a LOGIN or
+   * a Mode A burst as much as a placed mark — and it makes a late frame
+   * harmless, because a late frame declares the instant it really went out.
+   * Measured 2026-09-14 on node 2: a GridSync sent ~320 ms (and, in another
+   * run, ~10 ms) after the mark it was placed on moved the node's whole grid by
+   * that much, and promotion waited ~23 s per lucky mark catch.
+   * fireStamped says the two numbers mean something: proto3 zero is a real
+   * instant (round 0, offset 0). Outside the AAD, like burstIndex.
+   */
+  protobuf_c_boolean firestamped;
+  uint32_t fireround;
+  uint32_t fireoffsetus;
 };
 #define LORA_HEADER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_header__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*

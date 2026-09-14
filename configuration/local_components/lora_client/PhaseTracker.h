@@ -86,6 +86,11 @@ struct Stats
     // Samples outside the guard band. A promotion criterion that ignored these
     // would promote a node whose window is already missing frames.
     uint32_t outside_guard{0};
+    // Distinct FRAMES the samples came from. Every heard copy of a stamped burst
+    // is a sample, but all copies of one frame share the hub's timing for that
+    // frame: they average its jitter, they cannot check it. Promotion wants
+    // evidence from more than one transmission.
+    uint32_t frames{0};
 
     void reset() { *this = Stats{}; }
 
@@ -98,8 +103,11 @@ struct Stats
 };
 
 // Commit one sample. `guard_us` is the half-width the window tolerates.
-inline void commit(Stats &s, const Sample &sample, uint32_t guard_us)
+inline void commit(Stats &s, const Sample &sample, uint32_t guard_us,
+                   bool new_frame = true)
 {
+    if (new_frame)
+        s.frames++;
     const int64_t err64 = sample.t0_measured_us - sample.t0_expected_us;
     // Clamp before narrowing: a nonsense pair (an uninitialised expectation, a
     // frame from before the anchor) must not wrap into a plausible-looking
@@ -129,9 +137,10 @@ inline int64_t t0FromRx(int64_t t_rxdone_us, uint32_t payload_len)
 // that is small compared with the guard. The spread test is what rejects a
 // bimodal distribution whose mean happens to look fine.
 inline bool phaseTrustworthy(const Stats &s, uint32_t guard_us,
-                             uint32_t min_samples = 8)
+                             uint32_t min_samples = 8, uint32_t min_frames = 2)
 {
     if (s.n < min_samples)          return false;
+    if (s.frames < min_frames)      return false;
     if (s.outside_guard != 0)       return false;
     return (uint32_t) s.spread_us() <= guard_us;
 }

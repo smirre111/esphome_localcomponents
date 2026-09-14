@@ -148,6 +148,31 @@ constexpr int64_t armInstantUs(const State &st, int64_t t0_us)
 }
 
 
+// --- The hub's declared fire instant (LoraHeader fireRound / fireOffsetUs) ---
+//
+// Every copy the hub sends states where its own T0 is on the hub grid: `round`
+// rounds after the hub's anchor, `offset_us` into that round. On this node's
+// grid that is the same span from the node's anchor, stretched by the learned
+// rate. Nothing about slots or burst copies enters it: the hub already said
+// exactly where THIS copy is.
+constexpr int64_t t0ForHubInstantUs(const State &st, uint32_t round, uint32_t offset_us)
+{
+    return st.anchor_us
+         + stretchUs(st, (int64_t) round * (int64_t) st.params.round_us + (int64_t) offset_us);
+}
+
+// The anchor that puts a copy measured at `t0_measured_us` on its declared
+// instant. The GridSync solve for a stamped copy: unlike solveAnchorUs it trusts
+// the instant the frame really left, not the mark it was placed on, so a late
+// GridSync no longer moves every mark (measured 2026-09-14: -322 ms, -10 ms).
+constexpr int64_t solveAnchorFromHubInstantUs(int64_t t0_measured_us, uint32_t round,
+                                              uint32_t offset_us, const Params &p,
+                                              int32_t rate_ppb)
+{
+    const int64_t span = (int64_t) round * (int64_t) p.round_us + (int64_t) offset_us;
+    return t0_measured_us - (span + (span * (int64_t) rate_ppb) / kRateDen);
+}
+
 // This node's T0 for a given round.
 constexpr int64_t t0ForRound(const State &st, uint32_t round)
 {

@@ -51,7 +51,13 @@ namespace txqueue
 // than this cannot be fired ON it, and asking for such an instant puts the copy
 // late by whatever the shortfall is. It has to cover one FreeRTOS tick of wake
 // jitter (1 ms at the hub's CONFIG_FREERTOS_HZ = 1000) plus the SPI prepare.
-static constexpr int64_t kPrepareLeadUs = 5000;
+//
+// 15 ms, not 5, since copies declare their fire instant (LoraHeader fireRound /
+// fireOffsetUs): a copy is stamped with max(its instant, now + the tracker's
+// kStampLeadUs = 10 ms), so a frame handed over only 5 ms early was stamped —
+// and sent — ~5 ms after its mark on every copy. The lead has to exceed the
+// stamp lead for a placed copy to go out ON its instant.
+static constexpr int64_t kPrepareLeadUs = 15000;
 
 // Lower goes first. Named rather than numbered at call sites so the intent
 // survives: "behind nothing else" is a priority, not a magic 0.

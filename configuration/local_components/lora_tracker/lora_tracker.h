@@ -317,6 +317,20 @@ namespace esphome
       // restate the number, which is how two constants drift apart.
       static constexpr int64_t kMaxFireBusyWaitUs = 46875;
 
+      // How far ahead of "now" a copy's fire instant is chosen when it is
+      // stamped (LoraHeader fireRound / fireOffsetUs). The stamp is packed into
+      // the copy BEFORE it is prepared, so it can only be true if the pack, the
+      // radio mutex and the SPI prepare all fit in front of it; firePacket then
+      // busy-waits to exactly this instant. Well under kMaxFireBusyWaitUs.
+      static constexpr int64_t kStampLeadUs = 10000;
+      // A copy that left more than this after its stamped instant is counted.
+      static constexpr int64_t kStampToleranceUs = 1000;
+
+      // Copies whose actual fire instant missed the instant stamped into them by
+      // more than kStampToleranceUs. Should stay 0: a miss is a phase sample that
+      // lies to the node by the amount of the miss.
+      uint32_t  stampMisses() const { return this->tx_stamp_misses_; }
+
       // The copy count a TxPolicy of 0 resolves to. Public so a caller that
       // must NOT be reduced to a single copy can ask for the burst explicitly:
       // TxPolicy::copies == 0 means "no shape requested", which is exactly the
@@ -444,6 +458,13 @@ namespace esphome
       // The same for frames placed but not yet dequeued. See send().
       int64_t placed_busy_until_us_{0};
       uint32_t tx_late_placed_{0};
+      // The instant lora_tx() was called for the last copy, and how many copies
+      // missed their stamped instant. See kStampLeadUs.
+      int64_t last_fire_us_{0};
+      uint32_t tx_stamp_misses_{0};
+      // This T0 as the hub grid describes it: round since the anchor and the
+      // offset into that round. False without a grid, or before the anchor.
+      bool fireStampFor_(int64_t t0_us, uint32_t *round, uint32_t *offset_us) const;
       // One expression for when a burst stops occupying the channel.
       int64_t burstEndUs_(int64_t start_us, int copies, uint32_t stride_ms,
                           size_t len) const;

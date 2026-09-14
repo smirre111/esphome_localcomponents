@@ -84,6 +84,23 @@ TEST(PhaseTracker, TooFewSamplesIsNotTrustedHoweverGoodTheyLook) {
     EXPECT_TRUE(phaseTrustworthy(s, kGuard, 8));
 }
 
+TEST(PhaseTracker, OneFrameIsNotEvidenceHoweverManyCopiesWereHeard) {
+    // Every heard copy of a stamped burst is a sample, but the copies share the
+    // hub's timing for that one frame: they average its jitter, they cannot check
+    // it. Promotion needs samples from at least two transmissions.
+    Stats s;
+    commit(s, Sample{1000000, 1000000}, kGuard, /*new_frame=*/true);
+    for (int i = 0; i < 8; ++i)
+        commit(s, Sample{1000000 + i, 1000000}, kGuard, /*new_frame=*/false);
+    EXPECT_EQ(s.n, 9u);
+    EXPECT_EQ(s.frames, 1u);
+    EXPECT_FALSE(phaseTrustworthy(s, kGuard)) << "nine copies, one frame";
+
+    commit(s, Sample{1000003, 1000000}, kGuard, /*new_frame=*/true);
+    EXPECT_EQ(s.frames, 2u);
+    EXPECT_TRUE(phaseTrustworthy(s, kGuard));
+}
+
 TEST(PhaseTracker, AbsurdExpectationsClampInsteadOfWrapping) {
     // An uninitialised expectation, or a frame from before the anchor, must not
     // wrap a 64-bit difference into a small plausible-looking 32-bit error.

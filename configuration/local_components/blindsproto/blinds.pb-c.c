@@ -2485,7 +2485,7 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   (ProtobufCMessageInit) node_wake_beacon__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_header__field_descriptors[7] =
+static const ProtobufCFieldDescriptor lora_header__field_descriptors[10] =
 {
   {
     "destAddress",
@@ -2571,12 +2571,51 @@ static const ProtobufCFieldDescriptor lora_header__field_descriptors[7] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "fireStamped",
+    9,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, firestamped),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "fireRound",
+    10,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, fireround),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "fireOffsetUs",
+    11,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, fireoffsetus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_header__field_indices_by_name[] = {
   5,   /* field[5] = burstCount */
   4,   /* field[4] = burstIndex */
   0,   /* field[0] = destAddress */
   1,   /* field[1] = destSubnet */
+  9,   /* field[9] = fireOffsetUs */
+  8,   /* field[8] = fireRound */
+  7,   /* field[7] = fireStamped */
   3,   /* field[3] = msgId */
   6,   /* field[6] = onMark */
   2,   /* field[2] = senderAddress */
@@ -2585,7 +2624,7 @@ static const ProtobufCIntRange lora_header__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 6, 4 },
-  { 0, 7 }
+  { 0, 10 }
 };
 const ProtobufCMessageDescriptor lora_header__descriptor =
 {
@@ -2595,7 +2634,7 @@ const ProtobufCMessageDescriptor lora_header__descriptor =
   "LoraHeader",
   "",
   sizeof(LoraHeader),
-  7,
+  10,
   lora_header__field_descriptors,
   lora_header__field_indices_by_name,
   2,  lora_header__number_ranges,

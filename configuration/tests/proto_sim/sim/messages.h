@@ -141,6 +141,10 @@ struct LoraHeader {
     uint32_t burstCount{0};
     // Copy 0 placed on the destination node's grid mark (proto field 8).
     bool     onMark{false};
+    // This copy's T0 on the hub grid (proto fields 9-11).
+    bool     fireStamped{false};
+    uint32_t fireRound{0};
+    uint32_t fireOffsetUs{0};
 };
 
 struct LoraCoverOperation {
