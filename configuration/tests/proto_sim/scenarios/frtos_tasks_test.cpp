@@ -43,6 +43,7 @@
 
 #include "ClassAWindows.h"
 #include "LoraTiming.h"
+#include "NodeClock.h"
 
 #include <lora.h>
 #include <gtest/gtest.h>
@@ -63,6 +64,11 @@ namespace {
 struct Probe : LoraInterface {
     Probe(portMUX_TYPE &m, portMUX_TYPE &b) : LoraInterface(m, b) {}
     using LoraInterface::last_tx_len_;
+    // Which mechanism armed the pending one-shot, and whether it fired: the
+    // Class A sequence test below drives the loop pass by pass through them.
+    using LoraInterface::ArmSource;
+    using LoraInterface::arm_source_;
+    using LoraInterface::grid_arm_fire_us_;
 };
 
 struct Irq : public ::testing::Test {
@@ -185,6 +191,71 @@ TEST_F(Irq, TxDonePairsTheEdgeWithTheLengthTheTaskLoopRecorded) {
               classa::rx1OpenUs(classa::t0UplinkUs(txdone, sizeof(frame))))
         << "the window must hang off T0_uplink — TxDone minus this frame's own "
            "air time — not off TxDone itself";
+}
+
+TEST_F(Irq, AnOpenClassAWindowIsNeverReArmedAndRx2OpensAtItsOwnInstant) {
+    // Measured 2026-09-14 on node 2: "Class A RX1: empty (timeout)" and then
+    // "Class A RX2: empty (timeout)" 30 ms later. The receive loop came round
+    // while RX1 was still listening, found RX1 still pending with its instant
+    // passed, and armed it again at 1 us: the radio was idled mid-window, a
+    // second window opened and was booked as RX2, and the real RX2 never did.
+    // Driven here pass by pass through the real loop halves and the real
+    // interrupt handlers.
+    lif.setupRXPollingTimer();
+    // The fixture wires the firmware's globals, which the interrupt handlers
+    // use; the arming path reads LoraInterface's own pointer, which main.cpp
+    // sets with setCmdDispatcher.
+    lif.setCmdDispatcher(&disp);
+    sys.setAutoMode(true);
+    const uint8_t frame[60] = {0};
+    lif.sendPacketBytes(const_cast<uint8_t *>(frame), (int) sizeof(frame));
+    lif.last_tx_len_ = (int) sizeof(frame);
+
+    // TxDone just now, so both windows lie ahead of the host clock.
+    const int64_t txdone = nodeclock::nowUs();
+    dio0(LORA_IRQ_FLAG_TX_DONE, txdone);
+    ASSERT_TRUE(disp.classAActive());
+    const int64_t t0  = classa::t0UplinkUs(txdone, sizeof(frame));
+    const int64_t rx1 = classa::rx1OpenUs(t0);
+    const int64_t rx2 = classa::rx2OpenUs(t0);
+    loranode::rec().reset();
+
+    // Pass 1: arm RX1; its one-shot fires; the window opens.
+    lif.armNextRxWindow();
+    ASSERT_EQ(lif.arm_source_, Probe::ArmSource::ClassA);
+    lif.grid_arm_fire_us_ = rx1;
+    lif.serviceRxWindow();
+    ASSERT_EQ(r().count("lora_rxSingle"), 1u) << "RX1 is listening";
+    const size_t idles_with_rx1_open = r().count("lora_idle");
+
+    // Pass 2 comes round while RX1's outcome is still out.
+    lif.armNextRxWindow();
+    EXPECT_EQ(lif.arm_source_, Probe::ArmSource::Recheck)
+        << "an armed window whose outcome is not in must not be armed again";
+    lif.grid_arm_fire_us_ = rx1 + 60'000;   // the recheck fires
+    lif.serviceRxWindow();
+    EXPECT_EQ(r().count("lora_rxSingle"), 1u) << "a recheck opens no window";
+    EXPECT_EQ(r().count("lora_idle"), idles_with_rx1_open)
+        << "and never idles the radio in the middle of RX1";
+
+    // RX1 closes empty.
+    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+    ASSERT_TRUE(disp.classAActive()) << "RX2 is still to come";
+
+    // Pass 3: RX2 is armed at ITS instant, a whole second after RX1.
+    lif.armNextRxWindow();
+    EXPECT_EQ(lif.arm_source_, Probe::ArmSource::ClassA);
+    EXPECT_EQ(disp.classAArmInstantUs(), rx2);
+    EXPECT_EQ(rx2 - rx1, (int64_t) classa::kRx2DelayUs - (int64_t) classa::kRx1DelayUs);
+    lif.grid_arm_fire_us_ = rx2;
+    lif.serviceRxWindow();
+    EXPECT_EQ(r().count("lora_rxSingle"), 2u) << "RX2 opens its own window";
+
+    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+    EXPECT_FALSE(disp.classAActive()) << "after RX2 the sequence is over";
+    const macfunnel::Counters c = disp.macFunnelSnapshot();
+    EXPECT_EQ(c.windows_armed, 2u) << "exactly RX1 and RX2 — no phantom window";
+    EXPECT_EQ(c.windows_hit, 0u);
 }
 
 TEST_F(Irq, TxDoneSleepsTheRadioAndReturnsTheMutex) {

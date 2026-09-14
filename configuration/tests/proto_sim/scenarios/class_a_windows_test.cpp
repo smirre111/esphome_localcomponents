@@ -197,3 +197,74 @@ TEST(ClassAWindows, TheHubsStampUncertaintyEatsAThirdOfTheGuard) {
     EXPECT_GT((int64_t) timedgrid::kGuardUs - kHubStampUncertaintyUs, 9000)
         << "drift, arm residual and fire jitter share what remains";
 }
+
+// ---------------------------------------------------------------------------
+// armPlan: never arm the same window twice
+//
+// Measured 2026-09-14 on node 2: "Class A RX1: empty (timeout)" followed 30 ms
+// later by "Class A RX2: empty (timeout)". A task pass came round while RX1 was
+// still listening, found RX1 still pending with its instant in the past, and
+// armed it again at 1 us — idling the radio mid-window and opening a second
+// window that was booked as RX2. The real RX2, 1 s later, never opened.
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr int64_t kT0     = 5'000'000;
+constexpr int64_t kLeadUs = 1'000;
+}  // namespace
+
+TEST(ClassAWindows, NothingIsArmedWhenNoWindowIsPending) {
+    const classa::ArmPlan p = classa::armPlan(0, 0, 0, kT0, kLeadUs);
+    EXPECT_EQ(p.what, classa::ArmDecision::None);
+}
+
+TEST(ClassAWindows, TheNextWindowIsArmedAheadByTheLead) {
+    const int64_t open = classa::rx1OpenUs(kT0);
+    const int64_t now  = kT0 + 100'000;
+    const classa::ArmPlan p =
+        classa::armPlan(open, /*armed=*/0, classa::rx1CloseUs(kT0), now, kLeadUs);
+    EXPECT_EQ(p.what, classa::ArmDecision::Arm);
+    EXPECT_EQ(now + p.delay_us + kLeadUs, open);
+}
+
+TEST(ClassAWindows, AWindowNotYetArmedIsStillArmedWhenItsInstantHasPassed) {
+    // Lateness inside the guard is survivable; silence is not.
+    const int64_t open = classa::rx1OpenUs(kT0);
+    const classa::ArmPlan p =
+        classa::armPlan(open, /*armed=*/0, classa::rx1CloseUs(kT0), open + 5'000, kLeadUs);
+    EXPECT_EQ(p.what, classa::ArmDecision::Arm);
+    EXPECT_EQ(p.delay_us, 1);
+}
+
+TEST(ClassAWindows, AnArmedWindowWhoseOutcomeIsOutIsRecheckedNotReArmed) {
+    const int64_t open  = classa::rx1OpenUs(kT0);
+    const int64_t close = classa::rx1CloseUs(kT0);
+    const int64_t now   = open + 2'000;   // RX1 is listening right now
+    const classa::ArmPlan p = classa::armPlan(open, /*armed=*/open, close, now, kLeadUs);
+    EXPECT_EQ(p.what, classa::ArmDecision::Recheck)
+        << "re-arming the window that is open would idle the radio mid-window";
+    EXPECT_EQ(now + p.delay_us, close + classa::kRecheckMarginUs)
+        << "come back just after the window closes";
+}
+
+TEST(ClassAWindows, ARecheckNeverSpins) {
+    // A long frame still being received past the nominal close: the outcome is
+    // not in, and a 1 us recheck would busy-loop the task until it is.
+    const int64_t open  = classa::rx1OpenUs(kT0);
+    const int64_t close = classa::rx1CloseUs(kT0);
+    const classa::ArmPlan p =
+        classa::armPlan(open, open, close, close + 200'000, kLeadUs);
+    EXPECT_EQ(p.what, classa::ArmDecision::Recheck);
+    EXPECT_EQ(p.delay_us, classa::kRecheckMinUs);
+}
+
+TEST(ClassAWindows, OnceRx1ClosedEmptyRx2IsArmedAtItsOwnInstant) {
+    const int64_t rx1 = classa::rx1OpenUs(kT0);
+    const int64_t rx2 = classa::rx2OpenUs(kT0);
+    const int64_t now = classa::rx1CloseUs(kT0) + 25'000;
+    const classa::ArmPlan p =
+        classa::armPlan(rx2, /*armed=*/rx1, classa::rx2CloseUs(kT0), now, kLeadUs);
+    EXPECT_EQ(p.what, classa::ArmDecision::Arm);
+    EXPECT_EQ(now + p.delay_us + kLeadUs, rx2)
+        << "RX2 opens 1 s after RX1, not 30 ms";
+}
