@@ -977,7 +977,13 @@ TEST_F(RealNodeFixture, DisabledCheckinLeavesSleepDrivenPurelyByTheSchedule) {
     // The counterpart to SleepIsCappedByTheCheckinInterval: with check-in
     // explicitly disabled, the sleep must run all the way to the next event.
     give_clock(disp, 206, 1787000000ULL, 0);
-    sched::Entry e[] = {sched_entry(23 * 60, sched::DAY_ALL)};   // 23:00 UTC
+    // The sleep is computed against the wall clock, so the event is placed two
+    // hours after the current UTC minute. A fixed 23:00 UTC made this fail for
+    // the hour before it (measured 2026-09-15 00:07 CEST: sleep 3138 s).
+    struct timeval tv_place;
+    gettimeofday(&tv_place, nullptr);
+    const uint32_t now_min = static_cast<uint32_t>((tv_place.tv_sec % 86400) / 60);
+    sched::Entry e[] = {sched_entry((now_min + 120) % 1440, sched::DAY_ALL)};
     sys.setSchedule(1, 1, 0, /*checkin=*/0, /*lead=*/30, 0, 1800, e, 1);
 
     const uint64_t next  = disp.computeNextEvent();
