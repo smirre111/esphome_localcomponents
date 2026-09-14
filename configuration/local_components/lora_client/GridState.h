@@ -285,16 +285,52 @@ constexpr NextWindow nextWindow(const State &st, int64_t now_us, bool skip_own)
                            : NextWindow{own,    WindowKind::Own};
 }
 
+// Where to look for the next window, given the T0 of the window that has
+// already OPENED (0 = none).
+//
+// Measured 2026-09-14 on node 2 (fw 1.0.68, first Mode B promotion): the
+// receive task comes round a few ms after opening a window, while that window
+// is still listening and before its T0. nextT0Us(now) is then the SAME mark, so
+// it was armed again at 1 us — the task woke at once and blocked on the radio
+// mutex until the first window closed, then opened a second window after the
+// mark had passed. The node heard none of ~120 marks the hub placed. Class A
+// had the identical defect and classa::armPlan fixed it there.
+//
+// Half a slot pitch past the opened T0: windows are at least one pitch apart,
+// and a beacon re-anchor moves a predicted T0 by at most the guard (14 080 us),
+// less than half a pitch (23 437 us) — so the opened window can neither be found
+// again nor hide the next one.
+constexpr int64_t nextWindowSearchFromUs(int64_t now_us, int64_t opened_t0_us)
+{
+    if (opened_t0_us == 0) return now_us;
+    const int64_t after = opened_t0_us + (int64_t) timedgrid::kSlotPitchUs / 2;
+    return (after > now_us) ? after : now_us;
+}
+
 // armDelayUs for whichever window comes next, reporting which one it is: the
 // caller has to know, because a beacon window that closes empty is not a missed
 // MARK and must not feed the demotion counter.
+//
+// `opened_t0_us` is the window that has already opened (see
+// nextWindowSearchFromUs); `t0_out`, when given, receives the T0 aimed at, so
+// the caller can record it once that window opens. The delay is still measured
+// from `now_us`.
 constexpr int64_t nextWindowArmDelayUs(const State &st, int64_t now_us,
                                        int64_t lead_us, bool skip_own,
-                                       WindowKind &kind_out)
+                                       WindowKind &kind_out,
+                                       int64_t opened_t0_us = 0,
+                                       int64_t *t0_out = nullptr)
 {
-    if (!st.active) { kind_out = WindowKind::Own; return 1; }
-    const NextWindow w = nextWindow(st, now_us, skip_own);
+    if (!st.active)
+    {
+        kind_out = WindowKind::Own;
+        if (t0_out != nullptr) *t0_out = 0;
+        return 1;
+    }
+    const NextWindow w =
+        nextWindow(st, nextWindowSearchFromUs(now_us, opened_t0_us), skip_own);
     kind_out = w.kind;
+    if (t0_out != nullptr) *t0_out = w.t0_us;
     const int64_t d = armInstantUs(st, w.t0_us) - lead_us - now_us;
     return (d < 1) ? 1 : d;
 }

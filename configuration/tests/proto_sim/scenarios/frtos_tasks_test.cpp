@@ -69,6 +69,11 @@ struct Probe : LoraInterface {
     using LoraInterface::ArmSource;
     using LoraInterface::arm_source_;
     using LoraInterface::grid_arm_fire_us_;
+    // Mode B: what the one-shot was aimed at, whether one is in use, and the
+    // software lead the fire instant sits in front of the radio listening.
+    using LoraInterface::grid_arm_target_us_;
+    using LoraInterface::grid_timer_running_;
+    using LoraInterface::kRadioArmLeadUs;
 };
 
 struct Irq : public ::testing::Test {
@@ -256,6 +261,139 @@ TEST_F(Irq, AnOpenClassAWindowIsNeverReArmedAndRx2OpensAtItsOwnInstant) {
     const macfunnel::Counters c = disp.macFunnelSnapshot();
     EXPECT_EQ(c.windows_armed, 2u) << "exactly RX1 and RX2 — no phantom window";
     EXPECT_EQ(c.windows_hit, 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Mode B: one timed window per round, on this node's own mark
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr uint8_t kModeBNode   = 18;
+constexpr uint8_t kModeBSubnet = 2;
+
+// A GridSync the hub placed on this node's mark (header onMark).
+std::vector<uint8_t> gridSyncOnMark(uint32_t slot, uint32_t msgid) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kModeBNode;
+    hdr.destsubnet    = kModeBSubnet;
+    hdr.senderaddress = 1;
+    hdr.msgid         = msgid;
+    hdr.burstcount    = 17;
+    hdr.onmark        = true;
+
+    GridSync gs = GRID_SYNC__INIT;
+    gs.enable            = true;
+    gs.slotindex         = slot;
+    gs.slotcount         = timedgrid::kSlotCount;
+    gs.roundus           = timedgrid::kRoundUs;
+    gs.pitchus           = timedgrid::kSlotPitchUs;
+    gs.txround           = 0;
+    gs.txslot            = slot;
+    gs.beaconslotindex   = timedgrid::kSlotCount - 1;
+    gs.beaconeveryrounds = 233;
+    gs.symtimeout        = timedgrid::kSymbolTimeoutSymbols;
+    gs.resyncmaxs        = 350;
+    gs.uloffsetus        = 60000;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header   = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+    op.gridsync = &gs;
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+// A status request the hub placed on this node's mark: a phase sample that
+// moves no motor.
+std::vector<uint8_t> statusOnMark(uint32_t msgid) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kModeBNode;
+    hdr.destsubnet    = kModeBSubnet;
+    hdr.senderaddress = 1;
+    hdr.msgid         = msgid;
+    hdr.onmark        = true;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header   = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.sysop    = CLIENT_OPERATION__CMD_STATUS;
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+}  // namespace
+
+TEST_F(Irq, AModeBNodeArmsItsOwnNextMarkEveryRound) {
+    // Measured 2026-09-14 on node 2, fw 1.0.68: "Grid arming on" at 211.6 s, one
+    // beacon heard at 214.1 s, then none of ~120 marks the hub placed — and the
+    // node booked no missed mark until 563.9 s. Driven here pass by pass through
+    // the real receive-loop halves and the real DIO1 handler.
+    sys.setAddress(kModeBNode, kModeBSubnet);
+    proto_sim_timer_set_now_us(40'000'000);
+    lif.setupRXPollingTimer();
+    lif.setCmdDispatcher(&disp);
+    disp.setTimedRxEnabled(true);
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
+
+    const int64_t t0 = 40'000'000;
+    auto g = gridSyncOnMark(/*slot=*/4, /*msgid=*/900);
+    disp.onReceiveNew(g.data(), (int) g.size(),
+                      t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    int64_t last_rx = 0;
+    for (uint32_t i = 0; i < 8; ++i) {
+        const int64_t mark = gridstate::nextT0Us(
+            disp.gridState(), t0 + (int64_t) i * (int64_t) timedgrid::kRoundUs);
+        auto f = statusOnMark(1000 + i);
+        last_rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
+        proto_sim_timer_set_now_us(last_rx);
+        disp.onReceiveNew(f.data(), (int) f.size(), last_rx);
+    }
+    ASSERT_TRUE(disp.timedRxActive())
+        << "precondition: promoted (demotion reason " << (int) disp.demotionReasonNow() << ")";
+
+    for (int round = 0; round < 2; ++round) {
+        lif.armNextRxWindow();
+        ASSERT_TRUE(lif.grid_timer_running_);
+        const int64_t now    = esp_timer_get_time();
+        const int64_t target = lif.grid_arm_target_us_;
+        const int64_t own    = gridstate::nextT0Us(disp.gridState(), now);
+        EXPECT_EQ(lif.arm_source_, Probe::ArmSource::Grid) << "round " << round;
+        EXPECT_EQ(target, gridstate::armInstantUs(disp.gridState(), own))
+            << "round " << round << ": aimed at this node's next mark";
+
+        // A stale wake before the one-shot fires brings the task round again: the
+        // mark has not opened, so it must be armed again, not skipped.
+        proto_sim_timer_advance_us(1000);
+        lif.armNextRxWindow();
+        EXPECT_EQ(lif.grid_arm_target_us_, target)
+            << "round " << round << ": a mark that has not opened is still the one to arm";
+
+        // The one-shot fires one lead early; the window opens.
+        const int64_t fire = target - Probe::kRadioArmLeadUs;
+        proto_sim_timer_set_now_us(fire);
+        lif.grid_arm_fire_us_ = fire;
+        const size_t rx_before = r().count("lora_rxSingle");
+        lif.serviceRxWindow();
+        EXPECT_EQ(r().count("lora_rxSingle"), rx_before + 1)
+            << "round " << round << ": the fired one-shot opens the window";
+
+        // The task comes round at once, while that window is still listening.
+        proto_sim_timer_advance_us(2000);
+        lif.armNextRxWindow();
+        EXPECT_GT(lif.grid_arm_target_us_, target + (int64_t) timedgrid::kRoundUs / 2)
+            << "round " << round << ": a mark whose window is open must not be "
+               "armed again — the next arm is the NEXT round's mark";
+
+        // The window closes empty.
+        proto_sim_timer_set_now_us(own + 30'000);
+        dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+    }
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 2u) << "two armed marks, two empty windows";
 }
 
 TEST_F(Irq, TxDoneSleepsTheRadioAndReturnsTheMutex) {

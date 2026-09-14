@@ -377,6 +377,59 @@ TEST(GridState, TheArmDelayReportsWhichWindowItIsFor) {
     EXPECT_EQ(kind, WindowKind::Own);
 }
 
+TEST(GridState, AWindowThatHasOpenedIsNeverArmedAgain) {
+    // Measured 2026-09-14 on node 2 (fw 1.0.68): the receive task came round a
+    // few ms after opening a window, before its T0, and armed the same mark again
+    // at 1 us. It heard none of ~120 marks the hub placed.
+    const State st = gridded(3);
+    const int64_t lead = 1000;
+    const int64_t own  = nextT0Us(st, st.anchor_us + 5 * (int64_t) timedgrid::kRoundUs);
+    // Just after the window opened: the arm instant has passed, T0 has not.
+    const int64_t now  = armInstantUs(st, own) + 2000;
+    ASSERT_LT(now, own);
+
+    WindowKind kind = WindowKind::Own;
+    int64_t aimed = 0;
+    nextWindowArmDelayUs(st, now, lead, false, kind, /*opened_t0_us=*/0, &aimed);
+    ASSERT_EQ(aimed, own) << "precondition: without the record, the open mark is found again";
+
+    const int64_t d = nextWindowArmDelayUs(st, now, lead, false, kind, /*opened_t0_us=*/own, &aimed);
+    EXPECT_EQ(aimed, nextT0Us(st, own + 1)) << "the NEXT round's mark";
+    EXPECT_EQ(kind, WindowKind::Own);
+    EXPECT_EQ(d, armInstantUs(st, aimed) - lead - now) << "and the delay still runs from now";
+}
+
+TEST(GridState, AnArmedMarkThatHasNotOpenedIsStillTheOneToArm) {
+    // A stale wake brings the task round before the one-shot fires. Nothing has
+    // opened, so the record is the PREVIOUS window and the pending mark stands.
+    const State st = gridded(3);
+    const int64_t own      = nextT0Us(st, st.anchor_us + 5 * (int64_t) timedgrid::kRoundUs);
+    const int64_t previous = own - (int64_t) timedgrid::kRoundUs;
+    const int64_t now      = armInstantUs(st, own) - 400000;
+
+    WindowKind kind = WindowKind::Own;
+    int64_t aimed = 0;
+    nextWindowArmDelayUs(st, now, 1000, false, kind, /*opened_t0_us=*/previous, &aimed);
+    EXPECT_EQ(aimed, own);
+}
+
+TEST(GridState, AReAnchorInsideTheGuardDoesNotBringTheOpenedWindowBack) {
+    // A beacon heard in that window re-anchors the grid, moving the predicted T0
+    // of the very mark that just opened by up to the guard. Searching from
+    // "opened + 1 us" would find it again the moment the shift was positive.
+    State st = gridded(3);
+    const int64_t own = nextT0Us(st, st.anchor_us + 5 * (int64_t) timedgrid::kRoundUs);
+    st.anchor_us += (int64_t) timedgrid::kGuardUs;   // the whole guard, later
+    const int64_t shifted = own + (int64_t) timedgrid::kGuardUs;
+    const int64_t now = own - 5000;
+
+    WindowKind kind = WindowKind::Own;
+    int64_t aimed = 0;
+    nextWindowArmDelayUs(st, now, 1000, false, kind, /*opened_t0_us=*/own, &aimed);
+    EXPECT_GT(aimed, shifted) << "the re-anchored copy of the opened mark is not a new window";
+    EXPECT_EQ(aimed, shifted + (int64_t) timedgrid::kRoundUs);
+}
+
 TEST(GridState, RoundNumbersAreRecoverableFromAMark) {
     // The number both ends must agree on. The hub declares the round it
     // transmits in precisely so this inverse works out to the same value there.

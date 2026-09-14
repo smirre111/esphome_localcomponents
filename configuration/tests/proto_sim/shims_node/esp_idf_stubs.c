@@ -34,11 +34,24 @@ uint32_t esp_random(void) {
     return (uint32_t)rand() | ((uint32_t)rand() << 16);
 }
 
-int64_t esp_timer_get_time(void) {
+// CLOCK_MONOTONIC plus an offset that stays 0 unless a test sets the clock, so
+// every test that never touches it reads exactly what it always read. A Mode B
+// receive-loop test has to place "now" at a fire instant and one window later;
+// with an unsettable clock it could assert nothing about which mark was armed.
+static int64_t g_clock_offset_us = 0;
+
+static int64_t monotonic_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
+
+int64_t esp_timer_get_time(void) {
+    return monotonic_us() + g_clock_offset_us;
+}
+
+void proto_sim_timer_set_now_us(int64_t us) { g_clock_offset_us = us - monotonic_us(); }
+void proto_sim_timer_advance_us(int64_t delta_us) { g_clock_offset_us += delta_us; }
 #endif
 
 void esp_restart(void) {
