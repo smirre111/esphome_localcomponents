@@ -2108,6 +2108,75 @@ flashed and the GridSync arrived **9.5 s** after boot, before the 60 s recalibra
 * After the deadline the hub stopped sending marks, and the node demoted after 3 misses
   at 980 s. This is expected for a ModeTest grid.
 
+**MEASURED 2026-09-15 00:18–00:41 — RF duty and light sleep per operating phase.**
+Node 2, fw 1.0.76 (`617fb9e`), hub `2097467`, one boot. The node measures itself and
+logs once a minute:
+- RX on: from rxSingle or continuous receive until the radio is slept or idled.
+- TX on air: from each frame's length.
+- CAD count.
+- Light sleep: the time between the SoC's sleep-entry and sleep-exit events.
+
+Phases were driven from the hub: Timed Mode off (grid withdrawn), then on (grid, no
+marks), then the Mode B production ModeTest.
+
+| phase (steady minutes) | RX on | TX on air | light sleep | est. mA |
+|---|---|---|---|---|
+| Mode A, no grid (2 min) | 6.6–6.7 % | 0 | 97.6 % | ≈ 2.5 |
+| promotion trial, grid adopted, no marks (3 min) | 8.5–8.8 % | 0 | 96.6 % | ≈ 3.1 |
+| Mode B, a 58 B frame every round (13 min) | 4.2–4.6 % | 0–0.04 % | 91.4–91.7 % | ≈ 4.7 |
+| boot minute (login, config) | 7.2 % | 0.72 %, 16 CADs | 21.7 % | — |
+
+* The estimates are **datasheet figures, not measurements**: SX1276 RX 11 mA, TX
+  +17 dBm 87 mA; ESP32 light sleep 0.8 mA, awake at 240 MHz without WiFi ≈ 40 mA. They
+  leave out the board: regulator, motor driver and battery divider.
+* The RX figures match the design:
+  - Mode A opens a 29.44 ms window every 470 ms, which is 6.3 %.
+  - The trial adds one window per 1.5 s round, +2.0 %.
+  - A Mode B window that catches a frame stays open from the guard until RxDone, about
+    55 ms per 1.5 s, which is 3.7 %; beacon windows make up the rest.
+  - A Mode B round **without** traffic would be 29.44 ms per 1.5 s, 2.0 %. That is
+    predicted, not measured: the test sends a frame every round.
+* **The CPU, not the radio, dominates Mode B:** the SoC is awake 8.6 % of the time,
+  about 129 ms per round, against 2.4 % in Mode A. Each frame is decrypted and prints
+  about 25 log lines at 115 200 baud (~2 kB, ~170 ms of UART), so the figure includes
+  debug logging. Measure again with the log level lowered before optimising anything
+  on the radio side.
+* TX is negligible in these phases: 0.04 % at 87 mA is about 0.04 mA.
+* Not covered yet: Class A / Mode C wakes, deep sleep, and the hub.
+
+Mode B run within the same capture: the ModeTest started at node 383.8 s and the
+node was promoted at 396.7 s (12.9 s).
+
+| Mode B, MAC-0 (1.0.76, power run) | value |
+|---|---|
+| windows armed / hit | 591 / 585 (hub sensors; its report log line was not captured) |
+| node report | seq 1..596, 5 gaps; detected / CRC-valid / addressed 593 / 593 / 593 |
+| FER_link | 5 033 ppm |
+| phaseErr p50 / p99 / max | +2 512 / +5 244 / +6 049 us, n 591 |
+| hub copies late on their stamp | about 18 this run, 1.16–2.43 ms |
+| first rate beacon | +10 778 ppb at 1 056 s (≈ 12 min after grid adoption) |
+
+* oneShot n and residual ppm are not exposed as hub sensors, so this run does not
+  certify HW-8 or the pass line; those rest on the 1.0.74 and 1.0.75 runs.
+* **The 7 empty mark windows during the test, now placed in time** (1.0.76 logs each):
+  - **4 rounds whose frame never arrived** (467.4, 778.7, 955.1, 1 103.4 s). For three
+    of them the node's received msgid sequence skips exactly that round (61→63,
+    388→390, 488→490); 778.7 s was not checked. The windows opened on time, since both
+    neighbours landed 1.5 s either side. So these are link losses or unsent frames, not
+    arming faults.
+  - **2 logged about 70 ms after a beacon's RxDone** (710.6, 1 056.0 s). They look like
+    the beacon window being counted as an empty mark window. To check: such a count
+    feeds the 3-consecutive-miss demotion.
+  - **1 in a beacon round with no msgid skip** (709.1 s): that round had no mark to
+    catch.
+* **The +10 ppm drift before the first rate beacon showed again, and larger:**
+  - error reached 5.3 ms before the beacon at 710 s re-anchored the phase (27 us after it);
+  - the rate itself only arrived at 1 056 s;
+  - p50 2.5 ms against 0.8 ms on 1.0.75.
+
+  Applying the rate the phase fit already measures, instead of waiting for a rate
+  beacon, stays the candidate fix.
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
