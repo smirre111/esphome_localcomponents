@@ -1988,6 +1988,23 @@ FAST** (the fit is `add(nominal hub time, node rx time)`; `DriftEstimator.h` sai
   mechanism; the beacon-interval conclusion drawn from +60 ppm no longer applies
   at +9 ppm (guard exit ≈ 14 080 / 9 ≈ 26 min, beyond the 5.8 min interval).
 
+**MEASURED 2026-09-14 evening — Mode B MAC-0, three production 900 s runs on node 2.
+Not passed: no timed window was ever measured.** Each run removed one defect that
+kept Mode B from engaging; the pass line (residual |ppm| < 20 with windows armed
+> 0 and zero HW-8 misses) still cannot be judged.
+
+| start | node fw / hub | phaseErr p50 / p99 (n) | windows | raw / residual ppm | true FER | what stopped it |
+|---|---|---|---|---|---|---|
+| 18:03 | 1.0.67 / `caddbca` | −29 242 / −25 803 us (36) | 0/0 | +9 / +9 (36) | 0 / 37 | hub burst copies 1.. paced from before copy 0's placement wait (fixed `27176ed`) |
+| 18:26 | 1.0.67 / `27176ed` | **+4 296 / +9 377 us (36)** | 0/0 | — | 0 / 37 | node committed the UNPLACED ModeTest START (463 ms off the mark) as a phase sample → `outside_guard` latched → NoPhase (fixed: `LoraHeader.onMark`, hub `a74ac64`, node 1.0.68 `238d925`) |
+| 18:59 | 1.0.68 / `a74ac64` | — (START not heard) | — | — | — | **first Mode B promotion on hardware** ("Grid arming on" after 3.5 min), then no mark heard: an open window was re-armed 1 us out (fixed node 1.0.69 `a19b2ce`); the missed START left the node ignoring every mark (fixed `21b801b`) |
+| 19:53 | 1.0.69 / `a74ac64` | −321 686 / −317 108 us (37) | 0/0 | +9 / +9 (37) | 0 / 38 | GridSync placed inside the TimeSync burst queued just before it, sent ~320 ms after the mark it declared; the node anchored to that (fix in progress: placement reservations) |
+
+* The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
+* True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
+* HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
+  gate, and not yet a pass.
+
 **MEASURED 2026-09-14 — Mode C, MAC-0: PASS.** Node 2 in automatic mode (Class A),
 check-ins every 15 min, node fw 1.0.67 as of `04a57fa`, hub `f89f7f5`. Sign:
 positive ppm = node fast.
