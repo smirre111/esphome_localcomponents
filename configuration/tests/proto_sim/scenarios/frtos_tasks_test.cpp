@@ -74,6 +74,11 @@ struct Probe : LoraInterface {
     using LoraInterface::grid_arm_target_us_;
     using LoraInterface::grid_timer_running_;
     using LoraInterface::kRadioArmLeadUs;
+    // The promotion trial's state: what it aimed at, what opened, and whether a
+    // trial one-shot is pending beside the periodic timer.
+    using LoraInterface::grid_aim_t0_us_;
+    using LoraInterface::grid_opened_t0_us_;
+    using LoraInterface::trial_armed_;
 };
 
 struct Irq : public ::testing::Test {
@@ -394,6 +399,108 @@ TEST_F(Irq, AModeBNodeArmsItsOwnNextMarkEveryRound) {
         dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
     }
     EXPECT_EQ(disp.consecutiveMissedMarks(), 2u) << "two armed marks, two empty windows";
+}
+
+namespace {
+// Adopt a grid from an on-mark GridSync at t0 = 40 s, on the crystal, with timed
+// RX enabled — and no phase samples, so the node is NOT promoted.
+void adoptGridUnpromoted(Irq &f) {
+    f.sys.setAddress(kModeBNode, kModeBSubnet);
+    proto_sim_timer_set_now_us(40'000'000);
+    f.lif.setupRXPollingTimer();
+    f.lif.setCmdDispatcher(&f.disp);
+    f.disp.setTimedRxEnabled(true);
+    f.disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
+    auto g = gridSyncOnMark(/*slot=*/4, /*msgid=*/900);
+    f.disp.onReceiveNew(g.data(), (int) g.size(),
+                        40'000'000 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) g.size()));
+}
+}  // namespace
+
+TEST_F(Irq, AnAdoptedNodeListensAtItsOwnMarkWhileStillInModeA) {
+    // Measured 2026-09-14 on node 2 (fw 1.0.72): with only the free-running window
+    // the node caught a mark about every 23 s and promoted after 192.8 s; in Mode B
+    // it caught one every round. The promotion trial gives the unpromoted node one
+    // window per round at its mark, beside its Mode A windows.
+    adoptGridUnpromoted(*this);
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_FALSE(disp.timedRxActive()) << "precondition: no phase evidence yet";
+
+    const size_t armed_before = (size_t) proto_sim_timer_armed_count();
+    lif.armNextRxWindow();
+    EXPECT_EQ(lif.arm_source_, Probe::ArmSource::Trial);
+    EXPECT_TRUE(lif.trial_armed_);
+    EXPECT_FALSE(lif.grid_timer_running_) << "the periodic Mode A timer keeps running";
+    EXPECT_EQ((size_t) proto_sim_timer_armed_count(), armed_before + 1)
+        << "the trial one-shot runs BESIDE the periodic timer, not instead of it";
+    const int64_t now  = esp_timer_get_time();
+    const int64_t aim  = lif.grid_aim_t0_us_;
+    EXPECT_EQ(aim, gridstate::nextT0Us(disp.gridState(), now)) << "this node's own next mark";
+
+    // A periodic tick arrives first: an ordinary Mode A window, trial untouched.
+    const size_t rx0 = r().count("lora_rxSingle");
+    lif.serviceRxWindow();
+    EXPECT_EQ(r().count("lora_rxSingle"), rx0 + 1) << "Mode A still listens";
+    EXPECT_EQ(lif.grid_opened_t0_us_, 0) << "a periodic window is not the trial window";
+    EXPECT_TRUE(lif.trial_armed_);
+    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+
+    // The task comes round again before the one-shot fires: the aim must stand.
+    proto_sim_timer_advance_us(470'000);
+    lif.armNextRxWindow();
+    EXPECT_EQ(lif.grid_aim_t0_us_, aim) << "a pending trial window is not re-armed by a periodic pass";
+
+    // The trial one-shot fires: its window opens and is recorded.
+    const int64_t fire = lif.grid_arm_target_us_ - Probe::kRadioArmLeadUs;
+    proto_sim_timer_set_now_us(fire);
+    lif.grid_arm_fire_us_ = fire;
+    const size_t rx1 = r().count("lora_rxSingle");
+    lif.serviceRxWindow();
+    EXPECT_EQ(r().count("lora_rxSingle"), rx1 + 1);
+    EXPECT_EQ(lif.grid_opened_t0_us_, aim);
+    EXPECT_FALSE(lif.trial_armed_);
+
+    // Empty: not a missed mark — the node is not on the grid yet.
+    proto_sim_timer_set_now_us(aim + 30'000);
+    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "a trial window is not a mark";
+
+    // Next pass: the next round's mark.
+    lif.armNextRxWindow();
+    EXPECT_EQ(lif.arm_source_, Probe::ArmSource::Trial);
+    EXPECT_EQ(lif.grid_aim_t0_us_, aim + (int64_t) timedgrid::kRoundUs);
+}
+
+TEST_F(Irq, PromotionEndsTheTrialAndModeBTakesTheTimer) {
+    adoptGridUnpromoted(*this);
+    lif.armNextRxWindow();
+    ASSERT_EQ(lif.arm_source_, Probe::ArmSource::Trial);
+
+    // Eight on-mark samples from eight frames: promoted.
+    for (uint32_t i = 0; i < 8; ++i) {
+        const int64_t mark = gridstate::nextT0Us(
+            disp.gridState(), 40'000'000 + (int64_t) (i + 1) * (int64_t) timedgrid::kRoundUs);
+        auto s = statusOnMark(1000 + i);
+        const int64_t rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) s.size());
+        proto_sim_timer_set_now_us(rx);
+        disp.onReceiveNew(s.data(), (int) s.size(), rx);
+    }
+    ASSERT_TRUE(disp.timedRxActive());
+
+    lif.armNextRxWindow();
+    EXPECT_EQ(lif.arm_source_, Probe::ArmSource::Grid) << "Mode B's own mark window";
+    EXPECT_TRUE(lif.grid_timer_running_) << "and the periodic timer is stopped";
+    EXPECT_FALSE(lif.trial_armed_);
+}
+
+TEST_F(Irq, WithoutAGridThereIsNoTrial) {
+    lif.setupRXPollingTimer();
+    lif.setCmdDispatcher(&disp);
+    disp.setTimedRxEnabled(true);
+    ASSERT_FALSE(disp.gridState().active);
+    lif.armNextRxWindow();
+    EXPECT_EQ(lif.arm_source_, Probe::ArmSource::None);
+    EXPECT_FALSE(lif.trial_armed_);
 }
 
 TEST_F(Irq, TxDoneSleepsTheRadioAndReturnsTheMutex) {
