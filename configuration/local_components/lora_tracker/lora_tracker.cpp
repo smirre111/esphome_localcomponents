@@ -422,10 +422,7 @@ namespace esphome
       // what another caller consults to decide whether the channel is free.
       const int64_t tx_start_us = (fire_at_us > now_us) ? fire_at_us : now_us;
       this->burst_busy_until_us_ =
-          tx_start_us + (int64_t) (copies - 1) * (int64_t) stride_ms * 1000
-                 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) rx_buffer->length)
-                 + (int64_t) loratiming::kPreambleToT0Us
-                 + (int64_t) this->responseWindowMs * 1000;
+          this->burstEndUs_(tx_start_us, copies, stride_ms, rx_buffer->length);
 
       lora_tx_busy_ = true;
       this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
@@ -848,16 +845,45 @@ namespace esphome
       return this->burst_busy_until_us_;
     }
 
+    // When a burst of `copies` starting at `start_us` stops occupying the channel,
+    // including the response window sendTask holds the radio in afterwards. One
+    // expression for the burst on the air and for a frame merely placed.
+    int64_t LORATracker::burstEndUs_(int64_t start_us, int copies, uint32_t stride_ms,
+                                     size_t len) const
+    {
+      const int      n      = (copies > 0) ? copies : this->txSlotsPerRound;
+      const uint32_t stride = (stride_ms > 0) ? stride_ms : (uint32_t) this->txIntervalMs;
+      return start_us + (int64_t) (n - 1) * (int64_t) stride * 1000
+           + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) len)
+           + (int64_t) loratiming::kPreambleToT0Us
+           + (int64_t) this->responseWindowMs * 1000;
+    }
+
+    int64_t LORATracker::placedBusyUntilUs() const
+    {
+      return this->placed_busy_until_us_;
+    }
+
     // The next T0 for `slot` that is not inside a burst.
     //
     // Not simply "the next T0 after busyUntil": a caller wants the node's own
     // mark, and the node is only listening at its own marks. Skipping to the
     // first T0 at or after the channel clears is exactly that — the grid
     // arithmetic already spaces those a round apart.
+    //
+    // Clear of what is QUEUED too, not only of the burst on the air.
+    // burst_busy_until_us_ is set when sendTask dequeues a frame, so frames placed
+    // back to back all saw an idle channel. Measured 2026-09-14 on node 2 after a
+    // login: TimeSync placed 1386 ms out (a 17-copy burst, ~1.9 s with its
+    // response window), GridSync placed 2406 ms out — inside it. The queue fired
+    // the GridSync when the TimeSync burst ended, ~320 ms after the mark it
+    // declared; the node anchored to that arrival and every ModeTest mark read
+    // phaseErr p50 -321 686 us. It never promoted (windows 0/0).
     int64_t LORATracker::nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const
     {
-      const int64_t floor_us = (this->burst_busy_until_us_ > now_us)
-                             ? this->burst_busy_until_us_ : now_us;
+      int64_t floor_us = now_us;
+      if (this->burst_busy_until_us_ > floor_us)  floor_us = this->burst_busy_until_us_;
+      if (this->placed_busy_until_us_ > floor_us) floor_us = this->placed_busy_until_us_;
       return this->nextT0ForSlotUs(slot, floor_us);
     }
 
@@ -939,6 +965,18 @@ namespace esphome
           this->return_buffer_to_pool(rx_buffer);
           return false;
         }
+
+        // A PLACED frame reserves the channel from the moment it is accepted, so
+        // the next placement lands after it (see nextClearT0ForSlotUs). Frames
+        // leave one after another on one radio, so this is the order they go out
+        // in anyway. Written without a lock, like burst_busy_until_us_.
+        if (policy.earliest_us > 0)
+        {
+          const int64_t end_us = this->burstEndUs_(policy.earliest_us, policy.copies,
+                                                   policy.stride_ms, copy_len);
+          if (end_us > this->placed_busy_until_us_)
+            this->placed_busy_until_us_ = end_us;
+        }
         return true;
       }
 
@@ -986,13 +1024,30 @@ namespace esphome
       LoraClientOperationMessage *burstMsg =
           lora_client_operation_message__unpack(NULL, len, data);
       const bool canStamp = (burstMsg != nullptr && burstMsg->header != nullptr);
+      // A placed frame that reaches the radio after its mark is no longer ON it.
+      // Sending it is still better than dropping a command, but it must not claim
+      // the mark, and it must be visible: the node anchors to arrival, so a late
+      // GridSync moves every mark it will ever arm (measured 2026-09-14, -322 ms).
+      bool on_mark_eff = on_mark && not_before_us > 0;
+      if (not_before_us > 0)
+      {
+        const int64_t late_us = esp_timer_get_time() - not_before_us;
+        if (late_us > (int64_t) timedgrid::kGuardUs)
+        {
+          this->tx_late_placed_++;
+          on_mark_eff = false;
+          ESP_LOGW(TAG, "placed frame %lld us past its mark (%u so far) — sent, not on mark",
+                   (long long) late_us, (unsigned) this->tx_late_placed_);
+        }
+      }
+
       if (canStamp)
       {
         burstMsg->header->burstcount = burstCopies;
         // Whether copy 0 sits on the destination's grid mark — the node's only
         // licence to read this frame's arrival as a phase sample. Never claimed
         // for an unplaced frame, whatever the caller asked.
-        burstMsg->header->onmark = (on_mark && not_before_us > 0) ? 1 : 0;
+        burstMsg->header->onmark = on_mark_eff ? 1 : 0;
       }
 
       // for (int cnt = 0; cnt < 7; cnt++)

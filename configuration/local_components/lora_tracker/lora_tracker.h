@@ -243,6 +243,10 @@ namespace esphome
       // that the supersession path is doing anything.
       uint32_t  supersededDrops() const { return this->tx_superseded_drops_; }
 
+      // Placed frames that reached the radio more than a guard past their mark,
+      // and so went out without claiming it. Should stay 0; see sendPacketBurst.
+      uint32_t  latePlacedFrames() const { return this->tx_late_placed_; }
+
       // T-2: frames refused because the buffer pool was empty.
       //
       // The pool (POOL_SIZE = 5) is the real depth of a queue that advertises
@@ -280,6 +284,9 @@ namespace esphome
       // the round it runs in, so a timed downlink whose mark falls inside one
       // must move to the next CLEAR mark rather than be transmitted into it.
       int64_t   busyUntilUs() const;
+      // The end of the last PLACED frame's burst, from the moment send() accepted
+      // it — before sendTask has dequeued it. nextClearT0ForSlotUs clears it too.
+      int64_t   placedBusyUntilUs() const;
       int64_t   nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const;
       uint32_t  msUntilNextClearT0(uint8_t slot) const;
 
@@ -434,6 +441,12 @@ namespace esphome
       // When the hub's own burst stops occupying the channel, including the
       // post-burst response window sendTask holds the radio in.
       int64_t burst_busy_until_us_{0};
+      // The same for frames placed but not yet dequeued. See send().
+      int64_t placed_busy_until_us_{0};
+      uint32_t tx_late_placed_{0};
+      // One expression for when a burst stops occupying the channel.
+      int64_t burstEndUs_(int64_t start_us, int copies, uint32_t stride_ms,
+                          size_t len) const;
 
       rx_buffer_t *get_free_buffer(TickType_t timeout);
       esp_err_t return_buffer_to_pool(rx_buffer_t *buffer);

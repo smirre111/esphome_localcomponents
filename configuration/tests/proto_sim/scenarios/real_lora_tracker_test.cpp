@@ -500,6 +500,29 @@ TEST(RealTrackerTx, APlacedBurstPlacesEveryCopyOnItsOwnStride) {
                "arithmetic every node uses to recover copy 0";
 }
 
+TEST(RealTrackerTx, APlacedFrameThatMissedItsMarkIsCountedAndNotOnMark) {
+    // The queue fires a placed frame whose instant has passed as soon as it can.
+    // That keeps a command, but the frame is no longer ON the mark: stamping it
+    // onMark would feed the node a phase sample hundreds of ms out, and a late
+    // GridSync moves the node's whole grid (measured 2026-09-14, -322 ms).
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(5'500'000);
+    LORATracker t;
+    auto frame = packedOperationFrame();
+    t.sendPacketBurst(frame.data(), frame.size(), /*copies=*/1, /*stride_ms=*/0,
+                      /*not_before_us=*/5'000'000, /*on_mark=*/true);
+
+    EXPECT_EQ(t.latePlacedFrames(), 1u) << "500 ms past its mark is visible";
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1) << "and still sent";
+    const auto &p = lorahal::rec().packets[0];
+    LoraClientOperationMessage *m =
+        lora_client_operation_message__unpack(NULL, p.size(), p.data());
+    ASSERT_NE(m, nullptr);
+    EXPECT_FALSE((bool) m->header->onmark) << "a late frame does not claim the mark";
+    lora_client_operation_message__free_unpacked(m, NULL);
+}
+
 TEST(RealTrackerTx, OnlyAFramePlacedOnAMarkSaysSoOnEveryCopy) {
     // LoraHeader.onMark is the node's only licence to commit a frame's arrival
     // as a phase sample (measured 2026-09-14: one unplaced frame, 463 ms off the
@@ -752,6 +775,7 @@ TEST(RealTrackerFire, SendPacketBytesStillDoesBothAndIsUnchanged) {
 namespace {
 struct DeferProbe : TxProbe {
     using LORATracker::busyUntilUs;
+    using LORATracker::placedBusyUntilUs;
     using LORATracker::nextClearT0ForSlotUs;
 };
 }  // namespace
@@ -834,6 +858,39 @@ TEST(RealTrackerDefer, ASingleCopyDownlinkBarelyMovesTheWindow) {
     EXPECT_LT(t.busyUntilUs(), (int64_t) timedgrid::kRoundUs)
         << "a single copy must not deny the whole round";
     EXPECT_GT(t.busyUntilUs(), 0);
+}
+
+TEST(RealTrackerDefer, APlacedFrameReservesTheChannelBeforeItIsSent) {
+    // Measured 2026-09-14 on node 2 after a login: TimeSync placed 1386 ms out,
+    // GridSync placed 2406 ms out — inside the TimeSync's 17-copy burst, because
+    // the busy window is set only when a frame is DEQUEUED. The GridSync went out
+    // ~320 ms after the mark it declared, the node anchored to that, and every
+    // ModeTest mark read -322 ms: no promotion, windows 0/0.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    DeferProbe t;
+    t.init();
+    t.startGrid();
+    const int64_t a = t.gridAnchorUs();
+    proto_sim_timer_set_now_us(a);
+
+    constexpr uint8_t kSlot = 1;
+    const int64_t first_t0 = t.nextT0ForSlotUs(kSlot, a + 1'000'000);
+    auto frame = packedOperationFrame();
+    TxPolicy burst;                                   // the default 17 copies
+    burst.earliest_us = loratiming::fireInstantUs(first_t0, 0);
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), burst));
+
+    EXPECT_EQ(t.busyUntilUs(), 0) << "precondition: nothing has been dequeued";
+    const int64_t burst_end = burst.earliest_us
+        + (int64_t) (t.defaultBurstCopies() - 1) * 88'000;
+    EXPECT_GT(t.placedBusyUntilUs(), burst_end) << "the queued burst reserves its span";
+
+    const int64_t next = t.nextClearT0ForSlotUs(kSlot, a);
+    EXPECT_GT(next, burst_end)
+        << "a second frame for the same node must not be placed inside the first";
+    EXPECT_EQ((next - first_t0) % (int64_t) timedgrid::kRoundUs, 0)
+        << "and it is still one of this slot's marks";
 }
 
 TEST(RealTrackerDefer, WithoutAGridThereIsNothingToDeferTo) {
