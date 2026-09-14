@@ -2013,6 +2013,30 @@ kept Mode B from engaging; the pass line (residual |ppm| < 20 with windows armed
   not deafness: marks are not logged individually while a test is active. The 18:59
   run had no test running, so its silence after promotion stands.
 
+**MEASURED 2026-09-14 late — Mode B with declared fire instants (node 1.0.71 /
+1.0.72, hub `2097467`).** Every hub copy now states its real T0 on the hub grid.
+
+| run | promotion | phase error | windows | residual | outcome |
+|---|---|---|---|---|---|
+| 22:26 (1.0.71) | none | p50 −6 934, p99 −2 133 us (37) | 0/0 | +10 ppm (37) | a mark sample below −14 ms latched `outside_guard` |
+| 22:46 (1.0.72, per-sample log) | **192.8 s**, 8 samples / 8 frames | marks −8.3 ms drifting at +10 ppm to +2.9 ms; 0 of 420 outside the guard | one per round after promotion | not reported | demoted at 805 s by a beacon's rate update (+9 957 ppb reset the phase statistics); ended by the nightly deep sleep at 869 s, no report |
+
+* **Promotion is still sample-starved.** The declared instant makes every heard copy
+  usable, but a Mode A node hears a single-copy mark only about every 23 s. Fix: the
+  promotion trial (node `d10f50a`, 1.0.73) opens one window per round at the node's
+  own mark from grid adoption.
+* **A rate update demoted a working node.** 420 in-guard samples, then n = 1 after
+  the reset read as NoPhase. Fix (1.0.74): a Mode B node is demoted by contrary
+  evidence (a sample outside the guard, spread, missed marks, staleness), not by thin
+  evidence; promotion still needs the full baseline.
+* **Open: a −8 ms offset between frames.** Against an anchor from a 109-byte GridSync
+  (its second copy read −167 us), 54–58 byte marks read −8.3 ms and a 74-byte
+  ScheduleConfig +3.4 ms — both in Mode A catches and in Mode B windows, so not
+  light-sleep wake latency, and not linear in length. Inside the guard, but more than
+  half of it. Next: a frame-length sweep with padded MAC pings.
+* Hub: 10–13 copies per run left 1.1–1.9 ms after their stamped instant (tolerance
+  1 ms), all far inside the guard.
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
