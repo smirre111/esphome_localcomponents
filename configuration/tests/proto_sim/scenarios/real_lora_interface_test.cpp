@@ -573,6 +573,21 @@ TEST_F(Iface, AStaleTickIsSkippedWhenModeBGridArmingIsPendingToo) {
 // U-2: the radio-busy skip, and what a failed transmit does to a drift test
 // ---------------------------------------------------------------------------
 
+TEST_F(Iface, AReArmRequestIsAStaleWakeThatOpensNoWindow) {
+    // requestRearm wakes the receive task while a one-shot is armed and has not
+    // fired. That wake must only bring the task round to re-arm — never open a
+    // window at an instant nobody chose.
+    lif.requestRearm();
+    EXPECT_EQ(lif.rearmRequests(), 1u);
+
+    lif.arm_source_         = Probe::ArmSource::Grid;
+    lif.grid_timer_running_ = true;
+    lif.grid_arm_fire_us_   = 0;   // armed, not fired
+    lif.serviceRxWindow();
+    EXPECT_EQ(r().count("lora_rxSingle"), 0u);
+    EXPECT_EQ(lif.staleTicksSkipped(), 1u);
+}
+
 TEST_F(Iface, AFailedTransmitDoesNotLeaveTheNodeDeafInADriftTest) {
     // v1.0.33 again, through a door noteRadioSlept() did not cover.
     //

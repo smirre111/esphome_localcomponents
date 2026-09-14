@@ -1783,19 +1783,6 @@ namespace esphome
     // true, and still a full burst, because a node being told about the grid is
     // by definition not yet on it. A withdrawal is an unplaced burst.
     // -----------------------------------------------------------------------
-    // Does this listener have a downlink waiting for its node?
-    //
-    // Conservative by construction: anything that might become a transmit
-    // counts. A false negative here tells the node it may stop listening for a
-    // beacon interval, which is how a command goes missing for six minutes; a
-    // false positive costs one 29 ms window.
-    bool LORAListener::has_pending_downlink_() const
-    {
-      return this->op_awaiting_ack_
-          || this->mode_test_active_
-          || this->drift_test_active_;
-    }
-
     void LORAListener::send_grid_sync(bool enable)
     {
       LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -1858,20 +1845,20 @@ namespace esphome
         gs.txround = this->parent_->roundForSlotT0(this->grid_slot_, planned_t0);
         gs.txslot  = this->grid_slot_;
 
-        // The pending-data bitmap (section 4.4). A LORAListener knows only its
-        // OWN pending traffic — the fleet-wide view would have to come from the
-        // tracker, which is where all the queues live — so what it can publish
-        // honestly is: this node's bit, and every other bit SET.
+        // The pending-data bitmap (section 4.4): ALL LISTENING, this node's bit
+        // included — the same promise the beacon makes, for the same reason.
         //
-        // Setting the others is the safe direction, and deliberately not the
-        // convenient one. An empty bit is a licence to stop listening for a
-        // whole beacon interval (~5.8 min), so a bit this listener has no
-        // information about must never be clear. The saving is real for the one
-        // node this frame is addressed to and absent for the rest, which is the
-        // honest state of the implementation rather than a placeholder.
-        gs.pendingmask      = pending::withSlot(pending::allListening(),
-                                                this->grid_slot_,
-                                                this->has_pending_downlink_());
+        // It used to clear this node's bit whenever nothing was queued for it at
+        // the moment of publication. An empty bit is a licence to skip the
+        // private window for a whole beacon interval (~5.8 min), and "nothing
+        // queued right now" is not "nothing for 5.8 minutes": Home Assistant can
+        // produce a command at any instant, and a ModeTest sends a mark every
+        // round from a timer that queues nothing in advance. Measured 2026-09-14
+        // on node 2 (Mode B production 900 s): enabling timed mode published a
+        // cleared bit, the node promoted and then opened only BEACON windows —
+        // 1611 s to ~2067 s, two beacon intervals, not one mark heard. Once it
+        // listened, it caught 168 of 168.
+        gs.pendingmask      = pending::allListening();
         gs.pendingmaskvalid = true;
 
         // Section 4.4's fleet key, and the one condition on carrying it.

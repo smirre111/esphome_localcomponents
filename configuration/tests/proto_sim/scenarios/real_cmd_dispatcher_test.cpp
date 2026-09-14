@@ -4413,6 +4413,24 @@ TEST_F(RealNodeFixture, ABeaconCommitsOneSampleAndItIsInsideTheGuard) {
            "quarter-second phase error";
 }
 
+TEST_F(RealNodeFixture, AGridOrBeaconUpdateBringsTheReceiveTaskRoundToReArm) {
+    // Measured 2026-09-14 on node 2: the receive task re-armed as a beacon window
+    // closed, before this dispatcher had processed that beacon, so it aimed at the
+    // NEXT beacon under the old mask and slept 350 s through the new one.
+    ASSERT_EQ(lif.rearmRequests(), 0u);
+
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/730);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    EXPECT_EQ(lif.rearmRequests(), 1u) << "a new anchor and mask: re-arm now";
+
+    const gridstate::State st = disp.gridState();
+    auto b = build_grid_beacon(/*round=*/50, st.params.beacon_slot, /*msgid=*/1);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_beacon(st, 50, 0, (uint32_t) b.size()));
+    EXPECT_EQ(lif.rearmRequests(), 2u) << "a beacon's mask decides the next window too";
+}
+
 TEST_F(RealNodeFixture, ABurstCopyIsStampedAsCopyZero) {
     // handleGridSync and handleGridBeacon both back out burstIndex; the generic
     // phase path did not. Copies are one 88 ms stride apart, so stamping copy N

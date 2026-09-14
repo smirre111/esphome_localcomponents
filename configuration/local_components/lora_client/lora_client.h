@@ -381,9 +381,6 @@ namespace esphome
       // (11.7 min) of missed windows before demoting itself — and the beacon
       // that would re-anchor it is on a grid it no longer shares.
       void send_grid_sync(bool enable);
-      // Whether a downlink is waiting for this node, for the pending-data
-      // bitmap. Conservative: anything that might become a transmit counts.
-      bool has_pending_downlink_() const;
       // C2: send a single copy timed to land in the node's RX1 window, using
       // the hub's own receive stamp as the shared origin. False when there is
       // no usable stamp, so the caller falls back to today's burst.

@@ -221,6 +221,29 @@ TEST_F(Seam, AGridAlignedDownlinkArrivesInsideTheNodesWindow) {
 }
 
 // ---------------------------------------------------------------------------
+TEST_F(Seam, ANodeToldAboutTheGridIsNotToldToStopListening) {
+    // Measured 2026-09-14 on node 2: enabling timed mode published a GridSync
+    // whose pending mask cleared this node's bit (nothing was queued for it at
+    // that instant). The node promoted and then skipped every private window
+    // for two beacon intervals (1611 s to ~2067 s) while the hub sent a ModeTest
+    // mark every round. The real hub's frame, the real node's decision.
+    proto_sim_timer_set_now_us(1'000'000);
+    tracker.startGrid();
+    rol.enable_timed_mode(true);
+    ASSERT_TRUE(tracker.gridStarted());
+
+    const auto gridsync = lastDownlink();
+    ASSERT_FALSE(gridsync.empty());
+    const int64_t gs_t0 = tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us;
+    deliverAtT0(gridsync, gs_t0);
+    ASSERT_TRUE(disp.gridState().active);
+
+    for (int r = 1; r <= 3; ++r)
+        EXPECT_TRUE(disp.shouldArmNextWindow(gs_t0 + (int64_t) r * (int64_t) timedgrid::kRoundUs))
+            << "round +" << r << ": a hub with nothing queued right now cannot promise "
+               "silence for a beacon interval, so the node must keep its window";
+}
+
 TEST_F(Seam, AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm) {
     // The mechanism behind the largest open defect in the plan (§11b, "found by
     // review and NOT fixed").

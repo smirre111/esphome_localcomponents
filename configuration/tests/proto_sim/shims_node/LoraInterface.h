@@ -57,6 +57,11 @@ public:
 
     void stopLoraPollingTimer() {}
 
+    // The real one wakes the receive task; here a count is what a test can see.
+    // The wake itself is asserted against the real file in real_lora_interface_test.
+    void     requestRearm() { ++rearm_requests_; }
+    uint32_t rearmRequests() const { return rearm_requests_; }
+
     // Test inspection: drain the TX queue and return the buffer bytes.
     std::vector<std::vector<uint8_t>> drain_tx_queue() {
         std::vector<std::vector<uint8_t>> out;
@@ -81,6 +86,7 @@ public:
 
 private:
     uint32_t rx_busy_skips_{0};
+    uint32_t rearm_requests_{0};
 
     bool                     continuous_rx_{false};
     rx_buffer_t              pool_[POOL_SIZE];
