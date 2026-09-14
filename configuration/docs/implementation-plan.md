@@ -1988,6 +1988,44 @@ FAST** (the fit is `add(nominal hub time, node rx time)`; `DriftEstimator.h` sai
   mechanism; the beacon-interval conclusion drawn from +60 ppm no longer applies
   at +9 ppm (guard exit ≈ 14 080 / 9 ≈ 26 min, beyond the 5.8 min interval).
 
+**MEASURED 2026-09-14 — Mode C, MAC-0: PASS.** Node 2 in automatic mode (Class A),
+check-ins every 15 min, node fw 1.0.67 as of `04a57fa`, hub `f89f7f5`. Sign:
+positive ppm = node fast.
+
+| Mode C, MAC-0 | value |
+|---|---|
+| wake-clock counter rate (32 kHz counter at nominal vs hub) | **−128 ppm**, 5 samples over 3 667 s (hourly runs: −128 / −129) |
+| **wake-timing error — pass line \|ppm\| < 20** | **+12 ppm** (3, 11, 12, 12 as the fit grew) — **pass** |
+| deep-sleep request | 899 874 017 us handed to ESP-IDF for 900 000 000 us wanted |
+| Class A funnel per auto wake | 1 window armed, 1 hit, 1 detected, 1 CRC-valid |
+| true FER (stage 2→3), auto wakes | **0 of 4** |
+
+* **Cause and fix.** ESP-IDF sets the deep-sleep alarm as ticks = request /
+  NOMINAL period, so every wake ran at the crystal's error (−139.7 ppm against
+  the node's 40 MHz crystal; −128 ppm as the hub sees the counter). The node now
+  requests `want × nominal / measured period`; the residual +12 ppm is the
+  calibration reference — the 40 MHz crystal — against the hub, the same ~+10 ppm
+  Modes A and B read.
+* **How it is measured.** Each beacon reports the RTC tick count at the previous
+  beacon's T0 (the counter runs through deep sleep) and the sleep it wanted and
+  applied; the hub pairs ticks with its own receive stamps by msgId
+  (`WakeClockFit.h`) and converts the applied sleep to hub time.
+* **Found and fixed on the way (all measured on node 2 today):**
+  - Class A windows were never counted in the funnel (`6a4dc2e`).
+  - A stale periodic tick opened a window 140 ms after TxDone that was booked as
+    RX1; the real RX1 was booked as RX2 (`698f819`).
+  - An RX1 still listening was armed again at 1 us: the radio was idled
+    mid-window and a phantom "RX2" 30 ms later replaced the real RX2 (`6101b75`).
+  - Deep sleep entered while a frame was still on the air was rejected and
+    `esp_deep_sleep_start()` aborted — a PANIC reset (`04a57fa`); verified on the
+    same sequence: battery report, 1.2 s wait, clean deep-sleep wake.
+  - A lost boot REGISTER left a provisioned node unable to decrypt any downlink
+    until the hub restarted (`bc89a98`).
+* **Observed, not a fault:** replies in RX1 land RxDone +1 018 to +1 036 ms after
+  the node's T0 — 10–17 ms later than the nominal offset, near the window's
+  close; the hub's receive stamp is only good to ±5–9 ms. Worth a margin review
+  in MAC-1.
+
 **Recorded, not changed (decision D3, 2026-09-13): the hub persists its frame
 counters on every transmit.** `incrTxMessageId()` and `setRxMessageId()` call
 `save_state_()` on every frame, production commands included — not only
