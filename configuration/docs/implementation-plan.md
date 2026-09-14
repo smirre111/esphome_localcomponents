@@ -2159,9 +2159,9 @@ node was promoted at 396.7 s (12.9 s).
 * oneShot n and residual ppm are not exposed as hub sensors, so this run does not
   certify HW-8 or the pass line; those rest on the 1.0.74 and 1.0.75 runs.
 * **The 7 empty mark windows during the test, now placed in time** (1.0.76 logs each):
-  - **4 rounds whose frame never arrived** (467.4, 778.7, 955.1, 1 103.4 s). For three
-    of them the node's received msgid sequence skips exactly that round (61→63,
-    388→390, 488→490); 778.7 s was not checked. The windows opened on time, since both
+  - **4 rounds whose frame never arrived** (467.4, 778.7, 955.1, 1 103.4 s). For all four
+    the node's received msgid sequence skips exactly that round (61→63, 269→271,
+    388→390, 488→490). The windows opened on time, since both
     neighbours landed 1.5 s either side. So these are link losses or unsent frames, not
     arming faults.
   - **2 logged about 70 ms after a beacon's RxDone** (710.6, 1 056.0 s). They look like
