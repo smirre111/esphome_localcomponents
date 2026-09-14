@@ -952,13 +952,29 @@ namespace esphome
       // const TickType_t xFrequency = pdMS_TO_TICKS(142); // For RX /TX config 3x RX + 7x TX
       // const TickType_t xFrequency = pdMS_TO_TICKS(59); // For RX /TX config 3x RX + 17x TX in 1sec
       // Both come from the FRAME, not from tracker state; 0 means "the default".
-      const TickType_t xFrequency =
-          pdMS_TO_TICKS(stride_ms > 0 ? stride_ms : (uint32_t) this->txIntervalMs);
+      const uint32_t stride_eff_ms = (stride_ms > 0) ? stride_ms : (uint32_t) this->txIntervalMs;
+      const TickType_t xFrequency = pdMS_TO_TICKS(stride_eff_ms);
       const int burstCopies = (copies > 0) ? copies : this->txSlotsPerRound;
 
       TickType_t xLastWakeTime;
       ESP_LOGI(TAG, "Sending packed burst");
       xLastWakeTime = xTaskGetTickCount();
+
+      // WHERE EACH COPY GOES. The node backs a copy's arrival out to copy 0 as
+      // arrival - burstIndex * 88 ms, so copy k must leave at copy 0 + k * stride.
+      //
+      // It did not, measured 2026-09-14 on node 2: a GridSync placed 571 ms out
+      // made the node's whole grid 29 ms EARLY (every ModeTest mark then read
+      // phaseErr p50 -29 242 us, outside the 14 080 us guard, so the node — rightly
+      // — never promoted: windows 0/0). Copy 0 was placed; the rest were paced by
+      // vTaskDelayUntil from xLastWakeTime, taken BEFORE copy 0 waited for its
+      // instant. The first delays were therefore already overdue, copies 1, 2, ...
+      // went out back to back (one air time, ~60 ms, apart) until the schedule
+      // caught up, and a node that heard copy 1 put copy 0 ~28 ms early. Which copy
+      // it heard decided the offset, which is why earlier runs read +5.6 ms instead.
+      //
+      // A placed burst now places EVERY copy on its own instant; an unplaced burst
+      // paces from the moment copy 0 actually left.
 
       // Burst indexing: re-stamp header.burstIndex on every copy (and set
       // burstCount) so the node can compute when the burst ends and defer its
@@ -976,6 +992,22 @@ namespace esphome
       {
         this->lora_tx_busy_ = true;
 
+        // This copy's instant: copy 0's plus cnt strides, when copy 0 was placed.
+        int64_t copy_at_us = 0;
+        if (not_before_us > 0)
+        {
+          copy_at_us = not_before_us + (int64_t) cnt * (int64_t) stride_eff_ms * 1000;
+          // Yield the bulk of the wait; firePacket busy-waits only the last
+          // prepare lead, and its ceiling (kMaxFireBusyWaitUs) is shorter than a
+          // stride. Copy 0 was released by the queue a prepare lead early already.
+          if (cnt > 0)
+          {
+            const int64_t wait_us = copy_at_us - esp_timer_get_time() - kPrepareLeadUs;
+            if (wait_us >= 1000)
+              vTaskDelay(pdMS_TO_TICKS((uint32_t) (wait_us / 1000)));
+          }
+        }
+
         if (canStamp)
         {
           burstMsg->header->burstindex = cnt;
@@ -984,23 +1016,24 @@ namespace esphome
           if (cbuf)
           {
             lora_client_operation_message__pack(burstMsg, cbuf);
-            // Only copy 0 is placed. The rest are paced by vTaskDelayUntil at
-            // the burst stride, which is the construction they have always had
-            // — and a placed frame is a SINGLE copy anyway (C2's RX1 reply),
-            // so for it this loop runs once.
-            this->sendPacketAt(cbuf, clen, (cnt == 0) ? not_before_us : 0);
+            this->sendPacketAt(cbuf, clen, copy_at_us);
             free(cbuf);
           }
           else
           {
             // OOM fallback: unindexed copy, still placed.
-            this->sendPacketAt(data, len, (cnt == 0) ? not_before_us : 0);
+            this->sendPacketAt(data, len, copy_at_us);
           }
         }
         else
         {
-          this->sendPacketAt(data, len, (cnt == 0) ? not_before_us : 0);
+          this->sendPacketAt(data, len, copy_at_us);
         }
+
+        // An unplaced burst paces from the instant copy 0 actually LEFT, not from
+        // before whatever preceded it.
+        if (cnt == 0)
+          xLastWakeTime = xTaskGetTickCount();
         // sendPacketBytes((uint8_t *)&curTime, sizeof(curTime));
 
         // Release the radio to RX during the idle gap between copies.  Holding
@@ -1025,7 +1058,10 @@ namespace esphome
             xSemaphoreGive(this->radio_mutex_);
 
           this->lora_tx_busy_ = false; // allow loop()->receive() to read the FIFO
-          vTaskDelayUntil(&xLastWakeTime, xFrequency);
+          // A placed burst waits for each copy's own instant at the top of the
+          // loop; only an unplaced one is paced by the tick schedule.
+          if (not_before_us <= 0)
+            vTaskDelayUntil(&xLastWakeTime, xFrequency);
         }
       }
 

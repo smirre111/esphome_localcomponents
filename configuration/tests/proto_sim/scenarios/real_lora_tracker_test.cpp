@@ -467,6 +467,39 @@ TEST(RealTrackerTx, APlacedFrameFiresAtItsInstantNotWhenItIsPopped) {
            "instant the scheduler happened to release it";
 }
 
+TEST(RealTrackerTx, APlacedBurstPlacesEveryCopyOnItsOwnStride) {
+    // Measured 2026-09-14 on node 2: a GridSync burst placed 571 ms out made the
+    // node's grid 29 ms early. Copy 0 was placed, but copies 1.. were paced from
+    // a tick taken BEFORE copy 0's wait, so they went out back to back until the
+    // schedule caught up — and the node, which backs a copy out to copy 0 as
+    // arrival - burstIndex * stride, put copy 0 early by whatever the shortfall
+    // was. Every ModeTest mark then read -29 ms, outside the guard, and the node
+    // never promoted.
+    //
+    // A 40 ms stride keeps each wait inside firePacket's busy-wait ceiling, which
+    // is the part of the wait this harness clock can model (delayMicroseconds
+    // advances it; a task delay does not). In firmware the 88 ms stride yields
+    // for the bulk and busy-waits the last prepare lead.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    TxProbe t;
+    t.init();
+
+    constexpr int64_t kStart  = 5'000'000;
+    constexpr int64_t kFirst  = kStart + 2'000;
+    constexpr uint32_t kStride = 40;   // ms
+    proto_sim_timer_set_now_us(kStart);
+
+    auto f = tagged(0xB7);
+    t.sendPacketBurst(f.data(), f.size(), /*copies=*/4, kStride, /*not_before_us=*/kFirst);
+
+    ASSERT_EQ(lorahal::rec().tx_us.size(), (size_t) 4);
+    for (size_t k = 0; k < 4; ++k)
+        EXPECT_EQ(lorahal::rec().tx_us[k], kFirst + (int64_t) k * (int64_t) kStride * 1000)
+            << "copy " << k << " must leave at copy 0 + " << k << " strides — the "
+               "arithmetic every node uses to recover copy 0";
+}
+
 TEST(RealTrackerTx, AnEligibleFrameOvertakesADeferredOneAheadOfIt) {
     // "Not before round n+2, and behind nothing else" — the sentence section
     // 4.5 says the old API could not express.
