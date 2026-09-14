@@ -1577,7 +1577,10 @@ namespace esphome
       // reached the AIR — that needs a witness receiver, and its absence is the
       // acknowledged gap I2, not something to paper over with a hub-side count.
 
-      char buf[512];
+      // 1024, not 512: measured 2026-09-14 the line ran out at "residual 3" — the
+      // one number Mode B's pass line is judged on — and it is not published
+      // anywhere else, so the run's residual could not be read at all.
+      char buf[1024];
       std::snprintf(buf, sizeof(buf),
           "mode=%u prod=%d counter=%d crypto=%d | seq %u..%u exp %u gaps %u | "
           "detected %u crcValid %u addressed %u counterAcc %u micValid %u | "
