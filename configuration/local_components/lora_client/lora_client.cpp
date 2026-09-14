@@ -3209,6 +3209,11 @@ namespace esphome
 
       // Let the bursted START land before the grid begins. One burst round is
       // 1.5 s; 3 s is comfortable margin.
+      //
+      // THE NODE RELIES ON THIS NUMBER: a node that missed the START joins on an
+      // early mark and computes how much of the run is left from it
+      // (modetest::kHubFirstMarkDelayMs in ModeTestPolicy.h). Change both or
+      // neither.
       this->set_timeout("modetest_grid_arm", 3000, [this, grid_ms]() {
         if (!this->mode_test_active_)
           return;

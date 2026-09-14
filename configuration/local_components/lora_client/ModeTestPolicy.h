@@ -65,6 +65,43 @@ constexpr uint32_t testDurationS(uint32_t requested)
     return s > kMaxDurationS ? kMaxDurationS : s;
 }
 
+// --- Joining a run whose START was not heard --------------------------------
+//
+// Measured 2026-09-14 on node 2 (fw 1.0.68): the 17-copy START burst went out
+// while the node was still in Mode A — a 29 ms window every 470 ms — and none
+// of it was heard. The node then ignored every mark it did hear ("seq 4 with no
+// test running") and a 900 s Mode B run produced no report at all.
+//
+// A mark carries the complete request, so an EARLY one can arm the test as
+// well as the START could. A late one may not: a mark from after the node's own
+// deadline arming a fresh test is the defect the seq-0 rule was written for
+// (seq 278, measured 2026-09-13). The first kLateStartMaxSeq marks — about a
+// minute at either grid period — are early enough to be the start of a run.
+static constexpr uint32_t kLateStartMaxSeq = 40;
+
+// The hub sends its first mark this long after the START (lora_client
+// start_mode_test). Mark k follows it (k - 1) grid periods later.
+static constexpr uint32_t kHubFirstMarkDelayMs = 3000;
+
+constexpr bool markMayStartTest(uint32_t seq)
+{
+    return seq >= 1 && seq <= kLateStartMaxSeq;
+}
+
+// Seconds of a `duration_s` run still left when mark `seq` arrives, so a node
+// that joined late ends with the hub rather than a minute after it. Rounded
+// down; 0 means nothing is left to measure. seq 0 is the START itself.
+constexpr uint32_t remainingDurationS(uint32_t duration_s, uint32_t seq,
+                                      uint32_t grid_period_ms)
+{
+    if (seq == 0) return duration_s;
+    const uint64_t elapsed_ms = (uint64_t) kHubFirstMarkDelayMs
+                              + (uint64_t) (seq - 1) * (uint64_t) grid_period_ms;
+    const uint64_t total_ms   = (uint64_t) duration_s * 1000u;
+    return (elapsed_ms >= total_ms) ? 0u
+                                    : (uint32_t) ((total_ms - elapsed_ms) / 1000u);
+}
+
 // --- Grid period -----------------------------------------------------------
 //
 // A grid whose period is commensurate with the node's RX interval PHASE-LOCKS:

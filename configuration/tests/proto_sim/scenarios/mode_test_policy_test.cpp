@@ -57,6 +57,37 @@ TEST(ModeTestPolicy, TheCeilingIsTighterThanDriftTests) {
 }
 
 // ---------------------------------------------------------------------------
+// Joining a run whose START was not heard
+// ---------------------------------------------------------------------------
+
+TEST(ModeTestPolicy, AnEarlyMarkMayStartATestButALateOneMayNot) {
+    // Measured 2026-09-14: node 2 missed the START burst and ignored every mark.
+    EXPECT_FALSE(markMayStartTest(0)) << "seq 0 is the START, handled on its own";
+    EXPECT_TRUE(markMayStartTest(1));
+    EXPECT_TRUE(markMayStartTest(kLateStartMaxSeq));
+    EXPECT_FALSE(markMayStartTest(kLateStartMaxSeq + 1));
+    EXPECT_FALSE(markMayStartTest(278))
+        << "the mark that re-armed a finished Mode A run (2026-09-13) stays refused";
+}
+
+TEST(ModeTestPolicy, ALateJoinerEndsWithTheHubNotAFullDurationLater) {
+    // Mark k leaves kHubFirstMarkDelayMs + (k - 1) * period after the START.
+    EXPECT_EQ(remainingDurationS(900, 0, 1500), 900u) << "the START itself";
+    EXPECT_EQ(remainingDurationS(900, 1, 1500), 897u);       // 3.0 s gone
+    EXPECT_EQ(remainingDurationS(900, 5, 1500), 891u);       // 3 + 6 s
+    EXPECT_EQ(remainingDurationS(300, 5, 1093), 292u);       // 3 + 4.372 s, rounded down
+    EXPECT_EQ(remainingDurationS(60, 40, 1500), 0u)
+        << "a run shorter than the join window can be over before the mark";
+}
+
+TEST(ModeTestPolicy, TheJoinWindowFitsInsideTheShortestUsefulRun) {
+    // The last mark allowed to start a run must leave most of a default run to
+    // measure, at the longest grid period the hub uses.
+    EXPECT_GE(remainingDurationS(kDefaultDurationS, kLateStartMaxSeq, 1500),
+              kDefaultDurationS * 3 / 4);
+}
+
+// ---------------------------------------------------------------------------
 // Commensurate periods — the failure that has already happened
 // ---------------------------------------------------------------------------
 

@@ -4757,6 +4757,29 @@ TEST_F(RealNodeFixture, ALateMarkAfterTheDeadlineDoesNotArmANewTest) {
         << "a fresh seq-0 START after that must still arm";
 }
 
+TEST_F(RealNodeFixture, ANodeThatMissedTheStartJoinsOnAnEarlyMark) {
+    // Measured 2026-09-14 on node 2: the 17-copy START burst was not heard, and
+    // every mark after it was ignored ("seq 4 with no test running") — a 900 s
+    // Mode B run with no report at all. A mark carries the whole request.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    auto too_late = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2,
+                                        /*grid_period_ms=*/1093,
+                                        /*seq=*/modetest::kLateStartMaxSeq + 1);
+    disp.onReceiveNew(too_late.data(), static_cast<int>(too_late.size()));
+    EXPECT_FALSE(disp.modeTestActive()) << "past the join window a mark is still only a mark";
+
+    auto early = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/3,
+                                     /*grid_period_ms=*/1093, /*seq=*/4);
+    disp.onReceiveNew(early.data(), static_cast<int>(early.size()));
+    ASSERT_TRUE(disp.modeTestActive()) << "mark 4 of a run the node never saw start";
+
+    auto off = encrypted_mode_test_off(/*msgid=*/4);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    EXPECT_FALSE(disp.modeTestActive()) << "and the hub's STOP still ends it";
+}
+
 TEST_F(RealNodeFixture, AModeTestRunMeasuresTheNodesClockRateFromItsMarks) {
     // Mode B's goal is a clock rate within the crystal's rating, measured under
     // the production power profile. Before this, nothing fed a rate estimate
