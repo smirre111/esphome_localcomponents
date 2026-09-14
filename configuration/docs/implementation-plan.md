@@ -2037,6 +2037,40 @@ kept Mode B from engaging; the pass line (residual |ppm| < 20 with windows armed
 * Hub: 10–13 copies per run left 1.1–1.9 ms after their stamped instant (tolerance
   1 ms), all far inside the guard.
 
+**MEASURED 2026-09-14 23:38–23:54 — Mode B, MAC-0: PASS.** Node 2, fw 1.0.74, hub
+`2097467` + nightly sleep off for node 2 (`cfbe988`), production profile, 900 s. The
+grid was re-published at node uptime 297 s (Timed Mode off/on), i.e. on a settled
+node clock.
+
+| Mode B, MAC-0 | value |
+|---|---|
+| mode actually run / refusal | 2 / 0 |
+| promotion | **13.4 s** after the test's first mark (8 samples in 8 rounds, promotion trial) |
+| windows armed / hit | **591 / 590** (WMR 1 692 ppm) |
+| **HW-8:** oneShot n vs windows armed | **593 ≥ 591 → 0 missed one-shots** (the 2 extra are beacon windows); oneShot p99 −370 us |
+| armResidual p99 | **238 us** (was 13 661 us before the re-arm and anchor fixes) |
+| phaseErr p50 / p99 / max | +708 / +2 330 / +2 372 us, n 595 — inside the 14 080 us guard |
+| raw clock rate (no pass line) | +10 ppm, n 595, period 1 500 015 us |
+| **residual rate — pass line \|ppm\| < 20** | **−1 ppm — pass** (its n is cut off in the hub's log line) |
+| true FER (CRC-valid → addressed) | **0 of 597** |
+| FER_link | 0 ppm (seq 1..597, 2 gaps) |
+| beacon rate update during the run | +10 191 ppb at 955.7 s — the node **stayed in Mode B** (1.0.74) |
+
+* What it took, all measured on this node today: burst copies paced from copy 0
+  (`27176ed`), declared fire instants on every hub copy (hub `2097467`, node `e25f69c`),
+  placement reservations (`361f2a9`), an open window never re-armed (`a19b2ce`), a late
+  START join (`21b801b`), an all-listening GridSync and a re-arm request on grid/beacon
+  changes (`be1146c`, `56f395a`), the promotion trial (`d10f50a`), a rate update no longer
+  demoting (`d16b3f5`).
+* **The −8 ms "offset" is explained:** a grid adopted in the node's first minute after boot,
+  before the 60 s crystal recalibration, carries the unsettled clock's error into every mark.
+  The same hub's GridSync adopted at 297 s put marks within ~1 ms. Fixed in 1.0.75 (`0d32861`):
+  such an anchor is provisional and re-solved from the first stamped frame after settling —
+  not yet shown on hardware.
+* MAC-1 items seen: counterAcc 595 of 597 (the two late marks after the deadline).
+* **MAC-0 across modes is now complete:** A +10 ppm / FER 0 of 50; B residual −1 ppm /
+  FER 0 of 597; C wake timing +12 ppm / FER 0 of 4. Next per the layer order: MAC-1.
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
