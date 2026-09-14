@@ -144,6 +144,16 @@ struct NodeState
     uint32_t   s_since_addressed_frame  = 0;
     uint32_t   in_slot_uplinks          = 0;     // consecutive, hub-confirmed
     uint32_t   s_since_demotion         = 0xFFFFFFFF;
+    // Already in Mode B (the node's previous decision was None), and whether its
+    // phase evidence is merely THIN rather than contradicted: no sample outside
+    // the guard and the spread inside it, however few samples there are.
+    //
+    // Measured 2026-09-14 on node 2 (fw 1.0.72): 420 in-guard samples in Mode B,
+    // then a beacon learned the clock rate (+9957 ppb), the phase statistics were
+    // reset as the new prediction requires, and n = 1 read as NoPhase — a working
+    // node demoted itself, and would at every beacon that refines its rate.
+    bool       in_mode_b                = false;
+    bool       phase_consistent         = false;
 };
 
 // Guard half-width the phase error must fall inside. Passed in rather than
@@ -156,7 +166,12 @@ constexpr Demotion demotionReason(const NodeState &s, uint32_t resync_max_s,
     if (s.rtc_src != RtcSlowSrc::Crystal)                   return Demotion::BadClockSource;
     if (s.consecutive_missed_marks >= kMaxMissedMarks)      return Demotion::MissedMarks;
     if (s.s_since_addressed_frame > resync_max_s)           return Demotion::SyncStale;
-    if (!s.phase_valid)                                     return Demotion::NoPhase;
+    // Promotion needs trustworthy phase. STAYING in Mode B needs only that
+    // nothing contradicts it: a reset (rate update, re-anchor) thins the evidence
+    // without saying anything is wrong, and missed marks and staleness above
+    // still demote a node whose windows really stopped working.
+    if (!s.phase_valid && !(s.in_mode_b && s.phase_consistent))
+                                                            return Demotion::NoPhase;
     if (s.phase_err_us > (int32_t) guard_us ||
         s.phase_err_us < -(int32_t) guard_us)               return Demotion::NoPhase;
     // THE NODE IS THE AUTHORITY (decided 2026-09-14). in_slot_uplinks — the

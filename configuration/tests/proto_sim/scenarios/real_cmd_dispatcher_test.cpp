@@ -5048,6 +5048,30 @@ TEST_F(RealNodeFixture, ANodeLearnsItsClockRateFromBeaconsAndComesBackInsideTheG
     }
 }
 
+TEST_F(RealNodeFixture, LearningTheClockRateDoesNotThrowANodeOutOfModeB) {
+    // Measured 2026-09-14 on node 2 (fw 1.0.72): in Mode B with 420 in-guard
+    // samples, a beacon learned the rate (+9957 ppb), the reset left n = 1, and
+    // "Grid arming off" followed at once. It would repeat at every beacon.
+    bringNodeToTheEdgeOfPromotion(disp);
+    ASSERT_TRUE(disp.timedRxActive()) << "precondition: promoted";
+
+    gridstate::State truth = disp.gridState();
+    truth.rate_ppb = 20000;   // +20 ppm: learnable, and a real update
+    const uint32_t bslot = truth.params.beacon_slot;
+    for (uint32_t i = 1; i <= 2; ++i) {
+        auto b = build_grid_beacon(233 * i, bslot, i);
+        disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                          rx_for_truth(truth, 233 * i, (uint32_t) b.size()));
+    }
+    ASSERT_NE(disp.clockRatePpbForTest(), 0) << "precondition: the rate was learned";
+    ASSERT_LT(disp.phaseStats().n, timedmode::kPromotionPhaseSamples)
+        << "precondition: the rate update reset the phase statistics";
+
+    EXPECT_TRUE(disp.timedRxActive())
+        << "a better rate is not evidence the window stopped working (reason "
+        << (int) disp.demotionReasonNow() << ")";
+}
+
 TEST_F(RealNodeFixture, ALearnedRateSurvivesAGridWithdrawalAndReadoption) {
     auto gs = build_grid_sync(true, 4, 100);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));

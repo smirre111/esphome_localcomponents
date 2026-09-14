@@ -94,6 +94,27 @@ TEST(TimedModePolicy, DemotionIsImmediateOnEveryTrigger) {
     }
 }
 
+TEST(TimedModePolicy, AResetThinsTheEvidenceButDoesNotDemoteAModeBNode) {
+    // Measured 2026-09-14 on node 2 (fw 1.0.72): 420 in-guard samples in Mode B,
+    // then a beacon learned the clock rate, the phase statistics were reset, and
+    // n = 1 read as NoPhase — a working node demoted itself.
+    NodeState s = healthy();
+    s.phase_valid      = false;   // too few samples since the reset
+    s.phase_consistent = true;    // but nothing outside the guard
+    s.in_mode_b        = true;
+    EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::None)
+        << "thin evidence is not contrary evidence";
+
+    s.in_mode_b = false;
+    EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::NoPhase)
+        << "promotion still needs the full baseline";
+
+    s.in_mode_b        = true;
+    s.phase_consistent = false;   // a sample landed outside the guard
+    EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::NoPhase)
+        << "contrary evidence demotes immediately, in Mode B or not";
+}
+
 TEST(TimedModePolicy, PhaseErrorOutsideTheGuardDemotes) {
     for (int32_t e : {(int32_t) kGuardUs, -(int32_t) kGuardUs}) {
         NodeState s = healthy();
