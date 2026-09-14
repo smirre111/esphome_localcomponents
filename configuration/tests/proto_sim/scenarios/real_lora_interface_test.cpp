@@ -573,6 +573,38 @@ TEST_F(Iface, AStaleTickIsSkippedWhenModeBGridArmingIsPendingToo) {
 // U-2: the radio-busy skip, and what a failed transmit does to a drift test
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The power check's radio half: on-times the currents multiply
+// ---------------------------------------------------------------------------
+
+TEST_F(Iface, AWindowCountsExactlyTheTimeTheReceiverListened) {
+    // Requested 2026-09-14 once Mode B worked: RF duty cycle per operating phase.
+    proto_sim_timer_set_now_us(10'000'000);
+    lif.arm_source_         = Probe::ArmSource::None;
+    lif.grid_timer_running_ = false;
+    lif.serviceRxWindow();                       // a free-running window opens
+    ASSERT_EQ(r().count("lora_rxSingle"), 1u);
+
+    proto_sim_timer_advance_us((int64_t) timedgrid::kWindowUs);   // it times out
+    lif.noteRadioSlept();
+    const auto d = lif.radioDuty();
+    EXPECT_NEAR((double) d.rx_on_us, (double) timedgrid::kWindowUs, 200.0)
+        << "one symbol-timeout window of receive";
+
+    lif.noteRadioSlept();   // a second sleep with nothing open adds nothing
+    EXPECT_EQ(lif.radioDuty().rx_on_us, d.rx_on_us);
+}
+
+TEST_F(Iface, ATransmitCountsItsTimeOnAirAndACadIsCounted) {
+    const uint8_t frame[60] = {0};
+    lif.sendPacketBytes(const_cast<uint8_t *>(frame), (int) sizeof(frame));
+    EXPECT_EQ(lif.radioDuty().tx_air_us, (int64_t) loratiming::timeOnAirUs(60))
+        << "time on air from the pinned PHY, per frame";
+
+    lif.beginCad();
+    EXPECT_EQ(lif.radioDuty().cads, 1u);
+}
+
 TEST_F(Iface, AReArmRequestIsAStaleWakeThatOpensNoWindow) {
     // requestRearm wakes the receive task while a one-shot is armed and has not
     // fired. That wake must only bring the task round to re-arm — never open a
