@@ -529,6 +529,22 @@ TEST(ExactStop, DegenerateGeometryIsRefused) {
 // A target move must never snap to an extreme
 // ---------------------------------------------------------------------------
 
+// Measured 2026-09-15 on node 2 (fw 1.0.86): a move shorter than its stop fade
+// programmed the motor timer with 1 ms, which is 0 ticks at 100 Hz, and FreeRTOS
+// asserted on the zero period — a panic reset at boot.
+TEST(MotorTimer, APeriodShorterThanATickIsOneTickNotZero) {
+    EXPECT_EQ(timerPeriodTicks(1, 100), 1u) << "the 1 ms floor must not become 0 ticks";
+    EXPECT_EQ(timerPeriodTicks(0, 100), 1u);
+    EXPECT_EQ(timerPeriodTicks(9, 100), 1u);
+}
+
+TEST(MotorTimer, LongerPeriodsConvertAsPdMsToTicksDoes) {
+    EXPECT_EQ(timerPeriodTicks(10, 100), 1u);
+    EXPECT_EQ(timerPeriodTicks(42000, 100), 4200u);
+    EXPECT_EQ(timerPeriodTicks(25, 1000), 25u);
+    EXPECT_EQ(timerPeriodTicks(1999, 100), 199u) << "truncates like pdMS_TO_TICKS";
+}
+
 TEST(TargetSnap, ATargetMoveEndingOnTheTimerDoesNotSnap) {
     // The regression this exists to prevent. Once runMsForTarget made the
     // timer end PARTIAL moves too, "go to 50%" ended on the timer, hit the
