@@ -2341,6 +2341,51 @@ robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 
   timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
   `motorpolicy::timerPeriodTicks` never returns 0.
 
+**MEASURED 2026-09-15 — 1:1 window-kind comparison on 1.0.92: RxSingle and RxContinuous
+each lost 1 of about 395; the loss is an undetected preamble in both.** Node 2, one
+version (1.0.92, `b47dd06`) built twice, identical except
+`CONFIG_BLINDS_RX_WINDOW_SINGLE` (images sha256 `03BD22FE…` single, `0AB2B0CF…`
+continuous). Bench LNA gain G6, idle-before-sleep 2, hub `ea51f1e`, production profile.
+Same procedure for both: power-on through the capture, two 300 s Mode B ModeTests back
+to back.
+
+| 1.0.92 | RxSingle + restart | RxContinuous + node timer |
+|---|---|---|
+| marks lost, test 1 / test 2 | 0 / 197, **1 / 197** | 0 / 198, **1 / 197** |
+| windows armed / hit | 190/190, 192/191 | 190/190, 192/190 |
+| early-timeout restarts (listened before) | 2 (19.1, 22.7 ms), 1 (**15.3 ms**, the loss) | — |
+| phaseErr p99, test 1 / test 2 | 3 497 / 1 106 us | 2 592 / **11 356** us |
+| Mode B steady: RX on / light sleep / sleeps per min | 4.34 % / 91.39 % / 133 | 4.42 % / 91.09 % / 172 |
+| Mode A steady: light sleep, esp_timer vs crystal | 96.87 %, +32 ppm | **94.17 %**, +175 ppm |
+
+* **Loss is the same, and one event per image decides nothing.** Distinguishing about
+  1 in 400 from, say, 1 in 800 needs thousands of marks per kind.
+* **The RxContinuous loss is not the RxSingle mechanism.**
+  - The window stayed open the whole 29.96 ms. At its close RegModemStat read 0x04: no
+    detection, no sync, no header (header count 0), with −60 dBm on air.
+  - The frames either side were on time (+152 and +300 us).
+  - A strong, on-time preamble was never detected at all. RxSingle's restart timing
+    only decides how that shows up, as a timeout 15 ms in; it is not the cause.
+  - The 1.0.83–1.0.90 reading ("RxSingle's one detection attempt collides with the
+    preamble") is therefore at most part of the story.
+* **Radio configuration checked:** SF7 detection optimize 0xC3 and threshold 0x0A, and
+  the 500 kHz errata (0x36 = 0x02, 0x3A = 0x7F for 410–525 MHz) are written.
+* **Power is not resolved by one boot per image.** Mode B light sleep differs by 0.3
+  points between the kinds. Mode A differs by 2.7 points, but 1.0.91, the same
+  continuous kind, slept 96.7 %. The Mode A figure moves with the boot: esp_timer ran
+  +32, +114 and +175 ppm against the crystal on the three boots. Differences of 1–3
+  points need repeated boots per variant.
+* **Found: a kept grid drifts while the node is in Mode A.**
+  - Test 2 promoted 13 s in at +8.3..+10.5 ms, held about +11.1 ms, and was corrected
+    only by the first beacon after promotion (1 107.8 s: "clock rate +9029 ppb over
+    1013 s").
+  - A demoted node hears no beacon, so its anchor drifts at the crystal's ~9 ppm, about
+    11 ms per 20 minutes.
+  - After ~25 minutes the drift exceeds the 14.08 ms guard, and the node can no longer
+    re-promote without a GridSync. This is a consequence of the 1.0.89 change (a
+    demotion keeps the grid) and needs a fix: correct the anchor by the trial's mean
+    phase error, or keep the beacon window in Mode A.
+
 **MEASURED 2026-09-15 — Mode B on 1.0.91: 0 of 394 lost, window counts correct, Mode A
 light sleep restored.** Node 2 fw 1.0.91 (`7936459`), hub `375c57b`, production
 profile, bench LNA gain G6, `CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=2`, two 300 s
