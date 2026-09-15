@@ -5169,6 +5169,99 @@ TEST_F(RealNodeFixture, ALearnedRateSurvivesAGridWithdrawalAndReadoption) {
         << "and a new grid must predict with it from the first mark";
 }
 
+// ---------------------------------------------------------------------------
+// The rate span starts at an exact anchor. Measured 2026-09-15 on node 2
+// (fw 1.0.76): the span started only at the first beacon, so the rate arrived at
+// the second — 12 min after the grid — and phase drifted +10 ppm to 5.3 ms.
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr uint32_t kRefSlot   = 4;
+constexpr int64_t  kRefAnchor = 90'000'000;
+
+// A GridSync stamped as leaving on slot kRefSlot's mark of round 0, delivered at
+// kRefAnchor + that offset + `err_us`.
+void deliverStampedGridSync(CmdDispatcher &disp, uint32_t msgid, int64_t err_us) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
+    hdr.msgid = msgid; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.firestamped = true; hdr.fireround = 0;
+    hdr.fireoffsetus = (uint32_t) (kRefSlot * timedgrid::kSlotPitchUs);
+    GridSync g = GRID_SYNC__INIT;
+    g.enable = true; g.slotindex = kRefSlot; g.slotcount = timedgrid::kSlotCount;
+    g.roundus = timedgrid::kRoundUs; g.pitchus = timedgrid::kSlotPitchUs;
+    g.txround = 0; g.txslot = kRefSlot;
+    g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
+    g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+    const int64_t rx = kRefAnchor + (int64_t) kRefSlot * timedgrid::kSlotPitchUs + err_us
+                     + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
+}
+
+gridstate::State truthAt(const CmdDispatcher &disp, int32_t rate_ppb) {
+    gridstate::State t = disp.gridState();
+    t.anchor_us = kRefAnchor;
+    t.rate_ppb  = rate_ppb;
+    return t;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, AStampedGridSyncStartsTheRateSpanSoTheFirstBeaconLearnsTheRate) {
+    deliverStampedGridSync(disp, 760, /*err_us=*/0);
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.gridState().anchor_us, kRefAnchor);
+    ASSERT_EQ(disp.clockRatePpbForTest(), 0);
+
+    const gridstate::State truth = truthAt(disp, 60000);
+    auto b = build_grid_beacon(233, truth.params.beacon_slot, 1);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_truth(truth, 233, (uint32_t) b.size()));
+    EXPECT_NEAR(disp.clockRatePpbForTest(), 60000, 200)
+        << "the first beacon after a stamped GridSync must already reveal the rate";
+}
+
+TEST_F(RealNodeFixture, AGridSyncOnAnUnsettledClockDoesNotStartTheRateSpan) {
+    // Its anchor carries the boot-minute error: counted as drift it would teach
+    // the node -23 ppm from nothing.
+    nodeclock::setSettledForTest(false);
+    deliverStampedGridSync(disp, 770, /*err_us=*/8000);
+    nodeclock::setSettledForTest(true);
+    ASSERT_TRUE(disp.gridState().active);
+
+    const gridstate::State truth = truthAt(disp, 0);
+    auto b = build_grid_beacon(233, truth.params.beacon_slot, 1);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_truth(truth, 233, (uint32_t) b.size()));
+    EXPECT_EQ(disp.clockRatePpbForTest(), 0)
+        << "an 8 ms boot-minute offset is not a clock rate";
+}
+
+TEST_F(RealNodeFixture, TheBootMinuteReSolveStartsTheRateSpan) {
+    nodeclock::setSettledForTest(false);
+    deliverStampedGridSync(disp, 780, /*err_us=*/8000);
+    nodeclock::setSettledForTest(true);
+    ASSERT_TRUE(disp.gridState().active);
+
+    const gridstate::State truth = truthAt(disp, 60000);
+    // The first stamped frame on the settled clock re-solves the anchor.
+    auto f = pack_stamped_sysop(781, /*round=*/12, /*offset=*/300'000);
+    const int64_t rx = gridstate::t0ForHubInstantUs(truth, 12, 300'000)
+                     + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
+
+    auto b = build_grid_beacon(233, truth.params.beacon_slot, 1);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_truth(truth, 233, (uint32_t) b.size()));
+    EXPECT_NEAR(disp.clockRatePpbForTest(), 60000, 300)
+        << "the re-solved anchor is exact, so the first beacon learns the rate";
+}
+
 TEST_F(RealNodeFixture, ABeaconBeyondHalfASlotPitchChangesNothing) {
     auto gs = build_grid_sync(true, 4, 100);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));

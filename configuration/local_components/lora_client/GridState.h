@@ -481,6 +481,20 @@ constexpr int32_t residualRatePpb(int64_t err_us, int64_t hub_span_us)
     return (int32_t) ((err_us * kRateDen) / hub_span_us);
 }
 
+// A declared hub instant as hub-grid microseconds since the hub anchor: the
+// axis a rate span is measured on. A span counted in whole rounds was up to one
+// round (1.5 s) off when its ends sat in different slots.
+constexpr int64_t hubInstantUs(const Params &p, uint32_t round, uint32_t offset_us)
+{
+    return (int64_t) round * (int64_t) p.round_us + (int64_t) offset_us;
+}
+
+// The same for a beacon, which declares only its round: it sits on the beacon slot.
+constexpr int64_t beaconHubInstantUs(const Params &p, uint32_t round)
+{
+    return hubInstantUs(p, round, p.beacon_slot * p.pitch_us);
+}
+
 constexpr int32_t clampRatePpb(int64_t ppb)
 {
     if (ppb >  kRateMaxPpb) return  kRateMaxPpb;
