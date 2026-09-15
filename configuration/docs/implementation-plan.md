@@ -2309,6 +2309,61 @@ boost, SF7/BW500 detection 0xC3/0x0A, 8-symbol preamble at both ends.
 * Next: restart RxSingle for the rest of the window when it ends early (node only), then
   judge whether the strong-signal failures need a longer preamble.
 
+**2026-09-15 afternoon — 12-symbol downlink preamble, GridSync confirmation, and three
+robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 1.0.87.
+
+* **Radio parameters now defined once**, in `LoraTiming.h`: frequency, sync word, SF, BW,
+  CR, and the preamble per direction. The hub vendors it, and the node's LoraInterface and
+  the hub's LORATracker no longer redefine them. Downlink preamble 12 symbols, uplink 8.
+  The window arm lead goes from 17 216 to 18 240 us.
+* **GridSync confirmation.** The node ACKs an adopted GridSync, and the hub re-publishes
+  every 6 s, at most 5 times, until it sees the ACK. On hardware (1.0.86) the first two
+  publishes were lost, and the third was confirmed ("GridSync acknowledged (msgid=6, 2
+  re-publishes)").
+* **1.0.84 deafness.** An early-timeout restart armed for 12 symbols, against a 12-symbol
+  preamble, never raised RxTimeout. "RX window skipped — radio busy" logged 56 times, and
+  the node heard nothing for 15 minutes.
+  - Fix, 1.0.85: a restart must exceed the preamble (17 symbols minimum, static_assert).
+  - Also in 1.0.85: a window still receiving more than 1 s after it opened is closed and
+    counted, so no radio anomaly can make the node deaf again.
+* **1.0.85: config lost after a reset.**
+  - An interrupt-watchdog reset (TG1WDT, no backtrace, cause not found) came during a
+    `config.txt` save. The save was for the hub's resend of a schedule already saved 3 s
+    earlier.
+  - The save truncated the file before writing, so the reset left it empty and the node
+    booted at address 0.
+  - Its session survived in NVS, so it refused the plaintext ClientConfig the hub sent in
+    answer to REGISTER(needs_config), every minute. Stranded.
+  - Fix, 1.0.86: `config.tmp` is written and then renamed over `config.txt`; an unchanged
+    schedule is not rewritten; a node with no address accepts plaintext
+    ClientConfig/CoverConfig whatever session NVS restored.
+* **1.0.86: panic at boot.** The boot FULL_UP of a blind already at the top set the motor
+  timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
+  `motorpolicy::timerPeriodTicks` never returns 0.
+
+**MEASURED 2026-09-15 15:56–16:12 — Mode B on 1.0.86 with the 12-symbol downlink
+preamble: 1 of 597 lost.** Node 2 fw 1.0.86, hub `cdc6b30`, production profile, 900 s.
+
+| Mode B, MAC-0 (1.0.86, 12-symbol downlink) | value |
+|---|---|
+| GridSync | 2 re-publishes, then acknowledged |
+| promotion | 109.5 s, 16.1 s after the test's first mark |
+| windows armed / hit | 589 / 588 (WMR 1 697 ppm) |
+| **HW-8:** oneShot n vs windows armed | 591 ≥ 589 → 0 missed one-shots; oneShot p99 −279 us |
+| armResidual p99 | 500 us |
+| phaseErr p50 / p99 / max | +848 / +2 963 / +3 106 us, n 596 |
+| raw rate / residual | +10 ppm, period 1 500 015 us / **−1 ppm — pass** |
+| FER_link / counterAcc / micValid | 0 ppm / 596 / 596 of 597 |
+| early-timeout restarts in the test / stuck windows | 4 / 0 |
+| light sleeps per minute | 131–136 |
+
+* **The one loss (366.4 s)** is the strong-signal kind again. The window ended after
+  15 179 us, the restart listened on, and it closed empty with −51 dBm on air. The 8-symbol
+  runs lost 2 and 6 of about 597, so the longer preamble has halved these failures without
+  ending them.
+* Not yet checked: whether node 1, still on 8-symbol firmware, receives the 12-symbol
+  downlinks.
+
 **MEASURED 2026-09-15 08:46–09:02 — 1.0.82 regression: the first window restart left
 the node deaf.** Node 2 fw 1.0.82 (`1c79663`), hub `eddbc16`, production profile.
 
