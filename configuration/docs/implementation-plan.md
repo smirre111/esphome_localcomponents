@@ -2309,6 +2309,26 @@ boost, SF7/BW500 detection 0xC3/0x0A, 8-symbol preamble at both ends.
 * Next: restart RxSingle for the rest of the window when it ends early (node only), then
   judge whether the strong-signal failures need a longer preamble.
 
+**MEASURED 2026-09-15 08:46–09:02 — 1.0.82 regression: the first window restart left
+the node deaf.** Node 2 fw 1.0.82 (`1c79663`), hub `eddbc16`, production profile.
+
+* The restart worked once. At 153.7 s: "RX window ended after 15 041 us of 29 440 —
+  listening 56 more symbols".
+* The node then went deaf:
+  - from ~183 s the duty line read **RX on 0.00 %**;
+  - the ModeTest heard marks 1..36 and nothing after;
+  - the node demoted at 494.8 s (reason 4).
+* Light sleep turned into a storm, **31 715 sleeps in a minute**. esp_timer ran +794 to
+  +1 839 ppm against the crystal.
+* Cause: the restart path returned from `serviceDio1Event` before the tail that
+  re-enables the DIO1 interrupt (`gpio_intr_enable`). The restarted window's timeout was
+  never serviced, the radio semaphore never returned, and the level wake source on the
+  still-high DIO1 line woke the SoC continuously.
+* The host tests asserted the restart but not that the interrupt was re-enabled after
+  it. Fixed in 1.0.83: every path falls through to the one tail.
+* Hub side, same run: the new late-mark log fired once (msgid 139, 3 332 us after its
+  mark).
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
