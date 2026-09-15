@@ -2209,6 +2209,36 @@ window after a beacon or a mark; placement clear by interval), production profil
   (`0feb23a`) starts it at the stamped GridSync or the re-solve.
 * Duty during the run matches 1.0.76: RX 4.2–4.5 %, light sleep 91.2–91.6 %.
 
+**MEASURED 2026-09-15 07:21–07:37 — Mode B with the arming task above the dispatcher:
+late windows gone, 3 frames still lost.** Node 2 fw 1.0.79 (`9c1baae`: `taskLoraRx`
+priority 7, rate span from the exact anchor), hub `eddbc16`, production profile, 900 s.
+
+| Mode B, MAC-0 (1.0.79) | value |
+|---|---|
+| promotion | 124.2 s, 10.7 s after the test's first mark |
+| windows armed / hit | 593 / 590 (WMR 5 059 ppm) |
+| **HW-8:** oneShot n vs windows armed | 596 ≥ 593 → 0 missed one-shots; oneShot p99 −310 us |
+| **armResidual p99** | **343 us** (1.0.77: 29 836 us) |
+| phaseErr p50 / p99 / max | +591 / +2 189 / +2 217 us, n 595 |
+| raw rate / residual | +10 ppm, period 1 500 015 us / **−1 ppm — pass** |
+| FER_link / counterAcc / micValid | 0 ppm / 595 / 596 of 598 |
+| rate learned | **first beacon, 258 s**: +10 021 ppb over 189 s; then +11 588, +8 968 ppb |
+| duty, steady Mode B | RX 4.1–4.4 %, light sleep 91.1–91.7 % |
+
+* **No mark lost next to a beacon**, and no window logged more than 3 ms off target:
+  priority 7 fixed the late windows.
+* **The rate now comes from the first beacon** (1.0.77: the second). Later beacons move
+  it by ±1.6–2.6 ppm, i.e. 0.5–0.9 ms of beacon timestamp noise over 349 s.
+* **3 frames lost, each an empty window on time** (362.0, 705.1, 712.5 s; msgids 171,
+  403, 408). The node logs no RxDone, CRC or header interrupt, and the hub no late mark.
+  The DIO1 timeout was serviced at T0 −2.0, −10.7 and −0.6 ms. The empty windows after
+  the test read T0 +14.4 ms, the designed 29.44 ms window plus latency. So these
+  closed 15–25 ms early in node time. Under investigation.
+* **Power, measured in this capture:** steady Mode B prints 27.4 log lines, 1 451 bytes,
+  per 1.5 s round. That is 126 ms of UART at 115 200 baud, **8.4 % of the time**,
+  against the 8.6 % the SoC is awake. Per-frame debug logging is the Mode B power
+  cost. To be fixed once Mode B loses nothing.
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
