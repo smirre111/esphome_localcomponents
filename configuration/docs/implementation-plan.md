@@ -2177,6 +2177,38 @@ node was promoted at 396.7 s (12.9 s).
   Applying the rate the phase fit already measures, instead of waiting for a rate
   beacon, stays the candidate fix.
 
+**MEASURED 2026-09-15 06:57–07:13 — Mode B after the beacon fix: no beacon losses,
+3 frames still lost.** Node 2 fw 1.0.77 (`7366cdc`), hub `eddbc16` (no response
+window after a beacon or a mark; placement clear by interval), production profile,
+900 s.
+
+| Mode B, MAC-0 (1.0.77 / eddbc16) | value |
+|---|---|
+| provisional anchor | GridSync at 16.7 s; re-solved at 103.1 s, moved −18 330 us |
+| promotion | 118.9 s, 15.7 s after the test's first mark (8 samples, −47..+140 us) |
+| windows armed / hit | 589 / 586 (WMR 5 093 ppm) |
+| **HW-8:** oneShot n vs windows armed | 592 ≥ 589 → 0 missed one-shots; oneShot p99 −297 us |
+| **armResidual p99** | **29 836 us** — one window-width late |
+| phaseErr p50 / p99 / max | +483 / +2 479 / +2 675 us, n 594 |
+| raw rate / residual | +10 ppm, period 1 500 014 us / **−1 ppm — pass** |
+| FER_link | 0 ppm; counterAcc / micValid 594 / 594 of 597 |
+| hub marks > 3 ms late, placed frames late | 0; 1 (the STOP, after the run) |
+| rate beacons | +10 114 ppb at 637 s (second beacon), +9 980 ppb at 982 s |
+
+* **The beacon losses are gone:** no mark skipped or sent late around the three
+  beacons.
+* **3 marks lost, one per empty window**, each confirmed by a skipped msgid (130, 285,
+  596):
+  - **291.5 s and 981.6 s, the mark 94 ms after a beacon:** its window timed out
+    44–49 ms after T0. The one-shot fired on time (oneShot p99 −297 us), but the
+    radio started listening ~30 ms late (armResidual p99 29 836 us), while the node
+    was still handling and logging the beacon.
+  - **521.1 s:** the window timed out 10 ms *before* its T0, so it opened ~25 ms
+    early; not yet explained.
+* Rate span: this firmware still started it at the first beacon. Node 1.0.78
+  (`0feb23a`) starts it at the stamped GridSync or the re-solve.
+* Duty during the run matches 1.0.76: RX 4.2–4.5 %, light sleep 91.2–91.6 %.
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
