@@ -2239,6 +2239,38 @@ priority 7, rate span from the exact anchor), hub `eddbc16`, production profile,
   against the 8.6 % the SoC is awake. Per-frame debug logging is the Mode B power
   cost. To be fixed once Mode B loses nothing.
 
+**MEASURED 2026-09-15 07:56–08:13 — Mode B on 1.0.80: the radio times out early.**
+Node 2 fw 1.0.80 (`f948e7f`: each empty window logs how long it listened on both clocks
+and its IRQ flags), hub `eddbc16`, production profile, 897 s. The grid was re-published
+by toggling Timed Mode, because the first boot's GridSync was lost (see below).
+
+| Mode B, MAC-0 (1.0.80) | value |
+|---|---|
+| promotion | 848.2 s, 14.8 s after GridSync (trial) |
+| windows armed / hit | 598 / 595 (WMR 5 016 ppm) |
+| **HW-8:** oneShot n vs windows armed | 601 ≥ 598 → 0 missed one-shots; oneShot p99 −399 us |
+| armResidual p99 | 291 us |
+| phaseErr p50 / p99 / max | +335 / +1 539 / +1 804 us, n 595 |
+| raw rate / residual | +10 ppm, period 1 500 015 us / **0 ppm — pass** |
+| FER_link / counterAcc | 1 669 ppm / 595 of 598 |
+| rate learned | first beacon (948 s): +8 852 ppb over 116 s; then +9 593, +9 970 ppb |
+
+* **The three lost frames are early radio timeouts.** Empty windows before and after the
+  test listened 30.5–31.5 ms on both node time and esp_timer: the 29.44 ms symbol timeout
+  plus latency. The three during the test listened **13.5–15.7 ms**, the two clocks
+  agreeing to 60 us, with IRQ flags 0x80 (RxTimeout only). Listening starts at T0 −17.2 ms,
+  so each window closed at about T0 −2 ms. The hub's preamble starts at T0 −3.1 ms. The
+  modem gave up just as the frame began to arrive. Node time is not at fault. Next: read
+  RSSI, RegModemStat and the header counter at the timeout, and try reducing the hub's TX
+  power. The bench node is close: the hub receives it at −35 dBm.
+* **Mode B entry gap: a lost GridSync is never retried.** On the boot before this run the
+  node logged in at 3.7 s and received the TimeSync and the ScheduleConfig. It never heard
+  the GridSync (msgid 3): during that burst its own TX spent "5 CAD retries" on a busy
+  channel. The hub sends GridSync once per login and nothing re-sends it, so the node
+  stayed in Mode A for 13 minutes. A 72 B frame under the previous session's key
+  (AES-GCM auth failed) also arrived after re-login: the hub queue is not purged on
+  re-login.
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
