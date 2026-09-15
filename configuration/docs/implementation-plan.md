@@ -2271,6 +2271,44 @@ by toggling Timed Mode, because the first boot's GridSync was lost (see below).
   (AES-GCM auth failed) also arrived after re-login: the hub queue is not purged on
   re-login.
 
+**MEASURED 2026-09-15 08:20–08:36 — Mode B on 1.0.81: early timeouts are the modem's
+own, with the timeout register intact.** Node 2 fw 1.0.81 (`5f8b640`: an empty window
+reads the modem back), hub `eddbc16`, production profile, 900 s. GridSync adopted at
+9.1 s (provisional), re-solved at 96.2 s (−8 715 us), promoted at 110.6 s (14.4 s).
+
+| Mode B, MAC-0 (1.0.81) | value |
+|---|---|
+| windows armed / hit | 590 / 584 (WMR 10 169 ppm) |
+| **HW-8:** oneShot n vs windows armed | 593 ≥ 590 → 0 missed one-shots; oneShot p99 −332 us |
+| armResidual p99 | 358 us |
+| phaseErr p50 / p99 / max | +77 / +1 549 / +2 228 us, n 592 |
+| raw rate / residual | +10 ppm, period 1 500 015 us / **0 ppm — pass** |
+| FER_link / counterAcc | 5 016 ppm / 592 of 598 |
+| rate learned | first beacon (174 s), +9 578 ppb over 78 s; then +10 533, +11 448 ppb |
+
+The six empty windows during the test, read back at the timeout:
+
+| window at | listened (node / esp) | closed vs T0 | RSSI at timeout | symbol timeout read back |
+|---|---|---|---|---|
+| 289.5 s | 15 454 / 15 516 us | −1.4 ms | **−47 dBm** | 115 |
+| 308.7 s | 5 834 / 5 834 us | −11.2 ms | −99 dBm | 115 |
+| 320.6 s | 7 888 / 7 888 us | −9.1 ms | −100 dBm | 115 |
+| 342.8 s | 14 924 / 14 984 us | −2.1 ms | −100 dBm | 115 |
+| 579.4 s | 15 001 / 15 070 us | −2.2 ms | −100 dBm | 115 |
+| 787.9 s | 17 380 / 17 392 us | +0.3 ms | −77 dBm | 115 |
+
+Every one read op 0x81 (standby), modem status 0x14, header count 0, IRQ 0x80. Normal
+timeouts after the test listened ~31.5 ms at −99..−101 dBm. Radio config: AGC auto, LNA
+boost, SF7/BW500 detection 0xC3/0x0A, 8-symbol preamble at both ends.
+
+* **Not a register fault:** the programmed symbol timeout is intact every time.
+* **The modem ends RxSingle after one failed detection:**
+  - **4 of 6 at the noise floor**, 2–11 ms before T0: a false detection on noise.
+  - **2 of 6 with strong signal** (−47, −77 dBm) around T0: the real preamble was
+    detected and synchronisation failed.
+* Next: restart RxSingle for the rest of the window when it ends early (node only), then
+  judge whether the strong-signal failures need a longer preamble.
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
