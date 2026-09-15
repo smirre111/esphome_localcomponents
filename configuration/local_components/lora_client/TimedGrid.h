@@ -86,6 +86,51 @@ constexpr int64_t windowCloseUs(int64_t t0_us) { return windowOpenUs(t0_us) + kW
 // out 14.2-15.2 ms into the window, just after the preamble reaches the node at
 // 14.08 ms, and the restart came too late to hear it. In RxContinuous a failed
 // detection does not end reception: the modem searches again at once.
+//
+// The RxSingle window is kept for a 1:1 bench comparison
+// (CONFIG_BLINDS_RX_WINDOW_SINGLE), together with its restart below.
+
+// --- The RxSingle comparison window: one that ends early -------------------
+//
+// The SX1276 gives an RxSingle ONE detection attempt: a false detection on noise,
+// or a real preamble that fails to synchronise, ends the window with RxTimeout
+// long before the symbol timeout. Measured 2026-09-15 on node 2 (fw 1.0.81): six
+// Mode B windows listened 5.8-17.4 ms of 29.44 ms, the programmed timeout read
+// back intact (115) every time, four at the noise floor — each a lost frame.
+//
+// So the window is re-armed for what is LEFT of it, never beyond its original
+// end. Not when too little is left to detect a preamble in, not more than a few
+// times (persistent interference must not hold the radio open), and not for a
+// timeout reported before the window could have run one symbol: that belongs to
+// no detection in this window.
+// MORE THAN THE PREAMBLE. Measured 2026-09-15 on node 2 (fw 1.0.84): a restart
+// armed for 12 symbols against the 12-symbol downlink preamble never raised
+// RxTimeout at all — the window stayed open, the radio semaphore never came back
+// and the node heard nothing for 15 minutes ("RX window skipped" 56 times). With
+// the 8-symbol preamble, restarts of 10-13 symbols had always closed. A symbol
+// timeout must exceed the programmed preamble length.
+static constexpr uint32_t kRestartMinSymbols  = (uint32_t) kDownlinkPreambleSymbols + 5;
+static constexpr uint8_t  kMaxWindowRestarts  = 3;
+static_assert(kRestartMinSymbols > kDownlinkPreambleSymbols,
+              "a restarted window's symbol timeout must exceed the preamble, or it never times out");
+static_assert(kSymbolTimeoutSymbols > kDownlinkPreambleSymbols,
+              "the window's symbol timeout must exceed the preamble, or it never times out");
+
+// Symbols to re-arm a window that has listened `listened_us` and been restarted
+// `restarts` times already, or 0 to let it close.
+constexpr uint16_t restartSymbols(int64_t listened_us, uint8_t restarts)
+{
+    if (restarts >= kMaxWindowRestarts) return 0;
+    if (listened_us < (int64_t) kSymbolUs) return 0;
+    const int64_t left_us = (int64_t) kWindowUs - listened_us;
+    const int64_t left_sym = left_us / (int64_t) kSymbolUs;
+    if (left_sym < (int64_t) kRestartMinSymbols) return 0;
+    return (uint16_t) left_sym;
+}
+static_assert(restartSymbols(0, 0) == 0, "no restart before one symbol has run");
+static_assert(restartSymbols(6000, 0) == 91, "6 ms into 29.44 ms leaves 91 symbols");
+static_assert(restartSymbols(27000, 0) == 0, "too little left to detect a preamble");
+static_assert(restartSymbols(6000, kMaxWindowRestarts) == 0, "restarts are bounded");
 
 // True if a frame whose T0 lands `err_us` away from the expected T0 is caught.
 // Positive err = the frame is LATE relative to the node's expectation.

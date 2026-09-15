@@ -269,6 +269,28 @@ TEST_F(Iface, TheWindowIsClosedExactlyAsWideAsTheGuardBandAssumes) {
     EXPECT_EQ(timedgrid::kGuardUs, (timedgrid::kWindowUs - timedgrid::kDetectUs) / 2);
 }
 
+TEST_F(Iface, TheDefaultWindowIsContinuous) {
+    // What every deployed node runs; only CONFIG_BLINDS_RX_WINDOW_SINGLE changes it.
+    EXPECT_EQ(lif.rxWindowKind(), LoraInterface::RxWindowKind::Continuous);
+}
+
+TEST_F(Iface, TheRxSingleComparisonBuildOpensTheOldWindow) {
+    // CONFIG_BLINDS_RX_WINDOW_SINGLE: the window of fw 1.0.83-1.0.89, for a 1:1 bench
+    // comparison. The modem's symbol timeout is its width, and no timer closes it.
+    lif.setupRXPollingTimer();
+    proto_sim_timer_last_once_us = 0;
+    lif.setRxWindowKind(LoraInterface::RxWindowKind::Single);
+    lif.armTimedRxWindow();
+
+    EXPECT_EQ(r().count("lora_rxSingle"), 1u);
+    EXPECT_EQ(r().count("lora_rxContinuous"), 0u);
+    EXPECT_EQ(r().sym_timeout, (uint16_t) timedgrid::kSymbolTimeoutSymbols);
+    EXPECT_EQ((uint32_t) r().sym_timeout * loratiming::kSymbolUs, timedgrid::kWindowUs);
+    EXPECT_EQ(proto_sim_timer_last_once_us, 0u) << "the modem closes this window, not a timer";
+    EXPECT_LT(r().indexOf("lora_setSymbolTimeout"), r().indexOf("lora_clearInterrupts"));
+    EXPECT_LT(r().indexOf("lora_clearInterrupts"), r().indexOf("lora_rxSingle"));
+}
+
 TEST_F(Iface, ContinuousRxIsArmedOnceAndNotReArmedEveryPass) {
     // The drift test's whole point is to stop missing burst copies. The
     // semaphore that drives this fires every ~500 ms, and an idle + re-arm on
