@@ -4998,6 +4998,141 @@ TEST_F(RealNodeFixture, ADemotedNodeKeepingItsGridEarnsPromotionAgain) {
     EXPECT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::NoPhase);
 }
 
+// ---------------------------------------------------------------------------
+// Keeping a kept grid honest. Measured 2026-09-15 on node 2 (fw 1.0.92): after
+// ~17 minutes in Mode A the node re-promoted 8-11 ms off its marks, and held
+// +11 ms until the first beacon.
+// ---------------------------------------------------------------------------
+
+namespace {
+std::vector<CmdDispatcher::tx_command_t> drainTx(CmdDispatcher &d) {
+    std::vector<CmdDispatcher::tx_command_t> out;
+    CmdDispatcher::tx_command_t c{};
+    while (xQueueReceive(d.txCmdQueueNew, &c, 0) == pdTRUE) out.push_back(c);
+    return out;
+}
+std::vector<CmdDispatcher::tx_command_t> gridSyncRequests(CmdDispatcher &d) {
+    std::vector<CmdDispatcher::tx_command_t> out;
+    for (const auto &c : drainTx(d))
+        if (c.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_GRIDSYNC_REQUEST)
+            out.push_back(c);
+    return out;
+}
+// Addressed frames on this node's marks from `from_us` on, each `err_us` late.
+void framesOnMarks(CmdDispatcher &d, int64_t from_us, uint32_t count, int64_t err_us,
+                   uint32_t first_msgid) {
+    for (uint32_t i = 0; i < count; ++i) {
+        const int64_t mark = gridstate::nextT0Us(
+            d.gridState(), from_us + (int64_t) i * (int64_t) timedgrid::kRoundUs);
+        auto f = pack_sysop_op(first_msgid + i, CLIENT_OPERATION__CMD_STATUS);
+        d.onReceiveNew(f.data(), static_cast<int>(f.size()),
+                       mark + err_us + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size()));
+    }
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, AKeptGridIsRecentredOnItsOwnSamples) {
+    disp.setTimedRxEnabled(true);
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
+    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/600);
+    const int64_t t0 = 40'000'000;
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()),
+                      t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    const int64_t anchor_before = disp.gridState().anchor_us;
+
+    // The bench case: every frame 11 ms after the mark the node predicts.
+    constexpr int64_t kOffUs = 11'000;
+    framesOnMarks(disp, t0, timedmode::kPromotionPhaseSamples, kOffUs, 610);
+
+    EXPECT_NEAR((double) (disp.gridState().anchor_us - anchor_before), (double) kOffUs, 100.0)
+        << "samples that agree off-centre describe a shifted anchor";
+    EXPECT_EQ(disp.phaseStats().n, 0u) << "they described the anchor that was moved";
+
+    // And the node promotes on the marks where the hub really transmits.
+    framesOnMarks(disp, t0 + 20 * (int64_t) timedgrid::kRoundUs,
+                  timedmode::kPromotionPhaseSamples, /*err_us=*/0, 630);
+    EXPECT_TRUE(disp.timedRxActive());
+    EXPECT_LT(std::abs(disp.phaseStats().mean_us()), 1'000)
+        << "promoted on a centred anchor, not at the edge of the guard";
+}
+
+TEST_F(RealNodeFixture, InModeBTheBeaconNotTheTrialOwnsTheAnchor) {
+    bringNodeToTheEdgeOfPromotion(disp);
+    ASSERT_TRUE(disp.timedRxActive());
+    const int64_t anchor_before = disp.gridState().anchor_us;
+
+    framesOnMarks(disp, 40'000'000 + 20 * (int64_t) timedgrid::kRoundUs,
+                  timedmode::kPromotionPhaseSamples, 11'000, 1500);
+    EXPECT_EQ(disp.gridState().anchor_us, anchor_before)
+        << "a node in Mode B learns its anchor and rate from beacons";
+}
+
+TEST_F(RealNodeFixture, ANodeWithAStaleAnchorAsksTheHubForItsGrid) {
+    disp.setTimedRxEnabled(true);
+    proto_sim_timer_set_now_us(1'000'000);
+    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/700);
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()), 1'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+    auto login = pack_login_op(/*msgid=*/701, /*nonce=*/0xABCDEF01);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 1'100'000);
+    drainTx(disp);
+
+    disp.maybeRequestGridSync();
+    EXPECT_TRUE(gridSyncRequests(disp).empty()) << "a fresh anchor needs nothing";
+
+    // build_grid_sync publishes resyncMaxS = 350.
+    proto_sim_timer_set_now_us(esp_timer_get_time() + 351LL * 1'000'000);
+    disp.maybeRequestGridSync();
+    const auto asked = gridSyncRequests(disp);
+    ASSERT_EQ(asked.size(), 1u) << "an anchor nothing corrected for resyncMaxS";
+    EXPECT_EQ(asked[0].arg, (uint32_t) timedmode::SyncRequestReason::AnchorStale);
+
+    disp.maybeRequestGridSync();
+    EXPECT_TRUE(gridSyncRequests(disp).empty()) << "one request per resyncMaxS";
+    EXPECT_EQ(disp.gridSyncRequests(), 1u);
+}
+
+TEST_F(RealNodeFixture, WithoutASessionTheNodeDoesNotAskForItsGrid) {
+    disp.setTimedRxEnabled(true);
+    proto_sim_timer_set_now_us(1'000'000);
+    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/720);
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()), 1'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+    drainTx(disp);
+
+    proto_sim_timer_set_now_us(esp_timer_get_time() + 351LL * 1'000'000);
+    disp.maybeRequestGridSync();
+    EXPECT_TRUE(gridSyncRequests(disp).empty())
+        << "a plaintext request is one anybody could send, and it spends a hub burst";
+}
+
+TEST_F(RealNodeFixture, SamplesRefusedAsTooFarOffMakeTheNodeAsk) {
+    disp.setTimedRxEnabled(true);
+    proto_sim_timer_set_now_us(1'000'000);
+    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/740);
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()), 1'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+
+    // More than half a pitch off: the re-centre cannot use them.
+    const int64_t far = (int64_t) timedgrid::kSlotPitchUs / 2 + 5'000;
+    for (uint32_t i = 0; i < timedmode::kRefusedSamplesForSyncRequest; ++i) {
+        auto f = pack_sysop_op(741 + i, CLIENT_OPERATION__CMD_STATUS);
+        disp.onReceiveNew(f.data(), static_cast<int>(f.size()),
+                          rxOnMark(disp, f.size(),
+                                   2'000'000 + (int64_t) i * (int64_t) timedgrid::kRoundUs, far));
+    }
+    ASSERT_EQ(disp.phaseStats().n, 0u) << "precondition: both refused";
+
+    auto login = pack_login_op(/*msgid=*/750, /*nonce=*/0xABCDEF01);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 9'000'000);
+    drainTx(disp);
+    disp.maybeRequestGridSync();
+    const auto asked = gridSyncRequests(disp);
+    ASSERT_EQ(asked.size(), 1u) << "the anchor is fresh, but its samples say it is lost";
+    EXPECT_EQ(asked[0].arg, (uint32_t) timedmode::SyncRequestReason::SamplesRefused);
+}
+
 TEST_F(RealNodeFixture, ABaselineOneSampleShortStaysInModeA) {
     // The node's own threshold: phaseTrustworthy wants kPromotionPhaseSamples.
     bringNodeToTheEdgeOfPromotion(disp, /*samples=*/timedmode::kPromotionPhaseSamples - 1);
@@ -5494,6 +5629,7 @@ TEST_F(RealNodeFixture, ABeaconBeyondHalfASlotPitchChangesNothing) {
 
 namespace {
 void armModeBWithGrid(CmdDispatcher &disp) {
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);   // Mode B needs the crystal
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
     auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
@@ -5511,6 +5647,9 @@ void feedModeBMarks(CmdDispatcher &disp, const gridstate::State &truth) {
         const int64_t rx = gridstate::t0ForRound(truth, r)
                          + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) mark.size());
         disp.onReceiveNew(mark.data(), static_cast<int>(mark.size()), rx);
+        // The receive task decides on every pass. A node that promotes stops
+        // re-centring on its own samples, as a node in Mode B does.
+        (void) disp.timedRxActive();
     }
 }
 }  // namespace

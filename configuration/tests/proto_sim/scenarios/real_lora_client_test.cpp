@@ -339,6 +339,81 @@ TEST(RealLoraClient, GridSyncRepublishingIsBounded) {
     EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
 }
 
+// ---------------------------------------------------------------------------
+// A node asks for its grid again. Measured 2026-09-15 on node 2 (fw 1.0.92): a
+// demoted node that kept its grid came back 11 ms off its marks after ~17 minutes
+// without a beacon.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct SyncRequestProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::handle_grid_sync_request_;
+};
+void deliverSyncRequest(LORAClient &rol) {
+    GridSyncRequest r = GRID_SYNC_REQUEST__INIT;
+    r.reason          = (uint32_t) timedmode::SyncRequestReason::AnchorStale;
+    r.ssinceanchorfix = 1200;
+    static_cast<SyncRequestProbe &>(rol).handle_grid_sync_request_(&r);
+}
+// Timed mode on and the first GridSync confirmed, as a node on its grid has it.
+void confirmedGrid(real_helpers::RealHubHarness &h) {
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    deliverAck(h.rol, h.rol.gridsync_msgids_[0]);
+    ASSERT_FALSE(h.rol.gridSyncAwaitingAck());
+}
+}  // namespace
+
+TEST(RealLoraClient, ANodeAskingForItsGridIsSentItAgain) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    confirmedGrid(h);
+    // esp_timer, not SimClock: the hub stamps a publish on esp_timer_get_time(), and
+    // the gate counts whole seconds, so exactly 60 s after a 1 us stamp reads 59.
+    proto_sim_timer_advance_us((int64_t) (timedmode::kHubSyncRequestMinIntervalS + 1) * 1'000'000);
+
+    deliverSyncRequest(h.rol);
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck())
+        << "published again, and waiting for the node to confirm it like any GridSync";
+    EXPECT_EQ(h.rol.gridSyncRequestsAnswered(), 1u);
+}
+
+TEST(RealLoraClient, ARequestWithinAMinuteOfAPublishIsNotAnswered) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    confirmedGrid(h);
+    proto_sim_timer_advance_us((int64_t) (timedmode::kHubSyncRequestMinIntervalS - 1) * 1'000'000);
+
+    deliverSyncRequest(h.rol);
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck()) << "at most one burst a minute, however many ask";
+    EXPECT_EQ(h.rol.gridSyncRequestsIgnored(), 1u);
+}
+
+TEST(RealLoraClient, ARequestWhileAGridSyncAwaitsItsAckIsNotAnswered) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    const uint8_t republishes = h.rol.gridSyncRepublishes();
+
+    deliverSyncRequest(h.rol);
+    EXPECT_EQ(h.rol.gridSyncRequestsIgnored(), 1u)
+        << "the re-publish is already doing the job";
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), republishes) << "and the request adds nothing to it";
+}
+
+TEST(RealLoraClient, ARequestWithTimedModeOffIsNotAnswered) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+
+    deliverSyncRequest(h.rol);
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+    EXPECT_EQ(h.rol.gridSyncRequestsIgnored(), 1u);
+}
+
 // Real-code A1: REGISTER → real LORAListener sends ClientConfig with the
 // listener's address and the matching MAC, then schedules its 500 ms
 // login_startup timer.

@@ -1535,6 +1535,42 @@ namespace esphome
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT &&
                msg->modetestreport)
         this->handle_mode_test_report_(msg->modetestreport);
+      // The node asks for its grid again. Also MAC-layer: never forwarded.
+      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST &&
+               msg->gridsyncrequest)
+        this->handle_grid_sync_request_(msg->gridsyncrequest);
+    }
+
+    // A node asks for its grid again (GridSyncRequest). Advice, not a command:
+    // timedmode::hubAnswersSyncRequest decides, and an answer is the ordinary
+    // placed, acknowledged, re-published GridSync. Measured 2026-09-15 on node 2
+    // (fw 1.0.92): a demoted node that kept its grid came back 11 ms off its
+    // marks after ~17 minutes without a beacon.
+    void LORAListener::handle_grid_sync_request_(const ::GridSyncRequest *r)
+    {
+      if (r == nullptr)
+        return;
+      const int64_t now_us = esp_timer_get_time();
+      const uint32_t s_since_publish =
+          (this->last_gridsync_publish_us_ == 0)
+              ? 0xFFFFFFFFu
+              : (uint32_t) ((now_us - this->last_gridsync_publish_us_) / 1000000);
+      const bool answer = timedmode::hubAnswersSyncRequest(
+          this->timed_mode_enabled_,
+          this->parent_ != nullptr && this->parent_->gridStarted(),
+          this->gridsync_msgid_count_ != 0, s_since_publish);
+      ESP_LOGW(TAG, "[%s] node asks for its grid (reason %u, anchor %u s old, %u samples "
+                    "refused) \u2014 %s",
+               this->get_name().c_str(), (unsigned) r->reason,
+               (unsigned) r->ssinceanchorfix, (unsigned) r->refusedsamples,
+               answer ? "publishing" : "not now");
+      if (!answer)
+      {
+        this->gridsync_requests_ignored_++;
+        return;
+      }
+      this->gridsync_requests_answered_++;
+      this->send_grid_sync(true);
     }
 
     // The report is RECOMPUTED here, not on the node.
@@ -1923,6 +1959,10 @@ namespace esphome
         p.earliest_us = (planned_t0 != 0)
                             ? loratiming::fireInstantUs(planned_t0, 0) : 0;
         this->send_aligned_(buf, len, p);
+        {
+          const int64_t published_us = esp_timer_get_time();
+          this->last_gridsync_publish_us_ = (published_us > 0) ? published_us : 1;
+        }
 
         // Awaiting the node's confirmation: remember this msgid and re-publish if
         // none arrives. A re-publish is a fresh GridSync (new placement, new

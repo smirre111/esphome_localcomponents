@@ -434,3 +434,100 @@ TEST(TimedModePolicy, TheAnswerAndTheReasonCannotDisagree) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Keeping a kept grid honest. Measured 2026-09-15 on node 2 (fw 1.0.92): after
+// ~17 minutes in Mode A the node re-promoted 11 ms off its marks.
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr uint32_t kPitchUs = timedgrid::kSlotPitchUs;
+int32_t recenter(int32_t mean_us, int32_t spread_us = 500, uint32_t samples = kPromotionPhaseSamples,
+                 uint32_t frames = kPromotionPhaseSamples, bool in_mode_b = false,
+                 bool provisional = false) {
+    return trialRecenterUs(in_mode_b, provisional, samples, frames, mean_us, spread_us,
+                           kGuardUs, kPitchUs);
+}
+}  // namespace
+
+TEST(TrialRecenter, SamplesThatAgreeOffCentreMoveTheAnchorByTheirMean) {
+    EXPECT_EQ(recenter(11'100), 11'100) << "the bench case: +11.1 ms, tight spread";
+    EXPECT_EQ(recenter(-9'000), -9'000);
+    // Past the guard but inside half a pitch: exactly the drift a node cannot
+    // promote through, and the re-centre is what brings it back.
+    EXPECT_EQ(recenter(18'000), 18'000);
+}
+
+TEST(TrialRecenter, OnlyWhereItHelpsAndOnlyOnEnoughEvidence) {
+    EXPECT_EQ(recenter((int32_t) (kGuardUs / 4) - 1), 0) << "small enough to promote on";
+    EXPECT_EQ(recenter((int32_t) (kGuardUs / 4)), (int32_t) (kGuardUs / 4));
+    EXPECT_EQ(recenter((int32_t) (kPitchUs / 2) + 1), 0)
+        << "beyond half a pitch a sample no longer names its mark";
+    EXPECT_EQ(recenter(11'000, (int32_t) kGuardUs + 1), 0)
+        << "a wide spread is noise or two clusters, not a shifted anchor";
+    EXPECT_EQ(recenter(11'000, 500, kPromotionPhaseSamples - 1), 0);
+    EXPECT_EQ(recenter(11'000, 500, kPromotionPhaseSamples, 1), 0)
+        << "copies of one frame are one measurement";
+    EXPECT_EQ(recenter(11'000, 500, kPromotionPhaseSamples, kPromotionPhaseSamples, true), 0)
+        << "in Mode B the beacon owns the anchor";
+    EXPECT_EQ(recenter(11'000, 500, kPromotionPhaseSamples, kPromotionPhaseSamples, false, true), 0)
+        << "a provisional anchor is re-solved, not re-centred";
+}
+
+namespace {
+SyncRequestState wantsSync() {
+    SyncRequestState s;
+    s.timed_rx_enabled   = true;
+    s.grid_active        = true;
+    s.in_mode_b          = false;
+    s.session            = true;
+    s.resync_max_s       = kResyncMaxS;
+    s.s_since_anchor_fix = kResyncMaxS + 1;
+    s.refused_since_fix  = 0;
+    s.s_since_request    = 0xFFFFFFFF;
+    return s;
+}
+}  // namespace
+
+TEST(SyncRequest, AnAnchorOlderThanResyncMaxSAsks) {
+    EXPECT_EQ(syncRequestReason(wantsSync()), SyncRequestReason::AnchorStale);
+    SyncRequestState fresh = wantsSync();
+    fresh.s_since_anchor_fix = kResyncMaxS;
+    EXPECT_EQ(syncRequestReason(fresh), SyncRequestReason::None);
+}
+
+TEST(SyncRequest, RefusedSamplesAskEvenOnAFreshAnchor) {
+    SyncRequestState s = wantsSync();
+    s.s_since_anchor_fix = 1;
+    s.refused_since_fix  = kRefusedSamplesForSyncRequest - 1;
+    EXPECT_EQ(syncRequestReason(s), SyncRequestReason::None) << "one stray frame is not a lost grid";
+    s.refused_since_fix  = kRefusedSamplesForSyncRequest;
+    EXPECT_EQ(syncRequestReason(s), SyncRequestReason::SamplesRefused);
+}
+
+TEST(SyncRequest, EveryGateKeepsTheNodeQuiet) {
+    std::vector<SyncRequestState> quiet;
+    auto push = [&](void (*f)(SyncRequestState &)) { SyncRequestState s = wantsSync(); f(s); quiet.push_back(s); };
+    push([](SyncRequestState &s) { s.timed_rx_enabled = false; });
+    push([](SyncRequestState &s) { s.grid_active = false; });
+    push([](SyncRequestState &s) { s.in_mode_b = true; });
+    push([](SyncRequestState &s) { s.session = false; });
+    push([](SyncRequestState &s) { s.resync_max_s = 0; });
+    push([](SyncRequestState &s) { s.s_since_request = kResyncMaxS - 1; });
+    for (size_t i = 0; i < quiet.size(); ++i)
+        EXPECT_EQ(syncRequestReason(quiet[i]), SyncRequestReason::None) << "gate " << i;
+
+    SyncRequestState again = wantsSync();
+    again.s_since_request = kResyncMaxS;
+    EXPECT_EQ(syncRequestReason(again), SyncRequestReason::AnchorStale)
+        << "after a full resyncMaxS the node may ask again";
+}
+
+TEST(SyncRequest, TheHubAnswersAtMostOnceAMinuteAndOnlyWhenItCan) {
+    EXPECT_TRUE(hubAnswersSyncRequest(true, true, false, kHubSyncRequestMinIntervalS));
+    EXPECT_FALSE(hubAnswersSyncRequest(true, true, false, kHubSyncRequestMinIntervalS - 1));
+    EXPECT_FALSE(hubAnswersSyncRequest(false, true, false, 0xFFFFFFFF)) << "timed mode off";
+    EXPECT_FALSE(hubAnswersSyncRequest(true, false, false, 0xFFFFFFFF)) << "no grid running";
+    EXPECT_FALSE(hubAnswersSyncRequest(true, true, true, 0xFFFFFFFF))
+        << "a GridSync awaiting its ack is already being re-published";
+}

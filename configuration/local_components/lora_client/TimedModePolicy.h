@@ -321,4 +321,91 @@ constexpr HubBelief afterUnackedSingleShot(HubBelief b)
     return b;
 }
 
+// --- Keeping a kept grid honest ---------------------------------------------
+//
+// A demotion keeps the grid (fw 1.0.89), but a node out of Mode B hears no
+// beacon, so nothing corrects its anchor while its crystal drifts. Measured
+// 2026-09-15 on node 2 (fw 1.0.92): after ~17 minutes in Mode A the node
+// re-promoted +8..+11 ms off its marks — inside the 14.08 ms guard by luck — and
+// held +11 ms until the first beacon 95 s later. Two remedies, cheapest first.
+
+// 1. The node re-centres its anchor on its own evidence. Samples that agree with
+// one another (spread inside the guard) but sit off-centre describe a shifted
+// anchor, not a noisy one, and the shift is their mean.
+//
+// Not in Mode B, where the beacon owns the anchor and learns the rate from it; not
+// on a provisional anchor, which takes no samples; not on less evidence than
+// promotion itself asks for; not for an offset small enough to promote on anyway
+// (under a quarter of the guard); and not beyond half a pitch, where a sample no
+// longer says which mark it belongs to. Returns the shift to add to the anchor,
+// or 0 for none.
+constexpr int32_t trialRecenterUs(bool in_mode_b, bool provisional, uint32_t samples,
+                                  uint32_t frames, int32_t mean_us, int32_t spread_us,
+                                  uint32_t guard_us, uint32_t pitch_us)
+{
+    if (in_mode_b || provisional)                              return 0;
+    if (samples < kPromotionPhaseSamples || frames < 2)        return 0;
+    if (spread_us < 0 || (uint32_t) spread_us > guard_us)      return 0;
+    const int64_t mag = mean_us < 0 ? -(int64_t) mean_us : (int64_t) mean_us;
+    if (mag < (int64_t) (guard_us / 4))                        return 0;
+    if (mag > (int64_t) (pitch_us / 2))                        return 0;
+    return mean_us;
+}
+
+// 2. The node asks the hub for its grid again (GridSyncRequest), for what its
+// samples cannot fix: an anchor nothing has corrected for longer than the
+// published resyncMaxS — the interval the guard band survives at the crystal
+// ceiling — or samples refused as more than half a pitch off, which the re-centre
+// above cannot use.
+enum class SyncRequestReason : uint8_t {
+    None           = 0,
+    AnchorStale    = 1,
+    SamplesRefused = 2,
+};
+
+static constexpr uint32_t kRefusedSamplesForSyncRequest = 2;
+
+struct SyncRequestState
+{
+    bool     timed_rx_enabled   = false;
+    bool     grid_active        = false;
+    bool     in_mode_b          = false;
+    // An encrypted uplink is possible. A plaintext request is one anybody could
+    // send, and it would spend a hub burst.
+    bool     session            = false;
+    uint32_t resync_max_s       = 0;
+    // Since the anchor was last set or corrected: GridSync, beacon, settled
+    // re-solve or re-centre. 0xFFFFFFFF = never.
+    uint32_t s_since_anchor_fix = 0xFFFFFFFF;
+    uint32_t refused_since_fix  = 0;
+    uint32_t s_since_request    = 0xFFFFFFFF;   // 0xFFFFFFFF = never asked
+};
+
+constexpr SyncRequestReason syncRequestReason(const SyncRequestState &s)
+{
+    if (!s.timed_rx_enabled || !s.grid_active || s.in_mode_b)  return SyncRequestReason::None;
+    if (!s.session)                                            return SyncRequestReason::None;
+    // Fail closed, as txRefusalFor does: no published interval, nothing to judge by.
+    if (s.resync_max_s == 0)                                   return SyncRequestReason::None;
+    // At most one request per resyncMaxS: a hub that does not answer is not
+    // helped by being asked faster.
+    if (s.s_since_request < s.resync_max_s)                    return SyncRequestReason::None;
+    if (s.refused_since_fix >= kRefusedSamplesForSyncRequest)  return SyncRequestReason::SamplesRefused;
+    if (s.s_since_anchor_fix > s.resync_max_s)                 return SyncRequestReason::AnchorStale;
+    return SyncRequestReason::None;
+}
+
+// The hub's half. A request is advice: answered while timed mode is on and the grid
+// runs, not while a GridSync is still awaiting its ack (the re-publish is already
+// doing the job), and not within a minute of the last publish, so any number of
+// requests costs at most one burst a minute.
+static constexpr uint32_t kHubSyncRequestMinIntervalS = 60;
+
+constexpr bool hubAnswersSyncRequest(bool timed_mode_enabled, bool grid_started,
+                                     bool awaiting_ack, uint32_t s_since_publish)
+{
+    return timed_mode_enabled && grid_started && !awaiting_ack &&
+           s_since_publish >= kHubSyncRequestMinIntervalS;
+}
+
 }  // namespace timedmode

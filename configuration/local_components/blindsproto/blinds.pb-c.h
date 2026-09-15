@@ -41,6 +41,7 @@ typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
 typedef struct ClientBattery ClientBattery;
 typedef struct CoverPosition CoverPosition;
+typedef struct GridSyncRequest GridSyncRequest;
 typedef struct LoraClientResponseMessage LoraClientResponseMessage;
 
 
@@ -1361,8 +1362,43 @@ struct  CoverPosition
     , 0, 0, 0 }
 
 
+/*
+ * A node asks the hub to publish its grid again (node -> hub).
+ * A demotion keeps the grid (fw 1.0.89), and a node out of Mode B hears no
+ * beacon, so nothing corrects its anchor while its crystal drifts. Measured
+ * 2026-09-15 on node 2 (fw 1.0.92): after ~17 minutes in Mode A the node came back
+ * 11 ms off its marks against a 14.08 ms guard. The node re-centres what its own
+ * samples can see; this frame is for what they cannot — an anchor older than the
+ * published resyncMaxS, or samples refused as more than half a pitch off.
+ * ADVICE, NOT A COMMAND. The hub answers only while timed mode is on, not while a
+ * GridSync is still awaiting its ack, and not within a minute of its last one
+ * (timedmode::hubAnswersSyncRequest), so a flood of these costs at most one burst
+ * a minute. A node that does not know this field never sends it.
+ */
+struct  GridSyncRequest
+{
+  ProtobufCMessage base;
+  /*
+   * timedmode::SyncRequestReason
+   */
+  uint32_t reason;
+  /*
+   * seconds since the node last corrected its anchor
+   */
+  uint32_t ssinceanchorfix;
+  /*
+   * samples refused beyond half a pitch since then
+   */
+  uint32_t refusedsamples;
+};
+#define GRID_SYNC_REQUEST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_sync_request__descriptor) \
+    , 0, 0, 0 }
+
+
 typedef enum {
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET = 0,
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST = 23,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL = 10,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER = 11,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE = 12,
@@ -1393,6 +1429,10 @@ struct  LoraClientResponseMessage
      * above are absent.  Field 9 keeps a 1-byte tag.
      */
     EncryptedPayload *encrypted;
+    /*
+     * The node asks for its grid again. See GridSyncRequest.
+     */
+    GridSyncRequest *gridsyncrequest;
     LoginMsg *login;
     /*
      * MAC-layer echo. Emitted by MAC-0 in reply to a MacControl ping,
@@ -1912,6 +1952,25 @@ CoverPosition *
 void   cover_position__free_unpacked
                      (CoverPosition *message,
                       ProtobufCAllocator *allocator);
+/* GridSyncRequest methods */
+void   grid_sync_request__init
+                     (GridSyncRequest         *message);
+size_t grid_sync_request__get_packed_size
+                     (const GridSyncRequest   *message);
+size_t grid_sync_request__pack
+                     (const GridSyncRequest   *message,
+                      uint8_t             *out);
+size_t grid_sync_request__pack_to_buffer
+                     (const GridSyncRequest   *message,
+                      ProtobufCBuffer     *buffer);
+GridSyncRequest *
+       grid_sync_request__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_sync_request__free_unpacked
+                     (GridSyncRequest *message,
+                      ProtobufCAllocator *allocator);
 /* LoraClientResponseMessage methods */
 void   lora_client_response_message__init
                      (LoraClientResponseMessage         *message);
@@ -2011,6 +2070,9 @@ typedef void (*ClientBattery_Closure)
 typedef void (*CoverPosition_Closure)
                  (const CoverPosition *message,
                   void *closure_data);
+typedef void (*GridSyncRequest_Closure)
+                 (const GridSyncRequest *message,
+                  void *closure_data);
 typedef void (*LoraClientResponseMessage_Closure)
                  (const LoraClientResponseMessage *message,
                   void *closure_data);
@@ -2055,6 +2117,7 @@ extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;
 extern const ProtobufCMessageDescriptor client_battery__descriptor;
 extern const ProtobufCMessageDescriptor cover_position__descriptor;
+extern const ProtobufCMessageDescriptor grid_sync_request__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_response_message__descriptor;
 
 PROTOBUF_C__END_DECLS

@@ -1177,6 +1177,51 @@ void   cover_position__free_unpacked
   assert(message->base.descriptor == &cover_position__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   grid_sync_request__init
+                     (GridSyncRequest         *message)
+{
+  static const GridSyncRequest init_value = GRID_SYNC_REQUEST__INIT;
+  *message = init_value;
+}
+size_t grid_sync_request__get_packed_size
+                     (const GridSyncRequest *message)
+{
+  assert(message->base.descriptor == &grid_sync_request__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t grid_sync_request__pack
+                     (const GridSyncRequest *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &grid_sync_request__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t grid_sync_request__pack_to_buffer
+                     (const GridSyncRequest *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &grid_sync_request__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+GridSyncRequest *
+       grid_sync_request__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (GridSyncRequest *)
+     protobuf_c_message_unpack (&grid_sync_request__descriptor,
+                                allocator, len, data);
+}
+void   grid_sync_request__free_unpacked
+                     (GridSyncRequest *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &grid_sync_request__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   lora_client_response_message__init
                      (LoraClientResponseMessage         *message)
 {
@@ -4541,7 +4586,71 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   (ProtobufCMessageInit) cover_position__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[11] =
+static const ProtobufCFieldDescriptor grid_sync_request__field_descriptors[3] =
+{
+  {
+    "reason",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSyncRequest, reason),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "sSinceAnchorFix",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSyncRequest, ssinceanchorfix),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "refusedSamples",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSyncRequest, refusedsamples),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned grid_sync_request__field_indices_by_name[] = {
+  0,   /* field[0] = reason */
+  2,   /* field[2] = refusedSamples */
+  1,   /* field[1] = sSinceAnchorFix */
+};
+static const ProtobufCIntRange grid_sync_request__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 3 }
+};
+const ProtobufCMessageDescriptor grid_sync_request__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "GridSyncRequest",
+  "GridSyncRequest",
+  "GridSyncRequest",
+  "",
+  sizeof(GridSyncRequest),
+  3,
+  grid_sync_request__field_descriptors,
+  grid_sync_request__field_indices_by_name,
+  1,  grid_sync_request__number_ranges,
+  (ProtobufCMessageInit) grid_sync_request__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[12] =
 {
   {
     "header",
@@ -4675,12 +4784,25 @@ static const ProtobufCFieldDescriptor lora_client_response_message__field_descri
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "gridsyncrequest",
+    23,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientResponseMessage, proto_case),
+    offsetof(LoraClientResponseMessage, gridsyncrequest),
+    &grid_sync_request__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_response_message__field_indices_by_name[] = {
   7,   /* field[7] = ack */
   2,   /* field[2] = avail */
   8,   /* field[8] = beacon */
   1,   /* field[1] = encrypted */
+  11,   /* field[11] = gridsyncrequest */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
   9,   /* field[9] = maccontrol */
@@ -4695,7 +4817,7 @@ static const ProtobufCIntRange lora_client_response_message__number_ranges[4 + 1
   { 9, 1 },
   { 20, 9 },
   { 22, 10 },
-  { 0, 11 }
+  { 0, 12 }
 };
 const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
 {
@@ -4705,7 +4827,7 @@ const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
   "LoraClientResponseMessage",
   "",
   sizeof(LoraClientResponseMessage),
-  11,
+  12,
   lora_client_response_message__field_descriptors,
   lora_client_response_message__field_indices_by_name,
   4,  lora_client_response_message__number_ranges,

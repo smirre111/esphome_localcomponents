@@ -35,6 +35,7 @@
 struct NodeWakeBeacon;
 struct MacControl;                  // MAC-0 ping / echo, taken by pointer
 struct ModeTestReport;              // ModeTest results, taken by pointer
+struct GridSyncRequest;             // a node asking for its grid again, by pointer
 struct PhaseReport;                 // §4.6's promotion evidence, by pointer
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
 
@@ -495,6 +496,9 @@ namespace esphome
       // it has been re-published for that.
       bool     gridSyncAwaitingAck() const { return this->gridsync_msgid_count_ != 0; }
       uint8_t  gridSyncRepublishes() const { return this->gridsync_retries_; }
+      // Node-initiated GridSync requests, answered and not (hubAnswersSyncRequest).
+      uint32_t gridSyncRequestsAnswered() const { return this->gridsync_requests_answered_; }
+      uint32_t gridSyncRequestsIgnored() const  { return this->gridsync_requests_ignored_; }
       uint32_t opRetryCount() const    { return this->op_retry_count_; }
 
       const MacStats &mac_stats() const { return this->mac_stats_; }
@@ -745,6 +749,11 @@ namespace esphome
       uint32_t      gridsync_msgids_[kGridSyncMaxRepublishes + 1]{};
       uint8_t       gridsync_msgid_count_{0};
       uint8_t       gridsync_retries_{0};
+      // When a GridSync was last published (esp_timer us, 0 = never), for the
+      // once-a-minute bound on answering a node's request.
+      int64_t       last_gridsync_publish_us_{0};
+      uint32_t      gridsync_requests_answered_{0};
+      uint32_t      gridsync_requests_ignored_{0};
       static constexpr uint8_t  kSchedMaxRetries   = 3;
       static constexpr uint32_t kSchedRetryMs      = 5000;
       virtual void send_remote_config();
@@ -907,6 +916,8 @@ namespace esphome
 
       // P2: record a wake beacon and publish the derived clock offset.
       void handle_beacon_(const ::NodeWakeBeacon *b);
+      // A node asks for its grid again. See GridSyncRequest in blinds.proto.
+      void handle_grid_sync_request_(const ::GridSyncRequest *r);
 
       // Phases of set_response(), which was a single 250-line body at CCN 61 —
       // the hub mirror of the node's onReceiveNew (70 -> 15). The ORDER in
