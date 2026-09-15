@@ -336,6 +336,69 @@ TEST_F(RealNodeFixture, CmdCoverConfigRejectsPartialGeometry) {
            "produce a position calculation error.";
 }
 
+namespace {
+std::vector<uint8_t> plaintextClientConfigFor(uint64_t mac, uint32_t addr, uint32_t msgid) {
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr               = LORA_HEADER__INIT;
+    hdr.destaddress   = 18;
+    hdr.senderaddress = 1;
+    hdr.msgid         = msgid;
+    op.header         = &hdr;
+    ClientConfig cc = CLIENT_CONFIG__INIT;
+    cc.mac_addr = mac;
+    cc.addr     = addr;
+    cc.subnt    = 2;
+    op.cmd_case     = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
+    op.clientconfig = &cc;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+    return bytes;
+}
+void pinFactoryMac(uint64_t mac) {
+    uint8_t b[6];
+    for (int i = 0; i < 6; ++i) b[i] = static_cast<uint8_t>((mac >> (40 - 8 * i)) & 0xFF);
+    proto_sim_set_factory_mac(b);
+}
+}  // namespace
+
+// Measured 2026-09-15 on node 2 (fw 1.0.85): a reset during a config save left
+// config.txt empty (address 0) while the session survived in NVS. The hub pushed
+// ClientConfig in the clear, as REGISTER(needs_config) asks, and the node refused
+// every copy as "plaintext while holding a session" — stranded for good.
+TEST(RealCmdDispatcherFresh, AnUnprovisionedNodeWithAStaleSessionStillAcceptsItsConfig) {
+    MotorCtrl     mot;
+    SystemCtrl    sys;          // cfgAddress=0: config lost
+    LoraInterface lif;
+    portMUX_TYPE  motorMux{}, buttonMux{};
+    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    constexpr uint64_t kMac = 0xCAFEBABEFEEDULL;
+    pinFactoryMac(kMac);
+    disp.setBaseNonceForTest(1, 0xABCDEF01);   // the session NVS restored
+    ASSERT_EQ(sys.getConfigAddress(), 0u);
+
+    auto cfg = plaintextClientConfigFor(kMac, 18, 5);
+    disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
+    EXPECT_EQ(sys.getConfigAddress(), 18u)
+        << "a node with no address has no provisioning for a session to protect";
+}
+
+TEST(RealCmdDispatcherFresh, AProvisionedNodeWithASessionStillRefusesPlaintextConfig) {
+    MotorCtrl     mot;
+    SystemCtrl    sys;
+    sys.setAddress(18, 2);      // provisioned
+    LoraInterface lif;
+    portMUX_TYPE  motorMux{}, buttonMux{};
+    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    constexpr uint64_t kMac = 0xCAFEBABEFEEDULL;
+    pinFactoryMac(kMac);
+    disp.setBaseNonceForTest(1, 0xABCDEF01);
+
+    auto cfg = plaintextClientConfigFor(kMac, 42, 5);
+    disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
+    EXPECT_EQ(sys.getConfigAddress(), 18u)
+        << "the bootstrap exemption must not let plaintext re-address a provisioned node";
+}
+
 // A fresh node with cfgAddress=0 must still accept CLIENTCONFIG (the MAC
 // inside the message is the gate) and END UP with cfgAddress set. This
 // is the first-boot bootstrap path on the real CmdDispatcher.
@@ -3276,6 +3339,28 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
 // base nonce — rather than by reaching into set_base_nonce(). That matters:
 // login is the one exemption in the new rule, so establishing the session this
 // way also proves the exemption still works.
+
+TEST_F(RealNodeFixture, AResentScheduleIsAckedButNotWrittenToFlashAgain) {
+    // The hub re-sends a ScheduleConfig until it hears the ack. Measured
+    // 2026-09-15 on node 2 (fw 1.0.85): every copy rewrote config.txt, and the
+    // reset that emptied it came during the save of such a repeat.
+    auto first = pack_schedule_op(/*msgid=*/300, /*version=*/0x5420144e,
+                                  NODE_MODE__MODE_INTERACTIVE);
+    disp.onReceiveNew(first.data(), static_cast<int>(first.size()));
+    ASSERT_EQ(sys.getSchedVersion(), 0x5420144eu);
+    ASSERT_EQ(sys.save_calls(), 1);
+
+    auto again = pack_schedule_op(/*msgid=*/301, /*version=*/0x5420144e,
+                                  NODE_MODE__MODE_INTERACTIVE);
+    disp.onReceiveNew(again.data(), static_cast<int>(again.size()));
+    EXPECT_EQ(sys.save_calls(), 1) << "the same schedule again is not a flash write";
+    EXPECT_EQ(drain_acks(disp), 2) << "but it is acked, or the hub keeps re-sending";
+
+    auto changed = pack_schedule_op(/*msgid=*/302, /*version=*/0x5420144f,
+                                    NODE_MODE__MODE_INTERACTIVE);
+    disp.onReceiveNew(changed.data(), static_cast<int>(changed.size()));
+    EXPECT_EQ(sys.save_calls(), 2) << "a new schedule is saved";
+}
 
 TEST_F(RealNodeFixture, APlaintextScheduleIsRefusedOnceASessionExists) {
     // The worst of them. ScheduleConfig replaces the schedule WHOLESALE — it is

@@ -43,8 +43,12 @@ public:
     // LittleFS persistence — no-ops on host (test inspects the in-RAM
     // setters directly).
     void mountLittleFS()      {}
-    void saveConfiguration()  {}
+    // Counted: every save is a flash write, and a reset during one emptied
+    // config.txt on node 2 (2026-09-15). A test can assert when it must NOT happen.
+    void saveConfiguration()  { save_calls_++; }
     void unmountLittleFS()    {}
+    int  save_calls() const   { return save_calls_; }
+    int  save_calls_{0};
 
     // WiFi / OTA — no-ops.
     void setupWiFi()    {}
