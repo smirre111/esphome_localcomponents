@@ -2854,6 +2854,17 @@ TEST_F(RealNodeFixture, AGridWeDisagreeWithIsRefusedNotHalfAdopted) {
     EXPECT_EQ(disp.expectedT0Us(), 0);
 }
 
+namespace {
+// An RxDone instant for a frame of `len` bytes whose T0 sits on the grid's next
+// mark after `near_us`. A phase sample must be near a mark to count: one further
+// than half a slot pitch is refused (2026-09-15), and an arbitrary rx instant is
+// typically hundreds of ms from any mark.
+int64_t rxOnMark(const CmdDispatcher &d, size_t len, int64_t near_us, int64_t err_us = 0) {
+    return gridstate::nextT0Us(d.gridState(), near_us) + err_us
+         + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) len);
+}
+}  // namespace
+
 TEST_F(RealNodeFixture, WithdrawalIsUnconditionalAndClearsPhase) {
     auto on = build_grid_sync(true, 4, 620);
     disp.onReceiveNew(on.data(), static_cast<int>(on.size()));
@@ -2878,7 +2889,7 @@ TEST_F(RealNodeFixture, ReAnchoringResetsPhaseStats) {
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     auto ping = build_mac_ping(1, false, 631);
     disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()),
-                      /*rx_us=*/1040000);
+                      rxOnMark(disp, ping.size(), 1040000));
     ASSERT_GE(disp.phaseStats().n, 1u);
 
     auto b = build_grid_sync(true, 9, 632);   // new slot, new anchor
@@ -2994,6 +3005,24 @@ TEST_F(RealNodeFixture, ArmInstantLeadsTheMarkByTheArmLead) {
     EXPECT_EQ(t0 - arm, (int64_t) timedgrid::kArmLeadUs);
 }
 
+TEST_F(RealNodeFixture, ADemotionKeepsTheGridSoTheNodeCanReturnWithoutAGridSync) {
+    // Measured 2026-09-15 on node 2 (fw 1.0.88): a demotion cleared the grid,
+    // nothing re-published it, and every later ModeTest was refused "no adopted
+    // grid". Kept, the node re-earns Mode B through the promotion trial.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/820);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
+        disp.noteMarkArmed();
+        disp.noteMarkMissed();
+    }
+    EXPECT_TRUE(disp.gridState().active) << "demoted, but still holding the grid";
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "the count starts again";
+    EXPECT_EQ(disp.phaseStats().n, 0u) << "phase has to be earned again";
+    EXPECT_FALSE(disp.timedRxActive()) << "and it is out of Mode B until it has";
+}
+
 TEST_F(RealNodeFixture, MissedMarksKeyOnAddressedFramesNotOnSilence) {
     auto g = build_grid_sync(true, 4, 730);
     disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
@@ -3028,10 +3057,16 @@ TEST_F(RealNodeFixture, EnoughMissedMarksDemoteUnilaterally) {
     for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i)
         disp.noteMarkOutcome(false);
 
-    EXPECT_FALSE(disp.gridState().active)
+    // Demoted: out of Mode B, with the evidence for it thrown away. The grid is
+    // KEPT since 2026-09-15 (fw 1.0.89) so the node can re-earn Mode B through the
+    // promotion trial; clearing it left a demoted node in Mode A until its next
+    // login, because nothing re-publishes a grid the hub believes the node holds.
+    EXPECT_FALSE(disp.timedRxActive())
         << "staying in a window the hub no longer transmits into is the unsafe "
            "direction; dropping to Mode A is always safe";
-    EXPECT_EQ(disp.expectedT0Us(), 0);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
+    EXPECT_EQ(disp.phaseStats().n, 0u);
+    EXPECT_TRUE(disp.gridState().active);
 }
 
 // ---------------------------------------------------------------------------
@@ -3274,8 +3309,12 @@ TEST_F(RealNodeFixture, MissedMarksActuallyDemote) {
         disp.noteMarkMissed();
     }
 
-    EXPECT_FALSE(disp.gridState().active)
-        << "the node must drop a grid it is no longer being served on";
+    // The demotion ACTS: the missed-mark count is consumed and the node leaves
+    // Mode B. (It keeps the grid itself since fw 1.0.89 — see
+    // ADemotionKeepsTheGridSoTheNodeCanReturnWithoutAGridSync.)
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
+        << "the node must act on the missed marks, not merely count them";
+    EXPECT_FALSE(disp.timedRxActive());
     EXPECT_TRUE(disp.timedRxEnabledForTest())
         << "but timed RX stays ENABLED, so a later GridSync re-adopts without "
            "needing anything else to happen — clearing it would recreate the "
@@ -3291,16 +3330,17 @@ TEST_F(RealNodeFixture, AnAddressedFrameResetsTheMissedMarkCount) {
     disp.noteMarkMissed();
     disp.noteMarkArmed();
     disp.noteMarkMissed();
-    ASSERT_TRUE(disp.gridState().active) << "two is below the threshold";
+    ASSERT_EQ(disp.consecutiveMissedMarks(), 2u) << "two is below the threshold";
 
     // A frame addressed to us resets the count, so the third miss must not
     // demote — it is the FIRST of a new run, not the third of the old one.
+    // (A demotion shows as the count being consumed; the grid itself is kept.)
     auto op = pack_sysop_op(/*msgid=*/731, CLIENT_OPERATION__CMD_STATUS);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()), 30'100'000);
 
     disp.noteMarkArmed();
     disp.noteMarkMissed();
-    EXPECT_TRUE(disp.gridState().active);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
 }
 
 TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
@@ -3319,9 +3359,9 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
     // timestamp", which correctly commits nothing. Passing the default here
     // would have made this test pass for the wrong reason.
     auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/520);
-    disp.noteDriftSample(1'040'000);
-    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()),
-                      /*rx_us=*/1'040'000);
+    const int64_t rx = rxOnMark(disp, bytes.size(), 1'040'000, /*err_us=*/300);
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
     EXPECT_EQ(disp.phaseStats().n, 1u);
 }
 
@@ -3854,9 +3894,12 @@ TEST_F(RealNodeFixture, ThePhaseReportCarriesWhatTheTrackerMeasured) {
 
     // Two addressed frames, which is what feeds the tracker.
     auto p1 = build_mac_ping(1, false, 901);
-    disp.onReceiveNew(p1.data(), static_cast<int>(p1.size()), /*rx_us=*/1040000);
+    disp.onReceiveNew(p1.data(), static_cast<int>(p1.size()),
+                      rxOnMark(disp, p1.size(), 1040000, /*err_us=*/400));
     auto p2 = build_mac_ping(1, false, 902);
-    disp.onReceiveNew(p2.data(), static_cast<int>(p2.size()), /*rx_us=*/1090000);
+    disp.onReceiveNew(p2.data(), static_cast<int>(p2.size()),
+                      rxOnMark(disp, p2.size(), 1040000 + (int64_t) timedgrid::kRoundUs,
+                               /*err_us=*/-600));
     ASSERT_GE(disp.phaseStats().n, 1u);
 
     PhaseReport pr = PHASE_REPORT__INIT;
@@ -3880,7 +3923,8 @@ TEST_F(RealNodeFixture, ReAnchoringClearsWhatThePhaseReportWouldClaim) {
     auto a = build_grid_sync(true, 4, 910);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     auto ping = build_mac_ping(1, false, 911);
-    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()), /*rx_us=*/1040000);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()),
+                      rxOnMark(disp, ping.size(), 1040000));
     ASSERT_GE(disp.phaseStats().n, 1u);
 
     auto b = build_grid_sync(true, 9, 912);   // new slot, new anchor
@@ -4632,6 +4676,23 @@ TEST_F(RealNodeFixture, AStampedFrameIsAPhaseSampleWhereverItWasSent) {
     EXPECT_EQ(disp.phaseStats().last_us, 1500) << "the node's own error, and nothing else";
 }
 
+TEST_F(RealNodeFixture, ASampleFurtherThanHalfAPitchIsNotCountedAgainstPromotion) {
+    // Measured 2026-09-15 on node 2 (fw 1.0.88): one sample of +86 841 us latched
+    // outside_guard and held promotion off for 830 s.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/830);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    auto far = pack_stamped_sysop(/*msgid=*/831, /*round=*/20, /*offset=*/463'000);
+    deliverStamped(disp, far, 20, 463'000, /*err_us=*/86'841);
+    EXPECT_EQ(disp.phaseStats().n, 0u) << "not drift, not this mark: refused";
+    EXPECT_EQ(disp.phaseStats().outside_guard, 0u) << "and so it cannot latch";
+
+    auto near = pack_stamped_sysop(/*msgid=*/832, /*round=*/22, /*offset=*/463'000);
+    deliverStamped(disp, near, 22, 463'000, /*err_us=*/1500);
+    EXPECT_EQ(disp.phaseStats().n, 1u) << "an ordinary sample still counts";
+}
+
 TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
     // Measured 2026-09-14: a GridSync placed on slot 4's mark went out ~320 ms
     // late; solving the anchor from its placement moved every mark by 320 ms.
@@ -4907,6 +4968,34 @@ TEST_F(RealNodeFixture, TheNodePromotesOnItsOwnPhaseEvidence) {
         << "grid, crystal and a trustworthy phase: the node knows its window "
            "will be open, and promotes without waiting on the hub";
     EXPECT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::None);
+}
+
+TEST_F(RealNodeFixture, ADemotedNodeKeepingItsGridEarnsPromotionAgain) {
+    // Since fw 1.0.89 a demotion keeps the grid, so nothing but the forgotten
+    // decision stops the thin-evidence allowance (in_mode_b && an empty, hence
+    // "consistent", phase) from re-promoting the node on zero samples the moment
+    // the anti-flap hold runs out.
+    bringNodeToTheEdgeOfPromotion(disp);
+    ASSERT_TRUE(disp.timedRxActive());
+
+    for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
+        disp.noteMarkArmed();
+        disp.noteMarkMissed();
+    }
+    ASSERT_TRUE(disp.gridState().active);
+
+    proto_sim_timer_set_now_us(esp_timer_get_time()
+                               + (int64_t) (timedmode::kRepromotionHoldS + 60) * 1'000'000);
+    // The hub is still talking to it, so the link is not stale — but this frame
+    // lands more than half a pitch off the mark and adds no phase sample.
+    auto f = pack_sysop_op(/*msgid=*/1500, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()),
+                      rxOnMark(disp, f.size(), esp_timer_get_time(),
+                               (int64_t) timedgrid::kSlotPitchUs / 2 + 5'000));
+    ASSERT_EQ(disp.phaseStats().n, 0u);
+    EXPECT_FALSE(disp.timedRxActive())
+        << "past the hold, a demoted node with no phase samples must not be in Mode B";
+    EXPECT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::NoPhase);
 }
 
 TEST_F(RealNodeFixture, ABaselineOneSampleShortStaysInModeA) {

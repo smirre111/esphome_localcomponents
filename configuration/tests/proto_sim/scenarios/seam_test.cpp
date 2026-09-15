@@ -297,13 +297,16 @@ TEST_F(Seam, AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm) {
     const auto    frame   = lastDownlink();
 
     // The node measures the hub's correctly-placed frame against its own
-    // displaced marks, and reports the displacement.
+    // displaced marks. The displacement is more than half a slot pitch, so the
+    // frame is not even accepted as a phase sample (refused since 2026-09-15): the
+    // node's anchor follows where the GridSync ARRIVED, and against that anchor a
+    // correctly placed frame looks like a frame for some other mark.
+    ASSERT_GT(skew, (int64_t) timedgrid::kSlotPitchUs / 2);
     const uint32_t n_before = disp.phaseStats().n;
     deliverAtT0(frame, seen_t0);
-    ASSERT_GT(disp.phaseStats().n, n_before);
-    EXPECT_EQ(disp.phaseStats().last_us, -(int32_t) skew)
-        << "the node's anchor follows where the GridSync ARRIVED, so publishing "
-           "it from an unplaced frame moves every future mark by that much";
+    EXPECT_EQ(disp.phaseStats().n, n_before)
+        << "publishing the grid from an unplaced frame moves every future mark by "
+           "the displacement, and the node cannot even measure it";
 
     // And the consequence, which is the point: past the guard band the frame is
     // not merely late, it is missed. The node arms a window the hub never
@@ -316,8 +319,9 @@ TEST_F(Seam, AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm) {
     EXPECT_FALSE(proto_sim::caught(win, tx, timedgrid::kDetectUs))
         << "a displacement larger than the guard band must miss — if this "
            "starts passing, the guard band and the catch predicate disagree";
-    EXPECT_EQ(disp.phaseStats().outside_guard, 1u)
-        << "and the node's own promotion criterion must see it";
+    EXPECT_FALSE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs))
+        << "and the node's own promotion criterion must never be satisfied by it";
+    EXPECT_FALSE(disp.timedRxActive());
 }
 
 // ---------------------------------------------------------------------------
