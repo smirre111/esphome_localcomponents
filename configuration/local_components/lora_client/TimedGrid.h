@@ -84,8 +84,18 @@ constexpr int64_t windowCloseUs(int64_t t0_us) { return windowOpenUs(t0_us) + kW
 // times (persistent interference must not hold the radio open), and not for a
 // timeout reported before the window could have run one symbol: that belongs to
 // no detection in this window.
-static constexpr uint32_t kRestartMinSymbols  = 10;
+// MORE THAN THE PREAMBLE. Measured 2026-09-15 on node 2 (fw 1.0.84): a restart
+// armed for 12 symbols against the 12-symbol downlink preamble never raised
+// RxTimeout at all — the window stayed open, the radio semaphore never came back
+// and the node heard nothing for 15 minutes ("RX window skipped" 56 times). With
+// the 8-symbol preamble, restarts of 10-13 symbols had always closed. A symbol
+// timeout must exceed the programmed preamble length.
+static constexpr uint32_t kRestartMinSymbols  = (uint32_t) kDownlinkPreambleSymbols + 5;
 static constexpr uint8_t  kMaxWindowRestarts  = 3;
+static_assert(kRestartMinSymbols > kDownlinkPreambleSymbols,
+              "a restarted window's symbol timeout must exceed the preamble, or it never times out");
+static_assert(kSymbolTimeoutSymbols > kDownlinkPreambleSymbols,
+              "the window's symbol timeout must exceed the preamble, or it never times out");
 
 // Symbols to re-arm a window that has listened `listened_us` and been restarted
 // `restarts` times already, or 0 to let it close.

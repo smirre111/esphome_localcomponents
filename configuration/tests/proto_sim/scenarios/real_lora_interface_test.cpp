@@ -606,6 +606,42 @@ TEST_F(Iface, ATransmitCountsItsTimeOnAirAndACadIsCounted) {
     EXPECT_EQ(lif.radioDuty().cads, 1u);
 }
 
+TEST_F(Iface, AWindowTheRadioNeverClosedIsRecoveredNotLeftDeaf) {
+    // Measured 2026-09-15 on node 2 (fw 1.0.84): a window whose RxTimeout never
+    // came held the radio semaphore for 15 minutes; every later pass was "radio
+    // busy" and the node heard nothing.
+    proto_sim_timer_set_now_us(30'000'000);
+    lif.arm_source_         = Probe::ArmSource::None;
+    lif.grid_timer_running_ = false;
+    lif.serviceRxWindow();                          // a window opens and never closes
+    ASSERT_EQ(r().count("lora_rxSingle"), 1u);
+
+    loranode::rec().reset();
+    proto_sim_timer_advance_us(100'000);            // 100 ms: an ordinary busy radio
+    lif.noteRxWindowSkipped();
+    EXPECT_EQ(r().count("lora_sleep"), 0u) << "a window this young is not stuck";
+    EXPECT_EQ(lif.stuckWindowsRecovered(), 0u);
+
+    proto_sim_timer_advance_us(2'000'000);          // long past any frame
+    lif.noteRxWindowSkipped();
+    EXPECT_GE(r().count("lora_sleep"), 1u) << "closed, so the next window can open";
+    EXPECT_EQ(lif.stuckWindowsRecovered(), 1u);
+}
+
+TEST_F(Iface, ATransmitHoldingTheRadioIsNotTakenForAStuckWindow) {
+    proto_sim_timer_set_now_us(40'000'000);
+    lif.arm_source_         = Probe::ArmSource::None;
+    lif.grid_timer_running_ = false;
+    lif.serviceRxWindow();
+    const uint8_t frame[30] = {0};
+    lif.sendPacketBytes(const_cast<uint8_t *>(frame), (int) sizeof(frame));   // radio now transmitting
+    loranode::rec().reset();
+    proto_sim_timer_advance_us(2'000'000);
+    lif.noteRxWindowSkipped();
+    EXPECT_EQ(lif.stuckWindowsRecovered(), 0u) << "the radio is not receiving: leave it alone";
+    EXPECT_EQ(r().count("lora_sleep"), 0u);
+}
+
 TEST_F(Iface, AWindowAfterATransmitListensForTheDownlinkPreamble) {
     // The node transmits the 8-symbol uplink preamble and receives the 12-symbol
     // downlink one (LoraTiming.h, 2026-09-15). The register is shared, so every
