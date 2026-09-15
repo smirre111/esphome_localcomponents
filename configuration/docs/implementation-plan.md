@@ -2341,6 +2341,44 @@ robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 
   timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
   `motorpolicy::timerPeriodTicks` never returns 0.
 
+**MEASURED 2026-09-15 18:22–18:55 — Mode B on 1.0.89 with the LNA gain fixed at G6
+(bench only): 1 of 396 lost; the gain is not the cause.** Node 2 fw 1.0.89 (`e6bda93`),
+hub `f16de19`, production profile, two 300 s ModeTests back to back. The G6 setting is a
+working-tree `sdkconfig` bench option (`CONFIG_BLINDS_BENCH_LNA_GAIN`), never committed.
+
+| Mode B, MAC-0 (1.0.89, G6) | run 1 | run 2 |
+|---|---|---|
+| promotion | 15.3 s after START | 13.3 s after START, **no GridSync needed** |
+| windows armed / hit | 190 / 190 | 190 / 189 (WMR 5 235 ppm) |
+| **HW-8:** oneShot n vs windows armed | 191 ≥ 190, p99 −304 us | 192 ≥ 190, p99 −429 us |
+| armResidual p99 | 577 us | 557 us |
+| phaseErr p50 / p99 / max | +280 / +1 469 / +2 000 us, n 198 | +959 / +1 941 / +1 999 us, n 197 |
+| residual | 0 ppm | −3 ppm |
+| marks lost / early-timeout restarts | 0 / 0 | 1 / 2 |
+| RX on / light sleep, steady Mode B | 4.24–4.38 % / 91.3–91.5 % | 4.29–4.50 % / 91.2–91.4 % |
+
+* **The 1.0.89 fixes worked.** Both runs finished, and each demotion at a test's end kept
+  the grid. The second test promoted without a GridSync; on 1.0.88 it was refused (reason
+  8). No phase sample was refused.
+* **Fixed low gain did not remove the strong-signal loss.** The loss rate with AGC on
+  1.0.86 was 1 in 597; here it was 1 in 396.
+* **The one loss (1 270.7 s).** The window ended after 14 210 us and restarted for 59
+  symbols. It then closed empty with −48 dBm on air. The neighbouring phase errors were
+  −10 and +72 us, so the frame was on time.
+* **All four strong-signal losses have the same timing.** Their windows ended after
+  15 179, 15 200, 14 500 and 14 210 us, and every one of them was lost. The preamble
+  arrives at 14 080 us: the arm lead is 18 240 us and the preamble-to-T0 time is 4 160 us.
+  Each receive timeout therefore fired just after the preamble started, and the restart
+  came too late to catch it. Restarts earlier in the window, from 4 to 8 ms, lost
+  nothing.
+  The fault is RxSingle's single detection attempt colliding with the preamble. Neither
+  gain nor preamble length removes it. **Next: listen in RxContinuous for the window and
+  close it on the node's own window-end timer, so there is no receive timeout to collide
+  with.**
+* **Power, recorded for after reliability.** Steady Mode B runs 4.3 % RX on against
+  8.8 % in Mode A, yet only 91.3 % light sleep against 96.7 %. The extra CPU-awake time
+  is the per-frame logging already identified as the root cause.
+
 **MEASURED 2026-09-15 15:56–16:12 — Mode B on 1.0.86 with the 12-symbol downlink
 preamble: 1 of 597 lost.** Node 2 fw 1.0.86, hub `cdc6b30`, production profile, 900 s.
 
