@@ -79,9 +79,8 @@ struct Probe : LoraInterface {
     using LoraInterface::grid_aim_t0_us_;
     using LoraInterface::grid_opened_t0_us_;
     using LoraInterface::trial_armed_;
-    // An RxSingle window that ended early: when it started, and restarts so far.
+    // When the last receive window started listening.
     using LoraInterface::window_listen_esp_us_;
-    using LoraInterface::window_restarts_;
 };
 
 struct Irq : public ::testing::Test {
@@ -157,68 +156,100 @@ TEST_F(Irq, AnEmptyWindowNobodyPromisedAnythingInIsNotAMissedMark) {
 }
 
 // ---------------------------------------------------------------------------
-// An RxSingle that gives up early is not a closed window. Measured 2026-09-15 on
-// node 2 (fw 1.0.81): six Mode B windows listened 5.8-17.4 ms of 29.44 ms with
-// the symbol timeout intact — one failed detection each — and each lost a frame.
+// A window closes on the node's own timer. RxContinuous raises no RxTimeout, so
+// the window-end one-shot queues an event on the DIO1 queue and serviceDio1Event
+// closes the window as the timeout it replaces. Measured 2026-09-15 on node 2: in
+// RxSingle, four strong on-time frames were lost to a timeout that ended the
+// window just as their preamble arrived.
 // ---------------------------------------------------------------------------
 
 extern "C" int proto_sim_gpio_intr_enable_calls;   // esp_idf_stubs.c
 
-namespace {
-// A mark window that started listening at `start_us`.
-void openMarkWindowAt(Probe &lif, CmdDispatcher &disp, int64_t start_us) {
-    proto_sim_timer_set_now_us(start_us);
+TEST_F(Irq, AWindowListensContinuouslyAndItsTimerClosesItEmpty) {
+    proto_sim_timer_set_now_us(5'000'000);
     disp.noteMarkArmed();
-    lif.window_listen_esp_us_ = start_us;
-    lif.window_restarts_      = 0;
-}
-}  // namespace
+    lif.armTimedRxWindow();
+    EXPECT_EQ(r().count("lora_rxContinuous"), 1u)
+        << "no single detection attempt for a failure to end the window";
 
-TEST_F(Irq, AnEarlyTimeoutListensOnForTheRestOfTheWindow) {
-    openMarkWindowAt(lif, disp, 5'000'000);
-    proto_sim_timer_advance_us(6'000);            // gave up after 6 ms (1.0.81: 5.8 ms)
-    const int enables_before = proto_sim_gpio_intr_enable_calls;
-    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
-    EXPECT_EQ(proto_sim_gpio_intr_enable_calls, enables_before + 1)
-        << "the DIO1 interrupt must be re-enabled after a restart too, or the restarted "
-           "window's own timeout is never serviced (1.0.82 went deaf on hardware)";
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
 
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "the window is still open: nothing missed yet";
-    EXPECT_EQ(r().count("lora_rxSingle"), 1u) << "listening again";
-    EXPECT_EQ(r().sym_timeout, (timedgrid::kWindowUs - 6'000) / loratiming::kSymbolUs)
-        << "for what is left of the window, never past its original end";
-    EXPECT_EQ(r().count("lora_sleep"), 0u) << "not slept: it is still listening";
-    EXPECT_EQ(lif.earlyTimeoutRestarts(), 1u);
-
-    // The restarted window runs out for real.
-    proto_sim_timer_advance_us((int64_t) timedgrid::kWindowUs - 6'000);
-    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u) << "now it closed empty";
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u)
+        << "the timer's end is the empty window the RxTimeout used to report";
     EXPECT_GE(r().count("lora_sleep"), 1u);
 }
 
-TEST_F(Irq, AnEarlyTimeoutWithTooLittleWindowLeftCloses) {
-    openMarkWindowAt(lif, disp, 5'000'000);
-    // Fewer than kRestartMinSymbols left: no preamble could be detected in it.
-    proto_sim_timer_advance_us((int64_t) timedgrid::kWindowUs
-                               - (int64_t) (timedgrid::kRestartMinSymbols - 1) * loratiming::kSymbolUs);
-    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
-    EXPECT_EQ(r().count("lora_rxSingle"), 0u);
+TEST_F(Irq, AFrameArrivingAtTheWindowsEndKeepsItOpen) {
+    proto_sim_timer_set_now_us(5'000'000);
+    disp.noteMarkArmed();
+    lif.armTimedRxWindow();
+    const size_t sleeps = r().count("lora_sleep");
+
+    loranode::rec().modem_status = 0x02;   // synchronised on a preamble
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "closing now would cut the frame off";
+    EXPECT_EQ(r().count("lora_sleep"), sleeps);
+    EXPECT_EQ(lif.windowEndExtensions(), 1u);
+
+    // Nothing came of it: the next end closes the window.
+    loranode::rec().modem_status = 0x14;   // RX on-going, modem clear (1.0.80's readback)
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
     EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
 }
 
-TEST_F(Irq, EarlyTimeoutRestartsAreBounded) {
-    openMarkWindowAt(lif, disp, 5'000'000);
-    for (uint8_t i = 0; i < timedgrid::kMaxWindowRestarts; ++i) {
-        proto_sim_timer_advance_us(1'000);
-        dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
-        ASSERT_EQ(disp.consecutiveMissedMarks(), 0u) << "restart " << (int) i;
-    }
-    proto_sim_timer_advance_us(1'000);
-    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
-    EXPECT_EQ(r().count("lora_rxSingle"), (size_t) timedgrid::kMaxWindowRestarts)
-        << "persistent interference must not hold the radio open";
+TEST_F(Irq, AnEndQueuedForAWindowThatAlreadyClosedClosesNothing) {
+    proto_sim_timer_set_now_us(5'000'000);
+    lif.armTimedRxWindow();
+    const uint8_t old_end = LoraInterface::windowEndEvent(lif.windowGeneration());
+    // The frame came in: RxDone slept the radio, and the next window opened before
+    // the DIO1 task reached the end queued for the first one.
+    lif.noteRadioSlept();
+    disp.noteMarkArmed();
+    lif.armTimedRxWindow();
+    const size_t sleeps = r().count("lora_sleep");
+
+    serviceDio1Event(old_end);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "the new window is still open";
+    EXPECT_EQ(r().count("lora_sleep"), sleeps);
+    EXPECT_EQ(lif.staleWindowEnds(), 1u);
+
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
     EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
+}
+
+TEST_F(Irq, AnEndQueuedBeforeTheDriftTestsReceiveDoesNotEndIt) {
+    // The drift test's continuous receive opens no window and so moves no window
+    // generation on. Only the receive that ENDED can make the queued end stale.
+    proto_sim_timer_set_now_us(5'000'000);
+    lif.armTimedRxWindow();
+    const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
+    lif.noteRadioSlept();          // RxDone
+    lif.setContinuousRx(true);
+    lif.armContinuousRx();
+    const size_t sleeps = r().count("lora_sleep");
+
+    serviceDio1Event(end);
+
+    EXPECT_EQ(r().count("lora_sleep"), sleeps)
+        << "a stale window end must not stop the drift test's receive";
+    EXPECT_EQ(lif.staleWindowEnds(), 1u);
+}
+
+TEST_F(Irq, AWindowEndThatClosesNothingLeavesTheRadioAlone) {
+    proto_sim_timer_set_now_us(5'000'000);
+    lif.armTimedRxWindow();
+    const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
+    lif.noteRadioSlept();   // the receive already ended
+    loranode::rec().next_interrupts = LORA_IRQ_FLAG_RX_DONE;
+    const size_t reads = r().count("lora_readInterrupts");
+    const int enables_before = proto_sim_gpio_intr_enable_calls;
+
+    serviceDio1Event(end);
+
+    EXPECT_EQ(r().count("lora_readInterrupts"), reads)
+        << "reading the flags consumes an RxDone the DIO0 task has yet to service";
+    EXPECT_EQ(proto_sim_gpio_intr_enable_calls, enables_before)
+        << "no ISR disabled the pin, so there is nothing to re-enable";
 }
 
 TEST_F(Irq, AnUnhandledDio1FlagStillSleepsTheRadio) {
@@ -303,7 +334,7 @@ TEST_F(Irq, AnOpenClassAWindowIsNeverReArmedAndRx2OpensAtItsOwnInstant) {
     ASSERT_EQ(lif.arm_source_, Probe::ArmSource::ClassA);
     lif.grid_arm_fire_us_ = rx1;
     lif.serviceRxWindow();
-    ASSERT_EQ(r().count("lora_rxSingle"), 1u) << "RX1 is listening";
+    ASSERT_EQ(r().count("lora_rxContinuous"), 1u) << "RX1 is listening";
     const size_t idles_with_rx1_open = r().count("lora_idle");
 
     // Pass 2 comes round while RX1's outcome is still out.
@@ -312,7 +343,7 @@ TEST_F(Irq, AnOpenClassAWindowIsNeverReArmedAndRx2OpensAtItsOwnInstant) {
         << "an armed window whose outcome is not in must not be armed again";
     lif.grid_arm_fire_us_ = rx1 + 60'000;   // the recheck fires
     lif.serviceRxWindow();
-    EXPECT_EQ(r().count("lora_rxSingle"), 1u) << "a recheck opens no window";
+    EXPECT_EQ(r().count("lora_rxContinuous"), 1u) << "a recheck opens no window";
     EXPECT_EQ(r().count("lora_idle"), idles_with_rx1_open)
         << "and never idles the radio in the middle of RX1";
 
@@ -327,7 +358,7 @@ TEST_F(Irq, AnOpenClassAWindowIsNeverReArmedAndRx2OpensAtItsOwnInstant) {
     EXPECT_EQ(rx2 - rx1, (int64_t) classa::kRx2DelayUs - (int64_t) classa::kRx1DelayUs);
     lif.grid_arm_fire_us_ = rx2;
     lif.serviceRxWindow();
-    EXPECT_EQ(r().count("lora_rxSingle"), 2u) << "RX2 opens its own window";
+    EXPECT_EQ(r().count("lora_rxContinuous"), 2u) << "RX2 opens its own window";
 
     dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
     EXPECT_FALSE(disp.classAActive()) << "after RX2 the sequence is over";
@@ -450,9 +481,9 @@ TEST_F(Irq, AModeBNodeArmsItsOwnNextMarkEveryRound) {
         const int64_t fire = target - Probe::kRadioArmLeadUs;
         proto_sim_timer_set_now_us(fire);
         lif.grid_arm_fire_us_ = fire;
-        const size_t rx_before = r().count("lora_rxSingle");
+        const size_t rx_before = r().count("lora_rxContinuous");
         lif.serviceRxWindow();
-        EXPECT_EQ(r().count("lora_rxSingle"), rx_before + 1)
+        EXPECT_EQ(r().count("lora_rxContinuous"), rx_before + 1)
             << "round " << round << ": the fired one-shot opens the window";
 
         // The task comes round at once, while that window is still listening.
@@ -506,9 +537,9 @@ TEST_F(Irq, AnAdoptedNodeListensAtItsOwnMarkWhileStillInModeA) {
     EXPECT_EQ(aim, gridstate::nextT0Us(disp.gridState(), now)) << "this node's own next mark";
 
     // A periodic tick arrives first: an ordinary Mode A window, trial untouched.
-    const size_t rx0 = r().count("lora_rxSingle");
+    const size_t rx0 = r().count("lora_rxContinuous");
     lif.serviceRxWindow();
-    EXPECT_EQ(r().count("lora_rxSingle"), rx0 + 1) << "Mode A still listens";
+    EXPECT_EQ(r().count("lora_rxContinuous"), rx0 + 1) << "Mode A still listens";
     EXPECT_EQ(lif.grid_opened_t0_us_, 0) << "a periodic window is not the trial window";
     EXPECT_TRUE(lif.trial_armed_);
     dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
@@ -522,9 +553,9 @@ TEST_F(Irq, AnAdoptedNodeListensAtItsOwnMarkWhileStillInModeA) {
     const int64_t fire = lif.grid_arm_target_us_ - Probe::kRadioArmLeadUs;
     proto_sim_timer_set_now_us(fire);
     lif.grid_arm_fire_us_ = fire;
-    const size_t rx1 = r().count("lora_rxSingle");
+    const size_t rx1 = r().count("lora_rxContinuous");
     lif.serviceRxWindow();
-    EXPECT_EQ(r().count("lora_rxSingle"), rx1 + 1);
+    EXPECT_EQ(r().count("lora_rxContinuous"), rx1 + 1);
     EXPECT_EQ(lif.grid_opened_t0_us_, aim);
     EXPECT_FALSE(lif.trial_armed_);
 

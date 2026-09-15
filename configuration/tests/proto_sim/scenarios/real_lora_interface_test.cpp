@@ -226,50 +226,47 @@ TEST_F(Iface, TheUplinkAimBoundIsTheBackoffItReplaces) {
 // failure mode that is silent on both ends of the link.
 // ---------------------------------------------------------------------------
 
-TEST_F(Iface, ATimedWindowIsOpenedWithTheSixWritesInOrder) {
+TEST_F(Iface, ATimedWindowIsOpenedWithTheWritesInOrder) {
     // A window is not "the radio is listening"; it is this exact sequence. Get
     // the order wrong and the failure is silent: arming before the DIO map is
     // written means the first edge is reported against the previous mapping,
-    // and clearing interrupts AFTER rxSingle discards the event the window was
-    // opened for.
+    // and clearing interrupts AFTER the receive starts discards the event the
+    // window was opened for.
     lif.armTimedRxWindow();
 
-    const size_t idle  = r().indexOf("lora_idle");
-    const size_t dio   = r().indexOf("lora_setInterruptMode");
-    const size_t symto = r().indexOf("lora_setSymbolTimeout");
-    const size_t clr   = r().indexOf("lora_clearInterrupts");
-    const size_t single= r().indexOf("lora_rxSingle");
+    const size_t idle = r().indexOf("lora_idle");
+    const size_t dio  = r().indexOf("lora_setInterruptMode");
+    const size_t pre  = r().indexOf("lora_setPreambleLength");
+    const size_t clr  = r().indexOf("lora_clearInterrupts");
+    const size_t rx   = r().indexOf("lora_rxContinuous");
 
-    ASSERT_LT(single, r().calls.size()) << "the window must actually open";
+    ASSERT_LT(rx, r().calls.size()) << "the window must actually open";
     EXPECT_LT(idle, dio)    << "idle before remapping DIO";
-    EXPECT_LT(dio, symto);
-    EXPECT_LT(symto, clr);
-    EXPECT_LT(clr, single)
+    EXPECT_LT(dio, pre);
+    EXPECT_LT(pre, clr);
+    EXPECT_LT(clr, rx)
         << "clear the flags BEFORE listening, or the window's own first edge "
            "is thrown away with the stale ones";
 
     EXPECT_EQ(r().dio_mode[0], (uint8_t) LORA_IRQ_DIO0_RXDONE)
         << "DIO0 must report RX_DONE for a receive window — left on CADDONE "
            "from a transmit, the window cannot hear a frame at all";
-    EXPECT_EQ(r().dio_mode[1], (uint8_t) LORA_IRQ_DIO1_RXTIMEOUT);
 }
 
-TEST_F(Iface, TheWindowIsOpenedExactlyAsWideAsTheGuardBandAssumes) {
-    // The one radio setting Mode B's geometry depends on. G = (W - T_detect)/2
-    // is computed from kSymbolTimeoutSymbols in TimedGrid.h, so if the register
-    // is written with anything else, every guard band in the design is wrong by
-    // half the difference — and a node would look like it was merely unlucky.
+extern "C" uint64_t proto_sim_timer_last_once_us;   // esp_idf_stubs.c
+
+TEST_F(Iface, TheWindowIsClosedExactlyAsWideAsTheGuardBandAssumes) {
+    // The one timing Mode B's geometry depends on. G = (W - T_detect)/2 is
+    // computed from kWindowUs in TimedGrid.h, and since the modem runs no symbol
+    // timeout any more, the node's own one-shot is what makes W true. Armed for
+    // anything else, every guard band in the design is wrong by half the
+    // difference — and a node would look like it was merely unlucky.
+    lif.setupRXPollingTimer();
+    proto_sim_timer_last_once_us = 0;
     lif.armTimedRxWindow();
 
-    EXPECT_EQ(r().sym_timeout, (uint16_t) timedgrid::kSymbolTimeoutSymbols);
-    // And the width that implies, back through the design's own symbol time.
-    EXPECT_EQ((uint32_t) r().sym_timeout * loratiming::kSymbolUs,
-              timedgrid::kWindowUs);
-    // And therefore the guard band, which is the number the whole timed mode
-    // is judged by: G = (W - T_detect) / 2.
-    EXPECT_EQ(timedgrid::kGuardUs,
-              ((uint32_t) r().sym_timeout * loratiming::kSymbolUs -
-               timedgrid::kDetectUs) / 2);
+    EXPECT_EQ(proto_sim_timer_last_once_us, (uint64_t) timedgrid::kWindowUs);
+    EXPECT_EQ(timedgrid::kGuardUs, (timedgrid::kWindowUs - timedgrid::kDetectUs) / 2);
 }
 
 TEST_F(Iface, ContinuousRxIsArmedOnceAndNotReArmedEveryPass) {
@@ -496,7 +493,7 @@ TEST_F(Iface, ServicingAWindowDispatchesOnTheDriftTestFlag) {
     // branch is unreachable through it on a harness whose xSemaphoreTake always
     // succeeds — which is exactly why noteRxWindowSkipped is callable alone.
     lif.serviceRxWindow();
-    EXPECT_EQ(r().count("lora_rxSingle"), 1u);
+    EXPECT_EQ(r().count("lora_rxContinuous"), 1u);
     EXPECT_EQ(r().count("lora_receive"), 0u);
     EXPECT_EQ(lif.rxBusySkips(), 0u);
 
@@ -504,7 +501,7 @@ TEST_F(Iface, ServicingAWindowDispatchesOnTheDriftTestFlag) {
     lif.continuous_rx_ = true;
     lif.serviceRxWindow();
     EXPECT_EQ(r().count("lora_receive"), 1u);
-    EXPECT_EQ(r().count("lora_rxSingle"), 0u);
+    EXPECT_EQ(r().count("lora_rxContinuous"), 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +521,7 @@ TEST_F(Iface, AStaleTickDoesNotOpenAWindowWhileAClassAOneShotIsPending) {
 
     lif.serviceRxWindow();
 
-    EXPECT_EQ(r().count("lora_rxSingle"), 0u)
+    EXPECT_EQ(r().count("lora_rxContinuous"), 0u)
         << "a wake the one-shot did not cause must not open a window";
     EXPECT_FALSE(lif.takeClassAWindowOpen())
         << "and nothing may be booked against the Class A sequence";
@@ -538,7 +535,7 @@ TEST_F(Iface, TheFiredClassAOneShotOpensExactlyOneClassAWindow) {
 
     lif.serviceRxWindow();
 
-    EXPECT_EQ(r().count("lora_rxSingle"), 1u);
+    EXPECT_EQ(r().count("lora_rxContinuous"), 1u);
     EXPECT_TRUE(lif.takeClassAWindowOpen()) << "this window IS the Class A window";
     EXPECT_FALSE(lif.takeClassAWindowOpen()) << "and reports one outcome only";
     EXPECT_EQ(lif.staleTicksSkipped(), 0u);
@@ -551,7 +548,7 @@ TEST_F(Iface, AModeAPeriodicTickStillOpensAWindowNotBookedAsClassA) {
 
     lif.serviceRxWindow();
 
-    EXPECT_EQ(r().count("lora_rxSingle"), 1u) << "the free-running window is unchanged";
+    EXPECT_EQ(r().count("lora_rxContinuous"), 1u) << "the free-running window is unchanged";
     EXPECT_FALSE(lif.takeClassAWindowOpen())
         << "a free-running window is never a Class A window";
     EXPECT_EQ(lif.staleTicksSkipped(), 0u);
@@ -566,7 +563,7 @@ TEST_F(Iface, AStaleTickIsSkippedWhenModeBGridArmingIsPendingToo) {
 
     lif.serviceRxWindow();
 
-    EXPECT_EQ(r().count("lora_rxSingle"), 0u);
+    EXPECT_EQ(r().count("lora_rxContinuous"), 0u);
     EXPECT_EQ(lif.staleTicksSkipped(), 1u);
 }
 
@@ -584,7 +581,7 @@ TEST_F(Iface, AWindowCountsExactlyTheTimeTheReceiverListened) {
     lif.arm_source_         = Probe::ArmSource::None;
     lif.grid_timer_running_ = false;
     lif.serviceRxWindow();                       // a free-running window opens
-    ASSERT_EQ(r().count("lora_rxSingle"), 1u);
+    ASSERT_EQ(r().count("lora_rxContinuous"), 1u);
 
     proto_sim_timer_advance_us((int64_t) timedgrid::kWindowUs);   // it times out
     lif.noteRadioSlept();
@@ -614,7 +611,7 @@ TEST_F(Iface, AWindowTheRadioNeverClosedIsRecoveredNotLeftDeaf) {
     lif.arm_source_         = Probe::ArmSource::None;
     lif.grid_timer_running_ = false;
     lif.serviceRxWindow();                          // a window opens and never closes
-    ASSERT_EQ(r().count("lora_rxSingle"), 1u);
+    ASSERT_EQ(r().count("lora_rxContinuous"), 1u);
 
     loranode::rec().reset();
     proto_sim_timer_advance_us(100'000);            // 100 ms: an ordinary busy radio
@@ -656,7 +653,7 @@ TEST_F(Iface, AWindowAfterATransmitListensForTheDownlinkPreamble) {
     lif.arm_source_         = Probe::ArmSource::None;
     lif.grid_timer_running_ = false;
     lif.serviceRxWindow();
-    ASSERT_GE(r().count("lora_rxSingle"), 1u);
+    ASSERT_GE(r().count("lora_rxContinuous"), 1u);
     EXPECT_EQ(r().preamble_len, (long) loratiming::kDownlinkPreambleSymbols);
 }
 
@@ -671,7 +668,7 @@ TEST_F(Iface, AReArmRequestIsAStaleWakeThatOpensNoWindow) {
     lif.grid_timer_running_ = true;
     lif.grid_arm_fire_us_   = 0;   // armed, not fired
     lif.serviceRxWindow();
-    EXPECT_EQ(r().count("lora_rxSingle"), 0u);
+    EXPECT_EQ(r().count("lora_rxContinuous"), 0u);
     EXPECT_EQ(lif.staleTicksSkipped(), 1u);
 }
 

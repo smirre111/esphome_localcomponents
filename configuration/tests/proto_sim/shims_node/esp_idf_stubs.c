@@ -222,9 +222,12 @@ esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle
     return ESP_FAIL;
 }
 
+/* The timeout of the last one-shot started, so a test can hold a timer to its width. */
+uint64_t proto_sim_timer_last_once_us = 0;
+
 esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us) {
-    (void) timeout_us;
     if (!timer) return ESP_ERR_INVALID_ARG;
+    proto_sim_timer_last_once_us = timeout_us;
     timer->armed    = 1;
     timer->periodic = 0;
     return ESP_OK;

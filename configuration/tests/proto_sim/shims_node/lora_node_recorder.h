@@ -50,6 +50,9 @@ struct Recorder {
     // Symbol timeout as last written — the window width the node asked for,
     // which is the one radio setting Mode B's geometry actually depends on.
     uint16_t sym_timeout{0};
+    // RegModemStat (0x18) as lora_read_reg reports it. A window whose end arrives
+    // while a frame is arriving (detected, synchronised, header valid) stays open.
+    uint8_t  modem_status{0};
     // DIO mapping, per pin, as last written. A window armed with DIO0 mapped to
     // CADDONE instead of RXDONE is a window that cannot hear a frame.
     uint8_t  dio_mode[6]{};
