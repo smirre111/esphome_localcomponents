@@ -53,6 +53,9 @@ struct Recorder {
     // RegModemStat (0x18) as lora_read_reg reports it. A window whose end arrives
     // while a frame is arriving (detected, synchronised, header valid) stays open.
     uint8_t  modem_status{0};
+    // RegIrqFlags (0x12) as lora_read_reg reports it: the flags still pending in
+    // the radio, NOT consumed on read (lora_readInterrupts is the consuming path).
+    uint8_t  irq_flags_reg{0};
     // DIO mapping, per pin, as last written. A window armed with DIO0 mapped to
     // CADDONE instead of RXDONE is a window that cannot hear a frame.
     uint8_t  dio_mode[6]{};

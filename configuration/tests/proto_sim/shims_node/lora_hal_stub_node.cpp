@@ -137,7 +137,9 @@ uint8_t lora_readInterrupts() {
     return f;
 }
 void    lora_clearInterrupts(uint8_t f) { (void) f; R().note("lora_clearInterrupts"); }
-int     lora_read_reg(int reg)    { return reg == 0x18 ? R().modem_status : 0; }
+int     lora_read_reg(int reg)    {
+    return reg == 0x18 ? R().modem_status : reg == 0x12 ? R().irq_flags_reg : 0;
+}
 uint8_t lora_random()             { return 0; }
 void    lora_dump_registers(void) {}
 DeviceMode lora_getDeviceMode()   { return DeviceMode::Standby; }

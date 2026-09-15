@@ -197,6 +197,31 @@ TEST_F(Irq, AFrameArrivingAtTheWindowsEndKeepsItOpen) {
     EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
 }
 
+TEST_F(Irq, AFrameAlreadyInButNotYetServicedIsNotClosedAsEmpty) {
+    // Measured 2026-09-15 on node 2 (fw 1.0.90): RxDone lands about two window
+    // widths in, where the extended timer ends too. RegModemStat was back to
+    // "searching", so every such window was closed as empty — 380 of 380 — and the
+    // node booked a missed mark for a frame it received.
+    proto_sim_timer_set_now_us(5'000'000);
+    disp.noteMarkArmed();
+    lif.armTimedRxWindow();
+    const size_t sleeps = r().count("lora_sleep");
+
+    loranode::rec().modem_status  = 0x04;                    // searching again
+    loranode::rec().irq_flags_reg = LORA_IRQ_FLAG_RX_DONE    // pending for DIO0
+                                  | LORA_IRQ_FLAG_VALID_HEADER;
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
+
+    EXPECT_EQ(r().count("lora_sleep"), sleeps) << "sleeping now would drop the FIFO";
+    EXPECT_TRUE(disp.markWindowOpen()) << "the mark is the frame's to count, as a hit";
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
+
+    // A header seen, the payload still coming in, the status already cleared.
+    loranode::rec().irq_flags_reg = LORA_IRQ_FLAG_VALID_HEADER;
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
+    EXPECT_TRUE(disp.markWindowOpen());
+}
+
 TEST_F(Irq, AnEndQueuedForAWindowThatAlreadyClosedClosesNothing) {
     proto_sim_timer_set_now_us(5'000'000);
     lif.armTimedRxWindow();
