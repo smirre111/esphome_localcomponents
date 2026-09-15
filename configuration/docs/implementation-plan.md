@@ -2341,6 +2341,33 @@ robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 
   timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
   `motorpolicy::timerPeriodTicks` never returns 0.
 
+**MEASURED 2026-09-15 — Mode B on 1.0.91: 0 of 394 lost, window counts correct, Mode A
+light sleep restored.** Node 2 fw 1.0.91 (`7936459`), hub `375c57b`, production
+profile, bench LNA gain G6, `CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=2`, two 300 s
+ModeTests back to back.
+
+| Mode B, MAC-0 (1.0.91) | run 1 | run 2 |
+|---|---|---|
+| marks received | **197 / 197, 0 gaps** | **197 / 197, 0 gaps** |
+| windows armed / hit | 193 / 193 (WMR 0) | 191 / 191 (WMR 0) |
+| **HW-8:** oneShot n vs windows armed | 194 ≥ 193, p99 −587 us | 192 ≥ 191, p99 −420 us |
+| armResidual p99 | 400 us | 388 us |
+| phaseErr p50 / p99 / max | +114 / +2 674 / +2 839 us | +889 / +4 082 / +4 309 us |
+| residual | +9 ppm | −11 ppm |
+| windows closed empty during the tests | 0 | 0 (6 after the tests, as the hub stopped) |
+
+| light sleep / sleeps per minute | 1.0.89 (RxSingle) | 1.0.90 | **1.0.91** |
+|---|---|---|---|
+| Mode A, steady | 96.7 % / 334 | 89.5 % / 166 | **96.7 % / 330** |
+| Mode B, steady | 91.3 % / 133 | 87.2 % / 91 | **89.5–90.1 % / 131** |
+
+* **The race fix held:** every armed window that caught its frame was counted as a hit.
+* **Idle-before-sleep 2 restored Mode A** to the RxSingle figure.
+* **Mode B still sleeps 1.2–1.8 points less than 1.0.89.** 1.0.89 ran idle-before-sleep 3,
+  so this is not a like-for-like comparison. The next measurement is a 1:1 comparison of
+  the two window kinds in one version (1.0.92, `CONFIG_BLINDS_RX_WINDOW_SINGLE`),
+  identical in everything else.
+
 **MEASURED 2026-09-15 19:13–19:46 — Mode B on 1.0.90, receive windows in RxContinuous
 closed by the node's timer: 0 of 395 lost, but two defects.** Node 2 fw 1.0.90
 (`07de536`), hub `f83b49f`, production profile, bench LNA gain G6 as on 1.0.89, two
