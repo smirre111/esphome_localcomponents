@@ -39,6 +39,8 @@ struct TxPolicy {
     uint32_t supersede_gen{0};
     // earliest_us is the destination's grid mark (header onMark), mirrored.
     bool     on_mark{false};
+    // Whether a node answers the frame (response window held), mirrored.
+    bool     expects_reply{true};
 };
 
 
@@ -82,6 +84,10 @@ public:
     uint32_t msUntilNextT0(uint8_t slot) const;
     int64_t  busyUntilUs() const;
     int64_t  nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+    // The frame-shaped form; the shim has no reservations, so it is the same
+    // floor arithmetic.
+    int64_t  nextClearT0ForSlotUs(uint8_t slot, int64_t now_us, int copies,
+                                  size_t len, bool expects_reply) const;
     uint32_t msUntilNextClearT0(uint8_t slot) const;
     // Test seam: stand a burst in the way of the grid.
     int64_t  busy_until_us{0};
@@ -107,6 +113,7 @@ public:
     std::vector<uint32_t> sent_supersede_gen;
     std::vector<int64_t> sent_earliest_us;
     bool                 last_on_mark{false};
+    bool                 last_expects_reply{true};
     // The sim's "now" for grid arithmetic. Production reads esp_timer_get_time();
     // a test sets this instead so the answer is deterministic.
     int64_t sim_now_us{0};

@@ -3102,6 +3102,8 @@ namespace esphome
       // The normal transmit queue, with a per-frame copy count. Never
       // sendPacketOnce() from here — see the banner on build_mode_test_frame_.
       TxPolicy p{/*copies=*/(int) self->mt_copies_, /*stride_ms=*/0};
+      // Nobody answers a mark: no response window held or reserved after it.
+      p.expects_reply = false;
 
       // D4: IN MODE B THE MARK GOES ON THE NODE'S GRID MARK.
       //
@@ -3124,10 +3126,15 @@ namespace esphome
       if (self->mt_mode_ == 2 && self->parent_->gridStarted())
       {
         const int64_t now = esp_timer_get_time();
-        int64_t t0 = self->parent_->nextClearT0ForSlotUs(self->grid_slot_, now);
+        // By interval: a mark before a queued beacon is clear (2026-09-15).
+        const int copies = (int) self->mt_copies_;
+        const size_t len = self->mt_frame_len_;
+        int64_t t0 = self->parent_->nextClearT0ForSlotUs(self->grid_slot_, now, copies,
+                                                         len, false);
         if (t0 <= self->mt_last_mark_t0_us_)
           t0 = self->parent_->nextClearT0ForSlotUs(self->grid_slot_,
-                                                   self->mt_last_mark_t0_us_ + 1);
+                                                   self->mt_last_mark_t0_us_ + 1,
+                                                   copies, len, false);
         if (t0 > 0)
         {
           p.earliest_us = loratiming::fireInstantUs(t0, 0);

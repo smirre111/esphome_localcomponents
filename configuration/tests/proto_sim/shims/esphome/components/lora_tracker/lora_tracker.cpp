@@ -110,6 +110,11 @@ int64_t LORATracker::nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const {
     return nextT0ForSlotUs(slot, floor_us);
 }
 
+int64_t LORATracker::nextClearT0ForSlotUs(uint8_t slot, int64_t now_us, int, size_t,
+                                          bool) const {
+    return nextClearT0ForSlotUs(slot, now_us);
+}
+
 uint32_t LORATracker::msUntilNextClearT0(uint8_t slot) const {
     if (!grid_started_) return 0;
     const int64_t t0 = nextClearT0ForSlotUs(slot, sim_now_us);
@@ -129,6 +134,7 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     last_supersede_gen = policy.supersede_gen;
     sent_supersede_gen.push_back(policy.supersede_gen);
     last_on_mark = policy.on_mark;
+    last_expects_reply = policy.expects_reply;
 
     // A simulated drop happens AFTER the policy is recorded and BEFORE anything
     // reaches the air: production drops in send() too, having already computed

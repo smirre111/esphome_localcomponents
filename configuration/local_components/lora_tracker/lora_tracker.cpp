@@ -421,8 +421,13 @@ namespace esphome
       // placed frame those differ by up to kPrepareLeadUs, and this number is
       // what another caller consults to decide whether the channel is free.
       const int64_t tx_start_us = (fire_at_us > now_us) ? fire_at_us : now_us;
+      const bool expects_reply = rx_buffer->tx_expects_reply != 0;
       this->burst_busy_until_us_ =
-          this->burstEndUs_(tx_start_us, copies, stride_ms, rx_buffer->length);
+          this->burstEndUs_(tx_start_us, copies, stride_ms, rx_buffer->length, expects_reply);
+      // A placed frame reserved its span in send(); an unplaced one only now.
+      if (rx_buffer->tx_earliest_us <= 0)
+        this->reserve_(tx_start_us, this->burst_busy_until_us_);
+      this->last_tx_expects_reply_ = expects_reply;
 
       lora_tx_busy_ = true;
       this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
@@ -465,7 +470,11 @@ namespace esphome
           lora_receive(0);
           if (this->radio_mutex_ != nullptr)
             xSemaphoreGive(this->radio_mutex_);
-          vTaskDelay(pdMS_TO_TICKS(this->responseWindowMs));
+          // Only after a frame somebody answers. Held after a beacon, it sent the
+          // next round's first mark 344 872 us late (measured 2026-09-15).
+          const uint32_t hold_ms = this->postTxHoldMs();
+          if (hold_ms > 0)
+            vTaskDelay(pdMS_TO_TICKS(hold_ms));
           continue;
         }
 
@@ -793,6 +802,7 @@ namespace esphome
       p.stride_ms   = 0;
       p.earliest_us = fire;
       p.priority    = 0;              // a beacon that slips its mark is useless
+      p.expects_reply = false;        // a broadcast nobody answers: no hold after it
       if (!this->send(buf.data(), buf.size(), p))
       {
         // Dropped rather than queued: no pool buffer. Say so, and let the next
@@ -863,14 +873,25 @@ namespace esphome
     // including the response window sendTask holds the radio in afterwards. One
     // expression for the burst on the air and for a frame merely placed.
     int64_t LORATracker::burstEndUs_(int64_t start_us, int copies, uint32_t stride_ms,
-                                     size_t len) const
+                                     size_t len, bool expects_reply) const
     {
       const int      n      = (copies > 0) ? copies : this->txSlotsPerRound;
       const uint32_t stride = (stride_ms > 0) ? stride_ms : (uint32_t) this->txIntervalMs;
       return start_us + (int64_t) (n - 1) * (int64_t) stride * 1000
            + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) len)
            + (int64_t) loratiming::kPreambleToT0Us
-           + (int64_t) this->responseWindowMs * 1000;
+           + (expects_reply ? (int64_t) this->responseWindowMs * 1000 : 0);
+    }
+
+    void LORATracker::reserve_(int64_t start_us, int64_t end_us)
+    {
+      std::lock_guard<std::mutex> lock(this->reservations_mutex_);
+      size_t victim = 0;
+      for (size_t i = 1; i < kMaxReservations; ++i)
+        if (this->reservations_[i].end_us < this->reservations_[victim].end_us)
+          victim = i;
+      this->reservations_[victim].start_us = start_us;
+      this->reservations_[victim].end_us   = end_us;
     }
 
     int64_t LORATracker::placedBusyUntilUs() const
@@ -899,6 +920,43 @@ namespace esphome
       if (this->burst_busy_until_us_ > floor_us)  floor_us = this->burst_busy_until_us_;
       if (this->placed_busy_until_us_ > floor_us) floor_us = this->placed_busy_until_us_;
       return this->nextT0ForSlotUs(slot, floor_us);
+    }
+
+    // Clear of every reservation, by interval. The two-argument form above
+    // places after the END of the latest reservation, so a single-copy mark
+    // 1.4 s before a queued beacon was skipped although the air was free —
+    // measured 2026-09-15: two of node 2's marks never sent around a beacon, two
+    // empty windows, one short of demotion.
+    int64_t LORATracker::nextClearT0ForSlotUs(uint8_t slot, int64_t now_us, int copies,
+                                              size_t len, bool expects_reply) const
+    {
+      if (!this->grid_started_)
+        return now_us;
+
+      int64_t t0 = this->nextT0ForSlotUs(slot, now_us);
+      std::lock_guard<std::mutex> lock(this->reservations_mutex_);
+      for (uint32_t n = 0; n < kMaxClearSearchRounds; ++n, t0 += (int64_t) timedgrid::kRoundUs)
+      {
+        const int64_t fire  = loratiming::fireInstantUs(t0, 0);
+        // The node listens from a guard before T0: another frame starting inside
+        // that guard would be the one it receives.
+        const int64_t start = fire - (int64_t) timedgrid::kGuardUs;
+        const int64_t end   = this->burstEndUs_(fire, copies, 0, len, expects_reply);
+        bool clear = true;
+        for (const Reservation &r : this->reservations_)
+        {
+          if (r.end_us > now_us && start < r.end_us && r.start_us < end)
+          {
+            clear = false;
+            break;
+          }
+        }
+        if (clear)
+          return t0;
+      }
+      ESP_LOGW(TAG, "no clear mark for slot %u in %u rounds", (unsigned) slot,
+               (unsigned) kMaxClearSearchRounds);
+      return t0;
     }
 
     uint32_t LORATracker::msUntilNextClearT0(uint8_t slot) const
@@ -965,6 +1023,7 @@ namespace esphome
         rx_buffer->tx_supersede_key = policy.supersede_key;
         rx_buffer->tx_supersede_gen = policy.supersede_gen;
         rx_buffer->tx_on_mark       = policy.on_mark ? 1 : 0;
+        rx_buffer->tx_expects_reply = policy.expects_reply ? 1 : 0;
 
         // Recorded HERE, at the moment the frame is accepted, not when it
         // reaches the front. A second command queued while the first is still
@@ -987,9 +1046,11 @@ namespace esphome
         if (policy.earliest_us > 0)
         {
           const int64_t end_us = this->burstEndUs_(policy.earliest_us, policy.copies,
-                                                   policy.stride_ms, copy_len);
+                                                   policy.stride_ms, copy_len,
+                                                   policy.expects_reply);
           if (end_us > this->placed_busy_until_us_)
             this->placed_busy_until_us_ = end_us;
+          this->reserve_(policy.earliest_us, end_us);
         }
         return true;
       }
@@ -1120,6 +1181,20 @@ namespace esphome
             lora_client_operation_message__pack(burstMsg, cbuf);
             this->sendPacketAt(cbuf, clen, stamped ? fire_at_us : copy_at_us);
             free(cbuf);
+            // The stamp check below compares against the stamp, which is moved
+            // later when the frame was released late — so a mark that left 20 ms
+            // after its instant, honestly stamped, was invisible. A Mode B node
+            // listens at the MARK. Measured against it here.
+            static constexpr int64_t kMarkLateToleranceUs = 3000;
+            if (cnt == 0 && on_mark_eff &&
+                this->last_fire_us_ - copy_at_us > kMarkLateToleranceUs)
+            {
+              this->tx_mark_late_++;
+              ESP_LOGW(TAG, "on-mark frame msgid %u left %lld us after its mark (%u so far)",
+                       (unsigned) burstMsg->header->msgid,
+                       (long long) (this->last_fire_us_ - copy_at_us),
+                       (unsigned) this->tx_mark_late_);
+            }
             if (stamped && this->last_fire_us_ - fire_at_us > kStampToleranceUs)
             {
               this->tx_stamp_misses_++;

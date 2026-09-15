@@ -973,6 +973,110 @@ TEST(RealTrackerDefer, APlacedFrameReservesTheChannelBeforeItIsSent) {
         << "and it is still one of this slot's marks";
 }
 
+// ---------------------------------------------------------------------------
+// Around a beacon. Measured 2026-09-15 on node 2 (fw 1.0.76, hub 2097467): at one
+// beacon two of node 2's marks were never sent, at the next one mark left
+// 344 872 us late. Both from the beacon's 400 ms response window — held by
+// sendTask and reserved in placement — for a broadcast nobody answers.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct BeaconFixture {
+    DeferProbe t;
+    int64_t    a{0};
+    int64_t    beacon_t0{0};
+    static constexpr uint8_t kSlot    = 1;
+    static constexpr size_t  kMarkLen = 58;
+
+    void queueBeacon(bool expects_reply) {
+        lorahal::rec().reset();
+        proto_sim_timer_reset();
+        t.init();
+        t.startGrid();
+        a = t.gridAnchorUs();
+        proto_sim_timer_set_now_us(a);
+        beacon_t0 = t.nextT0ForSlotUs(timedgrid::kBeaconSlotIndex, a + 3'000'000);
+        auto frame = packedOperationFrame();
+        TxPolicy bp;
+        bp.copies        = 1;
+        bp.priority      = 0;
+        bp.expects_reply = expects_reply;
+        bp.earliest_us   = loratiming::fireInstantUs(beacon_t0, 0);
+        ASSERT_TRUE(t.send(frame.data(), frame.size(), bp));
+    }
+    int64_t firstMarkAfterBeacon() const { return t.nextT0ForSlotUs(kSlot, beacon_t0 + 1); }
+};
+}  // namespace
+
+TEST(RealTrackerDefer, TheMarkAfterABeaconIsClear) {
+    BeaconFixture f;
+    f.queueBeacon(/*expects_reply=*/false);
+    ASSERT_EQ(f.firstMarkAfterBeacon() - f.beacon_t0, 2 * (int64_t) timedgrid::kSlotPitchUs)
+        << "precondition: slot 1 of the next round is two pitches after the beacon";
+
+    EXPECT_EQ(f.t.nextClearT0ForSlotUs(BeaconFixture::kSlot, f.beacon_t0, 1,
+                                       BeaconFixture::kMarkLen, false),
+              f.firstMarkAfterBeacon())
+        << "a single-copy mark 94 ms after a beacon overlaps nothing";
+}
+
+TEST(RealTrackerDefer, AMarkBeforeAQueuedBeaconIsClear) {
+    BeaconFixture f;
+    f.queueBeacon(/*expects_reply=*/false);
+    const int64_t first = f.t.nextT0ForSlotUs(BeaconFixture::kSlot, f.a);
+    ASSERT_LT(first, f.beacon_t0);
+    EXPECT_EQ(f.t.nextClearT0ForSlotUs(BeaconFixture::kSlot, f.a, 1,
+                                       BeaconFixture::kMarkLen, false),
+              first)
+        << "the air before the beacon is free; placing after its END skipped marks";
+}
+
+TEST(RealTrackerDefer, AnAnsweredFrameStillPushesTheMarkInsideItsResponseWindow) {
+    // The other side: a frame a node DOES answer keeps its window, so the mark
+    // 94 ms after it moves a round — the interval test must not simply ignore it.
+    BeaconFixture f;
+    f.queueBeacon(/*expects_reply=*/true);
+    EXPECT_EQ(f.t.nextClearT0ForSlotUs(BeaconFixture::kSlot, f.beacon_t0, 1,
+                                       BeaconFixture::kMarkLen, false),
+              f.firstMarkAfterBeacon() + (int64_t) timedgrid::kRoundUs);
+}
+
+TEST(RealTrackerDefer, AMarkIsNotPlacedOnTopOfAnotherPlacedMark) {
+    BeaconFixture f;
+    f.queueBeacon(/*expects_reply=*/false);
+    const int64_t first = f.t.nextT0ForSlotUs(BeaconFixture::kSlot, f.a);
+    auto frame = packedOperationFrame();
+    TxPolicy mark;
+    mark.copies        = 1;
+    mark.expects_reply = false;
+    mark.earliest_us   = loratiming::fireInstantUs(first, 0);
+    ASSERT_TRUE(f.t.send(frame.data(), frame.size(), mark));
+    EXPECT_EQ(f.t.nextClearT0ForSlotUs(BeaconFixture::kSlot, f.a, 1,
+                                       BeaconFixture::kMarkLen, false),
+              first + (int64_t) timedgrid::kRoundUs);
+}
+
+TEST(RealTrackerTx, TheResponseWindowIsHeldOnlyAfterAnAnsweredFrame) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    TxProbe t;
+    t.init();
+    auto frame = packedOperationFrame();
+
+    TxPolicy unanswered;
+    unanswered.copies        = 1;
+    unanswered.expects_reply = false;
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), unanswered));
+    ASSERT_TRUE(t.serviceTxQueue(0));
+    EXPECT_EQ(t.postTxHoldMs(), 0u) << "a beacon or a mark: no hold";
+
+    TxPolicy answered;
+    answered.copies = 1;
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), answered));
+    ASSERT_TRUE(t.serviceTxQueue(0));
+    EXPECT_EQ(t.postTxHoldMs(), 400u) << "a command: the node's reply window";
+}
+
 TEST(RealTrackerDefer, WithoutAGridThereIsNothingToDeferTo) {
     DeferProbe t;
     ASSERT_FALSE(t.gridStarted());

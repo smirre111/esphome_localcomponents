@@ -8,6 +8,7 @@
 #include <esp_bt_defs.h> //For esp_bd_addr_t
 
 #include <array>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,7 @@ typedef struct
   uint32_t tx_supersede_key;  // 0 = supersedes nothing, superseded by nothing
   uint32_t tx_supersede_gen;
   uint8_t  tx_on_mark;        // TxPolicy::on_mark, stamped into the header
+  uint8_t  tx_expects_reply;  // TxPolicy::expects_reply: hold the response window
 } rx_buffer_t;
 
 // Statistics
@@ -121,6 +123,15 @@ namespace esphome
     // commit the frame's arrival as a phase sample. A Class A reply is placed
     // too, but on the node's uplink, not on its mark — it must leave this false.
     bool     on_mark{false};
+
+    // Whether a node answers this frame, so the hub must hold the channel in RX
+    // for responseWindowMs after it — and reserve that span when placing other
+    // frames. A broadcast beacon and a ModeTest mark are answered by nobody.
+    // Measured 2026-09-15 on node 2: the beacon's 400 ms hold sent the next
+    // round's slot-1 mark (94 ms after it) 344 872 us late, and its reservation
+    // made the hub skip two marks — lost frames and empty windows around every
+    // beacon.
+    bool     expects_reply{true};
   };
 
 
@@ -246,6 +257,15 @@ namespace esphome
       // Placed frames that reached the radio more than a guard past their mark,
       // and so went out without claiming it. Should stay 0; see sendPacketBurst.
       uint32_t  latePlacedFrames() const { return this->tx_late_placed_; }
+      // On-mark frames that left more than kMarkLateToleranceUs after their mark
+      // but inside the guard, so they still claimed it. Should stay 0.
+      uint32_t  lateMarks() const { return this->tx_mark_late_; }
+      // How long sendTask holds the radio in RX after the frame it just sent:
+      // the response window if a node answers that frame, otherwise nothing.
+      uint32_t  postTxHoldMs() const
+      {
+        return this->last_tx_expects_reply_ ? (uint32_t) this->responseWindowMs : 0u;
+      }
 
       // T-2: frames refused because the buffer pool was empty.
       //
@@ -288,6 +308,12 @@ namespace esphome
       // it — before sendTask has dequeued it. nextClearT0ForSlotUs clears it too.
       int64_t   placedBusyUntilUs() const;
       int64_t   nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+      // The next T0 for `slot` where a frame of this shape — its guard before,
+      // its copies, air time and (if answered) response window after — overlaps
+      // nothing reserved. Unlike the two-argument form, a mark BEFORE a queued
+      // frame is clear if it ends before that frame starts.
+      int64_t   nextClearT0ForSlotUs(uint8_t slot, int64_t now_us, int copies,
+                                     size_t len, bool expects_reply) const;
       uint32_t  msUntilNextClearT0(uint8_t slot) const;
 
       // Returns false when the frame was DROPPED rather than queued — no free
@@ -458,6 +484,23 @@ namespace esphome
       // The same for frames placed but not yet dequeued. See send().
       int64_t placed_busy_until_us_{0};
       uint32_t tx_late_placed_{0};
+      uint32_t tx_mark_late_{0};
+      // Whether the frame sendTask last sent is answered (see postTxHoldMs).
+      bool last_tx_expects_reply_{true};
+      // Every span the channel is spoken for: frames placed and not yet sent, and
+      // the burst on the air. Written from send() (loop and esp_timer tasks) and
+      // sendTask, hence the mutex. Eight covers the pool (POOL_SIZE) plus the
+      // burst on air; a full table evicts the span that ends first.
+      struct Reservation
+      {
+        int64_t start_us{0};
+        int64_t end_us{0};
+      };
+      static constexpr size_t   kMaxReservations      = 8;
+      static constexpr uint32_t kMaxClearSearchRounds = 64;
+      std::array<Reservation, kMaxReservations> reservations_{};
+      mutable std::mutex reservations_mutex_;
+      void reserve_(int64_t start_us, int64_t end_us);
       // The instant lora_tx() was called for the last copy, and how many copies
       // missed their stamped instant. See kStampLeadUs.
       int64_t last_fire_us_{0};
@@ -467,7 +510,7 @@ namespace esphome
       bool fireStampFor_(int64_t t0_us, uint32_t *round, uint32_t *offset_us) const;
       // One expression for when a burst stops occupying the channel.
       int64_t burstEndUs_(int64_t start_us, int copies, uint32_t stride_ms,
-                          size_t len) const;
+                          size_t len, bool expects_reply = true) const;
 
       rx_buffer_t *get_free_buffer(TickType_t timeout);
       esp_err_t return_buffer_to_pool(rx_buffer_t *buffer);
