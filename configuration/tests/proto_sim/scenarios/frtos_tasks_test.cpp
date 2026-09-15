@@ -79,6 +79,9 @@ struct Probe : LoraInterface {
     using LoraInterface::grid_aim_t0_us_;
     using LoraInterface::grid_opened_t0_us_;
     using LoraInterface::trial_armed_;
+    // An RxSingle window that ended early: when it started, and restarts so far.
+    using LoraInterface::window_listen_esp_us_;
+    using LoraInterface::window_restarts_;
 };
 
 struct Irq : public ::testing::Test {
@@ -151,6 +154,65 @@ TEST_F(Irq, AnEmptyWindowNobodyPromisedAnythingInIsNotAMissedMark) {
     dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
     EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
         << "no mark was armed, so nothing was promised and nothing was missed";
+}
+
+// ---------------------------------------------------------------------------
+// An RxSingle that gives up early is not a closed window. Measured 2026-09-15 on
+// node 2 (fw 1.0.81): six Mode B windows listened 5.8-17.4 ms of 29.44 ms with
+// the symbol timeout intact — one failed detection each — and each lost a frame.
+// ---------------------------------------------------------------------------
+
+namespace {
+// A mark window that started listening at `start_us`.
+void openMarkWindowAt(Probe &lif, CmdDispatcher &disp, int64_t start_us) {
+    proto_sim_timer_set_now_us(start_us);
+    disp.noteMarkArmed();
+    lif.window_listen_esp_us_ = start_us;
+    lif.window_restarts_      = 0;
+}
+}  // namespace
+
+TEST_F(Irq, AnEarlyTimeoutListensOnForTheRestOfTheWindow) {
+    openMarkWindowAt(lif, disp, 5'000'000);
+    proto_sim_timer_advance_us(6'000);            // gave up after 6 ms (1.0.81: 5.8 ms)
+    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "the window is still open: nothing missed yet";
+    EXPECT_EQ(r().count("lora_rxSingle"), 1u) << "listening again";
+    EXPECT_EQ(r().sym_timeout, (timedgrid::kWindowUs - 6'000) / loratiming::kSymbolUs)
+        << "for what is left of the window, never past its original end";
+    EXPECT_EQ(r().count("lora_sleep"), 0u) << "not slept: it is still listening";
+    EXPECT_EQ(lif.earlyTimeoutRestarts(), 1u);
+
+    // The restarted window runs out for real.
+    proto_sim_timer_advance_us((int64_t) timedgrid::kWindowUs - 6'000);
+    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u) << "now it closed empty";
+    EXPECT_GE(r().count("lora_sleep"), 1u);
+}
+
+TEST_F(Irq, AnEarlyTimeoutWithTooLittleWindowLeftCloses) {
+    openMarkWindowAt(lif, disp, 5'000'000);
+    // Fewer than kRestartMinSymbols left: no preamble could be detected in it.
+    proto_sim_timer_advance_us((int64_t) timedgrid::kWindowUs
+                               - (int64_t) (timedgrid::kRestartMinSymbols - 1) * loratiming::kSymbolUs);
+    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+    EXPECT_EQ(r().count("lora_rxSingle"), 0u);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
+}
+
+TEST_F(Irq, EarlyTimeoutRestartsAreBounded) {
+    openMarkWindowAt(lif, disp, 5'000'000);
+    for (uint8_t i = 0; i < timedgrid::kMaxWindowRestarts; ++i) {
+        proto_sim_timer_advance_us(1'000);
+        dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+        ASSERT_EQ(disp.consecutiveMissedMarks(), 0u) << "restart " << (int) i;
+    }
+    proto_sim_timer_advance_us(1'000);
+    dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+    EXPECT_EQ(r().count("lora_rxSingle"), (size_t) timedgrid::kMaxWindowRestarts)
+        << "persistent interference must not hold the radio open";
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
 }
 
 TEST_F(Irq, AnUnhandledDio1FlagStillSleepsTheRadio) {
