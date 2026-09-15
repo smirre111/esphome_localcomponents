@@ -2351,6 +2351,35 @@ robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 
   timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
   `motorpolicy::timerPeriodTicks` never returns 0.
 
+**MEASURED 2026-09-15 22:00–23:18 — long run on 1.0.92 RxContinuous, 2 985 marks: 5
+lost (~1 in 600), but only 1 408 of them in Mode B.** Node 2 fw 1.0.92 continuous (the
+1:1 image, bench gain G6, idle-before-sleep 2), hub `ea51f1e`, five 900 s ModeTests (the
+node's cap) back to back, START 22:01:25 / 22:16:41 / 22:31:56 / 22:47:11 / 23:02:26.
+
+| test | marks lost | Mode B windows armed / hit | promoted after START | phaseErr p99 |
+|---|---|---|---|---|
+| 1 | 1 / 597 | 591 / 589 | 13.6 s | 1 964 us |
+| 2 | 2 / 597 | 204 / 204 | 589.7 s | 958 us |
+| 3 | 1 / 597 | 205 / 204 | 589.2 s | 1 050 us |
+| 4 | 1 / 596 | 205 / 202 | 589.2 s | 1 264 us |
+| 5 | 0 / 597 | 203 / 203 | 591.0 s | 900 us |
+
+* **The run did not measure what it was meant to.** Each test's end demotes the node
+  (the hub stops, three marks go empty). The next test starts 7–8 s later, the node has
+  8 good samples within ~14 s, and then sits on reason 7 (RecentlyDemoted) until the
+  600 s anti-flap hold since that demotion runs out. Tests 2–5 were ~290 s of Mode B
+  each; their other marks were caught by Mode A and trial windows.
+* **Inside Mode B:** 1 408 windows armed, 1 402 hit. Two windows closed empty during a
+  test. One at 1 820.9 s had −61 dBm on air: the undetected strong preamble again. The
+  other, at 4 720.5 s, closed at the noise floor. The remaining misses (armed, neither hit
+  nor closed empty) have no log of their own; see review finding 5
+  (`docs/review-2026-09-15.md`).
+* No reset, no stuck window, no early-timeout restart; residual 0 to −1 ppm throughout.
+* Steady Mode B light sleep 91.2 % (RX on 4.4 %), as in the 1:1 run. The Mode A figure
+  (87.5 %) includes trial windows and says nothing about Mode A.
+* **A clean 3 000-mark Mode B run** needs either a longer bench ModeTest cap than 900 s,
+  or tests chained without the demotion between them.
+
 **MEASURED 2026-09-15 — 1:1 window-kind comparison on 1.0.92: RxSingle and RxContinuous
 each lost 1 of about 395; the loss is an undetected preamble in both.** Node 2, one
 version (1.0.92, `b47dd06`) built twice, identical except
