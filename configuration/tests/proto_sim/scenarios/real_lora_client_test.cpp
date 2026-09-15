@@ -279,6 +279,66 @@ struct RealHubHarness {
 
 } // namespace real_helpers
 
+// ---------------------------------------------------------------------------
+// A GridSync is re-published until the node confirms it. Measured 2026-09-15
+// on node 2: the single GridSync sent after a login was lost and nothing re-sent
+// it — the node sat in Mode A for 13 minutes with Timed Mode ON.
+// ---------------------------------------------------------------------------
+
+namespace {
+// handle_command_ack_ is protected. A probe that adds no state, so the harness's
+// listener can be addressed through it — the node's CommandAck reaches exactly
+// this function in production (set_response -> handle_command_ack_).
+struct AckProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::handle_command_ack_;
+};
+void deliverAck(LORAClient &rol, uint32_t msgid) {
+    static_cast<AckProbe &>(rol).handle_command_ack_(msgid);
+}
+}  // namespace
+
+TEST(RealLoraClient, AnUnconfirmedGridSyncIsRepublishedUntilTheNodeAcksIt) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    const uint32_t first = h.rol.gridsync_msgids_[0];
+
+    h.clock.tick(esphome::lora_tracker::LORAListener::kGridSyncRetryMs + 1);
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 1u) << "no confirmation: published again";
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck());
+
+    deliverAck(h.rol, first);   // a late ack for the FIRST publish still counts
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+    h.clock.tick(5 * esphome::lora_tracker::LORAListener::kGridSyncRetryMs);
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 1u) << "confirmed: no more re-publishes";
+}
+
+TEST(RealLoraClient, AnAckForAnotherFrameDoesNotConfirmTheGrid) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    deliverAck(h.rol, h.rol.gridsync_msgids_[0] + 100);
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck())
+        << "only an ack naming a GridSync's own msgid confirms the grid";
+}
+
+TEST(RealLoraClient, GridSyncRepublishingIsBounded) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    for (int i = 0; i < 20; ++i)
+        h.clock.tick(esphome::lora_tracker::LORAListener::kGridSyncRetryMs + 1);
+    EXPECT_EQ(h.rol.gridSyncRepublishes(),
+              esphome::lora_tracker::LORAListener::kGridSyncMaxRepublishes)
+        << "a node that never answers must not cost a burst every 6 s forever";
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+}
+
 // Real-code A1: REGISTER → real LORAListener sends ClientConfig with the
 // listener's address and the matching MAC, then schedules its 500 ms
 // login_startup timer.
@@ -1037,7 +1097,7 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     // kPreambleToT0Us later; a producer that forgets that conversion puts the
     // frame 3136 us late and this is the assertion that catches it.
     const int64_t fire      = tracker.last_earliest_us;
-    const int64_t seen_t0   = fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t seen_t0   = fire + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     const int64_t win_open  = classa::rx1OpenUs(kT0Node17);
     const int64_t win_close = classa::rx1CloseUs(kT0Node17);
     EXPECT_GE(seen_t0, win_open)
@@ -1218,7 +1278,7 @@ TEST(RealLoraClient, AReplyTooLateForRx1GoesToRx2RatherThanToABurst) {
     // code computes", but "the T0 the NODE sees lands inside the window the
     // node opens", built from classa::rx2OpenUs/rx2CloseUs off its own uplink.
     const int64_t fire      = n.tracker.last_earliest_us;
-    const int64_t seen_t0   = fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t seen_t0   = fire + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     const int64_t win_open  = classa::rx2OpenUs(kT0Uplink);
     const int64_t win_close = classa::rx2CloseUs(kT0Uplink);
     EXPECT_GE(seen_t0, win_open)  << "frame arrives before RX2 opens";
@@ -1246,7 +1306,7 @@ TEST(RealLoraClient, AWindowTooCloseToFireOnIsNotAWindow) {
 
     ASSERT_TRUE(n.rol.send_into_class_a_window_(payload.data(), payload.size()));
     const int64_t seen_t0 =
-        n.tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us;
+        n.tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     EXPECT_EQ(seen_t0, kT0Uplink + (int64_t) classa::kRx2DelayUs)
         << "an RX1 the queue cannot fire on must not be claimed as placed";
 }
@@ -2266,7 +2326,7 @@ TEST(GridAligned, WithAlignmentOnTheFrameIsDeferredToT0) {
     // would restate the code back at itself AND hide the missing conversion,
     // which is exactly how a 3136 us placement error survived review.
     const int64_t fire    = h.tracker.last_earliest_us;
-    const int64_t seen_t0 = fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t seen_t0 = fire + (int64_t) loratiming::kDownlinkPreambleToT0Us;
 
     // The real contract: that T0 is a mark of THIS node's slot. A mark is a
     // fixed point of nextT0ForSlotUs — asking for the next mark strictly after
@@ -2991,14 +3051,14 @@ TEST(GridAligned, AModeBTestMarkLandsOnTheNodesGridMark) {
 
     const int64_t fire    = h.tracker.last_earliest_us;
     ASSERT_GT(fire, 0) << "a Mode B mark must be PLACED, not sent whenever the timer fired";
-    const int64_t seen_t0 = fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t seen_t0 = fire + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     EXPECT_EQ(h.tracker.nextT0ForSlotUs(h.rol.grid_slot(), seen_t0 - 1), seen_t0)
         << "the mark's T0 must land ON a mark of this node's slot";
     EXPECT_GT(seen_t0, h.tracker.sim_now_us) << "and in the future";
 
     // A second tick must not aim at the same mark.
     h.rol.mode_test_tick_for_test();
-    EXPECT_GT(h.tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us, seen_t0)
+    EXPECT_GT(h.tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us, seen_t0)
         << "one mark per grid mark: a jittered tick must move on, not double up";
     h.rol.stop_mode_test();
 }

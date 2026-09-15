@@ -33,11 +33,11 @@ TEST(TimedGrid, SlotPitchIsExact) {
 
 TEST(TimedGrid, WindowSpan) {
     EXPECT_EQ(kWindowUs, 29440u);
-    EXPECT_EQ(kArmLeadUs, 17216u);
+    EXPECT_EQ(kArmLeadUs, 18240u);
 
     const int64_t t0 = 1'000'000;
-    EXPECT_EQ(windowOpenUs(t0),  t0 - 17216);
-    EXPECT_EQ(windowCloseUs(t0), t0 + 12224);   // 29440 - 17216
+    EXPECT_EQ(windowOpenUs(t0),  t0 - 18240);
+    EXPECT_EQ(windowCloseUs(t0), t0 + 11200);   // 29440 - 18240
 }
 
 TEST(TimedGrid, AdjacentWindowsAreClear) {
@@ -135,18 +135,19 @@ TEST(TimedGrid, ServableSlotsAtTheAssumedTurnaround) {
 
 TEST(TimedGrid, SensitivityToTheTurnaroundThatWasNeverMeasured) {
     // The headline (k+3, 10 nodes/round) is comfortable. The ack case is not:
-    // it breaks at 36.5 ms, and the assumed value is 20 ms with ZERO budgeted
-    // for DRAIN. If HW-7 comes back above 36.5 ms, this is the number that
-    // moved, and this test is where it shows.
-    EXPECT_EQ(maxTurnaroundForDelta(60,  3), 62929u);
-    EXPECT_EQ(maxTurnaroundForDelta(152, 4), 56556u);
-    EXPECT_EQ(maxTurnaroundForDelta(25,  2), 36534u);
+    // it breaks at 35.5 ms, and the assumed value is 20 ms with ZERO budgeted
+    // for DRAIN. If HW-7 comes back above 35.5 ms, this is the number that
+    // moved, and this test is where it shows. Each edge is 1 024 us tighter
+    // than with the 8-symbol downlink preamble (2026-09-15: now 12 symbols).
+    EXPECT_EQ(maxTurnaroundForDelta(60,  3), 61905u);
+    EXPECT_EQ(maxTurnaroundForDelta(152, 4), 55532u);
+    EXPECT_EQ(maxTurnaroundForDelta(25,  2), 35510u);
 
     // Just inside and just outside each edge.
-    EXPECT_EQ(nextServableSlotDelta(25, 36534), 2u);
-    EXPECT_EQ(nextServableSlotDelta(25, 36535), 3u);
-    EXPECT_EQ(nextServableSlotDelta(60, 62929), 3u);
-    EXPECT_EQ(nextServableSlotDelta(60, 62930), 4u);
+    EXPECT_EQ(nextServableSlotDelta(25, 35510), 2u);
+    EXPECT_EQ(nextServableSlotDelta(25, 35511), 3u);
+    EXPECT_EQ(nextServableSlotDelta(60, 61905), 3u);
+    EXPECT_EQ(nextServableSlotDelta(60, 61906), 4u);
 }
 
 TEST(TimedGrid, ServableDeltaIsMonotonicInTurnaround) {

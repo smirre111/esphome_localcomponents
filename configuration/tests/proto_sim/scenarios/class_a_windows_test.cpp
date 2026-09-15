@@ -26,10 +26,10 @@ TEST(ClassAWindows, OffsetsAreFromT0UplinkNotTxDone) {
 
 TEST(ClassAWindows, WindowPositions) {
     const int64_t t0 = 0;
-    EXPECT_EQ(rx1OpenUs(t0),  1000000 - 17216);
-    EXPECT_EQ(rx1CloseUs(t0), 1000000 - 17216 + 29440);
-    EXPECT_EQ(rx2OpenUs(t0),  2000000 - 17216);
-    EXPECT_EQ(rx2CloseUs(t0), 2000000 - 17216 + 29440);
+    EXPECT_EQ(rx1OpenUs(t0),  1000000 - 18240);
+    EXPECT_EQ(rx1CloseUs(t0), 1000000 - 18240 + 29440);
+    EXPECT_EQ(rx2OpenUs(t0),  2000000 - 18240);
+    EXPECT_EQ(rx2CloseUs(t0), 2000000 - 18240 + 29440);
 }
 
 TEST(ClassAWindows, WindowsDoNotOverlap) {
@@ -43,8 +43,8 @@ TEST(ClassAWindows, NoClockAgreementRequired) {
     for (int64_t skew : {-5000000LL, 0LL, 5000000LL}) {
         const int64_t t_txdone = 10000000 + skew;
         const int64_t t0 = t0UplinkUs(t_txdone, 60);
-        EXPECT_EQ(rx1OpenUs(t0) - t0, 1000000 - 17216);
-        EXPECT_EQ(rx2OpenUs(t0) - t0, 2000000 - 17216);
+        EXPECT_EQ(rx1OpenUs(t0) - t0, 1000000 - 18240);
+        EXPECT_EQ(rx2OpenUs(t0) - t0, 2000000 - 18240);
     }
 }
 
@@ -94,9 +94,19 @@ TEST(ClassAWindows, TodaysHubRepliesMissBothWindows) {
     for (uint8_t i = 0; i < kBurstCopies; ++i) {
         EXPECT_FALSE(copyLandsIn(rx1OpenUs(t0), rx1CloseUs(t0), i))
             << "copy " << (int) i << " at " << todaysHubCopyUs(i) << " us";
+        if (i == 14) continue;   // the edge case, pinned below
         EXPECT_FALSE(copyLandsIn(rx2OpenUs(t0), rx2CloseUs(t0), i))
             << "copy " << (int) i << " at " << todaysHubCopyUs(i) << " us";
     }
+
+    // The 12-symbol downlink preamble (2026-09-15) opens RX2 1 024 us earlier, and
+    // copy 14's T0 now falls 240 us inside it. It is still not a catch: its
+    // preamble starts kDownlinkPreambleToT0Us before T0, 3 920 us before the
+    // window opens, so the radio would see only the tail of it. A burst that
+    // brushes a window's edge is not a design.
+    EXPECT_EQ(todaysHubCopyUs(14) - rx2OpenUs(t0), 240);
+    EXPECT_LT(todaysHubCopyUs(14) - (int64_t) kDownlinkPreambleToT0Us, rx2OpenUs(t0))
+        << "copy 14's preamble begins before RX2 opens";
 
     // The nearest copies either side, quoted in the design document.
     EXPECT_EQ(todaysHubCopyUs(2), 926000);

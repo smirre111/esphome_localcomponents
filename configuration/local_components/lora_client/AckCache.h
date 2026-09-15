@@ -40,7 +40,7 @@ namespace ackcache
 // the first acceptance is another copy of the same burst, not a retry.
 static constexpr int64_t kBurstSpanUs =
     (int64_t) (loratiming::kBurstCopies - 1) * loratiming::kBurstCopyStrideUs +
-    (int64_t) loratiming::timeOnAirUs(60);
+    (int64_t) loratiming::downlinkTimeOnAirUs(60);
 
 // Never re-ack faster than this, whatever arrives. Bounds the uplink cost of a
 // hub that has gone haywire.

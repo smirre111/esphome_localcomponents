@@ -141,7 +141,7 @@ struct E2E : public ::testing::Test {
             if (lost) continue;
             const auto &bytes = f[delivered_].bytes;
             const int64_t t0 = (tracker.last_earliest_us > 0)
-                ? tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us
+                ? tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us
                 : esp_timer_get_time();
             const int64_t rxdone =
                 t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());

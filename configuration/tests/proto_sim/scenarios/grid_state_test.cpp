@@ -494,7 +494,7 @@ namespace {
 // terms at zero. Restated here rather than imported so a change to either end
 // shows up as a failing test rather than as an assertion that agrees with
 // whatever the code does.
-constexpr int64_t kLead = (int64_t) loratiming::kPreambleToT0Us
+constexpr int64_t kLead = (int64_t) loratiming::kUplinkPreambleToT0Us
                         + (int64_t) loratiming::kCadUs;
 // The bound the node passes: the random backoff this aim replaces, at its
 // worst case (LoraInterface::maxUplinkAimWaitUs — 29 ms x 10).

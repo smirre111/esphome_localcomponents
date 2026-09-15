@@ -152,7 +152,7 @@ TEST_F(Seam, AGridAlignedDownlinkArrivesInsideTheNodesWindow) {
     ASSERT_GT(gs_fire, 0)
         << "the GridSync must be PLACED. Sent bare, it leaves whenever the "
            "queue drains and declares a slot it does not occupy";
-    const int64_t gs_t0 = gs_fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t gs_t0 = gs_fire + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     EXPECT_EQ(tracker.nextT0ForSlotUs(rol.grid_slot(), gs_t0 - 1), gs_t0)
         << "copy 0 of the GridSync must land ON this node's mark, since that is "
            "what the frame claims and what the node will anchor to";
@@ -189,7 +189,7 @@ TEST_F(Seam, AGridAlignedDownlinkArrivesInsideTheNodesWindow) {
     // kPreambleToT0Us later. This is the one conversion the hub-side tests
     // could not check, because they asserted the hub's own expression.
     const auto     frame = lastDownlink();
-    const int64_t  seen_t0 = fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t  seen_t0 = fire + (int64_t) loratiming::kDownlinkPreambleToT0Us;
 
     // (1) The geometric statement: is it caught at all?
     const proto_sim::Transmission tx{
@@ -234,7 +234,7 @@ TEST_F(Seam, ANodeToldAboutTheGridIsNotToldToStopListening) {
 
     const auto gridsync = lastDownlink();
     ASSERT_FALSE(gridsync.empty());
-    const int64_t gs_t0 = tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t gs_t0 = tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     deliverAtT0(gridsync, gs_t0);
     ASSERT_TRUE(disp.gridState().active);
 
@@ -293,7 +293,7 @@ TEST_F(Seam, AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm) {
     ASSERT_GT(radio.hub_to_node_frames().size(), before);
 
     const int64_t fire    = tracker.last_earliest_us;
-    const int64_t seen_t0 = fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t seen_t0 = fire + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     const auto    frame   = lastDownlink();
 
     // The node measures the hub's correctly-placed frame against its own
@@ -363,7 +363,7 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
     const auto gridsync = lastDownlink();
     ASSERT_FALSE(gridsync.empty());
     const int64_t gs_t0 =
-        tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us;
+        tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     deliverAtT0(gridsync, gs_t0);
 
     ASSERT_TRUE(disp.gridState().active);

@@ -43,7 +43,7 @@ struct Transmission {
     uint32_t seq{0};
 
     int64_t air_start_us() const {
-        return t0_us - (int64_t) loratiming::kPreambleToT0Us;
+        return t0_us - (int64_t) loratiming::kDownlinkPreambleToT0Us;   // hub frames into node windows
     }
     int64_t air_end_us() const {
         return t0_us + (int64_t) loratiming::t0ToRxDoneUs(payload_len);

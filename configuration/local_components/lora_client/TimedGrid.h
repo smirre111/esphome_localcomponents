@@ -66,7 +66,7 @@ static constexpr uint32_t kDetectUs = kDetectSymbolsAssumed * kSymbolUs;
 static constexpr uint32_t kGuardUs = (kWindowUs - kDetectUs) / 2;
 
 // Arm the receiver this far before T0.
-static constexpr uint32_t kArmLeadUs = kPreambleToT0Us + kGuardUs;
+static constexpr uint32_t kArmLeadUs = kDownlinkPreambleToT0Us + kGuardUs;
 
 constexpr int64_t windowOpenUs(int64_t t0_us)  { return t0_us - (int64_t) kArmLeadUs; }
 constexpr int64_t windowCloseUs(int64_t t0_us) { return windowOpenUs(t0_us) + kWindowUs; }
@@ -127,8 +127,8 @@ constexpr int64_t t0ForSlot(int64_t anchor_us, uint32_t round, uint32_t slot)
 // A transmission is wider than a window, so serving node k also covers its
 // neighbours' windows. The hub occupies, relative to T0_k:
 //
-//   start = -kPreambleToT0Us
-//   end   = t0ToRxDoneUs(downlink) + turnaround + timeOnAirUs(ack)
+//   start = -kDownlinkPreambleToT0Us
+//   end   = t0ToRxDoneUs(downlink) + turnaround + uplinkTimeOnAirUs(ack)
 //
 // `turnaround_us` is the node's DRAIN + build time: FIFO read, protobuf unpack,
 // AEAD decrypt and three queue hops on a CPU that scales down to 40 MHz. It has
@@ -139,7 +139,7 @@ static constexpr uint32_t kAckPayloadBytes = 25;
 
 constexpr uint32_t hubOccupancyEndUs(uint32_t downlink_len, uint32_t turnaround_us)
 {
-    return t0ToRxDoneUs(downlink_len) + turnaround_us + timeOnAirUs(kAckPayloadBytes);
+    return t0ToRxDoneUs(downlink_len) + turnaround_us + uplinkTimeOnAirUs(kAckPayloadBytes);
 }
 
 // The next slot offset whose window opens clear of that occupancy.
@@ -161,7 +161,7 @@ constexpr uint32_t maxTurnaroundForDelta(uint32_t downlink_len, uint32_t delta)
 {
     const int64_t budget = (int64_t) delta * kSlotPitchUs
                          - (int64_t) kArmLeadUs
-                         - (int64_t) timeOnAirUs(kAckPayloadBytes)
+                         - (int64_t) uplinkTimeOnAirUs(kAckPayloadBytes)
                          - (int64_t) t0ToRxDoneUs(downlink_len);
     return budget < 0 ? 0u : (uint32_t) budget;
 }
@@ -224,7 +224,7 @@ static constexpr uint32_t kWindowsPerRound = 1;
 static_assert(kSlotPitchUs == 46875, "32 slots in 1500 ms");
 static_assert(kWindowUs == 29440,    "115 symbols at 256 us");
 static_assert(kGuardUs == 14080,     "(29440 - 1280) / 2");
-static_assert(kArmLeadUs == 17216,   "3136 + 14080");
+static_assert(kArmLeadUs == 18240,   "4160 (12-symbol downlink preamble) + 14080");
 static_assert(kInterWindowGapUs == 17435, "clear time between adjacent windows");
 static_assert(!secondWindowFitsInGap(), "a second window cannot be disjoint at 32 slots");
 static_assert(beaconClearSlots() == 1, "the beacon must leave one slot clear");

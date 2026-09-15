@@ -3002,6 +3002,31 @@ TEST_F(RealNodeFixture, AnAcceptedSysopIsAcked) {
     EXPECT_EQ(drain_acks(disp), 1);
 }
 
+// Measured 2026-09-15 on node 2: the only GridSync after a login was lost and
+// never re-sent; the node sat in Mode A for 13 minutes. The hub now re-publishes
+// until the node confirms, so the node must confirm — once per GridSync.
+TEST_F(RealNodeFixture, AnAdoptedGridSyncIsAckedOnce) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/800);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // Another copy of the same burst: same msgid, stops at the replay check.
+    auto copy = build_grid_sync(true, 4, 800, timedgrid::kSlotCount,
+                                timedgrid::kSlotPitchUs, /*burst_index=*/1);
+    disp.onReceiveNew(copy.data(), static_cast<int>(copy.size()));
+
+    EXPECT_EQ(drain_acks(disp), 1) << "one confirmation per GridSync, not per copy";
+}
+
+TEST_F(RealNodeFixture, ARefusedGridSyncIsNotAcked) {
+    // A node that disagrees with the grid must not tell the hub it is on it.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/810,
+                              /*slot_count=*/7);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_FALSE(disp.gridState().active) << "precondition: refused";
+    EXPECT_EQ(drain_acks(disp), 0);
+}
+
 TEST_F(RealNodeFixture, TheOtherSixteenBurstCopiesStaySilent) {
     // The trap the cache exists for. A naive cached ack answers all sixteen —
     // sixteen uplinks per command, on a battery node, for a command that

@@ -70,7 +70,7 @@ TEST(MixedMode, ABurstCopyIsShorterThanItsStrideButNotByMuch) {
     // The premise everything below rests on, stated once with its arithmetic
     // visible. If a copy occupied less than half its stride the conflict would
     // be mild; it does not.
-    const int64_t occupancy = (int64_t) loratiming::kPreambleToT0Us +
+    const int64_t occupancy = (int64_t) loratiming::kDownlinkPreambleToT0Us +
                               (int64_t) loratiming::t0ToRxDoneUs(kDownlinkLen);
     EXPECT_LT(occupancy, (int64_t) loratiming::kBurstCopyStrideUs)
         << "a copy that outlasts its stride would make the burst self-overlapping";

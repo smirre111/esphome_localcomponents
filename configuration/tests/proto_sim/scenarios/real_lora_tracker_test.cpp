@@ -194,7 +194,7 @@ TEST(RealTracker, SendTaskBlocksAFurther400msAfterABurst) {
     // 16 strides + one frame's air time + the response window.
     const int64_t burst_us =
         (int64_t) (p.txSlotsPerRound - 1) * p.txIntervalMs * 1000 +
-        (int64_t) loratiming::t0ToRxDoneUs(60) + (int64_t) loratiming::kPreambleToT0Us;
+        (int64_t) loratiming::t0ToRxDoneUs(60) + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     const int64_t occupied_us = burst_us + (int64_t) p.responseWindowMs * 1000;
 
     EXPECT_LT(burst_us, (int64_t) timedgrid::kRoundUs)
@@ -551,7 +551,7 @@ TEST(RealTrackerTx, EveryCopyDeclaresTheInstantItActuallyLeft) {
         ASSERT_NE(m, nullptr);
         ASSERT_TRUE((bool) m->header->firestamped) << "copy " << k;
         EXPECT_EQ(declaredT0(t, *m->header),
-                  lorahal::rec().tx_us[k] + (int64_t) loratiming::kPreambleToT0Us)
+                  lorahal::rec().tx_us[k] + (int64_t) loratiming::kDownlinkPreambleToT0Us)
             << "copy " << k << " must declare the T0 it actually went out with";
         EXPECT_LT(m->header->fireoffsetus, (uint32_t) timedgrid::kRoundUs);
         lora_client_operation_message__free_unpacked(m, NULL);
@@ -580,7 +580,7 @@ TEST(RealTrackerTx, APlacedFrameThatMissedItsMarkDeclaresWhenItReallyLeft) {
     ASSERT_NE(m, nullptr);
     ASSERT_TRUE((bool) m->header->firestamped);
     const int64_t declared = declaredT0(t, *m->header);
-    EXPECT_EQ(declared, lorahal::rec().tx_us[0] + (int64_t) loratiming::kPreambleToT0Us);
+    EXPECT_EQ(declared, lorahal::rec().tx_us[0] + (int64_t) loratiming::kDownlinkPreambleToT0Us);
     EXPECT_GT(declared, kMark + 320'000) << "the instant it left, not the mark it was placed on";
     lora_client_operation_message__free_unpacked(m, NULL);
 }

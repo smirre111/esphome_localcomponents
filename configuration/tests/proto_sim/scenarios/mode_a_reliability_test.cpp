@@ -66,9 +66,9 @@ TEST(ModeAReliability, TheFallbackIsNotIndependentDuringABurst) {
     // timed node's window is walked through AND when the single serialised TX
     // task is blocked for 1850 ms and cannot issue the fallback. Same cause,
     // so the independence assumption is void in precisely that case.
-    const uint32_t burst_span = (kBurstCopies - 1) * kBurstCopyStrideUs + timeOnAirUs(60);
+    const uint32_t burst_span = (kBurstCopies - 1) * kBurstCopyStrideUs + downlinkTimeOnAirUs(60);
     const uint32_t response_window_us = 400000;
-    EXPECT_EQ(burst_span, 1450048u);
+    EXPECT_EQ(burst_span, 1451072u);   // 12-symbol downlink preamble
     EXPECT_GT(burst_span + response_window_us, timedgrid::kRoundUs)
         << "1850 ms of occupancy against a 1500 ms round is why deferral must "
            "be by TWO rounds, not one";
@@ -96,7 +96,7 @@ TEST(ModeAReliability, ElapsedTimeNotAirtimeIsWhatMatters) {
     // A burst is 1450 ms and sendTask then blocks 400 ms more, so a clustered
     // event costs 1850 ms per node — 59.2 s for 32 nodes. Mode B serves 10 per
     // round, so the same event is 4 rounds: 6.0 s.
-    const double per_node_s = (1450048.0 + 400000.0) / 1e6;
+    const double per_node_s = (1451072.0 + 400000.0) / 1e6;
     EXPECT_NEAR(per_node_s * 32, 59.2, 0.1);
 
     const int rounds = (32 + 10 - 1) / 10;
@@ -131,15 +131,16 @@ TEST(ModeAReliability, AirtimeBudgetFavoursABroadcastBeaconAt32Nodes) {
     const double cmds_per_day = 32 * 3.5;
     const double beacons_per_day = 86400.0 / 348.0;      // every 5.8 min
 
-    const double today     = cmds_per_day * kBurstCopies * timeOnAirUs(60) / 1e6;
-    const double broadcast = cmds_per_day * timeOnAirUs(60) / 1e6
-                           + beacons_per_day * timeOnAirUs(45) / 1e6;
-    const double unicast   = cmds_per_day * timeOnAirUs(60) / 1e6
-                           + beacons_per_day * 32 * timeOnAirUs(45) / 1e6;
+    const double today     = cmds_per_day * kBurstCopies * downlinkTimeOnAirUs(60) / 1e6;
+    const double broadcast = cmds_per_day * downlinkTimeOnAirUs(60) / 1e6
+                           + beacons_per_day * downlinkTimeOnAirUs(45) / 1e6;
+    const double unicast   = cmds_per_day * downlinkTimeOnAirUs(60) / 1e6
+                           + beacons_per_day * 32 * downlinkTimeOnAirUs(45) / 1e6;
 
-    EXPECT_NEAR(today,     80.06,  0.05);
-    EXPECT_NEAR(broadcast, 13.12,  0.05);
-    EXPECT_NEAR(unicast,   273.69, 0.5);
+    // At the 12-symbol downlink preamble (2026-09-15); the decision is unchanged.
+    EXPECT_NEAR(today,     82.01,  0.05);
+    EXPECT_NEAR(broadcast, 13.48,  0.05);
+    EXPECT_NEAR(unicast,   281.94, 0.5);
 
     // The decision this encodes: a unicast keepalive is not viable at 32 nodes.
     EXPECT_GT(unicast, today);

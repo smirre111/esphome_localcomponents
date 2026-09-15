@@ -1923,9 +1923,38 @@ namespace esphome
         p.earliest_us = (planned_t0 != 0)
                             ? loratiming::fireInstantUs(planned_t0, 0) : 0;
         this->send_aligned_(buf, len, p);
+
+        // Awaiting the node's confirmation: remember this msgid and re-publish if
+        // none arrives. A re-publish is a fresh GridSync (new placement, new
+        // msgid), and an ack for ANY of them confirms the grid.
+        if (this->gridsync_msgid_count_ == 0)
+          this->gridsync_retries_ = 0;
+        if (this->gridsync_msgid_count_ < kGridSyncMaxRepublishes + 1)
+          this->gridsync_msgids_[this->gridsync_msgid_count_++] = header.msgid;
+        this->cancel_timeout("gridsync_retry");
+        this->set_timeout("gridsync_retry", kGridSyncRetryMs, [this]() {
+          if (this->gridsync_msgid_count_ == 0 || !this->timed_mode_enabled_)
+            return;
+          if (this->gridsync_retries_ >= kGridSyncMaxRepublishes)
+          {
+            ESP_LOGE(TAG, "[%s] GridSync not acknowledged after %u re-publishes — "
+                          "the node stays in Mode A until its next login",
+                     this->get_name().c_str(), (unsigned) kGridSyncMaxRepublishes);
+            this->gridsync_msgid_count_ = 0;
+            return;
+          }
+          this->gridsync_retries_++;
+          ESP_LOGW(TAG, "[%s] GridSync not acknowledged — re-publishing (%u/%u)",
+                   this->get_name().c_str(), (unsigned) this->gridsync_retries_,
+                   (unsigned) kGridSyncMaxRepublishes);
+          this->send_grid_sync(true);
+        });
       }
       else
       {
+        // A withdrawal ends any wait for a confirmation of the grid.
+        this->cancel_timeout("gridsync_retry");
+        this->gridsync_msgid_count_ = 0;
         // The withdrawal stays a plain burst. It is broadcast on the demote
         // path, and it is addressed to nodes whose anchor may already be wrong
         // — placing it on a mark they may not agree about is the one thing it
@@ -2119,7 +2148,7 @@ namespace esphome
                              ? loratiming::t0FromFireInstantUs(policy.earliest_us, 0)
                              : this->nextPlacementT0_(now);
       // earliest_us is a FIRE instant; t0 is where the node expects the frame's
-      // reference to land. They differ by kPreambleToT0Us, and the node's
+      // reference to land. They differ by kDownlinkPreambleToT0Us, and the node's
       // window is built around the T0, so the conversion belongs here. See
       // TxPolicy::earliest_us; d_tx_ramp is 0 for the reason given in
       // send_into_class_a_window_.
@@ -2343,6 +2372,19 @@ namespace esphome
 
     void LORAListener::handle_command_ack_(uint32_t ack_msg_id)
     {
+      // The node confirming a GridSync: it is on the grid, stop re-publishing.
+      for (uint8_t i = 0; i < this->gridsync_msgid_count_; ++i)
+      {
+        if (this->gridsync_msgids_[i] != ack_msg_id)
+          continue;
+        ESP_LOGI(TAG, "[%s] GridSync acknowledged (msgid=%u, %u re-publishes)",
+                 this->get_name().c_str(), (unsigned) ack_msg_id,
+                 (unsigned) this->gridsync_retries_);
+        this->cancel_timeout("gridsync_retry");
+        this->gridsync_msgid_count_ = 0;
+        return;
+      }
+
       // A schedule push is acked by the node; that is the only positive
       // confirmation the hub gets that the schedule actually landed.
       if (this->sched_push_msgid_ != 0 && ack_msg_id == this->sched_push_msgid_)

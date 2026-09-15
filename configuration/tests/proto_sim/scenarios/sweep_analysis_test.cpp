@@ -24,7 +24,7 @@ namespace {
 std::vector<Point> simulateSweep(uint32_t true_detect_us, uint32_t window_us,
                                  int32_t step_us = 500, uint32_t marks = 20) {
     std::vector<Point> pts;
-    const uint32_t arm_lead = loratiming::kPreambleToT0Us + (window_us - true_detect_us) / 2;
+    const uint32_t arm_lead = loratiming::kDownlinkPreambleToT0Us + (window_us - true_detect_us) / 2;
 
     for (int32_t off = -(int32_t) window_us; off <= (int32_t) window_us; off += step_us) {
         Point p;

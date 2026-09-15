@@ -164,12 +164,14 @@ namespace esphome
 
       lora_init();
 
-      lora_setFrequency(433.05E6 + 250e3);
-      lora_setSpreadingFactor(loraSpreadingFactor);
-      lora_setCodingRate4(loraCodingRate);
-      lora_setPreambleLength(loraPreambleLengthRx);
-      lora_setSignalBandwidth(loraSignalBandwidth);
-      lora_setSyncWord(loraSyncWord);
+      // Every value from LoraTiming.h, the link's one definition. The hub
+      // RECEIVES uplinks, so its receiver is programmed for the uplink preamble.
+      lora_setFrequency((long) loratiming::kFrequencyHz);
+      lora_setSpreadingFactor(loratiming::kSpreadingFactor);
+      lora_setCodingRate4(loratiming::kCodingRateDenom);
+      lora_setPreambleLength(loratiming::kUplinkPreambleSymbols);
+      lora_setSignalBandwidth((long) loratiming::kBandwidthHz);
+      lora_setSyncWord(loratiming::kSyncWord);
 
       lora_setTxPower(8, PA_OUTPUT_RFO_PIN);
 
@@ -879,7 +881,7 @@ namespace esphome
       const uint32_t stride = (stride_ms > 0) ? stride_ms : (uint32_t) this->txIntervalMs;
       return start_us + (int64_t) (n - 1) * (int64_t) stride * 1000
            + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) len)
-           + (int64_t) loratiming::kPreambleToT0Us
+           + (int64_t) loratiming::kDownlinkPreambleToT0Us
            + (expects_reply ? (int64_t) this->responseWindowMs * 1000 : 0);
     }
 
@@ -1304,10 +1306,10 @@ namespace esphome
       // runtime. Seventeen copies paid for it seventeen times, all of it
       // between the caller's decision to send and the radio actually firing.
       //
-      // The preamble genuinely does alternate (TX uses loraPreambleLengthTx,
-      // RX loraPreambleLengthRx, restored after the packet in firePacket), so
-      // it stays.
-      lora_setPreambleLength(loraPreambleLengthTx);
+      // The preamble genuinely does alternate (the hub transmits the longer
+      // downlink preamble and receives the uplink one, restored after the packet
+      // in firePacket), so it stays.
+      lora_setPreambleLength(loratiming::kDownlinkPreambleSymbols);
 
       const int status = lora_beginPacket();
       if (status == 0)
@@ -1326,7 +1328,7 @@ namespace esphome
         return;
 
       // Leave the radio listening rather than half-armed for a transmit.
-      lora_setPreambleLength(loraPreambleLengthRx);
+      lora_setPreambleLength(loratiming::kUplinkPreambleSymbols);
       lora_receive(0);
       this->tx_prepared_ = false;
 
@@ -1384,7 +1386,7 @@ namespace esphome
         ESP_LOGW(TAG, "TX timeout");
       }
 
-      lora_setPreambleLength(loraPreambleLengthRx);
+      lora_setPreambleLength(loratiming::kUplinkPreambleSymbols);
       this->tx_prepared_ = false;
 
       if (this->radio_mutex_ != nullptr)

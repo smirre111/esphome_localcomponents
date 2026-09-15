@@ -14,9 +14,9 @@
 //   air_start                T0 = SFD end        (ValidHeader)         RxDone
 //       |                          |                  |                   |
 //       |<-- n_pre up-chirps --><sync><SFD>|<- header 8 sym ->|<- payload ->|
-//       |<---------- kPreambleToT0Us ------>|
+//       |<------ k{Down,Up}linkPreambleToT0Us ->|
 //
-//   hub:  T0 = t_fire + d_tx_ramp + kPreambleToT0Us
+//   hub:  T0 = t_fire + d_tx_ramp + kDownlinkPreambleToT0Us
 //   node: T0 = t_rxdone - symbolCount(len) * kSymbolUs        <- ONE LINE
 //
 // That last line is deliberately not a decomposition. Subtracting the payload
@@ -34,17 +34,34 @@
 namespace loratiming
 {
 
-// --- Radio configuration in force on this link ----------------------------
-// SF7 / BW500 / CR4-8 / explicit header / CRC on. Changing any of these
-// changes every timing constant below, which is why they are named here and
-// the static_asserts at the bottom fail loudly if the derivation drifts.
+// --- The radio configuration of this link: THE ONE DEFINITION -------------
+// Every LoRa parameter the hub and the node program into their SX127x is
+// defined here and nowhere else. LoraInterface (node) and LORATracker (hub) set
+// their radios up from these values, and all the timing below is derived from
+// the same numbers, so the radio and the arithmetic cannot disagree. The hub
+// builds against a vendored copy of this file (proto/regen_stubs.sh).
+static constexpr uint32_t kFrequencyHz       = 433300000;   // 433.05 MHz + 250 kHz
+static constexpr uint8_t  kSyncWord          = 0x12;
 static constexpr uint8_t  kSpreadingFactor   = 7;
 static constexpr uint32_t kBandwidthHz       = 500000;
 static constexpr uint8_t  kCodingRateDenom   = 8;   // CR 4/8 -> the "+4" term is 4
-static constexpr uint8_t  kPreambleSymbols   = 8;
 static constexpr bool     kCrcOn             = true;
 static constexpr bool     kImplicitHeader    = false;
 static constexpr bool     kLowDataRateOpt    = false;
+
+// The preamble, per direction.
+//
+// DOWNLINK (hub -> node) is longer. Measured 2026-09-15 on node 2 (fw 1.0.83):
+// strong, on-time Mode B frames (-45/-48 dBm) still failed to synchronise on an
+// 8-symbol preamble, 2 of 597, and a window restarted after the failure had no
+// preamble left to detect. 12 symbols cost 1 024 us of airtime per downlink.
+// UPLINK (node -> hub) stays at 8: the hub listens continuously.
+//
+// A receiver is programmed with the longest preamble it expects (SX127x
+// datasheet), so the node listens for the downlink length and the hub for the
+// uplink length.
+static constexpr uint8_t  kDownlinkPreambleSymbols = 12;
+static constexpr uint8_t  kUplinkPreambleSymbols   = 8;
 
 // T_sym = 2^SF / BW. At SF7/BW500 this is exactly 256 us; the expression is
 // kept general so a bandwidth change is a compile-time result, not a hand edit.
@@ -53,8 +70,12 @@ static constexpr uint32_t kSymbolUs =
 
 // air start -> T0. The preamble is n_pre up-chirps plus 4.25 symbols of sync
 // word and SFD. Expressed in quarters to stay in integer arithmetic.
-static constexpr uint32_t kPreambleToT0Us =
-    ((uint32_t) kPreambleSymbols * 4u + 17u) * kSymbolUs / 4u;
+constexpr uint32_t preambleToT0Us(uint8_t preamble_symbols)
+{
+    return ((uint32_t) preamble_symbols * 4u + 17u) * kSymbolUs / 4u;
+}
+static constexpr uint32_t kDownlinkPreambleToT0Us = preambleToT0Us(kDownlinkPreambleSymbols);
+static constexpr uint32_t kUplinkPreambleToT0Us   = preambleToT0Us(kUplinkPreambleSymbols);
 
 // T0 -> ValidHeader. Structural only on this hardware: DIO3 is not routed to
 // the CPU on the node PCB, so ValidHeader cannot be observed. Kept because the
@@ -111,10 +132,15 @@ constexpr uint32_t t0ToRxDoneUs(uint32_t payload_len)
     return symbolCount(payload_len) * kSymbolUs;
 }
 
-// Full time on air: air start -> RxDone.
-constexpr uint32_t timeOnAirUs(uint32_t payload_len)
+// Full time on air: air start -> RxDone. Per direction, because the preambles
+// differ; there is deliberately no direction-less form to reach for.
+constexpr uint32_t downlinkTimeOnAirUs(uint32_t payload_len)
 {
-    return kPreambleToT0Us + t0ToRxDoneUs(payload_len);
+    return kDownlinkPreambleToT0Us + t0ToRxDoneUs(payload_len);
+}
+constexpr uint32_t uplinkTimeOnAirUs(uint32_t payload_len)
+{
+    return kUplinkPreambleToT0Us + t0ToRxDoneUs(payload_len);
 }
 
 // The node's reference recovery, as ONE operation. Do not open-code this.
@@ -137,17 +163,17 @@ static constexpr uint32_t kCadUs =
     (uint32_t) ((((uint64_t) 1u << kSpreadingFactor) + 32ull) * 1000000ull
                 / kBandwidthHz);
 
-// The hub's fire instant for a wanted T0. d_tx_ramp is the PLL/PA ramp between
+// The hub's fire instant for a wanted DOWNLINK T0. d_tx_ramp is the PLL/PA ramp between
 // the RegOpMode=TX write and the first chirp leaving the antenna; it is
 // UNMEASURED (implementation-plan.md section 12.1) and is passed in rather than
 // guessed here, so no caller can mistake a placeholder for a measurement.
 constexpr int64_t fireInstantUs(int64_t t0_us, uint32_t d_tx_ramp_us)
 {
-    return t0_us - (int64_t) kPreambleToT0Us - (int64_t) d_tx_ramp_us;
+    return t0_us - (int64_t) kDownlinkPreambleToT0Us - (int64_t) d_tx_ramp_us;
 }
 
-// The instant a CAD-then-transmit sequence must BEGIN for the resulting frame's
-// T0 to land on `t0_us`. This is fireInstantUs() with the sender's own
+// The instant a node's CAD-then-transmit sequence must BEGIN for the resulting
+// UPLINK's T0 to land on `t0_us`: the uplink preamble, with the sender's own
 // pre-transmit work in front of it:
 //
 //   cad_start ---kCadUs---> fire ---d_tx_ramp---> air start ---T_pre---> T0
@@ -163,7 +189,7 @@ constexpr int64_t fireInstantUs(int64_t t0_us, uint32_t d_tx_ramp_us)
 constexpr int64_t cadStartInstantUs(int64_t t0_us, uint32_t d_cad_dispatch_us,
                                     uint32_t d_tx_ramp_us)
 {
-    return fireInstantUs(t0_us, d_tx_ramp_us)
+    return t0_us - (int64_t) kUplinkPreambleToT0Us - (int64_t) d_tx_ramp_us
          - (int64_t) kCadUs
          - (int64_t) d_cad_dispatch_us;
 }
@@ -174,7 +200,7 @@ constexpr int64_t cadStartInstantUs(int64_t t0_us, uint32_t d_cad_dispatch_us,
 // wrong sign. That has happened once already, in both placement producers.
 constexpr int64_t t0FromFireInstantUs(int64_t fire_us, uint32_t d_tx_ramp_us)
 {
-    return fire_us + (int64_t) kPreambleToT0Us + (int64_t) d_tx_ramp_us;
+    return fire_us + (int64_t) kDownlinkPreambleToT0Us + (int64_t) d_tx_ramp_us;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +208,8 @@ constexpr int64_t t0FromFireInstantUs(int64_t fire_us, uint32_t d_tx_ramp_us)
 // than in the field as a window that is armed at the wrong microsecond.
 // ---------------------------------------------------------------------------
 static_assert(kSymbolUs == 256, "T_sym must be 256 us at SF7/BW500");
-static_assert(kPreambleToT0Us == 3136, "air start -> T0 must be 3136 us");
+static_assert(kUplinkPreambleToT0Us == 3136, "uplink air start -> T0 must be 3136 us");
+static_assert(kDownlinkPreambleToT0Us == 4160, "downlink air start -> T0 must be 4160 us");
 static_assert(kHeaderUs == 2048, "T0 -> ValidHeader must be 2048 us");
 static_assert(kCadUs == 320, "CAD must be 320 us at SF7/BW500");
 
@@ -196,10 +223,11 @@ static_assert(symbolCount(152) == 360, "152 B ScheduleConfig");
 static_assert(symbolCount(58) == symbolCount(60), "same symbol block");
 static_assert(symbolCount(62) == symbolCount(60) + 8, "next symbol block");
 
-static_assert(timeOnAirUs(25)  == 21568, "25 B time on air");
-static_assert(timeOnAirUs(45)  == 33856, "45 B time on air");
-static_assert(timeOnAirUs(60)  == 42048, "60 B time on air");
-static_assert(timeOnAirUs(152) == 95296, "152 B time on air");
+static_assert(uplinkTimeOnAirUs(25)  == 21568, "25 B ack, uplink");
+static_assert(uplinkTimeOnAirUs(60)  == 42048, "60 B uplink");
+static_assert(downlinkTimeOnAirUs(45)  == 34880, "45 B beacon, downlink");
+static_assert(downlinkTimeOnAirUs(60)  == 43072, "60 B routine command, downlink");
+static_assert(downlinkTimeOnAirUs(152) == 96320, "152 B ScheduleConfig, downlink");
 
 // A grid period must be a whole number of milliseconds — see kBurstCopyStrideUs.
 static_assert(kBurstCopyStrideUs % 1000 == 0, "burst stride must be integer ms");

@@ -94,11 +94,11 @@ namespace esphome
     //
     // THIS IS A FIRE INSTANT, NOT A T0. It is the moment lora_tx() is called,
     // i.e. when the first chirp leaves the antenna. The receiver's reference
-    // T0 is kPreambleToT0Us (3136 us) LATER, plus the unmeasured PA ramp.
+    // T0 is kDownlinkPreambleToT0Us (4160 us) LATER, plus the unmeasured PA ramp.
     //
     // A producer that knows the T0 it wants must convert:
     //     policy.earliest_us = loratiming::fireInstantUs(t0, d_tx_ramp_us);
-    // Passing a wanted T0 here directly puts the frame 3136 us late at the
+    // Passing a wanted T0 here directly puts the frame 4160 us late at the
     // receiver, which spends 22 % of a 14080 us guard band before the link
     // has done anything at all.
     int64_t  earliest_us{0};
@@ -159,12 +159,8 @@ namespace esphome
     public:
       LORATracker();
 
-      static const int loraSpreadingFactor = 7;
-      static const int loraCodingRate = 8;
-      static const int loraPreambleLengthRx = 8;
-      static const int loraPreambleLengthTx = 8;
-      static const long loraSignalBandwidth = 500e3;
-      static const int loraSyncWord = 0x12;
+      // The radio parameters (frequency, SF, BW, CR, sync word, preambles) are
+      // defined once, in LoraTiming.h, for the hub and the node alike.
       static const uint64_t loraPollingTimeout = 75;
 
       static const uint8_t broadcastAddressing = 0xFF;

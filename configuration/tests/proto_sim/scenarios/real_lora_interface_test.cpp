@@ -105,7 +105,8 @@ TEST_F(Iface, InitProgramsThePhyLoraTimingAssumes) {
     EXPECT_EQ(r().sf, (int) loratiming::kSpreadingFactor);
     EXPECT_EQ(r().bw, (long) loratiming::kBandwidthHz);
     EXPECT_EQ(r().cr_denom, (int) loratiming::kCodingRateDenom);
-    EXPECT_EQ(r().preamble_len, (long) loratiming::kPreambleSymbols);
+    EXPECT_EQ(r().preamble_len, (long) loratiming::kDownlinkPreambleSymbols)
+        << "the node receives downlinks: its receiver is set for their longer preamble";
     EXPECT_EQ(r().crc_on, loratiming::kCrcOn)
         << "the CRC contributes 16 bits to the symbol count; a radio with it "
            "off makes every frame shorter than the arithmetic says";
@@ -598,11 +599,29 @@ TEST_F(Iface, AWindowCountsExactlyTheTimeTheReceiverListened) {
 TEST_F(Iface, ATransmitCountsItsTimeOnAirAndACadIsCounted) {
     const uint8_t frame[60] = {0};
     lif.sendPacketBytes(const_cast<uint8_t *>(frame), (int) sizeof(frame));
-    EXPECT_EQ(lif.radioDuty().tx_air_us, (int64_t) loratiming::timeOnAirUs(60))
+    EXPECT_EQ(lif.radioDuty().tx_air_us, (int64_t) loratiming::uplinkTimeOnAirUs(60))
         << "time on air from the pinned PHY, per frame";
 
     lif.beginCad();
     EXPECT_EQ(lif.radioDuty().cads, 1u);
+}
+
+TEST_F(Iface, AWindowAfterATransmitListensForTheDownlinkPreamble) {
+    // The node transmits the 8-symbol uplink preamble and receives the 12-symbol
+    // downlink one (LoraTiming.h, 2026-09-15). The register is shared, so every
+    // receive must set it back: a window left at 8 would be listening for a
+    // shorter preamble than the hub now sends.
+    const uint8_t frame[40] = {0};
+    lif.sendPacketBytes(const_cast<uint8_t *>(frame), (int) sizeof(frame));
+    ASSERT_EQ(r().preamble_len, (long) loratiming::kUplinkPreambleSymbols)
+        << "precondition: a transmit programs the uplink preamble";
+
+    proto_sim_timer_set_now_us(20'000'000);
+    lif.arm_source_         = Probe::ArmSource::None;
+    lif.grid_timer_running_ = false;
+    lif.serviceRxWindow();
+    ASSERT_GE(r().count("lora_rxSingle"), 1u);
+    EXPECT_EQ(r().preamble_len, (long) loratiming::kDownlinkPreambleSymbols);
 }
 
 TEST_F(Iface, AReArmRequestIsAStaleWakeThatOpensNoWindow) {

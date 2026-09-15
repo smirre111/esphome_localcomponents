@@ -27,8 +27,11 @@ TEST(LoraTiming, SymbolTime) {
 }
 
 TEST(LoraTiming, PreambleToT0) {
-    // (n_pre + 4.25) * T_sym = 12.25 * 256 = 3136 us.
-    EXPECT_EQ(kPreambleToT0Us, 3136u);
+    // (n_pre + 4.25) * T_sym: uplink 12.25 * 256 = 3136 us, downlink 16.25 * 256 = 4160 us.
+    EXPECT_EQ(kUplinkPreambleToT0Us, 3136u);
+    EXPECT_EQ(kDownlinkPreambleToT0Us, 4160u);
+    EXPECT_GT(kDownlinkPreambleSymbols, kUplinkPreambleSymbols)
+        << "downlinks carry the longer preamble (2 of 597 strong frames failed sync on 8)";
 }
 
 TEST(LoraTiming, HeaderIsEightSymbols) {
@@ -48,22 +51,27 @@ TEST(LoraTiming, NsymPinned) {
 }
 
 TEST(LoraTiming, TimeOnAirPinned) {
-    EXPECT_EQ(timeOnAirUs(25), 21568u);
-    EXPECT_EQ(timeOnAirUs(45), 33856u);
-    EXPECT_EQ(timeOnAirUs(60), 42048u);
-    EXPECT_EQ(timeOnAirUs(152), 95296u);
+    EXPECT_EQ(uplinkTimeOnAirUs(25), 21568u);
+    EXPECT_EQ(uplinkTimeOnAirUs(45), 33856u);
+    EXPECT_EQ(uplinkTimeOnAirUs(60), 42048u);
+    EXPECT_EQ(uplinkTimeOnAirUs(152), 95296u);
+    EXPECT_EQ(downlinkTimeOnAirUs(45), 34880u);
+    EXPECT_EQ(downlinkTimeOnAirUs(60), 43072u);
+    EXPECT_EQ(downlinkTimeOnAirUs(152), 96320u);
 }
 
 TEST(LoraTiming, TimeOnAirIsPreamblePlusT0ToRxDone) {
-    for (uint32_t len : {0u, 1u, 25u, 45u, 60u, 152u, 255u})
-        EXPECT_EQ(timeOnAirUs(len), kPreambleToT0Us + t0ToRxDoneUs(len)) << len;
+    for (uint32_t len : {0u, 1u, 25u, 45u, 60u, 152u, 255u}) {
+        EXPECT_EQ(uplinkTimeOnAirUs(len), kUplinkPreambleToT0Us + t0ToRxDoneUs(len)) << len;
+        EXPECT_EQ(downlinkTimeOnAirUs(len), kDownlinkPreambleToT0Us + t0ToRxDoneUs(len)) << len;
+    }
 }
 
 TEST(LoraTiming, AirtimeIsMonotonicInPayload) {
     // Not a tautology: the ceil term steps, so this catches a sign error in the
     // numerator that would otherwise only show at one payload length.
     for (uint32_t len = 1; len <= 255; ++len)
-        EXPECT_GE(timeOnAirUs(len), timeOnAirUs(len - 1)) << len;
+        EXPECT_GE(downlinkTimeOnAirUs(len), downlinkTimeOnAirUs(len - 1)) << len;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,10 +138,10 @@ TEST(LoraTiming, T0RecoveryRoundTripsAgainstTheHubsFireInstant) {
     const uint32_t len = 60;
 
     const int64_t fire = fireInstantUs(t0, ramp);
-    EXPECT_EQ(fire, t0 - 3136 - 220);
+    EXPECT_EQ(fire, t0 - 4160 - 220);
 
     const int64_t air_start = fire + ramp;
-    const int64_t rxdone = air_start + timeOnAirUs(len);
+    const int64_t rxdone = air_start + downlinkTimeOnAirUs(len);
     EXPECT_EQ(t0FromRxDoneUs(rxdone, len), t0);
 }
 
@@ -155,9 +163,9 @@ TEST(LoraTiming, GridPeriodsAreIntegerMilliseconds) {
 }
 
 TEST(LoraTiming, BurstOccupies1450msForARoutineCommand) {
-    // 16 * 88 ms + 42.048 ms. Quoted throughout the plan; pinned once here.
-    const uint32_t span = (kBurstCopies - 1) * kBurstCopyStrideUs + timeOnAirUs(60);
-    EXPECT_EQ(span, 1450048u);
+    // 16 * 88 ms + 43.072 ms (12-symbol downlink preamble). Pinned once here.
+    const uint32_t span = (kBurstCopies - 1) * kBurstCopyStrideUs + downlinkTimeOnAirUs(60);
+    EXPECT_EQ(span, 1451072u);
     EXPECT_GT(span, 1'400'000u);
 }
 
@@ -180,9 +188,11 @@ TEST(LoraTiming, CadStartIsTheFireInstantMinusTheCad) {
     // and exactly the kind of small that accumulates into a missed window when
     // it is left out of the arithmetic entirely.
     const int64_t t0 = 5'000'000;
-    EXPECT_EQ(cadStartInstantUs(t0, 0, 0), fireInstantUs(t0, 0) - (int64_t) kCadUs);
+    // The node's own frame: the UPLINK preamble, not the hub's downlink one.
     EXPECT_EQ(t0 - cadStartInstantUs(t0, 0, 0),
-              (int64_t) kPreambleToT0Us + (int64_t) kCadUs);
+              (int64_t) kUplinkPreambleToT0Us + (int64_t) kCadUs);
+    EXPECT_NE(t0 - cadStartInstantUs(t0, 0, 0),
+              (int64_t) kDownlinkPreambleToT0Us + (int64_t) kCadUs);
 }
 
 TEST(LoraTiming, UnmeasuredLeadsMakeTheUplinkLateNotEarly) {

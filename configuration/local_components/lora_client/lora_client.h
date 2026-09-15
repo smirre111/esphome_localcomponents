@@ -491,6 +491,10 @@ namespace esphome
       bool     awaitingAck() const     { return this->op_awaiting_ack_; }
       bool     commandFailed() const   { return this->command_failed_; }
       uint32_t schedulePushMsgid() const { return this->sched_push_msgid_; }
+      // A published GridSync the node has not confirmed yet, and how many times
+      // it has been re-published for that.
+      bool     gridSyncAwaitingAck() const { return this->gridsync_msgid_count_ != 0; }
+      uint8_t  gridSyncRepublishes() const { return this->gridsync_retries_; }
       uint32_t opRetryCount() const    { return this->op_retry_count_; }
 
       const MacStats &mac_stats() const { return this->mac_stats_; }
@@ -731,6 +735,16 @@ namespace esphome
       // Retransmit until the node's CommandAck confirms delivery.
       uint32_t      sched_push_msgid_{0};
       uint8_t       sched_push_retries_{0};
+      // A GridSync is re-published until the node's CommandAck names one of its
+      // msgids. Measured 2026-09-15 on node 2: the single GridSync sent after a
+      // login was lost (the node spent the burst in CAD retries) and nothing
+      // re-sent it — 13 minutes in Mode A with Timed Mode ON. Exact msgids, not a
+      // range: a tracked op sent in between must not be mistaken for it.
+      static constexpr uint8_t  kGridSyncMaxRepublishes = 5;
+      static constexpr uint32_t kGridSyncRetryMs        = 6000;
+      uint32_t      gridsync_msgids_[kGridSyncMaxRepublishes + 1]{};
+      uint8_t       gridsync_msgid_count_{0};
+      uint8_t       gridsync_retries_{0};
       static constexpr uint8_t  kSchedMaxRetries   = 3;
       static constexpr uint32_t kSchedRetryMs      = 5000;
       virtual void send_remote_config();

@@ -55,12 +55,7 @@ void set_active_radio(proto_sim::SimRadio* r);
 
 class LORATracker : public Component {
 public:
-    static constexpr int      loraSpreadingFactor   = 7;
-    static constexpr int      loraCodingRate        = 8;
-    static constexpr int      loraPreambleLengthRx  = 8;
-    static constexpr int      loraPreambleLengthTx  = 8;
-    static constexpr long     loraSignalBandwidth   = 500000;
-    static constexpr int      loraSyncWord          = 0x12;
+    // Radio parameters: LoraTiming.h, as in production.
     static constexpr uint64_t loraPollingTimeout    = 75;
     static constexpr uint8_t  broadcastAddressing   = 0xFF;
     static constexpr uint8_t  subnetAddressing      = 0xFE;
