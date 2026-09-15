@@ -2361,8 +2361,11 @@ preamble: 1 of 597 lost.** Node 2 fw 1.0.86, hub `cdc6b30`, production profile, 
   15 179 us, the restart listened on, and it closed empty with −51 dBm on air. The 8-symbol
   runs lost 2 and 6 of about 597, so the longer preamble has halved these failures without
   ending them.
-* Not yet checked: whether node 1, still on 8-symbol firmware, receives the 12-symbol
-  downlinks.
+* **Node 1 still works with the 12-symbol downlink.** Node 1 runs old firmware, which
+  programs its receiver for 8 preamble symbols. On 2026-09-15 the user sent node 1 a
+  command from the hub after the change, and node 1 carried it out. A receiver set for a
+  shorter preamble still picks up the longer one, so the fleet can be updated node by
+  node.
 
 **MEASURED 2026-09-15 08:46–09:02 — 1.0.82 regression: the first window restart left
 the node deaf.** Node 2 fw 1.0.82 (`1c79663`), hub `eddbc16`, production profile.
