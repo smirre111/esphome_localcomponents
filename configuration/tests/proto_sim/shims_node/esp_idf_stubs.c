@@ -303,7 +303,11 @@ esp_err_t gpio_isr_handler_add(gpio_num_t pin, void (*fn)(void *), void *arg) {
 }
 esp_err_t gpio_isr_handler_remove(gpio_num_t pin) { (void) pin; return ESP_OK; }
 esp_err_t gpio_set_intr_type(gpio_num_t pin, gpio_int_type_t t) { (void) pin; (void) t; return ESP_OK; }
-esp_err_t gpio_intr_enable(gpio_num_t pin) { (void) pin; return ESP_OK; }
+// Counted, not discarded: node 1.0.82 returned from the DIO1 handler before
+// re-enabling the pin's interrupt and went deaf on hardware, and a silent stub
+// let every host test pass through it.
+int proto_sim_gpio_intr_enable_calls = 0;
+esp_err_t gpio_intr_enable(gpio_num_t pin) { (void) pin; proto_sim_gpio_intr_enable_calls++; return ESP_OK; }
 esp_err_t gpio_intr_disable(gpio_num_t pin) { (void) pin; return ESP_OK; }
 esp_err_t gpio_set_level(gpio_num_t pin, uint32_t level) { (void) pin; (void) level; return ESP_OK; }
 int       gpio_get_level(gpio_num_t pin) { (void) pin; return 0; }

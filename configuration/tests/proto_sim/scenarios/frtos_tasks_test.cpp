@@ -162,6 +162,8 @@ TEST_F(Irq, AnEmptyWindowNobodyPromisedAnythingInIsNotAMissedMark) {
 // the symbol timeout intact — one failed detection each — and each lost a frame.
 // ---------------------------------------------------------------------------
 
+extern "C" int proto_sim_gpio_intr_enable_calls;   // esp_idf_stubs.c
+
 namespace {
 // A mark window that started listening at `start_us`.
 void openMarkWindowAt(Probe &lif, CmdDispatcher &disp, int64_t start_us) {
@@ -175,7 +177,11 @@ void openMarkWindowAt(Probe &lif, CmdDispatcher &disp, int64_t start_us) {
 TEST_F(Irq, AnEarlyTimeoutListensOnForTheRestOfTheWindow) {
     openMarkWindowAt(lif, disp, 5'000'000);
     proto_sim_timer_advance_us(6'000);            // gave up after 6 ms (1.0.81: 5.8 ms)
+    const int enables_before = proto_sim_gpio_intr_enable_calls;
     dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
+    EXPECT_EQ(proto_sim_gpio_intr_enable_calls, enables_before + 1)
+        << "the DIO1 interrupt must be re-enabled after a restart too, or the restarted "
+           "window's own timeout is never serviced (1.0.82 went deaf on hardware)";
 
     EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "the window is still open: nothing missed yet";
     EXPECT_EQ(r().count("lora_rxSingle"), 1u) << "listening again";
