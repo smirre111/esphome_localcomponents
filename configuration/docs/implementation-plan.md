@@ -2341,6 +2341,46 @@ robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 
   timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
   `motorpolicy::timerPeriodTicks` never returns 0.
 
+**MEASURED 2026-09-15 19:13–19:46 — Mode B on 1.0.90, receive windows in RxContinuous
+closed by the node's timer: 0 of 395 lost, but two defects.** Node 2 fw 1.0.90
+(`07de536`), hub `f83b49f`, production profile, bench LNA gain G6 as on 1.0.89, two
+300 s ModeTests back to back (START 19:15:07 and 19:30:22).
+
+| Mode B, MAC-0 (1.0.90) | run 1 | run 2 |
+|---|---|---|
+| marks received | **197 / 197, 0 gaps** | **198 / 198, 0 gaps** |
+| windows armed / hit (as reported) | 192 / 1 | 191 / 0 |
+| **HW-8:** oneShot n vs windows armed | 193 ≥ 192, p99 −396 us | 191 ≥ 191, p99 −438 us |
+| armResidual p99 | 364 us | 389 us |
+| phaseErr p50 / p99 / max | +651 / +2 593 / +2 952 us | −1 370 / −487 / −228 us |
+| residual | −4 ppm | −1 ppm |
+| light sleep / RX on, steady Mode B | 87.1–87.3 % / 4.25–4.39 % | 87.1–87.2 % / 4.09–4.29 % |
+
+* **No frame lost, no stuck window, no reset.** On 1.0.83–1.0.89 about one mark in
+  400–600 had been lost.
+* **Defect 1: windows booked as empty although their frame arrived.**
+  - 380 of 380 in-test windows logged "closed empty" 60–65 ms after opening, radio asleep.
+  - The frame's RxDone lands about two window widths in, where the extended timer also
+    ends.
+  - By then RegModemStat in RxContinuous reads "searching" again, so the close took the
+    mark as missed before the hit was counted. That is why the hub shows windows 192/1.
+  - The frames survived only because the DIO0 task had already read the FIFO.
+  - **Fixed in 1.0.91:** the window end also reads RegIrqFlags, before the generation
+    check, and extends while ValidHeader or RxDone is pending.
+* **Defect 2: the SoC no longer sleeps inside a window.**
+
+  | light sleep, 1.0.89 → 1.0.90 | per minute | share of the minute |
+  |---|---|---|
+  | Mode A | 334 → 166 | 96.7 % → 89.5 % |
+  | Mode B | 133 → 91 | 91.3 % → 87.2 % |
+
+  - The losses equal one window per Mode A window (128 × 29.44 ms = 6.3 % of a minute)
+    and the extended ~60 ms windows in Mode B.
+  - Cause: `CONFIG_FREERTOS_HZ=100` with `CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3`.
+    Light sleep needs 30 ms to the next wake, and the window-end timer is 29.44 ms away.
+    In RxSingle the SoC slept until the DIO1 GPIO woke it.
+  - **Set to 2 (20 ms) for 1.0.91**, to be measured.
+
 **MEASURED 2026-09-15 18:22–18:55 — Mode B on 1.0.89 with the LNA gain fixed at G6
 (bench only): 1 of 396 lost; the gain is not the cause.** Node 2 fw 1.0.89 (`e6bda93`),
 hub `f16de19`, production profile, two 300 s ModeTests back to back. The G6 setting is a
