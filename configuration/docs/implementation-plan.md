@@ -2329,6 +2329,34 @@ the node deaf.** Node 2 fw 1.0.82 (`1c79663`), hub `eddbc16`, production profile
 * Hub side, same run: the new late-mark log fired once (msgid 139, 3 332 us after its
   mark).
 
+**MEASURED 2026-09-15 09:09–09:25 — Mode B on 1.0.83: the window restart rescues the
+false detections, 2 of 597 frames lost to on-time sync failures.** Node 2 fw 1.0.83
+(`b8a15e8`), hub `eddbc16`, production profile, 900 s. GridSync at 11.0 s (provisional),
+re-solved at 92.1 s (−11 304 us), promoted at 105.7 s.
+
+| Mode B, MAC-0 (1.0.83) | value |
+|---|---|
+| windows armed / hit | 591 / 589 (WMR 3 384 ppm) |
+| **HW-8:** oneShot n vs windows armed | 593 ≥ 591 → 0 missed one-shots; oneShot p99 −384 us |
+| armResidual p99 | 332 us |
+| phaseErr p50 / p99 / max | +16 / +1 801 / +1 853 us, n 595 |
+| raw rate / residual | +9 ppm, period 1 500 014 us / **0 ppm — pass** |
+| FER_link / counterAcc / micValid | 0 ppm / 595 / 597 of 597 (DUP 3 350 ppm) |
+| rate learned | first beacon (361 s), +6 815 ppb over 272 s from the re-solve; then +9 627 ppb |
+| light sleeps / RX on / sleep, steady Mode B | 129–135 per minute / 4.2–4.5 % / 91.2–91.5 % |
+
+* **No deafness and no sleep storm:** the 1.0.82 regression is gone.
+* **Window restarts during the test:**
+  - **674.9 and 938.2 s**, after 6.7 and 6.6 ms at the noise floor: the node listened on,
+    and **no mark was lost** there.
+  - **537.4 and 694.2 s**, after 15.2 and 14.5 ms, as the frame arrived: the restarted
+    windows ran to the end with the signal still at **−48 and −45 dBm**. Both frames were
+    lost.
+* Also before the test: 5 restarts in the free-running and trial windows (4.1–26.7 ms).
+* **The remaining loss is a strong, on-time frame whose preamble fails to synchronise.**
+  A restart 1 ms before T0 has no preamble left to detect.
+* Hub: one mark 3 831 us after its mark (msgid 192), not one of the losses.
+
 * The raw rate is stable at **+9 ppm** across all four runs, and period 1 500 013 us.
 * True FER (CRC-valid → addressed, stage 2→3) was 0 in every run.
 * HW-8 has still not run: `oneShot n 0` because `windows 0/0`. Not a failure of the
