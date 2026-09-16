@@ -2356,6 +2356,34 @@ robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 
   timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
   `motorpolicy::timerPeriodTicks` never returns 0.
 
+**OPEN, NOT MEASURED — did the 12-symbol downlink preamble earn its place?** Raised
+2026-09-16; deferred, and recorded so the question is not settled by the table below
+looking tidy.
+
+| downlink preamble | runs | marks | lost | rate |
+|---|---|---|---|---|
+| 8 symbols (up to 1.0.83) | 7 | ~4 180 | 26 | ~6.2 per 1 000 |
+| 12 symbols (1.0.86 onward) | 7 | ~5 550 | 9 | ~1.6 per 1 000 |
+
+* The fourfold difference is not chance, and **not attributable to the preamble**: late
+  windows, the window restart, RxContinuous windows, the stuck-window recovery and
+  several timing corrections all landed between the two groups. The 8-symbol runs carry
+  defects the 12-symbol runs do not.
+* What it costs to keep: 4 symbols = 1 024 us per downlink frame (~2.4 % of a 43 ms
+  frame) and 1 ms more window lead. Node 1, on old firmware, receives it (verified
+  2026-09-15).
+* The mechanism argues for it: every remaining loss is a preamble the modem never
+  detected, and a longer one gives the detector more chances.
+* **To answer it properly**, the 1:1 method used for the window kinds:
+  1. both ends must agree on the preamble, so the switch changes `LoraTiming.h` and each
+     variant needs hub AND node flashed together — four flashes;
+  2. raise the bench ModeTest cap above 900 s first, or the 600 s anti-flap hold after
+     each test keeps the node out of Mode B for most of the next one (see the long run
+     below);
+  3. ~3 000 marks per variant, about 75 min each. At the rates above that is ~5 losses
+     against ~18 — enough to separate, which single 600-mark runs are not.
+* Until then the preamble stays at 12 symbols.
+
 **MEASURED 2026-09-15 22:00–23:18 — long run on 1.0.92 RxContinuous, 2 985 marks: 5
 lost (~1 in 600), but only 1 408 of them in Mode B.** Node 2 fw 1.0.92 continuous (the
 1:1 image, bench gain G6, idle-before-sleep 2), hub `ea51f1e`, five 900 s ModeTests (the
