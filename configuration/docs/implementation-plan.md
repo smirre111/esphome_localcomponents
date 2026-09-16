@@ -2356,6 +2356,34 @@ robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 
   timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
   `motorpolicy::timerPeriodTicks` never returns 0.
 
+**MEASURED 2026-09-16 08:15–09:08 — Mode C MAC-0 on fw 1.0.94: PASS.** Node 2 into
+automatic mode at its 15 min check-in pace, straight after the Mode B run rather than
+overnight. The Mode B grid was WITHDRAWN first (Timed Mode off), so the hub does not
+place marks and beacons at a node that is asleep. Measured hub-side only: opening the
+node's serial port resets a sleeping node, which is the thing under test.
+
+| Mode C, MAC-0 (1.0.94) | value |
+|---|---|
+| check-ins expected / heard | **3 / 3**, each `reason=TIMER_CHECKIN reset=DEEPSLEEP fw=10094` |
+| **wake-timing error — pass line \|ppm\| < 20** | **+8 ppm**, both paired samples — **pass** |
+| wake-clock counter rate | −132 ppm (crystal −139 ppm at period 16 002 235 Q19) |
+| deep sleep | requested 900 000 000 us, applied 899 874 298 us (corrected) |
+| session | `resume=1` on every wake — no re-login, no REGISTER |
+| true FER (CRC-valid of detected), auto wakes | **0 lost**: 9/9, 2/2, 1/1 |
+| node wall clock vs hub | −1 to −2 s, TimeSync sent on each beacon |
+
+* **Consistent with the 2026-09-14 pass** (+12 ppm, counter −128 ppm) on fw 1.0.67, which
+  is the point: the receive path has been rewritten twice since (RxContinuous windows,
+  the node-timer close, the window-end race fix), and Mode C's wake timing and Class A
+  reception are unchanged.
+* **Class A windows per wake: 2/0, 3/1, 1/1 (armed/hit).** Not every armed window is a
+  promise — a window opened after an uplink the hub does not answer is legitimately
+  empty — so this is not loss, and every frame that did arrive was CRC-valid. The first
+  row is the transition wake (the node was awake and interactive when AUTO was pushed).
+  What this run cannot separate is "armed after an unanswered uplink" from "armed and
+  missed": that needs the node's own funnel, and the node's serial port is exactly what
+  a Mode C run may not touch.
+
 **MEASURED 2026-09-16 — MAC-0 on fw 1.0.94 (AGC, RxContinuous windows, both review
 fixes): Mode A and Mode B both pass.** Node 2 fw 1.0.94 (`71681dd`), hub `a5cbf58`,
 production profile, AGC (the bench gain option is back to 0).
