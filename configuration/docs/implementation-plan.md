@@ -2356,6 +2356,37 @@ robustness defects the bench found on the way.** Hub `cdc6b30`; node 1.0.84 → 
   timer to its 1 ms floor, which is 0 ticks at 100 Hz, and FreeRTOS asserted. Fix, 1.0.87:
   `motorpolicy::timerPeriodTicks` never returns 0.
 
+**MEASURED 2026-09-16 — MAC-0 on fw 1.0.94 (AGC, RxContinuous windows, both review
+fixes): Mode A and Mode B both pass.** Node 2 fw 1.0.94 (`71681dd`), hub `a5cbf58`,
+production profile, AGC (the bench gain option is back to 0).
+
+| | Mode A (900 s, grid 1093 ms) | Mode B (900 s, grid 1500 ms) |
+|---|---|---|
+| arm refusal | 0 | 0 |
+| mode actually run | 1 | 2 |
+| true FER (CRC-valid → addressed) | **0 of 53** | **0 of 599** |
+| marks lost (seq gaps) | n/a — Mode A arms no marks | **2 of 597** |
+| windows armed / hit | — (none, by definition) | **591 / 589** (WMR 3 384 ppm) |
+| **HW-8:** oneShot n vs windows armed | — | **594 ≥ 591 → 0 missed one-shots**, p99 −453 us |
+| armResidual p99 | — | 325 us |
+| phaseErr p50 / p99 / max | — | −12 / +1 780 / +2 067 us, n 595 |
+| raw clock rate | +9 ppm, n 53, period 1 093 003 us | +9 ppm, n 595, period 1 500 014 us |
+| **residual — pass line \|ppm\| < 20** | — (Mode A has none) | **0 ppm — pass** |
+| steady RX on / light sleep | 6.6 % / 97.0 % | 4.3 % / 90.7 % |
+
+* Node side, both runs: no early-timeout restart, no stuck window, no reset. Mode B had
+  two empty windows, matching its two lost marks; promotion came 12 s after the first
+  mark.
+* **The first Mode B attempt was VOID, not a failure.** The node refused the arm with
+  `ArmRefusal::NoGrid` (8): the hub had rebooted for its OTA and came back with **Timed
+  Mode OFF**, so no grid was ever published. The node stayed healthy throughout, hearing
+  the hub's marks and logging them as late marks with no test running. Switching Timed
+  Mode on published the grid, the node acked it with 0 re-publishes, and the run above
+  followed.
+  **Open question this raises:** whether the hub should restore Timed Mode across a
+  restart. Today a hub reboot silently leaves every node in Mode A, which is the safe
+  direction but looks exactly like a working system.
+
 **OPEN, NOT MEASURED — did the 12-symbol downlink preamble earn its place?** Raised
 2026-09-16; deferred, and recorded so the question is not settled by the table below
 looking tidy.
