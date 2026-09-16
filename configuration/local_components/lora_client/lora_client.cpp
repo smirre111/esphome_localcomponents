@@ -1755,47 +1755,43 @@ namespace esphome
         return;
       }
 
-      // Plaintext path. The counter moves only while no session is confirmed:
-      // before the handshake there is nothing to authenticate with and the
-      // msgid is the only sequencing the hub has, but once the node is proven
-      // to hold the key, an unauthenticated frame must not be able to move it.
+      // Plaintext path. Before the handshake there is nothing to authenticate
+      // with and the msgid is the only sequencing the hub has, so the counter
+      // moves here and the frame is acted on — that is the bootstrap.
+      //
+      // ONCE THE SESSION IS CONFIRMED, IT IS REFUSED OUTRIGHT (review finding 1,
+      // 2026-09-15). Suppressing duplicates was not enough, because dispatch is
+      // not inert and the msgid is plaintext in every header, so anyone in radio
+      // range can pick one above the high-water mark and be acted on ONCE, which
+      // is all it takes:
+      //   * a forged CommandAck naming a msgid in the tracked command's range
+      //     cancels its retransmissions and clears "command failed" — the command
+      //     is lost while Home Assistant shows it delivered;
+      //   * the same ack confirms a GridSync or a ScheduleConfig push;
+      //   * the PhaseReport it carries sets the hub's single-shot belief, which the
+      //     plan describes as authenticated by the beacon's GCM tag — on this path
+      //     it was not.
+      // This is the mirror of the node's default-deny gate (CmdDispatcher). REGISTER
+      // and LOGIN are the two exemptions and both return before this point: REGISTER
+      // is the bootstrap, LOGIN carries the base nonce and is the recovery path.
       if (!this->session_confirmed_)
       {
         this->commit_rx_msgid_(rcv_message);
       }
       else
       {
-        // Duplicate suppression for frames that do NOT commit.
-        //
-        // Rejecting a repeat used to be a side effect of the counter
-        // assignment: the frame moved rx_message_id, so the next copy failed
-        // the "msgid > rx_message_id" window. Taking the assignment away to
-        // stop an unauthenticated frame ratcheting the counter took the dedup
-        // with it, and nothing replaced it — the SAME plaintext frame could be
-        // admitted without limit. dispatch_payload_ is not inert: a captured
-        // CommandAck replayed in a loop cleared op_awaiting_ack_ every time,
-        // suppressing the retry ladder indefinitely while the hub reported the
-        // command delivered.
-        //
-        // A separate high-water mark restores the suppression without giving
-        // an unauthenticated frame any say over the authenticated counter. It
-        // can only wedge OTHER plaintext frames, which on a confirmed session
-        // are precisely the ones the hub does not trust; every encrypted frame
-        // bypasses this check entirely, so the 1024-window wedge this split was
-        // written to prevent cannot come back through it.
-        const uint32_t msgid =
-            (rcv_message->header != nullptr) ? rcv_message->header->msgid : 0u;
-        if (this->have_plaintext_hwm_ && msgid <= this->plaintext_hwm_)
-        {
-          ESP_LOGW(TAG, "[%s] plaintext msgid %u not above the high-water mark "
-                        "%u on a confirmed session — dropping as a duplicate",
-                   this->get_name().c_str(), (unsigned) msgid,
-                   (unsigned) this->plaintext_hwm_);
-          return;
-        }
-        this->plaintext_hwm_      = msgid;
-        this->have_plaintext_hwm_ = true;
+        this->plaintext_refused_++;
+        ESP_LOGW(TAG, "[%s] refusing a PLAINTEXT uplink (proto_case=%d, msgid=%u) — "
+                      "this node holds a confirmed session (%u refused)",
+                 this->get_name().c_str(), (int) rcv_message->proto_case,
+                 (unsigned) (rcv_message->header != nullptr ? rcv_message->header->msgid : 0u),
+                 (unsigned) this->plaintext_refused_);
+        return;
       }
+      // The high-water mark that used to suppress plaintext duplicates here is
+      // gone with the frames it bounded: on a confirmed session none of them
+      // reach this point any more. It is still maintained in commit_rx_msgid_,
+      // where it belongs to the authenticated counter.
       this->dispatch_payload_(rcv_message);
       for (size_t i = 0; i < this->nodes_.size(); i++)
         this->nodes_[i]->set_response(data, len);

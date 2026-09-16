@@ -53,6 +53,11 @@ int lora_parsePacket(int size) {
 }
 int lora_parsePacket(uint8_t irqFlags, int size) {
     (void) irqFlags;
+    // The real driver's FIRST act is lora_clearInterrupts(irqFlags) (lora.cpp), and
+    // the modem is idled only later, after the payload length is read. Both matter
+    // to LoraInterface::windowEndClosesWindow, so both are modelled here.
+    R().irq_flags_reg = 0;
+    if (R().on_parse_packet) R().on_parse_packet();
     return lora_parsePacket(size);
 }
 
@@ -79,16 +84,18 @@ int lora_read() {
     return R().rx_payload[R().rx_cursor++];
 }
 int     lora_peek()               { return lora_available() ? R().rx_payload[R().rx_cursor] : 0; }
-void    lora_receive(void)        { R().note("lora_receive"); }
-void    lora_receive(int size)    { (void) size; R().note("lora_receive"); }
+void    lora_receive(void)        { R().op_mode = 0x85; R().note("lora_receive"); }
+void    lora_receive(int size)    { (void) size; R().op_mode = 0x85; R().note("lora_receive"); }
 uint8_t lora_getPayloadLength()   { return (uint8_t) R().rx_payload.size(); }
 
-void lora_idle(void)              { R().note("lora_idle"); }
-void lora_sleep(void)             { R().note("lora_sleep"); }
-void lora_cad(void)               { R().note("lora_cad"); if (R().on_cad) R().on_cad(); }
-void lora_tx()                    { R().note("lora_tx"); }
-void lora_rxSingle()              { R().note("lora_rxSingle"); }
-void lora_rxContinuous()          { R().note("lora_rxContinuous"); }
+// RegOpMode is maintained here, not merely recorded: production reads it back to
+// decide whether a receive is still running (LoraInterface::windowEndClosesWindow).
+void lora_idle(void)              { R().op_mode = 0x81; R().note("lora_idle"); }
+void lora_sleep(void)             { R().op_mode = 0x80; R().note("lora_sleep"); }
+void lora_cad(void)               { R().op_mode = 0x87; R().note("lora_cad"); if (R().on_cad) R().on_cad(); }
+void lora_tx()                    { R().op_mode = 0x83; R().note("lora_tx"); }
+void lora_rxSingle()              { R().op_mode = 0x86; R().note("lora_rxSingle"); }
+void lora_rxContinuous()          { R().op_mode = 0x85; R().note("lora_rxContinuous"); }
 
 void lora_setTxPower(int level, int outputPin) { (void) level; (void) outputPin; R().note("lora_setTxPower"); }
 void lora_setTxPower(int level)   { (void) level; R().note("lora_setTxPower"); }
@@ -138,7 +145,10 @@ uint8_t lora_readInterrupts() {
 }
 void    lora_clearInterrupts(uint8_t f) { (void) f; R().note("lora_clearInterrupts"); }
 int     lora_read_reg(int reg)    {
-    return reg == 0x18 ? R().modem_status : reg == 0x12 ? R().irq_flags_reg : 0;
+    return reg == 0x18 ? R().modem_status
+         : reg == 0x12 ? R().irq_flags_reg
+         : reg == 0x01 ? R().op_mode
+                       : 0;
 }
 uint8_t lora_random()             { return 0; }
 void    lora_dump_registers(void) {}

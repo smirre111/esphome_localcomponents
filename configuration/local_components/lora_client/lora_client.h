@@ -499,6 +499,8 @@ namespace esphome
       // Node-initiated GridSync requests, answered and not (hubAnswersSyncRequest).
       uint32_t gridSyncRequestsAnswered() const { return this->gridsync_requests_answered_; }
       uint32_t gridSyncRequestsIgnored() const  { return this->gridsync_requests_ignored_; }
+      // Plaintext uplinks refused because this node holds a confirmed session.
+      uint32_t plaintextRefused() const { return this->plaintext_refused_; }
       uint32_t opRetryCount() const    { return this->op_retry_count_; }
 
       const MacStats &mac_stats() const { return this->mac_stats_; }
@@ -754,6 +756,7 @@ namespace esphome
       int64_t       last_gridsync_publish_us_{0};
       uint32_t      gridsync_requests_answered_{0};
       uint32_t      gridsync_requests_ignored_{0};
+      uint32_t      plaintext_refused_{0};
       static constexpr uint8_t  kSchedMaxRetries   = 3;
       static constexpr uint32_t kSchedRetryMs      = 5000;
       virtual void send_remote_config();

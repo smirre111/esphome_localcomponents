@@ -404,6 +404,96 @@ TEST(RealLoraClient, ARequestWhileAGridSyncAwaitsItsAckIsNotAnswered) {
     EXPECT_EQ(h.rol.gridSyncRepublishes(), republishes) << "and the request adds nothing to it";
 }
 
+// ---------------------------------------------------------------------------
+// Review finding 1 (2026-09-15): a plaintext uplink was acted on while the session
+// was confirmed. The header is in the clear on every frame, so the msgid an attacker
+// needs is not a secret, and dispatch is not inert — one admitted frame retires a
+// command, confirms a push, or sets the single-shot belief.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct TrackedOpProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::op_awaiting_ack_;
+    using esphome::lora_tracker::LORAListener::op_last_msgid_;
+};
+
+std::vector<uint8_t> plaintext_ack_frame(uint32_t msgid, uint32_t ack_msg_id,
+                                         bool timed_rx_active) {
+    LoraHeader hdr       = LORA_HEADER__INIT;
+    hdr.destaddress      = esphome::lora_tracker::kHubAddress;
+    hdr.destsubnet       = 2;
+    hdr.senderaddress    = 18;
+    hdr.msgid            = msgid;
+
+    PhaseReport pr       = PHASE_REPORT__INIT;
+    pr.samples           = 12;
+    pr.rtcslowsrc        = 2;          // crystal
+    pr.timedrxactive     = timed_rx_active;
+
+    CommandAck ack       = COMMAND_ACK__INIT;
+    ack.ack_msg_id       = ack_msg_id;
+    ack.status           = ACK_STATUS__ACK_OK;
+    ack.phase            = &pr;
+
+    LoraClientResponseMessage resp = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    resp.header          = &hdr;
+    resp.proto_case      = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK;
+    resp.ack             = &ack;
+
+    std::vector<uint8_t> out(lora_client_response_message__get_packed_size(&resp));
+    lora_client_response_message__pack(&resp, out.data());
+    return out;
+}
+}  // namespace
+
+TEST(RealLoraClient, AForgedPlaintextAckCannotRetireATrackedCommand) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_         = true;
+    h.rol.session_confirmed_  = true;   // the node has proved it holds the key
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                               COV_OPERATION__CMD_OPEN, 0.0f);
+    auto &op = static_cast<TrackedOpProbe &>(h.rol);
+    ASSERT_TRUE(op.op_awaiting_ack_) << "precondition: a command is in flight";
+
+    // Just above the hub's replay counter: inside the 1024-wide window, which is
+    // what an attacker reading the plaintext header would choose.
+    auto forged = plaintext_ack_frame(/*msgid=*/5, op.op_last_msgid_, false);
+    h.rol.set_response(forged.data(), forged.size());
+
+    EXPECT_TRUE(op.op_awaiting_ack_)
+        << "an unauthenticated ack must not retire a command the node may never have had";
+    EXPECT_EQ(h.rol.plaintextRefused(), 1u);
+}
+
+TEST(RealLoraClient, AForgedPlaintextAckCannotEarnSingleShot) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_        = true;
+    h.rol.session_confirmed_ = true;
+
+    auto forged = plaintext_ack_frame(/*msgid=*/5, /*ack_msg_id=*/1, /*timed=*/true);
+    h.rol.set_response(forged.data(), forged.size());
+
+    EXPECT_FALSE(h.rol.hubBelief().phase_reported)
+        << "the phase report is evidence only when the frame carrying it was authenticated";
+    EXPECT_FALSE(h.rol.hubBelief().node_timed_rx);
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst);
+}
+
+TEST(RealLoraClient, PlaintextIsStillTheBootstrapBeforeASessionExists) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;           // no session confirmed: the node holds no key
+
+    auto frame = plaintext_ack_frame(/*msgid=*/5, /*ack_msg_id=*/1, /*timed=*/false);
+    h.rol.set_response(frame.data(), frame.size());
+
+    EXPECT_EQ(h.rol.plaintextRefused(), 0u) << "refusing here would close the bootstrap";
+    EXPECT_EQ(h.rol.frame_counter_.rx_message_id, 5u)
+        << "and with nothing to authenticate with, the msgid is the only sequencing there is";
+}
+
 TEST(RealLoraClient, ARequestWithTimedModeOffIsNotAnswered) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};

@@ -56,6 +56,10 @@ struct Recorder {
     // RegIrqFlags (0x12) as lora_read_reg reports it: the flags still pending in
     // the radio, NOT consumed on read (lora_readInterrupts is the consuming path).
     uint8_t  irq_flags_reg{0};
+    // RegOpMode (0x01) as lora_read_reg reports it, maintained by the mode calls
+    // below. A window end closes a window only while the radio is still in the
+    // receive that window opened.
+    uint8_t  op_mode{0};
     // DIO mapping, per pin, as last written. A window armed with DIO0 mapped to
     // CADDONE instead of RXDONE is a window that cannot hear a frame.
     uint8_t  dio_mode[6]{};
@@ -82,6 +86,14 @@ struct Recorder {
     // free" consumed as this CAD's answer is what makes the node transmit into
     // a running burst.
     std::function<void()> on_cad;
+
+    // Called FROM lora_parsePacket, at the instant the real driver clears
+    // RegIrqFlags — its first act, before the FIFO is read and before the modem is
+    // idled. That is the gap a window end must not be able to close: the flags say
+    // nothing arrived and the radio is still in the receive the window opened. A
+    // test uses this to deliver the end exactly there, which is the interleaving
+    // the DIO1 task really gets when spi_device_transmit blocks the DIO0 task.
+    std::function<void()> on_parse_packet;
 
     void reset() { *this = Recorder{}; }
 

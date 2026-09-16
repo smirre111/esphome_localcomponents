@@ -244,6 +244,89 @@ TEST_F(Irq, AnEndQueuedForAWindowThatAlreadyClosedClosesNothing) {
     EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
 }
 
+TEST_F(Irq, AWindowEndArrivingWhileTheFlagsAreBeingClearedClosesNothing) {
+    // The gap itself, at the instant the driver clears RegIrqFlags: the radio is
+    // still in the receive this window opened, and the flags no longer say a frame
+    // came. Only the generation, moved on before the clear, tells the two apart.
+    proto_sim_timer_set_now_us(5'000'000);
+    disp.noteMarkArmed();
+    lif.armTimedRxWindow();
+    const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
+    const size_t sleeps = r().count("lora_sleep");
+
+    loranode::rec().irq_flags_reg = 0;       // cleared by lora_parsePacket
+    loranode::rec().modem_status  = 0x04;    // searching again, mid-frame
+    lif.noteFrameArriving();                 // what the DIO0 task does first
+
+    serviceDio1Event(end);
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
+    EXPECT_EQ(r().count("lora_sleep"), sleeps) << "sleeping here empties the FIFO";
+    EXPECT_EQ(lif.staleWindowEnds(), 1u);
+}
+
+TEST_F(Irq, AWindowEndDeliveredInsideDio0ServicingClosesNothing) {
+    // The same thing through the real path: the DIO1 task runs while the DIO0 task
+    // is blocked inside the driver (spi_device_transmit blocks per register, and
+    // both tasks share core 1). The window end is delivered from the recorder's
+    // parse hook, which fires where the driver clears the flags.
+    proto_sim_timer_set_now_us(5'000'000);
+    disp.noteMarkArmed();
+    lif.armTimedRxWindow();
+    const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
+    // No payload: this fixture never initialises the buffer pools, and what is
+    // under test is the interleaving, which the hook reproduces before
+    // lora_parsePacket returns anything.
+    loranode::rec().on_parse_packet = [&]() { serviceDio1Event(end); };
+
+    dio0(LORA_IRQ_FLAG_RX_DONE);
+    loranode::rec().on_parse_packet = nullptr;
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
+        << "the window caught its frame; closing it mid-read would book a miss for it";
+    EXPECT_EQ(lif.staleWindowEnds(), 1u) << "the end belongs to a window already ending";
+}
+
+TEST_F(Irq, AFrameBeingServicedIsNotClosedByAWindowEnd) {
+    // Review finding 3 (2026-09-15). lora_parsePacket clears ValidHeader/RxDone as
+    // its FIRST act, so from that moment a window end sees exactly what an empty
+    // window looks like. Closing one would book a missed mark for this frame and
+    // sleep the radio — which empties the SX1276 FIFO — under the DIO0 task still
+    // reading it, and give the radio semaphore a second time.
+    proto_sim_timer_set_now_us(5'000'000);
+    disp.noteMarkArmed();
+    lif.armTimedRxWindow();
+    const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
+
+    dio0(LORA_IRQ_FLAG_RX_DONE);          // the frame is serviced
+    const size_t sleeps = r().count("lora_sleep");
+
+    serviceDio1Event(end);
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
+        << "a frame the node received is not an empty window";
+    EXPECT_EQ(r().count("lora_sleep"), sleeps);
+    EXPECT_EQ(lif.staleWindowEnds(), 1u);
+}
+
+TEST_F(Irq, AWindowEndAfterTheRadioLeftReceiveClosesNothing) {
+    // The second half of the same fix, independent of the generation: whatever the
+    // event says, a radio that is no longer in the receive this window opened has
+    // already ended it. lora_parsePacket idles the modem on RxDone.
+    proto_sim_timer_set_now_us(5'000'000);
+    disp.noteMarkArmed();
+    lif.armTimedRxWindow();
+    const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
+    const size_t sleeps = r().count("lora_sleep");
+
+    lora_idle();                          // standby, as parsePacket leaves it
+    serviceDio1Event(end);
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
+    EXPECT_EQ(r().count("lora_sleep"), sleeps);
+    EXPECT_EQ(lif.staleWindowEnds(), 1u);
+}
+
 TEST_F(Irq, AnEndQueuedBeforeTheDriftTestsReceiveDoesNotEndIt) {
     // The drift test's continuous receive opens no window and so moves no window
     // generation on. Only the receive that ENDED can make the queued end stale.
