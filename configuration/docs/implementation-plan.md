@@ -1380,15 +1380,20 @@ plus an unchanged caller is not security, it is an outage.
 
 Recorded here rather than left to look maintained.
 
-- **Review of 2026-09-15 (node `f4c93c9`, hub `dcc52b4`) — open, see
-  `docs/review-2026-09-15.md`.** High: the hub acts on plaintext uplinks while the
-  session is confirmed (forged acks cancel command retransmits and set the
-  single-shot belief); the header timing fields (`burstIndex`, `onMark`, fire stamps)
-  are not in the AAD and the node's phase path reads them before the replay check.
-  Medium: a window end can close a window whose frame is being read
-  (`lora_parsePacket` clears the flags first); unbounded window extension; a mark
-  window that hears a non-addressed frame stays open and the next empty window is
-  booked as a missed mark. Four low items.
+- **Review of 2026-09-15 (node `f4c93c9`, hub `dcc52b4`), see
+  `docs/review-2026-09-15.md`.** Two of nine fixed on 2026-09-16:
+  - ~~the hub acts on plaintext uplinks while the session is confirmed~~ — **FIXED**:
+    refused and counted once `session_confirmed_` is set, REGISTER and LOGIN keeping
+    their earlier paths.
+  - ~~a window end can close a window whose frame is being read~~ — **FIXED** in fw
+    1.0.94: the window generation moves on before `lora_parsePacket` clears the
+    radio's flags, and a window is closed only while the radio is still in the
+    receive that window opened.
+
+  **Still open.** High: the header timing fields (`burstIndex`, `onMark`, fire stamps)
+  are not in the AAD, and the node's phase path reads them before the replay check.
+  Medium: unbounded window extension; a mark window that hears a non-addressed frame
+  stays open, so the next empty window is booked as a missed mark. Four low items.
 
 - ~~**The hub's grid anchor is never established correctly.**~~ **FIXED.** It
   had two independent halves, and either alone was enough to put every mark
