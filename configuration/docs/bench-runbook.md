@@ -246,6 +246,23 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
    boot; `rx_stamp_uncertainty_us()` gives it per packet.
 3. **Closes when** you have the high-water number. It bounds how well the hub can
    place any uplink, which is what C2's ±1 ms gate is measured against.
+   **⚠️ Blocked on readout, not on traffic (found 2026-09-19).** The hub had been
+   up 3.09 days — the "hour of ordinary traffic" is long satisfied — but neither
+   observable can be read while it runs:
+   * `worst_poll_gap_us_` (`lora_tracker.cpp:264`) is printed **only** by
+     `LORATracker::dump_config()` at :154, which ESPHome runs at boot. Restarting
+     the hub to read it zeroes the very counter you came for.
+   * `rx_stamp_uncertainty_us()` reaches a log line only through
+     `last_uplink_unc_us_`, printed in the Class A reply aim at
+     `lora_client.cpp:4056` (`reply aimed at … hub stamp +/-N us`). Node 2 never
+     took that path during the 1.0.95 run (`turnaround … n 0`), so it appears in
+     no capture.
+   * No YAML entity exposes either value.
+   **Fix, small and worth doing with HW-9's hub half:** publish
+   `worst_poll_gap_us()` as a diagnostic sensor. The same hub change can expose
+   the built `configTICK_RATE_HZ`, which is the observable HW-9 says does not
+   exist yet — closing both items with one OTA. Note the reflash resets the
+   high-water, which is fine once it is continuously readable.
 4. **Expect it to be large during a burst** — `checkReception()` is not called
    while `lora_tx_busy_`, so the gap across a 17-copy burst *is* the burst. That
    is honest: the hub genuinely was not listening. Do not treat it as a defect.

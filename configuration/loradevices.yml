@@ -699,6 +699,41 @@ sensor:
     # a mark the node did not answer, which is not the same as a slow one.
     lambda: 'return (float) id(rol_2)->mac_stats().echo_seq_gaps;'
 
+  # HW-10: the hub's RX-stamp uncertainty, as a high-water mark.
+  #
+  # worst_poll_gap_us() was already measured on every poll (lora_tracker.cpp:264)
+  # and printed ONLY by dump_config() at boot — so reading it meant restarting
+  # the hub, which zeroes the counter you came to read. Published here it is
+  # readable while the hub runs, which is what the runbook's "closes when you
+  # have the high-water number" actually needs.
+  #
+  # Expect it to be LARGE during a burst: checkReception() is not called while
+  # lora_tx_busy_, so the gap across a 17-copy burst IS the burst. That is
+  # honest — the hub genuinely was not listening — and not a defect.
+  - platform: template
+    name: "Hub RX stamp — worst poll gap"
+    id: hub_worst_poll_gap
+    entity_category: diagnostic
+    unit_of_measurement: us
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(my_lora_tracker)->worst_poll_gap_us();'
+
+  # HW-9, hub half. The node half closed from the ModeTest report (tick 100 Hz);
+  # the hub half could not, because tickRateHz in that report is a field the
+  # NODE fills. What was unconfirmed is that this build HONOURS the pin at
+  # line 33 (CONFIG_FREERTOS_HZ: "1000") rather than inheriting a default, and
+  # the compiled macro is exactly that confirmation: it is the value the built
+  # firmware's pdMS_TO_TICKS quantises against.
+  - platform: template
+    name: "Hub FreeRTOS tick rate"
+    id: hub_tick_rate_hz
+    entity_category: diagnostic
+    unit_of_measurement: Hz
+    update_interval: 300s
+    accuracy_decimals: 0
+    lambda: 'return (float) CONFIG_FREERTOS_HZ;'
+
   - platform: uptime
     name: '${devicename} Uptime'
     unit_of_measurement: days
