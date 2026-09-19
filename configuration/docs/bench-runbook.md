@@ -419,6 +419,16 @@ on bench time.
    own aim hits and misses for exactly this reason — read them.
 
 ### HW-2 — `T_detect`, by sweeping the arm instant
+
+**⚠️ BEFORE EVERY SWEEP SESSION: check `Timed Mode (Mode B) — node 2` is ON.**
+The switch is declared `restore_mode: ALWAYS_OFF` (`loradevices.yml:874`), so it
+comes up OFF after **every hub reboot** — an OTA, a restart, a power cut. With it
+off the hub publishes no grid, the node free-runs in Mode A, and a sweep is
+refused `NoGrid`. Worse mid-campaign: the points after a hub restart arm nothing,
+report `armed = 0`, and read as "no reception" — a false edge, by a different
+route than the demotion one the node-side guard closes. Caught 2026-09-19 after
+flashing 1.0.96: the node had a session and no grid. A sweep point whose report
+shows `windows 0/0` has measured the switch, not the radio.
 1. **Bench-flagged node**, and **timed mode switched on** for node 2
    (`Timed Mode (Mode B)` switch — it makes Mode B *reachable*, not active).
 2. Step `armOffsetUs` **late** in 500 µs increments until reception fails. The
