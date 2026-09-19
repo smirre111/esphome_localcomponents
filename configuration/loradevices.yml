@@ -162,12 +162,18 @@ lora_client:
     # Node 1 deliberately stays at 6 h — it has no serial, so it cannot provide
     # the observability this spends battery on, and its pack is the weaker one.
     #
-    # 15 min for Mode C MAC-0 measurement (2026-09-14): every check-in is one
-    # wake-clock sample and one Class A funnel report, so four times the data
-    # per hour. A wake with sleepOk costs ~3 s, so 96 wakes/day is ~290 s awake.
-    # Per-pair resolution is +-5 ms / 900 s = +-5.6 ppm; the run's fit averages
-    # it down. Return to 1h when the measurement campaign ends.
-    checkin_interval: 15min
+    # BACK TO 1h (2026-09-19). The 15 min pace was for the Mode C MAC-0
+    # measurement: every check-in is one wake-clock sample and one Class A
+    # funnel report, so four times the data per hour, at ~290 s awake per day
+    # against hourly's 185 s. MAC-0 is now measured in all three modes (A, B
+    # and C all pass; Mode B on fw 1.0.95 lost 0 of 598 marks), so the extra
+    # sample rate no longer buys anything and the battery cost stops.
+    #
+    # The MODE stays interactive (auto_mode: false above, and the HA Auto Mode
+    # switch off). Interval and mode are independent: an interactive node is
+    # awake and reachable, which is what the remaining bench work needs — this
+    # change only slows the check-in cadence, it does not let the node sleep.
+    checkin_interval: 1h
     catchup_window: 0min
     # Two events eight minutes apart so one run observes both a first entry
     # into auto mode AND a wake out of deep sleep with the RTC markers already
@@ -401,24 +407,47 @@ button:
   # Run one press per offset and read the funnel in the report. The early edge
   # (negative offsets) returns G independently, and the two must sum to
   # N*T_sym - T_detect; SweepAnalysis.h does that arithmetic.
+  #
+  # ⚠️ GRID IS 1093 ms, NOT 1100 (fixed 2026-09-19). These three buttons shipped
+  # at 1100 and were REFUSED on every press: armRefusal() gates the
+  # commensurate check on periodMattersFor(), which is true for MODE_SWEEP as
+  # well as MODE_A, and gcd(1100, 500) = 100 ms is far wider than the 29.44 ms
+  # window — ArmRefusal::CommensurateGrid, measured at "1 of 277 marks heard".
+  # So HW-2 could never have run from this control surface. 1093 gives
+  # gcd = 1 ms, so the phase walks 93 ms per mark and visits every residue.
   - platform: template
     name: "Mode Sweep +4 ms (node 2, BENCH ONLY)"
     id: rol_2_modesweep_p4
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1100, 4, 1, true, false, false, true, 4000);'
+      - lambda: 'id(rol_2)->start_mode_test(120, 1093, 4, 1, true, false, false, true, 4000);'
   - platform: template
     name: "Mode Sweep +12 ms (node 2, BENCH ONLY)"
     id: rol_2_modesweep_p12
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1100, 4, 1, true, false, false, true, 12000);'
+      - lambda: 'id(rol_2)->start_mode_test(120, 1093, 4, 1, true, false, false, true, 12000);'
   - platform: template
     name: "Mode Sweep -12 ms (node 2, BENCH ONLY)"
     id: rol_2_modesweep_m12
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1100, 4, 1, true, false, false, true, -12000);'
+      - lambda: 'id(rol_2)->start_mode_test(120, 1093, 4, 1, true, false, false, true, -12000);'
+  # The sweep the procedure actually asks for: an ARBITRARY offset, so the edge
+  # can be walked in 500 us steps. Three fixed offsets cannot find an edge that
+  # sits near +/-14 080 us; they can only say "inside" or "outside".
+  #
+  # 120 s at a 1093 ms grid is ~109 marks per point, and SweepAnalysis::Point
+  # ::receives() needs >= 8 armed with >= 80 % hit, so one press is one Point
+  # with ample margin. Read `windows armed/hit` from the REPORT for that point.
+  - platform: template
+    name: "Mode Sweep at offset (node 2, BENCH ONLY)"
+    id: rol_2_modesweep_at_offset
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          id(rol_2)->start_mode_test(120, 1093, 4, 1, true, false, false, true,
+                                     (int32_t) id(rol_2_sweep_offset_us).state);
 
   # --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------------
   #
@@ -456,6 +485,28 @@ button:
     entity_category: diagnostic
     on_press:
       - lambda: 'id(rol_2)->reset_mac_stats();'
+
+number:
+  # HW-2's arm offset, in microseconds. The procedure needs 500 us steps around
+  # a +/-14 080 us guard to find the reception edge; until this existed the only
+  # controls were three fixed offsets, which can bracket the edge but never
+  # locate it. Paired with the "Mode Sweep at offset" button above.
+  #
+  # Range is wider than the guard on purpose: the sweep must reach offsets that
+  # FAIL, or it never sees an edge. A run at an offset outside the guard is
+  # expected to lose marks — that is the measurement, not a fault.
+  - platform: template
+    name: "Mode Sweep arm offset (node 2)"
+    id: rol_2_sweep_offset_us
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    min_value: -20000
+    max_value: 20000
+    step: 500
+    unit_of_measurement: us
+    mode: box
 
 sensor:
   # --- ModeTest and MAC-ping results, as numbers ---------------------------

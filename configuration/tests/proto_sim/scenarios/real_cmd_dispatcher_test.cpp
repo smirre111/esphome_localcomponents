@@ -3756,8 +3756,12 @@ std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgi
 
 std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
                                          uint32_t grid_period_ms = 1093,
-                                         uint32_t seq = 0) {
+                                         uint32_t seq = 0,
+                                         int32_t arm_offset_us = 0) {
     ModeTest mt = MODE_TEST__INIT;
+    // HW-2: non-zero only for MODE_SWEEP, which deliberately mis-arms its
+    // windows. Defaulted so every existing caller builds the frame it did.
+    mt.armoffsetus      = arm_offset_us;
     mt.enable           = true;
     // 0 is the START. The hub resets its sequence immediately before building
     // it, so every later frame in the same test — each mark, and the STOP —
@@ -3866,6 +3870,85 @@ TEST_F(RealNodeFixture, ModeTestBActuallyPutsTheNodeInTimedRx) {
     ASSERT_TRUE(disp.modeTestActive());
     EXPECT_TRUE(disp.timedRxEnabledForTest());
     EXPECT_EQ(disp.modeTestReportedMode(), (uint8_t) modetest::Mode::B);
+}
+
+// ---------------------------------------------------------------------------
+// HW-2: a sweep must not demote itself.
+//
+// MODE_SWEEP arms its windows deliberately off the mark to find the reception
+// edge, so the marks it loses ARE the measurement. Counting them as evidence
+// that the grid is stale ends the very run being performed: three of them
+// (kMaxMissedMarks) make demotionReasonNow() return MissedMarks, timedRxActive()
+// goes false, and the node arms nothing for the rest of the test. A point
+// outside the guard would report ~3 armed windows instead of ~109 — below
+// SweepAnalysis::Point::receives()'s min_armed of 8, so it would read "no
+// reception" for the wrong reason — and the 600 s anti-flap hold would then make
+// every LATER point read the same way. The first failing offset would plant a
+// false edge and poison the rest of the sweep.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, ASweepsOwnMissedMarksNeitherCountNorDemote) {
+    disp.setBenchNode(true);   // MODE_SWEEP is refused outright off the bench
+
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active) << "a sweep needs an anchor to mis-arm against";
+
+    auto sweep = encrypted_mode_test(MODE_TEST__MODE__MODE_SWEEP, /*msgid=*/3,
+                                     /*grid_period_ms=*/1093, /*seq=*/0,
+                                     /*arm_offset_us=*/12000);
+    disp.onReceiveNew(sweep.data(), static_cast<int>(sweep.size()));
+    ASSERT_TRUE(disp.modeTestActive());
+    ASSERT_EQ(disp.modeTestLastRefusal(), (uint32_t) modetest::ArmRefusal::None)
+        << "1093 ms, bench node, adopted grid: nothing here is refusable";
+
+    // Two missed marks. The control test below shows this same sequence leaves a
+    // count of 2 in an ordinary timed run — so 0 here is the guard acting, not
+    // an artefact of the counter being reset by a demotion that did happen.
+    disp.noteMarkArmed(/*generation=*/1);
+    disp.noteMarkMissed(/*generation=*/1);
+    disp.noteMarkArmed(/*generation=*/2);
+    disp.noteMarkMissed(/*generation=*/2);
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
+        << "the sweep's induced misses must not accumulate toward MissedMarks";
+    EXPECT_TRUE(disp.gridState().active) << "and must not cost the node its grid";
+    EXPECT_TRUE(disp.timedRxEnabledForTest())
+        << "the sweep must still be arming windows: that is what it measures";
+}
+
+TEST_F(RealNodeFixture, AnOrdinaryTimedRunStillCountsItsMissedMarks) {
+    // The control. Identical mechanics with NO arm offset, so the guard must not
+    // apply: this is what proves sweepMisArming_() did not simply switch
+    // demotion off for every mode.
+    disp.setBenchNode(true);
+
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    auto b = encrypted_mode_test(MODE_TEST__MODE__MODE_B, /*msgid=*/3);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
+    ASSERT_TRUE(disp.modeTestActive());
+
+    disp.noteMarkArmed(/*generation=*/1);
+    disp.noteMarkMissed(/*generation=*/1);
+    disp.noteMarkArmed(/*generation=*/2);
+    disp.noteMarkMissed(/*generation=*/2);
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 2u)
+        << "without a sweep offset the misses are real evidence and must count";
+
+    // The third is the demotion itself, which resets the counter as it fires —
+    // which is exactly why the assertions above stop at two.
+    disp.noteMarkArmed(/*generation=*/3);
+    disp.noteMarkMissed(/*generation=*/3);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
+        << "kMaxMissedMarks reached: demoteIfMarksMissed_ resets the count";
 }
 
 TEST_F(RealNodeFixture, ModeTestBIsRefusedWithNoGridRatherThanMislabelled) {

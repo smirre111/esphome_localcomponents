@@ -295,6 +295,14 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
   for the node's own timing, not the hub's, wherever ±1 ms is claimed.
 * **It only grows on a burst**, so a quiet hour re-reads the same number. Treat a
   flat value as "no burst worse than this since boot", not as a fresh measurement.
+* **⚠️ The figure is per-boot, and a later boot beat it (2026-09-19, same day).**
+  After the next OTA the counter restarted and reached **246 629 us** within
+  minutes — above the 191 611 us this item closed on — because that reboot's
+  `ScheduleConfig` push was a larger burst. So quote the bound as a FLOOR: the
+  hub's RX stamp can be **at least ~250 ms** uncertain while it transmits. The
+  closing number is not a maximum, and re-reading it after any hub restart is
+  worth doing; what it bounds (C2's ±1 ms cannot rest on a hub stamp taken
+  during a burst) only gets stronger as the figure grows.
 4. **Expect it to be large during a burst** — `checkReception()` is not called
    while `lora_tx_busy_`, so the gap across a 17-copy burst *is* the burst. That
    is honest: the hub genuinely was not listening. Do not treat it as a defect.
