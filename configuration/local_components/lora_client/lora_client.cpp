@@ -3220,6 +3220,11 @@ namespace esphome
       if ((self->mt_mode_ == 2 || self->mt_mode_ == 4) && self->parent_->gridStarted())
       {
         const int64_t now = esp_timer_get_time();
+        // Kept for the log line below: mt_last_mark_t0_us_ is overwritten before
+        // it runs, so the spacing between consecutive marks — the one number
+        // that tells a placed run (~1500 ms) from an unplaced one (~1093 ms) —
+        // would otherwise be gone by the time it is printed.
+        const int64_t prev_mark = self->mt_last_mark_t0_us_;
         // By interval: a mark before a queued beacon is clear (2026-09-15).
         const int copies = (int) self->mt_copies_;
         const size_t len = self->mt_frame_len_;
@@ -3235,6 +3240,20 @@ namespace esphome
           p.on_mark     = true;   // the node's own mark: its phase sample
           self->mt_last_mark_t0_us_ = t0;
         }
+        // Placement is invisible from the hub otherwise: this path logs nothing,
+        // and a sweep that reports a 1093 ms mark period cannot be told from a
+        // placed one without it. Three separate theories were argued from
+        // inference on 2026-09-19 before this line existed.
+        ESP_LOGI(TAG, "[%s] mark: mode %u placed=%d t0=%lld dt=%lld ms",
+                 self->get_name().c_str(), (unsigned) self->mt_mode_,
+                 (int) (t0 > 0), (long long) t0,
+                 (long long) ((t0 - prev_mark) / 1000));
+      }
+      else
+      {
+        ESP_LOGI(TAG, "[%s] mark: mode %u UNPLACED (gridStarted=%d)",
+                 self->get_name().c_str(), (unsigned) self->mt_mode_,
+                 (int) self->parent_->gridStarted());
       }
       self->parent_->send(self->mt_frame_, self->mt_frame_len_, p);
 
