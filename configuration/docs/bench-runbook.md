@@ -17,7 +17,7 @@ instrument (HW-1's mean, HW-4).
 |---|---|
 | HW-5 | **CLOSED** — `ppm 10, n 598, residual -1 ppm` under the production profile |
 | HW-9 | **CLOSED, both halves** — node `tick 100 Hz cpu 240 MHz`; hub **1000 Hz**, read from the new `Hub FreeRTOS tick rate` sensor |
-| HW-8 | **passes on inference, not on its own observables** — neither the miss count nor `staleWindowEnds()` is reported (review finding 12). Windows 590/590, `oneShot n` 593, p99 -417 us |
+| HW-8 | **passes on weaker evidence than the gate asks for** — no miss count exists in either direction, and the documented `windowsArmed - n` reading is invalid (different populations; it yields −3 on a clean run). Windows 590/590, p99 −417 us. See review finding 12 |
 | HW-7 | **blocked on code, not bench time** — `payloadPadTo` is a proto field with no implementation at either end |
 | HW-3 | open — needs the three-condition distribution, including with the motor running |
 | HW-2 | open — needs the bench-flagged node and timed mode on |
@@ -321,9 +321,20 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
    * **The histogram is printed in part.** `Hist` carries min/p50/p95/p99/max/n;
      the hub's REPORT line prints only `p99` and `n`
      (`lora_client.cpp:1626,1655`), so "bounded" is read off one percentile.
-   Until those are exported, record HW-8 as **passing on the available
-   evidence** (windows armed == hit, `oneShot n` >= armed, p99 within a few
-   hundred us) and say which of the two named observables was inferred.
+   * **The documented workaround does not work either.** `lora_client.cpp:1660`
+     says "HW-8's miss count is windowsArmed - n". Those counters span different
+     populations: `windows_armed` is incremented only for `ArmSource::Grid`
+     (`noteMarkArmed()` at `CmdDispatcher.h:349`, called from
+     `LoraInterface.cpp:648`), while `oneShotErrorUs.n` counts every non-Trial
+     arm — **Grid and Beacon**. The difference therefore goes negative on a
+     healthy run (1.0.95: 590 − 593 = **−3**, the ~2.6 beacon windows a 900 s
+     test contains at `every 233 rounds` × 1.5 s), and a run that really lost
+     three one-shots would compute 0 and read as perfect.
+   Until a like-for-like counter exists, record HW-8 as **passing on weaker
+   evidence than the gate asks for**: every armed grid window was hit (590/590),
+   the timer error is bounded at the one percentile published (p99 −417 us), and
+   **no miss count was available in either direction**. Do not quote
+   `windowsArmed - n` as a miss count.
 
 ### HW-3 — RxDone ISR + light-sleep wake latency, as a distribution
 1. Fixed grid, known marks. Run the Mode A baseline; record the `phaseErrUs`
@@ -353,8 +364,14 @@ only when `mode actually run` = 2, `windows armed` > 0, the HW-8 miss count is
 **CLOSED 2026-09-19 on fw 1.0.95** — `ppm 10, n 598, period 1500015 us,
 residual -1 ppm`, from a 900 s Mode B ModeTest with `prod=1`, `mode actually
 run` = 2, `windows 590/590` and `refusal 0`. Every precondition of the gate is
-met: |ppm| = 10 < 20, `ppmSamples` 598 >= 30 over 900 s >= 200 s, and the HW-8
-miss count is zero *by inference* (see finding 12 — there is no counter to read).
+met save one: |ppm| = 10 < 20, `ppmSamples` 598 >= 30 over 900 s >= 200 s, `prod=1`,
+`mode actually run` = 2, `windows armed` > 0. **The exception is the gate's
+"HW-8 miss count is 0" clause, which is not verifiable as written** — no miss
+counter exists and the prescribed `windowsArmed - n` reading is invalid (finding
+12). What this closure actually rests on is that every armed grid window was hit,
+590/590: had one-shots been going missing, windows would have gone unopened and
+unhit. That is a weaker statement than the clause asks for, and it is the one
+supported by the data.
 B0 is on the build: `wakeSourceEnable()` arms DIO0 and DIO1
 (`LoraInterface.cpp:169-170`, `esp_sleep_enable_gpio_wakeup` at :189), with the
 paired disarms in `frtosTasks.cpp:256,517`. Note the plan's B0 row (§ line 1128)

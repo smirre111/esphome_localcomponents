@@ -2469,8 +2469,16 @@ START 08:33:20.
 | arm refusal | 0 |
 | clock | ppm 10, period 1 500 015 us, **residual −1 ppm** (n 598) |
 
-* **HW-8 gate: PASS.** 593 one-shots for 590 armed windows, none missed, none stale. No
-  window closed empty, no `after its mark` late delivery, no demotion during the test.
+* **HW-8: passes on weaker evidence than the gate asks for — corrected 2026-09-19.**
+  Every armed grid window was hit (590/590), the one-shot error is bounded at the one
+  percentile published (p99 −417 us), no window closed empty, no `after its mark` late
+  delivery, no demotion during the test. **What cannot be said is "none missed":** there is
+  no miss counter, and the reading the hub source prescribes (`windowsArmed - n`,
+  `lora_client.cpp:1660`) subtracts different populations — `windowsArmed` counts
+  `ArmSource::Grid` only, `oneShotErrorUs.n` counts Grid **and Beacon** — so it yields
+  590 − 593 = −3 here, which is the ~2.6 beacon windows a 900 s test contains, not three
+  phantom one-shots. A run that genuinely lost three would compute 0 and read as perfect.
+  See review finding 12.
 * **The node was in Mode B for the whole test** (590 windows against 598 marks), unlike
   tests 2–5 of the 1.0.92 long run. The reason is the cold boot: with no recent demotion
   there was no 600 s anti-flap hold to sit out, so promotion completed within the first
