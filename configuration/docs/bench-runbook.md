@@ -420,6 +420,33 @@ on bench time.
 
 ### HW-2 — `T_detect`, by sweeping the arm instant
 
+**STATE AT 2026-09-19 23:35 — the sweep's MARKS are fixed and proven; what
+remains is the promotion handover.**
+
+| | |
+|---|---|
+| marks placed | **199 / 199**, every one at `dt=1500 ms` |
+| delivery | `detected 201, crcValid 201, addressed 200`, `FER_link 0 ppm` |
+| phase | `p50 555, p99 2679, max 2978 us, n 199` — all well inside the 14 080 us guard |
+| clock | `ppm 9, period 1500012 us` — matches Mode B exactly |
+| **windows** | **0 / 0** — the node armed nothing |
+
+Two fixes got the marks there: the hub now PLACES mode-4 marks
+(`mt_mode_ == 2` excluded them), and the sweep period is now the round (node
+1.0.97 exempts MODE_SWEEP from the commensurate check, as MODE_B already was).
+
+**The remaining blocker is the warm-up handover, not the sweep.** The chained
+warm-up ends, its marks stop, the hub's first mark of the next test comes
+`kHubFirstMarkDelayMs` = 3 s later, and 3 empty marks (`kMaxMissedMarks`)
+demote the node — so the sweep ran its whole 300 s inside the 600 s
+`RecentlyDemoted` hold, with 199 perfect phase samples sitting unused.
+
+**The warm-up is now obsolete.** It existed only because a sweep could not
+bootstrap itself; with marks placed, the sweep feeds itself ~8 samples in ~12 s
+and promotes unaided. Press the sweep ALONE, after any hold has expired
+(`sweep_solo.sh`). The chaining that was the fix for defect 4 is now the cause
+of defect 7.
+
 **CORRECTION 2026-09-19: the "outside_guard latches" theory was WRONG.** It was
 recorded as the blocker after the placement fix, on the reasoning that one
 off-mark sample pins `NoPhase` permanently. The data refutes it: the warm-up
