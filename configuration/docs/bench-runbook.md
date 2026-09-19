@@ -20,7 +20,7 @@ instrument (HW-1's mean, HW-4).
 | HW-8 | **passes on weaker evidence than the gate asks for** — no miss count exists in either direction, and the documented `windowsArmed - n` reading is invalid (different populations; it yields −3 on a clean run). Windows 590/590, p99 −417 us. See review finding 12 |
 | HW-7 | **blocked on code, not bench time** — `payloadPadTo` is a proto field with no implementation at either end |
 | HW-3 | open — needs the three-condition distribution, including with the motor running |
-| HW-2 | open — needs the bench-flagged node and timed mode on |
+| HW-2 | **apparatus WORKS** (first valid Point 2026-09-19: `armed 189, hit 189` at +4000 us). `T_detect` itself not yet measured — needs both edges, ~8 points at ~16 min each |
 | HW-10 | **CLOSED** — high-water **191 611 us**, set by a `ScheduleConfig` retry burst; an hour of ordinary traffic did not exceed it |
 | HW-1, HW-4 | open, blocked on an external instrument (scope, meter) |
 | HW-6 | not a measurement — a deployment decision |
@@ -420,8 +420,38 @@ on bench time.
 
 ### HW-2 — `T_detect`, by sweeping the arm instant
 
-**STATE AT 2026-09-19 23:35 — the sweep's MARKS are fixed and proven; what
-remains is the promotion handover.**
+**THE SWEEP WORKS — first valid Point, 2026-09-19 23:45 (node 1.0.97).**
+
+```
+Point{offset_us=4000, armed=189, hit=189} receives=YES
+mode=4 | seq 1..197 exp 197 gaps 0 | detected 200 addressed 200
+windows 189/189 | FER_link 0 ppm WMR 0 ppm | refusal 0
+phaseErr p50 2400 p99 2910 max 2927 n 197 | armResidual p99 432
+oneShot p99 -425 n 190 | ppm 8 period 1500014 us | 199 marks placed, dt=1500 ms
+```
+
+**The procedure that produced it: press the sweep ALONE.** No warm-up, no
+chaining. Wait out any anti-flap hold first (`sweep_solo.sh <offset> [pre_s]`,
+default 640 s). The sweep feeds itself ~8 phase samples in ~12 s from its own
+on-mark marks, promotes unaided, and arms for the rest of the run.
+
+Three fixes were needed to get here, and all three were necessary:
+1. the grid period must be the round — node 1.0.97 exempts MODE_SWEEP from the
+   commensurate check, as MODE_B already was;
+2. the hub must PLACE mode-4 marks — placement was gated on `mt_mode_ == 2`;
+3. the node must not demote on its own deliberate mis-arms — the sweep guard
+   in 1.0.96.
+
+**And one procedure that had to be UNDONE:** the chained warm-up. It was the
+right fix while a sweep could not bootstrap itself, but once the marks were
+placed it became the cause of failure — its marks stop 3 s before the next
+test's begin, three empty marks demote the node, and the sweep then runs its
+whole 300 s inside the 600 s hold. Measured that way: `windows 0/0` with 199
+perfect phase samples unused. A fix that outlives its problem becomes the
+problem.
+
+**PREVIOUS STATE, kept for the evidence trail — the marks were fixed here but
+the handover still blocked promotion.**
 
 | | |
 |---|---|

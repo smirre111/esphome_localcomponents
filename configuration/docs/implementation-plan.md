@@ -2450,6 +2450,32 @@ looking tidy.
      against ~18 — enough to separate, which single 600-mark runs are not.
 * Until then the preamble stays at 12 symbols.
 
+**MEASURED 2026-09-19 23:45 — HW-2's sweep mode produces a valid Point at last
+(node 1.0.97, hub `e56591f`).** `Point{offset_us=4000, armed=189, hit=189}
+receives=YES`, with `seq 1..197 gaps 0`, `detected 200 addressed 200`,
+`FER_link 0 ppm`, `WMR 0 ppm`, `phaseErr p50 2400 p99 2910 n 197`,
+`armResidual p99 432 us`, `oneShot p99 -425 us n 190`, `ppm 8`,
+`period 1500014 us`, `refusal 0`, and 199 marks placed at `dt=1500 ms`.
+
+* **T_detect is NOT yet measured.** One point inside the guard says the
+  apparatus works, not where the edges are. `SweepAnalysis::analyse` needs both
+  edges: `span = late - early = 2G`, `T_detect = W - span` with `W = 29 440 us`,
+  and `asymmetry = early + late` must be ~0 or the result is to be distrusted
+  rather than averaged.
+* **Cost of the campaign: ~16 min per point.** The 300 s test is the small half;
+  when a sweep ends its marks stop, three empty marks trip `kMaxMissedMarks`,
+  and the 600 s `kRepromotionHoldS` must expire before the next point can arm.
+  Bisecting both edges to 500 us is ~8 points, about 2 hours.
+* **Four defects and one bad procedure stood between the button and this line**,
+  every one of which produced plausible data rather than an error: a 1100 ms
+  grid refused outright as `CommensurateGrid`; the sweep demoting itself on its
+  own deliberate mis-arms; sweep marks never placed on the node's mark
+  (placement was gated on `mt_mode_ == 2`, so mode 4 inherited a defect fixed
+  for Mode B six days earlier); the sweep period not being the round, which
+  queued 411 s of placed marks into a 299 s test; and finally the chained
+  warm-up, which was the right fix for the bootstrap and became the cause of
+  failure once the marks worked.
+
 **MEASURED 2026-09-19 08:33–08:48 — Mode B on 1.0.95: 0 of 598 marks lost, 590/590
 windows hit, zero missed one-shots. The cleanest Mode B run so far.** Node 2 fw 1.0.95
 (`7590efb`, carrying review findings 4 and 5 — bounded window extension and
