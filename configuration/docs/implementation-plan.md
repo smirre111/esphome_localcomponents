@@ -1390,10 +1390,17 @@ Recorded here rather than left to look maintained.
     radio's flags, and a window is closed only while the radio is still in the
     receive that window opened.
 
+  - ~~unbounded window extension~~ and ~~a mark window that hears a non-addressed frame
+    stays open~~ — **FIXED** in fw 1.0.95: the extension bound is derived from the longest
+    downlink the PHY allows, and a mark carries the generation of the window it was armed
+    for (only that window may close it; the next arm resolves an unresolved one as missed).
+
   **Still open.** High: the header timing fields (`burstIndex`, `onMark`, fire stamps)
-  are not in the AAD, and the node's phase path reads them before the replay check.
-  Medium: unbounded window extension; a mark window that hears a non-addressed frame
-  stays open, so the next empty window is booked as a missed mark. Four low items.
+  are not in the AAD, and the node's phase path reads them before the replay check —
+  **accepted 2026-09-19** as denial of service only (it can deny Mode B and spend
+  battery; it cannot forge a command, since those are inside the AEAD). Five low items,
+  including the hub's published `symTimeout` being stored and never applied, plus one
+  design option: widen the window past the coast limit instead of demoting to Mode A.
 
 - ~~**The hub's grid anchor is never established correctly.**~~ **FIXED.** It
   had two independent halves, and either alone was enough to put every mark
