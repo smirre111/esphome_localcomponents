@@ -11,6 +11,20 @@ design; where a number is a gate, the gate is quoted from the plan.
 open, of which one is not a measurement at all (HW-6) and two need an external
 instrument (HW-1's mean, HW-4).
 
+**Status as of 2026-09-19** (fw 1.0.95, hub `3970436`):
+
+| item | state |
+|---|---|
+| HW-5 | **CLOSED** — `ppm 10, n 598, residual -1 ppm` under the production profile |
+| HW-9 | node half **CLOSED** (`tick 100 Hz cpu 240 MHz`); hub half still open, and it needs an observable that does not exist yet |
+| HW-8 | **passes on inference, not on its own observables** — neither the miss count nor `staleWindowEnds()` is reported (review finding 12). Windows 590/590, `oneShot n` 593, p99 -417 us |
+| HW-7 | **blocked on code, not bench time** — `payloadPadTo` is a proto field with no implementation at either end |
+| HW-3 | open — needs the three-condition distribution, including with the motor running |
+| HW-2 | open — needs the bench-flagged node and timed mode on |
+| HW-10 | open — an hour of ordinary traffic, then read the high-water poll gap |
+| HW-1, HW-4 | open, blocked on an external instrument (scope, meter) |
+| HW-6 | not a measurement — a deployment decision |
+
 **Four defects sat in front of the ten**, each invisible to the host suite:
 
 1. **`setRtcSlowSrc()` had no caller anywhere in the firmware**, so
@@ -287,7 +301,35 @@ only when `mode actually run` = 2, `windows armed` > 0, the HW-8 miss count is
 4. **Closes when** you have ppm under the production profile, with its sample
    count.
 
+**CLOSED 2026-09-19 on fw 1.0.95** — `ppm 10, n 598, period 1500015 us,
+residual -1 ppm`, from a 900 s Mode B ModeTest with `prod=1`, `mode actually
+run` = 2, `windows 590/590` and `refusal 0`. Every precondition of the gate is
+met: |ppm| = 10 < 20, `ppmSamples` 598 >= 30 over 900 s >= 200 s, and the HW-8
+miss count is zero *by inference* (see finding 12 — there is no counter to read).
+B0 is on the build: `wakeSourceEnable()` arms DIO0 and DIO1
+(`LoraInterface.cpp:169-170`, `esp_sleep_enable_gpio_wakeup` at :189), with the
+paired disarms in `frtosTasks.cpp:256,517`. Note the plan's B0 row (§ line 1128)
+still reads "WRITTEN AND COMPILED, NOT RUN" — that is stale; it has run on
+hardware since the 1.0.8x sessions.
+* **+8 ppm vs +10 ppm.** `DriftTest` measured +8 with sleep disabled; the
+  production profile gives +10 with a -1 ppm residual after compensation. The
+  clock Mode B actually runs on is therefore ~2 ppm faster than the sleep-off
+  figure, which is the point of measuring it separately — and both are far
+  inside the 20 ppm budget.
+
 ### HW-7 — node DRAIN + build turnaround, as a function of payload
+
+**⚠️ NOT RUNNABLE AS WRITTEN (found 2026-09-19). `payloadPadTo` is a protocol
+field with no implementation at either end.** It exists as `ModeTest` field 6 in
+`blinds.proto:686` and in the generated stubs, and nowhere else: the node never
+reads it (no reference in `main/` outside the generated code), the hub never
+sets it (no reference in `lora_client/`), and no YAML entity exposes it. Step 2's
+sweep therefore cannot be driven, and a run started today would pad nothing and
+return one turnaround figure for whatever length the frames happen to be — which
+step 2 explicitly says is not an answer. **Implement the field on both ends
+first** (node: pad the echo payload to N; hub: a number entity feeding
+`start_mode_test`), then run the sweep. Until then HW-7 is blocked on code, not
+on bench time.
 1. MAC echo on (the baseline button already sets it). A MAC echo measures
    RxDone → TX fire and nothing else, which is what §4.3's servable-slot rule
    needs and cannot get from a command the application answers.
