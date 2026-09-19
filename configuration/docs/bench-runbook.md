@@ -430,6 +430,31 @@ phaseErr p50 2400 p99 2910 max 2927 n 197 | armResidual p99 432
 oneShot p99 -425 n 190 | ppm 8 period 1500014 us | 199 marks placed, dt=1500 ms
 ```
 
+**SECOND POINT, AND IT ALREADY CONTRADICTS THE ASSUMED GUARD (2026-09-20
+00:01).** `Point{offset_us=16000, armed=189, hit=189} receives=YES` — a full,
+clean run (`seq 1..197 gaps 0`, `detected 199 addressed 199`, `FER_link 0 ppm`,
+`refusal 0`, 199 marks placed at `dt=1500 ms`).
+
+The model says this should have FAILED. `TimedGrid.h:63-65`: *late by l,
+detection completes at T0 - T_pre + l + T_detect, before close while l <= G*,
+with `kGuardUs = (kWindowUs - kDetectUs)/2 = (29440 - 1280)/2 = 14080` and
+`kArmLeadUs == 18240` (`4160 + 14080`). So the predicted late edge is +14 080 us
+and reception at **+16 000 us** is ~1.9 ms past it.
+
+The offset is genuinely applied — the hub writes `mt.armoffsetus`
+(`lora_client.cpp:3135`) and the node arms at
+`t0 - kArmLeadUs + arm_offset_us` — so this is a measurement, not an artefact.
+
+**The likely reading: `T_detect` is SMALLER than the assumed 5 symbols
+(1 280 us), so `G = (W - T_detect)/2` is larger than 14 080.** That is exactly
+what HW-2 exists to find: the 5-symbol figure is a LoRaWAN rule of thumb, and
+this system never writes `RegDetectOptimize` or `RegDetectThreshold`, so they
+sit at reset defaults nobody has checked. If it holds, section 5.4's guard-band
+numbers are CONSERVATIVE rather than wrong — the late-side margin is bigger than
+the design claims. **Do not record a T_detect from this**: one bracket is not an
+edge, and the early side must agree (`asymmetry = early + late ~ 0`) or the
+result is to be distrusted rather than averaged.
+
 **The procedure that produced it: press the sweep ALONE.** No warm-up, no
 chaining. Wait out any anti-flap hold first (`sweep_solo.sh <offset> [pre_s]`,
 default 640 s). The sweep feeds itself ~8 phase samples in ~12 s from its own
