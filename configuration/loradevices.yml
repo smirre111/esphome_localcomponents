@@ -437,16 +437,31 @@ button:
   # can be walked in 500 us steps. Three fixed offsets cannot find an edge that
   # sits near +/-14 080 us; they can only say "inside" or "outside".
   #
-  # 120 s at a 1093 ms grid is ~109 marks per point, and SweepAnalysis::Point
-  # ::receives() needs >= 8 armed with >= 80 % hit, so one press is one Point
-  # with ample margin. Read `windows armed/hit` from the REPORT for that point.
+  # 300 s, NOT 120 — a point must outlast PROMOTION or it measures Mode A.
+  #
+  # Measured 2026-09-19, the first sweep that ever ran: a 120 s point at +4000 us
+  # (well inside the guard) returned `windows 14/1`, `detected 8` of 71 marks.
+  # 8/71 is the Mode A free-running catch rate — RX duty ~6.5 %, grid walking at
+  # gcd 1 ms — so the node was unpromoted for nearly the whole test and armed 14
+  # timed windows only at the tail. The cause is circular and slow: promotion
+  # needs 8 phase samples, samples come only from frames actually CAUGHT, and at
+  # ~6 % that takes ~130 s — longer than the point itself.
+  #
+  # 300 s leaves ~170 s of steady Mode B after the bootstrap. The unpromoted
+  # phase does not dilute the ratio (windowsArmed counts ArmSource::Grid only,
+  # so unarmed marks are simply absent), it only shrinks `armed`.
+  #
+  # ⚠️ `armed >= 8` is NOT sufficient to trust a point. That 14/1 result clears
+  # SweepAnalysis::Point::receives()'s min_armed of 8 and would have been
+  # recorded as a FALSE EDGE at +4 ms. Require `armed` consistent with the run
+  # length (~270 for 300 s) before believing a "no reception" verdict.
   - platform: template
     name: "Mode Sweep at offset (node 2, BENCH ONLY)"
     id: rol_2_modesweep_at_offset
     entity_category: diagnostic
     on_press:
       - lambda: |-
-          id(rol_2)->start_mode_test(120, 1093, 4, 1, true, false, false, true,
+          id(rol_2)->start_mode_test(300, 1093, 4, 1, true, false, false, true,
                                      (int32_t) id(rol_2_sweep_offset_us).state);
 
   # --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------------
