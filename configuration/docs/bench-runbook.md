@@ -462,10 +462,25 @@ The procedure that works: press **Mode Test B — timed windows** (300 s at a
 Set the offset BEFORE the warm-up, so only one press has to land in that
 window. `sweep_chained.sh` does exactly this.
 
-**⚠️ THE PRECONDITION SENSORS ARE A VETO, NOT A GREEN LIGHT.** `belief_` fills
-only from a decrypted BEACON's PhaseReport, and beacons run every ~349.5 s, so
-a reading can be ~6 min stale. Reason 7 (RecentlyDemoted) or 5 (NoPhase) means
-"do not press"; reason 0 does not guarantee the node is still promoted.
+**⚠️ THE PRECONDITION SENSORS ARE BLIND DURING A TEST — MEASURED, 2026-09-19.**
+Stronger than the "veto, not a green light" caveat first written here, and it
+means these sensors cannot gate a sweep at all. `belief_` refreshes ONLY from a
+decrypted beacon's PhaseReport, and beacons run every ~349.5 s (233 rounds), so
+no beacon need arrive during a 300 s test. Measured: a warm-up that reported
+`windows 193/192, phaseErr p50 19 p99 306 max 1256 n 197, ppm 9` — a node
+plainly in Mode B — showed, throughout, `demotion reason 5`, `timed RX active
+0`, and phase spread / outside-guard / samples / last-error all **0**. Every one
+of those readings was stale and wrong.
+
+**So: the ModeTest REPORT's `windows armed/hit` is the only authority on whether
+a point is valid.** Use the sensors between runs, never during, and never to
+attribute a failure inside a test. Attributing `NoPhase` needs node SERIAL
+(`phase sample: ... n .. frames .. outside ..`, `grid anchor re-centred`), which
+the hub cannot see.
+
+**Settle time after grid adoption matters.** A warm-up pressed 46 s after
+adoption gave `windows 0/0`; pressed at 73 s and at 171 s it gave 193/192 and
+191/191. Allow at least ~60 s between `GridSync acknowledged` and the press.
 
 **⚠️ BEFORE EVERY SWEEP SESSION: check `Timed Mode (Mode B) — node 2` is ON.**
 The switch is declared `restore_mode: ALWAYS_OFF` (`loradevices.yml:874`), so it
