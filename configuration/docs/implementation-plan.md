@@ -2450,6 +2450,52 @@ looking tidy.
      against ~18 — enough to separate, which single 600-mark runs are not.
 * Until then the preamble stays at 12 symbols.
 
+**MEASURED 2026-09-19 08:33–08:48 — Mode B on 1.0.95: 0 of 598 marks lost, 590/590
+windows hit, zero missed one-shots. The cleanest Mode B run so far.** Node 2 fw 1.0.95
+(`7590efb`, carrying review findings 4 and 5 — bounded window extension and
+window-scoped mark accounting), hub `3970436`, production profile, one 900 s ModeTest,
+START 08:33:20.
+
+| Mode B, MAC-0 (1.0.95) | value |
+|---|---|
+| marks lost | **0 / 598** (seq 1..598, exp 598, gaps 0) |
+| windows armed / hit | **590 / 590** |
+| detected / crcValid / addressed | 601 / 601 / 601 |
+| counterAcc / micValid | 598 / 598 |
+| FER_link / WMR / DUP / MIC_FAIL | 0 / 0 / 0 / 0 ppm |
+| phaseErr p50 / p99 / max | 355 / 2 451 / 2 554 us (n 598) |
+| armResidual p99 | 424 us |
+| oneShot p99 | −417 us (n 593) |
+| arm refusal | 0 |
+| clock | ppm 10, period 1 500 015 us, **residual −1 ppm** (n 598) |
+
+* **HW-8 gate: PASS.** 593 one-shots for 590 armed windows, none missed, none stale. No
+  window closed empty, no `after its mark` late delivery, no demotion during the test.
+* **The node was in Mode B for the whole test** (590 windows against 598 marks), unlike
+  tests 2–5 of the 1.0.92 long run. The reason is the cold boot: with no recent demotion
+  there was no 600 s anti-flap hold to sit out, so promotion completed within the first
+  marks. This is the counterfactual the long run lacked — chaining tests, not the code,
+  was what kept Mode B short there.
+* **Zero losses in 598 marks does not refute the ~1 in 600 preamble loss** (see the long
+  run above and [[rxsingle-preamble-collision]]): one run of this length is exactly the
+  sample size that cannot separate 0 from 1. It is consistent with the established rate,
+  not evidence against it.
+* **Hub-side slips, all absorbed.** The tracker logged one `placed frame 1738437 us past
+  its mark — sent, not on mark` and two `left … after its stamped instant` (1 182 and
+  2 694 us). The node still hit 590/590, because a frame sent off-mark is simply caught by
+  Mode A/trial reception rather than the timed window; it explains the 601 detected
+  against 598 counted on mark. The transmit-side stamping, not the receive window, is what
+  slipped.
+* **Four `Could not read protobuf` are noise, not node 2.** They came in two pairs, each
+  from a packet at −107 / −106 dBm and SNR −12 (lengths 90 and 254) — the unauthenticated
+  garbage that review finding 2 accepts as DoS-only. Two errors per packet because
+  `set_response()` logs once per unpack attempt.
+* Procedure note: the node was recovered from an unreachable state over serial
+  (`esptool --after hard-reset`), and the run only worked because the hub's Auto Mode
+  switch was OFF, so the boot login pushed `mode=INTERACTIVE` and the node stayed awake.
+  COM6 was left closed for the duration — opening it resets the node — so there are no
+  node-side duty-cycle figures for this run.
+
 **MEASURED 2026-09-15 22:00–23:18 — long run on 1.0.92 RxContinuous, 2 985 marks: 5
 lost (~1 in 600), but only 1 408 of them in Mode B.** Node 2 fw 1.0.92 continuous (the
 1:1 image, bench gain G6, idle-before-sleep 2), hub `ea51f1e`, five 900 s ModeTests (the
