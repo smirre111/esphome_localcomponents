@@ -420,6 +420,26 @@ on bench time.
 
 ### HW-2 — `T_detect`, by sweeping the arm instant
 
+**⚠️ A SWEEP POINT CANNOT BOOTSTRAP ITSELF — chain it behind a warm-up.**
+Promotion needs 8 phase samples; samples come only from frames actually CAUGHT;
+and at the sweep's mandatory 1093 ms grid the node catches ~10 % (Mode A
+free-running, RX duty ~6.5 %), so promotion costs ~130 s. Measured 2026-09-19:
+a 120 s point armed 14 windows of ~109 marks, and a 300 s point armed 0.
+**Waiting for the node to promote on its own is a deadlock**, and the new
+`Timed RX — demotion reason (node 2)` sensor says so in the node's own words:
+after a fresh grid adoption it reads **5 = NoPhase** with `Timed RX — active`
+0. Phase is never measured because marks only flow DURING a ModeTest.
+The procedure that works: press **Mode Test B — timed windows** (300 s at a
+1500 ms grid, which promoted in 13.6 s) and then press the sweep point within
+~3 marks (4.5 s) of its REPORT, so the node never demotes between the two.
+Set the offset BEFORE the warm-up, so only one press has to land in that
+window. `sweep_chained.sh` does exactly this.
+
+**⚠️ THE PRECONDITION SENSORS ARE A VETO, NOT A GREEN LIGHT.** `belief_` fills
+only from a decrypted BEACON's PhaseReport, and beacons run every ~349.5 s, so
+a reading can be ~6 min stale. Reason 7 (RecentlyDemoted) or 5 (NoPhase) means
+"do not press"; reason 0 does not guarantee the node is still promoted.
+
 **⚠️ BEFORE EVERY SWEEP SESSION: check `Timed Mode (Mode B) — node 2` is ON.**
 The switch is declared `restore_mode: ALWAYS_OFF` (`loradevices.yml:874`), so it
 comes up OFF after **every hub reboot** — an OTA, a restart, a power cut. With it
