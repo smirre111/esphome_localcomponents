@@ -16,12 +16,12 @@ instrument (HW-1's mean, HW-4).
 | item | state |
 |---|---|
 | HW-5 | **CLOSED** — `ppm 10, n 598, residual -1 ppm` under the production profile |
-| HW-9 | node half **CLOSED** (`tick 100 Hz cpu 240 MHz`); hub half still open, and it needs an observable that does not exist yet |
+| HW-9 | **CLOSED, both halves** — node `tick 100 Hz cpu 240 MHz`; hub **1000 Hz**, read from the new `Hub FreeRTOS tick rate` sensor |
 | HW-8 | **passes on inference, not on its own observables** — neither the miss count nor `staleWindowEnds()` is reported (review finding 12). Windows 590/590, `oneShot n` 593, p99 -417 us |
 | HW-7 | **blocked on code, not bench time** — `payloadPadTo` is a proto field with no implementation at either end |
 | HW-3 | open — needs the three-condition distribution, including with the motor running |
 | HW-2 | open — needs the bench-flagged node and timed mode on |
-| HW-10 | open — an hour of ordinary traffic, then read the high-water poll gap |
+| HW-10 | **readout unblocked** — `Hub RX stamp — worst poll gap` now publishes (83 788 us, then 191 611 us in the first minute). Closes once an hour of ordinary traffic has run and the high-water is read with its context |
 | HW-1, HW-4 | open, blocked on an external instrument (scope, meter) |
 | HW-6 | not a measurement — a deployment decision |
 
@@ -235,10 +235,18 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
    `CONFIG_FREERTOS_HZ=100` is the reason `lora_reset()`'s `pdMS_TO_TICKS(1)`
    was zero ticks — expect 100 there and do not "fix" it. The 240 MHz
    separately confirms the production profile's pinned CPU frequency.
-3. **Hub half: still open**, and it needs an observable that does not exist
+3. ~~**Hub half: still open**, and it needs an observable that does not exist
    yet — the hub's own `configTICK_RATE_HZ` at boot, through `dump_config()`
    or a diagnostic entity. The value is pinned in `loradevices.yml`; what is
-   unconfirmed is that the build honours the pin.
+   unconfirmed is that the build honours the pin.~~
+4. **HUB HALF CLOSED 2026-09-19 — `1000 Hz`.** The observable now exists: the
+   `Hub FreeRTOS tick rate` template sensor publishes the compiled
+   `CONFIG_FREERTOS_HZ` (hub commit `951eaff`), read back from the running
+   firmware as **1000 Hz**. That is the confirmation the item wanted — the
+   build honours the pin at `loradevices.yml:33` rather than inheriting a
+   default, so `vTaskDelayUntil(pdMS_TO_TICKS(88))` really does pace the
+   transmit burst at 88 ms and not 80. **HW-9 is now closed in both halves**
+   (node: `tick 100 Hz cpu 240 MHz`; hub: 1000 Hz).
 
 ### HW-10 — hub RX-stamp uncertainty (an hour, no setup)
 1. Run an ordinary traffic mix for an hour. No special mode.
@@ -258,11 +266,16 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
      took that path during the 1.0.95 run (`turnaround … n 0`), so it appears in
      no capture.
    * No YAML entity exposes either value.
-   **Fix, small and worth doing with HW-9's hub half:** publish
-   `worst_poll_gap_us()` as a diagnostic sensor. The same hub change can expose
-   the built `configTICK_RATE_HZ`, which is the observable HW-9 says does not
-   exist yet — closing both items with one OTA. Note the reflash resets the
-   high-water, which is fine once it is continuously readable.
+   **FIXED 2026-09-19 (hub `951eaff`, OTA'd).** `Hub RX stamp — worst poll gap`
+   publishes `worst_poll_gap_us()` every 60 s, and the same change closed HW-9's
+   hub half with `Hub FreeRTOS tick rate`. First readings after the reboot:
+   **83 788 us, then 191 611 us within the first minute** — already six figures,
+   and exactly the burst effect item 4 predicts (the hub was resending an
+   unacknowledged `ScheduleConfig` at the time). The reflash reset the counter,
+   which is the last time that matters: it is continuously readable now.
+   **To close HW-10:** let an hour of ordinary traffic run and read the
+   high-water, quoting what the hub was doing when it peaked. A number without
+   that context is not the bound C2 needs — it is just the largest burst seen.
 4. **Expect it to be large during a burst** — `checkReception()` is not called
    while `lora_tx_busy_`, so the gap across a 17-copy burst *is* the burst. That
    is honest: the hub genuinely was not listening. Do not treat it as a defect.
