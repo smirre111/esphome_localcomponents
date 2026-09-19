@@ -21,7 +21,7 @@ instrument (HW-1's mean, HW-4).
 | HW-7 | **blocked on code, not bench time** — `payloadPadTo` is a proto field with no implementation at either end |
 | HW-3 | open — needs the three-condition distribution, including with the motor running |
 | HW-2 | open — needs the bench-flagged node and timed mode on |
-| HW-10 | **readout unblocked** — `Hub RX stamp — worst poll gap` now publishes (83 788 us, then 191 611 us in the first minute). Closes once an hour of ordinary traffic has run and the high-water is read with its context |
+| HW-10 | **CLOSED** — high-water **191 611 us**, set by a `ScheduleConfig` retry burst; an hour of ordinary traffic did not exceed it |
 | HW-1, HW-4 | open, blocked on an external instrument (scope, meter) |
 | HW-6 | not a measurement — a deployment decision |
 
@@ -273,9 +273,28 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
    and exactly the burst effect item 4 predicts (the hub was resending an
    unacknowledged `ScheduleConfig` at the time). The reflash reset the counter,
    which is the last time that matters: it is continuously readable now.
-   **To close HW-10:** let an hour of ordinary traffic run and read the
-   high-water, quoting what the hub was doing when it peaked. A number without
-   that context is not the bound C2 needs — it is just the largest burst seen.
+**CLOSED 2026-09-19 — the high-water is 191 611 us (191.6 ms).**
+
+| | |
+|---|---|
+| high-water poll gap | **191 611 us** |
+| when it was set | in the first minute after the OTA reboot, during the `ScheduleConfig not acknowledged — resending (2/3)` retry burst (`Sending packed burst`, `copy 16 left 2289 us after its stamped instant`) |
+| an hour of ordinary traffic | **did not exceed it** — 55 sensor publishes of the same value, flat from first to last |
+| what the hour contained | 9 bursts, 12 packets received, 18 battery-telemetry publishes, 10 noise frames that failed to unpack |
+
+* **The gap is ~2 burst strides, not the whole burst — a correction to item 4's
+  prediction.** The item expects "the gap across a 17-copy burst *is* the burst",
+  which at an 88 ms stride would be ~1.4 s. Measured, the worst gap is 191.6 ms:
+  about two 88 ms strides plus a frame's air time. So `checkReception()` does get
+  called between copies; what it cannot do is poll across a couple of them. The
+  honest statement is narrower than the one the runbook carried, and better for
+  the hub.
+* **What it bounds.** While the hub is transmitting a burst, an uplink's RX stamp
+  can be up to ~192 ms uncertain. Any placement that needs C2's ±1 ms therefore
+  cannot be computed from a stamp taken during a hub burst — which is an argument
+  for the node's own timing, not the hub's, wherever ±1 ms is claimed.
+* **It only grows on a burst**, so a quiet hour re-reads the same number. Treat a
+  flat value as "no burst worse than this since boot", not as a fresh measurement.
 4. **Expect it to be large during a burst** — `checkReception()` is not called
    while `lora_tx_busy_`, so the gap across a 17-copy burst *is* the burst. That
    is honest: the hub genuinely was not listening. Do not treat it as a defect.
