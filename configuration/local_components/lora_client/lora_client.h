@@ -514,6 +514,16 @@ namespace esphome
       // before pressing instead of reconstructed from timestamps afterwards.
       uint32_t node_demotion_reason() const { return this->belief_.node_demotion; }
       bool     node_timed_rx_active() const { return this->belief_.node_timed_rx; }
+      // The four inputs phaseTrustworthy() actually tests, so a NoPhase can be
+      // attributed instead of guessed. Demotion::NoPhase has TWO producers
+      // (TimedModePolicy.h:173 and :175) and they report as the same value:
+      // !phase_valid (samples, frames, outside_guard, spread) versus the LAST
+      // sample being outside the guard. Without these the two are
+      // indistinguishable, which is what made a stuck node unreadable.
+      int32_t  node_phase_err_us() const     { return this->belief_.phase_err_us; }
+      int32_t  node_phase_spread_us() const  { return this->belief_.phase_spread_us; }
+      uint32_t node_phase_samples() const    { return this->belief_.phase_samples; }
+      uint32_t node_phase_outside_guard() const { return this->belief_.phase_outside_guard; }
 
       const MacStats &mac_stats() const { return this->mac_stats_; }
       void reset_mac_stats() { this->mac_stats_ = MacStats{}; }

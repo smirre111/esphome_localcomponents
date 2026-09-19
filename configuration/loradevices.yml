@@ -767,6 +767,46 @@ sensor:
     accuracy_decimals: 0
     lambda: 'return id(rol_2)->node_timed_rx_active() ? 1.0f : 0.0f;'
 
+  # The four inputs phaseTrustworthy() tests. Demotion::NoPhase (5) has TWO
+  # producers that report identically — !phase_valid, and the last sample being
+  # outside the guard — so these are what turn "reason 5" into an attribution.
+  #
+  # phaseTrustworthy fails if: samples < 8, frames < 2, outside_guard != 0, or
+  # spread > 14080 us. Measured 2026-09-19: a warm-up reported phaseErr p50 -605
+  # p99 352 max 2005 over 197 samples — every sample far inside the guard — and
+  # still sat on NoPhase, so the failing clause is spread or the last-sample
+  # test, not a latched outside_guard as first assumed.
+  - platform: template
+    name: "Phase — spread (node 2)"
+    id: rol_2_phase_spread
+    entity_category: diagnostic
+    unit_of_measurement: us
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->node_phase_spread_us();'
+  - platform: template
+    name: "Phase — samples outside guard (node 2)"
+    id: rol_2_phase_outside_guard
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->node_phase_outside_guard();'
+  - platform: template
+    name: "Phase — samples (node 2)"
+    id: rol_2_phase_samples
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->node_phase_samples();'
+  - platform: template
+    name: "Phase — last error (node 2)"
+    id: rol_2_phase_err
+    entity_category: diagnostic
+    unit_of_measurement: us
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->node_phase_err_us();'
+
   - platform: template
     name: "Node overdue — missed a predicted check-in (node 2)"
     id: rol_2_overdue

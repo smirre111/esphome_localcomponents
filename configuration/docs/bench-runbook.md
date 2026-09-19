@@ -420,6 +420,19 @@ on bench time.
 
 ### HW-2 — `T_detect`, by sweeping the arm instant
 
+**CORRECTION 2026-09-19: the "outside_guard latches" theory was WRONG.** It was
+recorded as the blocker after the placement fix, on the reasoning that one
+off-mark sample pins `NoPhase` permanently. The data refutes it: the warm-up
+that failed to promote reported `phaseErr p50 -605 p99 352 max 2005 n 197` —
+every sample far inside the ±14 080 us guard, so `outside_guard` was zero.
+`phaseTrustworthy()` fails four ways (samples < 8, frames < 2,
+outside_guard != 0, spread > guard) and `Demotion::NoPhase` has TWO producers
+that report the same value (`TimedModePolicy.h:173` and `:175`). The remaining
+candidates are the SPREAD test and the last-sample test. Four new diagnostics
+(spread, outside-guard count, samples, last error) were added to attribute it
+rather than guess again — the hub had been storing all four from every beacon
+and publishing none.
+
 **⚠️ ROOT CAUSE, found 2026-09-19 after four void points: the hub never placed
 sweep marks on the node's mark.** `lora_client.cpp` gated mark placement on
 `mt_mode_ == 2`, so mode 4 fell through to the unplaced path and its marks
