@@ -63,6 +63,11 @@ constexpr uint64_t kNodeMac = 0xE08CFE5F9EC4ULL;
 
 // Serialise a hub-sent operation message into the byte buffer that
 // onReceiveNew() expects.
+// A mark belongs to the window it was armed for (review finding 5), and these tests
+// exercise the counter and the demotion ladder rather than the windows: one constant
+// generation says "the same window each time", which is what they mean.
+constexpr uint8_t kTestWindowGen = 1;
+
 std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce) {
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     LoraHeader hdr               = LORA_HEADER__INIT;
@@ -3014,13 +3019,49 @@ TEST_F(RealNodeFixture, ADemotionKeepsTheGridSoTheNodeCanReturnWithoutAGridSync)
     ASSERT_TRUE(disp.gridState().active);
 
     for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
-        disp.noteMarkArmed();
-        disp.noteMarkMissed();
+        disp.noteMarkArmed(kTestWindowGen);
+        disp.noteMarkMissed(kTestWindowGen);
     }
     EXPECT_TRUE(disp.gridState().active) << "demoted, but still holding the grid";
     EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "the count starts again";
     EXPECT_EQ(disp.phaseStats().n, 0u) << "phase has to be earned again";
     EXPECT_FALSE(disp.timedRxActive()) << "and it is out of Mode B until it has";
+}
+
+TEST_F(RealNodeFixture, AMarkThatHeardNothingForThisNodeIsMissedAtTheNextMark) {
+    // Review finding 5 (2026-09-15). A mark window that received a CRC failure or a
+    // neighbour's frame was neither hit nor closed empty, so it was never counted —
+    // and a node hearing its neighbour instead of its own frame every round never
+    // demoted, while the rule says a miss is "no frame ADDRESSED to me at my mark".
+    // Arming the NEXT mark resolves it: that round is over, and the dispatcher task
+    // has had a full round to deliver a hit for it.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/760);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    disp.noteMarkArmed(kTestWindowGen);
+    ASSERT_EQ(disp.consecutiveMissedMarks(), 0u) << "nothing resolved yet";
+
+    disp.noteMarkArmed(kTestWindowGen + 1);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u)
+        << "the previous mark was armed and nothing addressed to this node arrived";
+
+    // A hit resolves a mark, so the one after it owes nothing.
+    disp.noteMarkHit();
+    disp.noteMarkArmed(kTestWindowGen + 2);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u) << "a hit is not a miss";
+}
+
+TEST_F(RealNodeFixture, AWindowThatIsNotTheMarksOwnCannotMissIt) {
+    // The other half: only the window a mark was armed for may close it.
+    disp.noteMarkArmed(kTestWindowGen);
+    disp.noteMarkMissed(kTestWindowGen + 7);   // some other window closed empty
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
+    EXPECT_TRUE(disp.markWindowOpen());
+
+    disp.noteMarkMissed(kTestWindowGen);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
+    EXPECT_FALSE(disp.markWindowOpen());
 }
 
 TEST_F(RealNodeFixture, MissedMarksKeyOnAddressedFramesNotOnSilence) {
@@ -3305,8 +3346,8 @@ TEST_F(RealNodeFixture, MissedMarksActuallyDemote) {
     ASSERT_TRUE(disp.gridState().active);
 
     for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
-        disp.noteMarkArmed();
-        disp.noteMarkMissed();
+        disp.noteMarkArmed(kTestWindowGen);
+        disp.noteMarkMissed(kTestWindowGen);
     }
 
     // The demotion ACTS: the missed-mark count is consumed and the node leaves
@@ -3326,10 +3367,10 @@ TEST_F(RealNodeFixture, AnAddressedFrameResetsTheMissedMarkCount) {
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 30'000'000);
     ASSERT_TRUE(disp.gridState().active);
 
-    disp.noteMarkArmed();
-    disp.noteMarkMissed();
-    disp.noteMarkArmed();
-    disp.noteMarkMissed();
+    disp.noteMarkArmed(kTestWindowGen);
+    disp.noteMarkMissed(kTestWindowGen);
+    disp.noteMarkArmed(kTestWindowGen);
+    disp.noteMarkMissed(kTestWindowGen);
     ASSERT_EQ(disp.consecutiveMissedMarks(), 2u) << "two is below the threshold";
 
     // A frame addressed to us resets the count, so the third miss must not
@@ -3338,8 +3379,8 @@ TEST_F(RealNodeFixture, AnAddressedFrameResetsTheMissedMarkCount) {
     auto op = pack_sysop_op(/*msgid=*/731, CLIENT_OPERATION__CMD_STATUS);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()), 30'100'000);
 
-    disp.noteMarkArmed();
-    disp.noteMarkMissed();
+    disp.noteMarkArmed(kTestWindowGen);
+    disp.noteMarkMissed(kTestWindowGen);
     EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
 }
 
@@ -4979,8 +5020,8 @@ TEST_F(RealNodeFixture, ADemotedNodeKeepingItsGridEarnsPromotionAgain) {
     ASSERT_TRUE(disp.timedRxActive());
 
     for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
-        disp.noteMarkArmed();
-        disp.noteMarkMissed();
+        disp.noteMarkArmed(kTestWindowGen);
+        disp.noteMarkMissed(kTestWindowGen);
     }
     ASSERT_TRUE(disp.gridState().active);
 

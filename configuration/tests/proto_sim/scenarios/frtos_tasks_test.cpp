@@ -133,7 +133,7 @@ TEST_F(Irq, AnEmptyWindowIsTheOnlyThingThatMissesAMark) {
     // RX_TIMEOUT is where the node learns a window closed with nothing in it.
     // Every demotion in Mode B descends from this branch, and until this file
     // compiled, nothing had run it.
-    disp.noteMarkArmed();
+    disp.noteMarkArmed(lif.windowGeneration());
     ASSERT_EQ(disp.consecutiveMissedMarks(), 0u);
 
     dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
@@ -169,8 +169,8 @@ extern "C" int proto_sim_gpio_intr_enable_calls;   // esp_idf_stubs.c
 
 TEST_F(Irq, AWindowListensContinuouslyAndItsTimerClosesItEmpty) {
     proto_sim_timer_set_now_us(5'000'000);
-    disp.noteMarkArmed();
     lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
     EXPECT_EQ(r().count("lora_rxContinuous"), 1u)
         << "no single detection attempt for a failure to end the window";
 
@@ -183,8 +183,8 @@ TEST_F(Irq, AWindowListensContinuouslyAndItsTimerClosesItEmpty) {
 
 TEST_F(Irq, AFrameArrivingAtTheWindowsEndKeepsItOpen) {
     proto_sim_timer_set_now_us(5'000'000);
-    disp.noteMarkArmed();
     lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
     const size_t sleeps = r().count("lora_sleep");
 
     loranode::rec().modem_status = 0x02;   // synchronised on a preamble
@@ -205,8 +205,8 @@ TEST_F(Irq, AFrameAlreadyInButNotYetServicedIsNotClosedAsEmpty) {
     // "searching", so every such window was closed as empty — 380 of 380 — and the
     // node booked a missed mark for a frame it received.
     proto_sim_timer_set_now_us(5'000'000);
-    disp.noteMarkArmed();
     lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
     const size_t sleeps = r().count("lora_sleep");
 
     loranode::rec().modem_status  = 0x04;                    // searching again
@@ -231,8 +231,8 @@ TEST_F(Irq, AnEndQueuedForAWindowThatAlreadyClosedClosesNothing) {
     // The frame came in: RxDone slept the radio, and the next window opened before
     // the DIO1 task reached the end queued for the first one.
     lif.noteRadioSlept();
-    disp.noteMarkArmed();
     lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
     const size_t sleeps = r().count("lora_sleep");
 
     serviceDio1Event(old_end);
@@ -249,8 +249,8 @@ TEST_F(Irq, AWindowEndArrivingWhileTheFlagsAreBeingClearedClosesNothing) {
     // still in the receive this window opened, and the flags no longer say a frame
     // came. Only the generation, moved on before the clear, tells the two apart.
     proto_sim_timer_set_now_us(5'000'000);
-    disp.noteMarkArmed();
     lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
     const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
     const size_t sleeps = r().count("lora_sleep");
 
@@ -271,8 +271,8 @@ TEST_F(Irq, AWindowEndDeliveredInsideDio0ServicingClosesNothing) {
     // both tasks share core 1). The window end is delivered from the recorder's
     // parse hook, which fires where the driver clears the flags.
     proto_sim_timer_set_now_us(5'000'000);
-    disp.noteMarkArmed();
     lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
     const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
     // No payload: this fixture never initialises the buffer pools, and what is
     // under test is the interleaving, which the hook reproduces before
@@ -294,8 +294,8 @@ TEST_F(Irq, AFrameBeingServicedIsNotClosedByAWindowEnd) {
     // sleep the radio — which empties the SX1276 FIFO — under the DIO0 task still
     // reading it, and give the radio semaphore a second time.
     proto_sim_timer_set_now_us(5'000'000);
-    disp.noteMarkArmed();
     lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
     const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
 
     dio0(LORA_IRQ_FLAG_RX_DONE);          // the frame is serviced
@@ -314,8 +314,8 @@ TEST_F(Irq, AWindowEndAfterTheRadioLeftReceiveClosesNothing) {
     // event says, a radio that is no longer in the receive this window opened has
     // already ended it. lora_parsePacket idles the modem on RxDone.
     proto_sim_timer_set_now_us(5'000'000);
-    disp.noteMarkArmed();
     lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
     const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
     const size_t sleeps = r().count("lora_sleep");
 
@@ -375,7 +375,7 @@ void openMarkWindowAt(Probe &lif, CmdDispatcher &disp, int64_t start_us,
                       LoraInterface::RxWindowKind kind = LoraInterface::RxWindowKind::Single) {
     proto_sim_timer_set_now_us(start_us);
     lif.setRxWindowKind(kind);
-    disp.noteMarkArmed();
+    disp.noteMarkArmed(lif.windowGeneration());
     lif.window_listen_esp_us_ = start_us;
     lif.window_restarts_      = 0;
 }
@@ -436,6 +436,98 @@ TEST_F(Irq, AContinuousWindowIsNeverRestartedAsAnRxSingle) {
     EXPECT_EQ(r().count("lora_rxSingle"), 0u);
     EXPECT_EQ(lif.earlyTimeoutRestarts(), 0u);
     EXPECT_EQ(disp.consecutiveMissedMarks(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// Review findings 4 and 5 (2026-09-15).
+// ---------------------------------------------------------------------------
+
+TEST_F(Irq, AWindowIsExtendedAtMostAsFarAsTheLongestFrameNeeds) {
+    // Finding 4. The modem's "signal detected" bit is weak evidence — interference
+    // sets it too — and an extension on every window end had no bound but the 1 s
+    // stuck-window recovery, which costs every window in between.
+    proto_sim_timer_set_now_us(5'000'000);
+    lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
+    const size_t sleeps = r().count("lora_sleep");
+    loranode::rec().modem_status = 0x01;     // signal detected, never a frame
+
+    for (uint8_t i = 0; i < LoraInterface::kMaxWindowEndExtensions; ++i) {
+        serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
+        ASSERT_EQ(disp.consecutiveMissedMarks(), 0u) << "extension " << (int) i;
+        ASSERT_EQ(r().count("lora_sleep"), sleeps) << "extension " << (int) i;
+    }
+    EXPECT_EQ(lif.windowEndExtensions(), (uint32_t) LoraInterface::kMaxWindowEndExtensions);
+
+    // One more end, with the same evidence: the bound closes the window.
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 1u)
+        << "a signal that never becomes a frame must not hold the window forever";
+    EXPECT_GE(r().count("lora_sleep"), sleeps + 1);
+    EXPECT_EQ(lif.windowExtensionCaps(), 1u);
+}
+
+TEST_F(Irq, TheExtensionBoundCarriesTheLongestFrameAndNoMore) {
+    // The BOUND is the fix, so it is asserted against the two things that set it
+    // rather than restated as a number. Too small and a long frame arriving late in
+    // its window is cut off; large enough to reach the stuck-window recovery and the
+    // defect is back — a window held open by interference, costing the windows after
+    // it until the 1 s watchdog.
+    const uint32_t longest_frame_us = loratiming::downlinkTimeOnAirUs(255);
+    const uint32_t carried_us =
+        (uint32_t) LoraInterface::kMaxWindowEndExtensions * timedgrid::kWindowUs;
+    EXPECT_GE(carried_us, longest_frame_us)
+        << "a frame that starts inside the window must be able to finish";
+    EXPECT_LT((int64_t) carried_us + timedgrid::kWindowUs, LoraInterface::kStuckWindowUs)
+        << "the bound must close the window before the stuck-window recovery has to";
+}
+
+TEST_F(Irq, EachWindowGetsItsOwnExtensionBudget) {
+    // The budget is per window, not per boot: a window that used its extensions
+    // must not leave the next one unable to wait for its frame.
+    proto_sim_timer_set_now_us(5'000'000);
+    lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
+    loranode::rec().modem_status = 0x01;
+    for (uint8_t i = 0; i <= LoraInterface::kMaxWindowEndExtensions; ++i)
+        serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
+    ASSERT_EQ(lif.windowExtensionCaps(), 1u) << "precondition: the first window capped";
+    // That window closed empty, which is a missed mark and is meant to be. What this
+    // test is about is the window AFTER it, so measure the change across that one.
+    const uint32_t missed_after_first = disp.consecutiveMissedMarks();
+
+    lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());
+    const size_t sleeps = r().count("lora_sleep");
+    loranode::rec().modem_status = 0x02;     // synchronised: a frame is arriving
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
+
+    EXPECT_EQ(r().count("lora_sleep"), sleeps) << "this window may still wait";
+    EXPECT_EQ(disp.consecutiveMissedMarks(), missed_after_first)
+        << "the second window is still waiting for its frame, so it has missed nothing";
+    EXPECT_EQ(lif.windowExtensionCaps(), 1u);
+}
+
+TEST_F(Irq, AnEmptyWindowThatWasNeverAMarkBooksNothing) {
+    // Finding 5. A mark window that heard a CRC failure or a NEIGHBOUR's frame
+    // leaves the mark open — only an addressed frame closes it as a hit. The next
+    // window to close empty used to book that miss, whatever it was: a Mode A,
+    // beacon or Class A window that was never promised anything.
+    proto_sim_timer_set_now_us(5'000'000);
+    lif.armTimedRxWindow();
+    disp.noteMarkArmed(lif.windowGeneration());                   // the mark's own window
+    ASSERT_TRUE(disp.markWindowOpen());
+
+    // A later window, armed by something else, closes empty.
+    // Through the Probe: ArmSource is protected on LoraInterface, and the fixture's
+    // probe is what makes it reachable at all.
+    lif.arm_source_ = Probe::ArmSource::ClassA;
+    lif.armTimedRxWindow();
+    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
+
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
+        << "this window was never a mark, so it cannot miss one";
+    EXPECT_TRUE(disp.markWindowOpen()) << "and the mark is still the mark's to resolve";
 }
 
 TEST_F(Irq, AnUnhandledDio1FlagStillSleepsTheRadio) {
