@@ -243,6 +243,24 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
 3. **Closes when** the histogram is bounded *and the miss count is zero*.
    **A single miss is a failed gate, not an outlier** — the whole ARM mechanism
    rests on this.
+4. **⚠️ Neither observable is fully reported (found 2026-09-19).** The gate as
+   written cannot be closed from the REPORT alone:
+   * **There is no miss counter.** `noteModeTestOneShotError()` is called only
+     when `grid_arm_fire_us_ != 0` (`LoraInterface.cpp:699`), so a window whose
+     one-shot never fired contributes no sample, no log and no counter — the
+     miss is silent. It is visible only as `oneShot n` falling short of the
+     non-trial armed windows, which is an inference, not a reading.
+   * **`staleWindowEnds()` is test-only.** The counter increments at
+     `LoraInterface.cpp:345`, but its accessor has no caller outside
+     `frtos_tasks_test.cpp` — it is never logged on the node nor put in the
+     report, so on hardware a stale window end is invisible (cf. finding 10's
+     dead `symTimeout`).
+   * **The histogram is printed in part.** `Hist` carries min/p50/p95/p99/max/n;
+     the hub's REPORT line prints only `p99` and `n`
+     (`lora_client.cpp:1626,1655`), so "bounded" is read off one percentile.
+   Until those are exported, record HW-8 as **passing on the available
+   evidence** (windows armed == hit, `oneShot n` >= armed, p99 within a few
+   hundred us) and say which of the two named observables was inferred.
 
 ### HW-3 — RxDone ISR + light-sleep wake latency, as a distribution
 1. Fixed grid, known marks. Run the Mode A baseline; record the `phaseErrUs`
