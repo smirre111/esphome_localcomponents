@@ -420,19 +420,19 @@ button:
     id: rol_2_modesweep_p4
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1093, 4, 1, true, false, false, true, 4000);'
+      - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, 4000);'
   - platform: template
     name: "Mode Sweep +12 ms (node 2, BENCH ONLY)"
     id: rol_2_modesweep_p12
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1093, 4, 1, true, false, false, true, 12000);'
+      - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, 12000);'
   - platform: template
     name: "Mode Sweep -12 ms (node 2, BENCH ONLY)"
     id: rol_2_modesweep_m12
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1093, 4, 1, true, false, false, true, -12000);'
+      - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, -12000);'
   # The sweep the procedure actually asks for: an ARBITRARY offset, so the edge
   # can be walked in 500 us steps. Three fixed offsets cannot find an edge that
   # sits near +/-14 080 us; they can only say "inside" or "outside".
@@ -461,7 +461,7 @@ button:
     entity_category: diagnostic
     on_press:
       - lambda: |-
-          id(rol_2)->start_mode_test(300, 1093, 4, 1, true, false, false, true,
+          id(rol_2)->start_mode_test(300, 1500, 4, 1, true, false, false, true,
                                      (int32_t) id(rol_2_sweep_offset_us).state);
 
   # --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------------

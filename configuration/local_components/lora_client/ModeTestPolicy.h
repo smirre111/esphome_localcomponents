@@ -172,9 +172,29 @@ constexpr bool periodsAreCommensurate(uint32_t grid_period_ms, uint32_t rx_inter
     return periodsPhaseLock(grid_period_ms, rx_interval_ms, window_us);
 }
 
+// MODE_SWEEP IS EXEMPT TOO, for the same reason MODE_B is — MEASURED 2026-09-19.
+//
+// The commensurate check exists for a FREE-RUNNING receiver: a period whose gcd
+// with the 500 ms RX interval exceeds the window means marks land at a few fixed
+// phases and a sweeping window may never see them. A sweep is not free-running.
+// It arms one timed window per round against the grid, offset deliberately, so
+// its period must BE the round exactly as Mode B's is — "the grid period must BE
+// the round and phase-locked to the node's slot. That is the mode, not a
+// mistake."
+//
+// Leaving Sweep in here forced it onto an incommensurate 1093 ms while the hub
+// places each mark on the next free round T0, 1500 ms apart. The timer then runs
+// 407 ms further behind on every tick: 274 ticks x 1.5 s = 411 s of marks inside
+// a 299 s test, the tail scheduled ~112 s after it ends. Measured result —
+// 274/274 marks placed, only 53 of 196 delivered, gaps 143, FER_link 730 000 ppm,
+// windows 0/0, and the node never promoted. The backlog is structural.
+//
+// Both halves were needed: the hub must PLACE sweep marks (it gated placement on
+// mode 2 alone), and the period must be the round so placement has nothing to
+// queue behind.
 constexpr bool periodMattersFor(Mode m)
 {
-    return m == Mode::A || m == Mode::Sweep || m == Mode::Unspec;
+    return m == Mode::A || m == Mode::Unspec;
 }
 
 // --- Which modes the node must actually be able to enter -------------------

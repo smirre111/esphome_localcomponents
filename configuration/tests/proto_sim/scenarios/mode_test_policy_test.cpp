@@ -148,7 +148,25 @@ TEST(ModeTestPolicy, ModeBRequiresTheCommensuratePeriodItWouldOtherwiseRefuse) {
     EXPECT_FALSE(periodMattersFor(Mode::B));
     EXPECT_FALSE(periodMattersFor(Mode::C));
     EXPECT_TRUE(periodMattersFor(Mode::A));
-    EXPECT_TRUE(periodMattersFor(Mode::Sweep));
+    // Sweep is exempt for exactly the same reason as B, changed 2026-09-19 after
+    // it was measured. A sweep arms one timed window per round against the grid;
+    // it is not free-running, so its period must BE the round. Forced onto an
+    // incommensurate 1093 ms while the hub places each mark on the next free
+    // round T0 (1500 ms apart), the mark timer fell 407 ms behind per tick and
+    // scheduled 411 s of marks inside a 299 s test: 53 of 196 delivered,
+    // windows 0/0, no promotion.
+    EXPECT_FALSE(periodMattersFor(Mode::Sweep));
+
+    // And the period a sweep must now be able to use is the round itself, which
+    // the commensurate check would otherwise refuse (gcd(1500, 500) = 500 ms).
+    Request sw;
+    sw.mode           = Mode::Sweep;
+    sw.grid_period_ms = 1500;
+    sw.copies         = 1;
+    auto bench = armable();
+    bench.is_bench_node = true;       // MODE_SWEEP is refused off the bench
+    EXPECT_EQ(armRefusal(sw, bench), ArmRefusal::None)
+        << "a sweep at the round must arm: its windows hang off that round";
 }
 
 TEST(ModeTestPolicy, CommensurabilityIsSymmetricAndZeroSafe) {
