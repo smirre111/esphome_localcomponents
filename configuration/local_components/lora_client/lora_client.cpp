@@ -3201,7 +3201,23 @@ namespace esphome
       //
       // Mode A stays unplaced on purpose: its swept period (1093 ms) is what
       // lets a free-running window catch it at all.
-      if (self->mt_mode_ == 2 && self->parent_->gridStarted())
+      //
+      // MODE 4 (SWEEP) BELONGS HERE TOO — added 2026-09-19. It is a timed-window
+      // run, distinguished only by a deliberate arm offset, so its marks must
+      // land on the node's mark like Mode B's. Gated on mode 2 alone, every
+      // sweep mark left unplaced and carried neither onMark nor fireStamped —
+      // and BOTH the mark-hit path and the phase-sample commit
+      // (CmdDispatcher.cpp:4858) require one of those. So a sweep resolved no
+      // marks and committed no samples: windows 14/1 on a 120 s point, then
+      // windows 0/0 -> Demotion::NoPhase -> no REPORT at all. Exactly the
+      // failure the note above records for Mode B on 2026-09-13, inherited by
+      // the mode that was never added to the condition.
+      //
+      // With placement on, the 1093 ms timer tick is deferred to the next clear
+      // slot T0, so ticks collapse onto ~one mark per round — which is what a
+      // sweep needs. The period itself can stay incommensurate; it is the
+      // PLACEMENT, not the period, that was missing.
+      if ((self->mt_mode_ == 2 || self->mt_mode_ == 4) && self->parent_->gridStarted())
       {
         const int64_t now = esp_timer_get_time();
         // By interval: a mark before a queued beacon is clear (2026-09-15).

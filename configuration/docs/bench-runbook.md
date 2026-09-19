@@ -420,6 +420,20 @@ on bench time.
 
 ### HW-2 — `T_detect`, by sweeping the arm instant
 
+**⚠️ ROOT CAUSE, found 2026-09-19 after four void points: the hub never placed
+sweep marks on the node's mark.** `lora_client.cpp` gated mark placement on
+`mt_mode_ == 2`, so mode 4 fell through to the unplaced path and its marks
+carried neither `onMark` nor `fireStamped`. Both the mark-hit path and the
+phase-sample commit (`CmdDispatcher.cpp:4858`) require one of those, so a sweep
+resolved no marks and committed no phase samples: `windows 14/1` on a 120 s
+point, then `windows 0/0` -> `Demotion::NoPhase` -> no REPORT at all. This is
+the same defect measured for Mode B on 2026-09-13 ("every one of 14 phase
+samples at -651 ms... timed RX never armed"), fixed there and never extended to
+mode 4. **Fixed hub-side** by including mode 4 in the placement condition; the
+1093 ms tick is then deferred to the next clear slot T0, giving ~one mark per
+round. It was the PLACEMENT that was missing, not the period — the earlier
+1093 ms change fixed the arm REFUSAL and left the sweep unable to hit anything.
+
 **⚠️ A SWEEP POINT CANNOT BOOTSTRAP ITSELF — chain it behind a warm-up.**
 Promotion needs 8 phase samples; samples come only from frames actually CAUGHT;
 and at the sweep's mandatory 1093 ms grid the node catches ~10 % (Mode A
