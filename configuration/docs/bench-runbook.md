@@ -20,7 +20,7 @@ instrument (HW-1's mean, HW-4).
 | HW-8 | **passes on weaker evidence than the gate asks for** — no miss count exists in either direction, and the documented `windowsArmed - n` reading is invalid (different populations; it yields −3 on a clean run). Windows 590/590, p99 −417 us. See review finding 12 |
 | HW-7 | **blocked on code, not bench time** — `payloadPadTo` is a proto field with no implementation at either end |
 | HW-3 | open — needs the three-condition distribution, including with the motor running |
-| HW-2 | **apparatus WORKS** (first valid Point 2026-09-19: `armed 189, hit 189` at +4000 us). `T_detect` itself not yet measured — needs both edges, ~8 points at ~16 min each |
+| HW-2 | **apparatus runs clean, but its OBSERVABLE cannot measure `T_detect`** — identical `armed 189, hit 189` at +4 000, +16 000, +19 000 AND −20 000 us. `windows hit` is insensitive to the arm offset (review finding 13). Needs the RxSingle build and a window-gated hit before any edge means anything |
 | HW-10 | **CLOSED** — high-water **191 611 us**, set by a `ScheduleConfig` retry burst; an hour of ordinary traffic did not exceed it |
 | HW-1, HW-4 | open, blocked on an external instrument (scope, meter) |
 | HW-6 | not a measurement — a deployment decision |
@@ -429,6 +429,39 @@ windows 189/189 | FER_link 0 ppm WMR 0 ppm | refusal 0
 phaseErr p50 2400 p99 2910 max 2927 n 197 | armResidual p99 432
 oneShot p99 -425 n 190 | ppm 8 period 1500014 us | 199 marks placed, dt=1500 ms
 ```
+
+**THE SWEEP'S VERDICT DOES NOT RESPOND TO THE OFFSET — four points, both
+extremes, 2026-09-20 00:41. HW-2 cannot be measured through `windows hit`.**
+
+| offset | armed | hit | verdict | window opens |
+|---|---|---|---|---|
+| +4 000 us | 189 | 189 | YES | T0 − 14 240 us |
+| +16 000 us | 189 | 189 | YES | T0 − 2 240 us |
+| +19 000 us | 189 | 189 | YES | **T0 + 760 us** — after the preamble ends |
+| −20 000 us | 189 | 189 | YES | T0 − 38 240 us |
+
+Every run was full and clean (`seq 1..197 gaps 0`, `FER_link 0 ppm`, `refusal 0`,
+199 marks placed at `dt=1500 ms`, `armResidual p99` 412–464 us). The offset is
+genuinely applied end to end: the hub writes `mt.armoffsetus`
+(`lora_client.cpp:3135`) and the node arms at `t0 - kArmLeadUs + arm_offset_us`.
+
+**A window opening 760 us AFTER T0 cannot catch a frame whose preamble ended at
+T0, and one opening 38 ms early cannot either. Both reported 100 %.** So the
+verdict is not about the window. `mark_hit_pending` is set on `mine` alone —
+the frame is addressed to this node — with no check that it arrived in the
+window the mark armed (`CmdDispatcher.cpp:4660`, review finding 13). The MISS
+path already carries the window generation for exactly this reason; the HIT path
+never got it.
+
+**Before HW-2 can run at all:** gate the hit on the arming window's generation,
+and build with `CONFIG_BLINDS_RX_WINDOW_SINGLE` so each window is armed for real
+rather than re-using an already-listening RxContinuous receiver. Until then
+`windows hit` means "the node was served during this mark", not "this window
+worked" — which also weakens WMR's hit half in ordinary Mode B.
+
+**THE CHEAP CHECK THAT WOULD HAVE CAUGHT THIS IN ONE RUN:** probe both extremes
+of the input range FIRST. Identical answers at +19 000 and −20 000 prove
+insensitivity immediately; bisecting toward an edge assumes an edge exists.
 
 **SECOND POINT, AND IT ALREADY CONTRADICTS THE ASSUMED GUARD (2026-09-20
 00:01).** `Point{offset_us=16000, armed=189, hit=189} receives=YES` — a full,
