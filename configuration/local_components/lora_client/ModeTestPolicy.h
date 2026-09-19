@@ -111,9 +111,12 @@ constexpr uint32_t remainingDurationS(uint32_t duration_s, uint32_t seq,
 // frames sent, zero heard. DriftTest uses 1100 ms for exactly this reason.
 //
 // MODE_B inverts it. There the period must be exactly the round and phase-locked
-// to the node's slot; that IS the mode. So the rule applies to MODE_A and
-// MODE_SWEEP only, and it is enforced at arm time rather than left for an
-// operator to rediscover.
+// to the node's slot; that IS the mode. **MODE_SWEEP inverts it for the same
+// reason** (changed 2026-09-19 — see periodMattersFor below): a sweep arms one
+// timed window per round against the grid, offset deliberately, so it is not a
+// free-running receiver either and its period must also BE the round. The rule
+// therefore applies to MODE_A (and Unspec) only, and it is enforced at arm time
+// rather than left for an operator to rediscover.
 //
 // MEASURED 2026-09-12, and it refutes the paragraph above. The old test was
 // `(a % b) == 0` — divisibility — and 1100 ms passes it, which is why 1100 was
