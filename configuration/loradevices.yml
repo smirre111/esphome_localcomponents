@@ -731,6 +731,42 @@ sensor:
   #
   # 0 for a node the hub cannot predict — never heard from, or no hub clock.
   # A prediction that cannot be made must not read as a failure.
+  # Why the node is NOT in Mode B, in its own words. The beacon has carried
+  # demotionReason since B3 and the hub stored it in belief_.node_demotion
+  # (lora_client.cpp:3853) without ever publishing it — the same "carried,
+  # stored, never read" shape as review findings 10 and 12.
+  #
+  # It is the difference between a bench procedure that waits and hopes and one
+  # that checks. HW-2 cost two void points to this: a sweep started inside the
+  # 600 s anti-flap hold (Demotion::RecentlyDemoted = 7) arms NOTHING and
+  # reports windows 0/0, which reads exactly like "no reception at this offset".
+  # Read this before pressing: anything but 0 (None) means the point will be
+  # void, whatever the offset.
+  #
+  # Legend (timedmode::Demotion, TimedModePolicy.h:53 — read from the enum, not
+  # from memory): 0 None, 1 GridDisabled, 2 BadClockSource, 3 MissedMarks,
+  # 4 SyncStale, 5 NoPhase, 6 NotConfirmed (RETIRED, never returned),
+  # 7 RecentlyDemoted (the 600 s anti-flap hold).
+  - platform: template
+    name: "Timed RX — demotion reason (node 2)"
+    id: rol_2_demotion_reason
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->node_demotion_reason();'
+
+  # The other half of the same precondition: the node's own answer to "am I
+  # arming timed windows". A sweep point is only a measurement when this is 1
+  # AND the demotion reason is 0; otherwise `windows 0/0` says the node was not
+  # in Mode B, not that the offset failed.
+  - platform: template
+    name: "Timed RX — active per the node (node 2)"
+    id: rol_2_timed_rx_active
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return id(rol_2)->node_timed_rx_active() ? 1.0f : 0.0f;'
+
   - platform: template
     name: "Node overdue — missed a predicted check-in (node 2)"
     id: rol_2_overdue

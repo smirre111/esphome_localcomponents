@@ -502,6 +502,18 @@ namespace esphome
       // Plaintext uplinks refused because this node holds a confirmed session.
       uint32_t plaintextRefused() const { return this->plaintext_refused_; }
       uint32_t opRetryCount() const    { return this->op_retry_count_; }
+      // Why the node says it is NOT in Mode B, and whether it says it IS. Both
+      // arrive in every decrypted beacon's PhaseReport and were stored in
+      // belief_ without ever being published — so a bench operator could only
+      // infer the node's arming state from side effects.
+      //
+      // That inference cost two void HW-2 points (2026-09-19): a sweep started
+      // inside the 600 s anti-flap hold (Demotion::RecentlyDemoted) arms nothing
+      // and reports `windows 0/0`, which is indistinguishable from "no reception
+      // at this offset" — a false edge. Published, the precondition is readable
+      // before pressing instead of reconstructed from timestamps afterwards.
+      uint32_t node_demotion_reason() const { return this->belief_.node_demotion; }
+      bool     node_timed_rx_active() const { return this->belief_.node_timed_rx; }
 
       const MacStats &mac_stats() const { return this->mac_stats_; }
       void reset_mac_stats() { this->mac_stats_ = MacStats{}; }
