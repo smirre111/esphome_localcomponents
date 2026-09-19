@@ -446,12 +446,29 @@ genuinely applied end to end: the hub writes `mt.armoffsetus`
 (`lora_client.cpp:3135`) and the node arms at `t0 - kArmLeadUs + arm_offset_us`.
 
 **A window opening 760 us AFTER T0 cannot catch a frame whose preamble ended at
-T0, and one opening 38 ms early cannot either. Both reported 100 %.** So the
-verdict is not about the window. `mark_hit_pending` is set on `mine` alone —
-the frame is addressed to this node — with no check that it arrived in the
-window the mark armed (`CmdDispatcher.cpp:4660`, review finding 13). The MISS
-path already carries the window generation for exactly this reason; the HIT path
-never got it.
+T0, and one opening 38 ms early cannot either. Both reported 100 %.** Three
+causes, all confirmed in the node review of 2026-09-20:
+
+1. **The window-end EXTENSION re-opens the window onto the frame.**
+   `windowEndClosesWindow` re-arms a full `kWindowUs` whenever RegModemStat's
+   signal-detected bits are set — noise raises them — up to 6 times, so a window
+   can occupy 206 ms (`LoraInterface.cpp:352-361`). At −20 000 us the window
+   opens at T0−38.2 ms and would close at T0−8.8 ms; one extension carries it to
+   T0+20.6 ms, across the whole frame. **HW-2 cannot work until extensions are
+   forced to 0 while a sweep offset is active.**
+2. **Beacons book a false hit.** GridBeacon and GridDemote are broadcast, and the
+   `mine` test accepts the broadcast address, so every beacon closes whatever
+   grid mark is open (`CmdDispatcher.cpp:4649-4651`). The phase path refuses
+   `CMD_GRIDBEACON` explicitly; the hit path does not.
+3. **The hit is not window-scoped at all** — `mark_hit_pending` is set on `mine`
+   alone (`:4660`, review finding 13), and the fix needs the window generation
+   captured at RxDone and carried in `rx_buffer_t`, because by dispatch time
+   `window_gen_` has already been bumped twice.
+
+**An earlier version of this note blamed a "late arm is a no-op on an
+already-listening radio" mechanism. That was WRONG:** those lines are
+`armContinuousRx()`, the drift-test path. `armTimedRxWindow()` re-arms
+unconditionally every window.
 
 **Before HW-2 can run at all:** gate the hit on the arming window's generation,
 and build with `CONFIG_BLINDS_RX_WINDOW_SINGLE` so each window is armed for real
