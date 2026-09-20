@@ -392,7 +392,13 @@ namespace esphome
       bool send_into_class_a_window_(const uint8_t *buf, size_t len);
       // The mark a placed frame for this node would go out on. Shared with
       // send_grid_sync, which must declare the round it will be transmitted in.
-      int64_t nextPlacementT0_(int64_t now_us) const;
+      // The frame's SHAPE is required, not optional: clearance depends on how
+      // long the transmission occupies the air, and burstEndUs_ derives that
+      // from copies x stride + time-on-air(len) + an optional response window.
+      // Without it this asked the two-argument question, which places after the
+      // END of the latest reservation and so skips marks whose air was free.
+      int64_t nextPlacementT0_(int64_t now_us, int copies, size_t len,
+                               bool expects_reply) const;
       // Capture this node's own uplink T0 and score it against the grid. Called
       // only for a frame that has earned the replay counter — see
       // commit_rx_msgid_.

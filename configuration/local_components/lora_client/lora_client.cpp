@@ -1825,9 +1825,21 @@ namespace esphome
       header.msgid         = this->incrTxMessageId();
 
       // Chosen BEFORE the frame is built, because the frame declares it.
+      //
+      // The length is a BOUND rather than the real figure, and it has to be:
+      // gs.txround below is computed from planned_t0, so the mark must be chosen
+      // before the frame exists to be measured. Over-estimating is the safe
+      // direction — it only makes the clearance search stricter, never places a
+      // frame into occupied air. Observed GridSync frames run 93-95 B (94 B with
+      // the fleet key); 128 is comfortably above that and far under the 256 B
+      // buffer. The copy count matches what is actually requested below.
+      static constexpr size_t kGridSyncLenBound = 128;
       const int64_t planned_t0 =
           (enable && this->grid_aligned_ && this->parent_->gridStarted())
-              ? this->nextPlacementT0_(esp_timer_get_time())
+              ? this->nextPlacementT0_(esp_timer_get_time(),
+                                       this->parent_->defaultBurstCopies(),
+                                       kGridSyncLenBound,
+                                       /*expects_reply=*/false)
               : 0;
 
       GridSync gs = GRID_SYNC__INIT;
@@ -2101,12 +2113,28 @@ namespace esphome
     // Split out of send_aligned_ so a producer that must DECLARE its position
     // can ask the same question the placement will answer. Two computations of
     // "the next clear mark" would be two answers the moment either moved.
-    int64_t LORAListener::nextPlacementT0_(int64_t now_us) const
+    // BY INTERVAL, not by high-water mark (2026-09-20). This used to call the
+    // two-argument nextClearT0ForSlotUs, which floors the search at the END of
+    // the latest reservation — so a single-copy mark 1.4 s before a queued
+    // beacon was skipped although the air was free. Measured 2026-09-15: two of
+    // node 2's marks never sent around a beacon, two empty windows, one short of
+    // demotion. The five-argument form was written to replace it and says so in
+    // its own comment; only the ModeTest mark scheduler was ever converted.
+    //
+    // This is the production path — every placed downlink comes through here —
+    // and the cost of skipping a mark is not one late frame: three consecutive
+    // empty windows trip kMaxMissedMarks, and a demoted node drops from one
+    // window per round to Mode A's three plus the promotion trial's one. The
+    // hub was causing the exact receive-duty cost Mode B exists to avoid.
+    int64_t LORAListener::nextPlacementT0_(int64_t now_us, int copies, size_t len,
+                                           bool expects_reply) const
     {
-      int64_t t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now_us);
+      int64_t t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now_us,
+                                                       copies, len, expects_reply);
       if (t0 <= this->last_placed_t0_us_)
         t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_,
-                                                 this->last_placed_t0_us_ + 1);
+                                                 this->last_placed_t0_us_ + 1,
+                                                 copies, len, expects_reply);
       return t0;
     }
 
@@ -2180,9 +2208,13 @@ namespace esphome
       // that because it has to DECLARE the round the frame goes out in, and a
       // declaration computed from one mark and transmitted on another is how
       // the two ends came to disagree about which round is a beacon round.
+      // The real shape of THIS frame. policy.copies may still be 0 here, meaning
+      // "the normal burst" — burstEndUs_ resolves that to txSlotsPerRound, so
+      // passing it through is both correct and the conservative reading.
       const int64_t t0 = (policy.earliest_us != 0)
                              ? loratiming::t0FromFireInstantUs(policy.earliest_us, 0)
-                             : this->nextPlacementT0_(now);
+                             : this->nextPlacementT0_(now, policy.copies, len,
+                                                      policy.expects_reply);
       // earliest_us is a FIRE instant; t0 is where the node expects the frame's
       // reference to land. They differ by kDownlinkPreambleToT0Us, and the node's
       // window is built around the T0, so the conversion belongs here. See

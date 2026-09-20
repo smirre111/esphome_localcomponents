@@ -340,6 +340,47 @@ TEST(RealLoraClient, GridSyncRepublishingIsBounded) {
 }
 
 // ---------------------------------------------------------------------------
+// Placement asks the INTERVAL question, not the high-water one.
+//
+// nextPlacementT0_ is the production path: every placed downlink comes through
+// send_aligned_ into it. It used to call the two-argument
+// nextClearT0ForSlotUs, which floors the search at the END of the latest
+// reservation — so a short frame whose air was free BEFORE a later burst was
+// pushed past that burst instead of being placed in the hole. Measured
+// 2026-09-15: two of node 2's marks never sent around a beacon, two empty
+// windows, one short of demotion. Three consecutive empty windows trip
+// kMaxMissedMarks, and a demoted node runs Mode A's three windows per round
+// plus the promotion trial's one instead of Mode B's single window — so the
+// hub was causing the very receive-duty cost Mode B exists to avoid.
+//
+// The five-argument form was written to replace it and says so in its own
+// comment; only the ModeTest mark scheduler had ever been converted.
+// ---------------------------------------------------------------------------
+
+// NO CLIENT-SIDE WITNESS HERE, deliberately (2026-09-20).
+//
+// A test was written at this point asserting that nextPlacementT0_ returns a
+// free mark before a later reservation. It was UNFALSIFIABLE and has been
+// removed: this file compiles against the SHIM tracker, whose five-argument
+// nextClearT0ForSlotUs forwards straight to the two-argument one
+// (shims/.../lora_tracker.cpp:113-116), discarding copies, len and
+// expects_reply. Both forms therefore return the same answer here, so the test
+// passed with the fix present OR absent — a mutant reverting the call site
+// SURVIVED against it, which is how this was caught.
+//
+// The SEMANTICS are covered where the real LORATracker is compiled:
+// RealTrackerDefer.AMarkBeforeAQueuedBeaconIsClear queues a beacon at a later
+// mark and asserts the earlier mark is still chosen — "the air before the
+// beacon is free; placing after its END skipped marks". That is exactly the
+// interval-vs-high-water distinction, and it passes.
+//
+// What remains unverified by any test is the WIRING — that nextPlacementT0_
+// passes the shape through rather than asking the two-argument question. The
+// signature change makes that a compile-time property, and adding a call
+// recorder to the shim to assert it would be more machinery than the one-line
+// call site is worth.
+
+// ---------------------------------------------------------------------------
 // A node asks for its grid again. Measured 2026-09-15 on node 2 (fw 1.0.92): a
 // demoted node that kept its grid came back 11 ms off its marks after ~17 minutes
 // without a beacon.
