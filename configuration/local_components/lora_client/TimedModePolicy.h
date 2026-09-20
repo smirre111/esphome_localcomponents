@@ -215,32 +215,75 @@ struct HubBelief
 // max_age_s is the hub's published resyncMaxS — see the banner above where the
 // constant used to be. Zero refuses everything, which is the safe direction for
 // a caller that has published no interval.
-constexpr TxPolicy txPolicyFor(const HubBelief &b, uint32_t guard_us,
-                               uint32_t max_age_s)
+// WHY a node is still on bursts, in the order the reasons are tested.
+//
+// U-1: txPolicyFor answered only Burst-or-SingleShot, so a node stuck on
+// bursts — paying seventeen copies for every frame, which is the entire cost
+// Mode B exists to remove — gave an operator nothing to act on. The single
+// boolean is not the diagnostic; WHICH of fourteen conditions failed is.
+//
+// This mirrors the node's own demotionReason() beside modeFor(), and for the
+// same reason: one list of reasons to fall back, tested in one order, with the
+// yes/no answer DERIVED from it rather than restated. Two copies of the ladder
+// would drift and the drift would be silent — the hub would burst while
+// reporting a reason that says it should not.
+//
+// Numbered explicitly because the value is published to Home Assistant, so the
+// numbers are a wire format: append, never renumber.
+enum class TxRefusal : uint8_t {
+    None              = 0,   // single shot
+    GridDisabled      = 1,   // no grid published to this node
+    RebootedSinceConfirm = 2,
+    SessionChanged    = 3,
+    BeaconMissed      = 4,
+    FirmwareUnknown   = 5,   // no decrypted beacon has carried a version
+    SingleShotUnacked = 6,   // Rule 4's one-frame exposure
+    NoPhaseReport     = 7,
+    BadClockSource    = 8,   // not the external crystal
+    TooFewSamples     = 9,
+    PhaseOutOfGuard   = 10,  // the mean is outside the guard band
+    SpreadTooWide     = 11,  // bimodal: a mean can pass while samples miss
+    SamplesOutOfGuard = 12,  // the node's own count, which must be zero
+    NoPublishedMaxAge = 13,  // the hub published no resyncMaxS: fail closed
+    ConfirmationStale = 14,
+};
+
+constexpr TxRefusal txRefusalFor(const HubBelief &b, uint32_t guard_us,
+                                 uint32_t max_age_s)
 {
-    if (!b.grid_enabled)                            return TxPolicy::Burst;
-    if (b.rebooted_since_confirm)                   return TxPolicy::Burst;
-    if (b.session_changed)                          return TxPolicy::Burst;
-    if (b.beacon_missed)                            return TxPolicy::Burst;
-    if (!b.firmware_known)                          return TxPolicy::Burst;
-    if (b.single_shot_unacked)                      return TxPolicy::Burst;
+    if (!b.grid_enabled)                            return TxRefusal::GridDisabled;
+    if (b.rebooted_since_confirm)                   return TxRefusal::RebootedSinceConfirm;
+    if (b.session_changed)                          return TxRefusal::SessionChanged;
+    if (b.beacon_missed)                            return TxRefusal::BeaconMissed;
+    if (!b.firmware_known)                          return TxRefusal::FirmwareUnknown;
+    if (b.single_shot_unacked)                      return TxRefusal::SingleShotUnacked;
 
     // The node's phase report, and every way of not having one.
-    if (!b.phase_reported)                          return TxPolicy::Burst;
-    if (b.rtc_src != RtcSlowSrc::Crystal)           return TxPolicy::Burst;
-    if (b.phase_samples < kPromotionPhaseSamples)   return TxPolicy::Burst;
+    if (!b.phase_reported)                          return TxRefusal::NoPhaseReport;
+    if (b.rtc_src != RtcSlowSrc::Crystal)           return TxRefusal::BadClockSource;
+    if (b.phase_samples < kPromotionPhaseSamples)   return TxRefusal::TooFewSamples;
     if (b.phase_err_us > (int32_t) guard_us ||
-        b.phase_err_us < -(int32_t) guard_us)       return TxPolicy::Burst;
+        b.phase_err_us < -(int32_t) guard_us)       return TxRefusal::PhaseOutOfGuard;
     // Spread, not just the mean: two clusters one slot pitch apart average to
     // something innocent, and a node whose window is sometimes right and
     // sometimes a pitch out will drop the single copy on the wrong half.
-    if (b.phase_spread_us > (int32_t) guard_us)     return TxPolicy::Burst;
+    if (b.phase_spread_us > (int32_t) guard_us)     return TxRefusal::SpreadTooWide;
     // The node's own test, not an approximation of it.
-    if (b.phase_outside_guard != 0)                 return TxPolicy::Burst;
+    if (b.phase_outside_guard != 0)                 return TxRefusal::SamplesOutOfGuard;
 
-    if (max_age_s == 0)                             return TxPolicy::Burst;
-    if (b.confirmation_age_s > max_age_s)           return TxPolicy::Burst;
-    return TxPolicy::SingleShot;
+    if (max_age_s == 0)                             return TxRefusal::NoPublishedMaxAge;
+    if (b.confirmation_age_s > max_age_s)           return TxRefusal::ConfirmationStale;
+    return TxRefusal::None;
+}
+
+// DERIVED, exactly as modeFor is derived from demotionReason. The ladder above
+// is the only copy.
+constexpr TxPolicy txPolicyFor(const HubBelief &b, uint32_t guard_us,
+                               uint32_t max_age_s)
+{
+    return txRefusalFor(b, guard_us, max_age_s) == TxRefusal::None
+               ? TxPolicy::SingleShot
+               : TxPolicy::Burst;
 }
 
 // The state the hub must move to the instant a single shot is not acked.

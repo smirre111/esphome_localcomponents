@@ -418,6 +418,17 @@ namespace esphome
         return timedmode::txPolicyFor(this->hubBeliefNow_(), timedgrid::kGuardUs,
                                       this->published_resync_max_s_);
       }
+      // U-1: WHY this listener is still bursting, from the same ladder the
+      // decision above comes out of — not a re-derivation of it.
+      //
+      // The boolean alone was never the diagnostic. A node stuck on bursts is
+      // paying seventeen copies for every frame, which is the whole cost Mode B
+      // exists to remove, and "single shot: no" gives an operator nothing to
+      // act on. Which of the fourteen conditions failed does.
+      timedmode::TxRefusal txRefusalNow() const {
+        return timedmode::txRefusalFor(this->hubBeliefNow_(), timedgrid::kGuardUs,
+                                       this->published_resync_max_s_);
+      }
       // The node replies at its mark + this rather than "immediately"; must be
       // >= the measured DRAIN + build time, which is HW-7's number. Published
       // to the node in GridSync.ulOffsetUs and used by the hub to decide

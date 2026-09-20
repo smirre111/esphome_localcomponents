@@ -538,6 +538,48 @@ sensor:
     accuracy_decimals: 0
     lambda: 'return (float) id(my_lora_tracker)->poolAllocationFailures();'
 
+  # U-1: whether this node is on ONE copy per frame or seventeen.
+  #
+  # This is what the whole of Mode B buys — a 17x airtime reduction on every
+  # addressed downlink — and until now it was visible only in an ESPHome log
+  # line, so nobody could see whether a fleet was actually getting it.
+  #
+  # Two entities, deliberately. The boolean says what is happening; the reason
+  # below says why, and the reason is the one you act on. "Single shot: no" on
+  # a node you expected to be promoted tells you nothing about whether it needs
+  # a crystal, a longer baseline, or simply more time.
+  - platform: template
+    name: "Single shot active (node 2)"
+    id: rol_2_single_shot
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return id(rol_2)->txPolicyNow() == timedmode::TxPolicy::SingleShot
+                 ? 1.0f : 0.0f;'
+
+  # Why it is still bursting, from the same ladder the decision comes out of —
+  # see TimedModePolicy.h's TxRefusal. 0 means it is not.
+  #
+  #  1 no grid           6 rule 4: a single shot went unacked
+  #  2 rebooted          7 no phase report yet
+  #  3 new session       8 not on the external crystal
+  #  4 beacon missed     9 phase baseline too short
+  #  5 firmware unknown 10 phase mean outside the guard band
+  #                     11 phase spread too wide (bimodal)
+  #                     12 the node scored samples outside the guard
+  #                     13 the hub published no resyncMaxS
+  #                     14 the confirmation has gone stale
+  #
+  # The numbers are a wire format now that they are published here: append to
+  # the enum, never renumber.
+  - platform: template
+    name: "Single shot refused — reason (node 2)"
+    id: rol_2_single_shot_refusal
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) (uint8_t) id(rol_2)->txRefusalNow();'
+
   # MAC ping, stage 0 of the funnel. pings_offered is the only number in this
   # system that the HUB alone can know.
   - platform: template

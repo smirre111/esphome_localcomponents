@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <set>
 #include <vector>
 
 #include "TimedGrid.h"
@@ -312,4 +313,115 @@ TEST(TimedModePolicy, A60SecondBoundWouldHaveBeenInert) {
     b.confirmation_age_s = 300;                       // a very recent uplink
     EXPECT_EQ(txPolicyFor(b, kGuardUs, 60), TxPolicy::Burst);
     EXPECT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::SingleShot);
+}
+
+// ---------------------------------------------------------------------------
+// U-1: the REASON, not just the answer
+//
+// txPolicyFor answered Burst-or-SingleShot and nothing else, so a node stuck on
+// bursts — paying seventeen copies for every frame, which is the entire cost
+// Mode B exists to remove — gave an operator nothing to act on. The boolean was
+// never the diagnostic; which of fourteen conditions failed is.
+// ---------------------------------------------------------------------------
+
+TEST(TimedModePolicy, EveryRefusalReasonIsReachableAndNamesItsOwnCondition) {
+    // One case per rung. If a rung is ever added without a case here, the
+    // exhaustiveness check at the bottom of this test fails.
+    struct Case { const char *what; TxRefusal want; HubBelief b; };
+    std::vector<Case> cases;
+
+    auto with = [](void (*mutate)(HubBelief &)) {
+        HubBelief b = confident();
+        mutate(b);
+        return b;
+    };
+
+    cases.push_back({"no grid", TxRefusal::GridDisabled,
+                     with([](HubBelief &b) { b.grid_enabled = false; })});
+    cases.push_back({"rebooted", TxRefusal::RebootedSinceConfirm,
+                     with([](HubBelief &b) { b.rebooted_since_confirm = true; })});
+    cases.push_back({"new session", TxRefusal::SessionChanged,
+                     with([](HubBelief &b) { b.session_changed = true; })});
+    cases.push_back({"beacon missed", TxRefusal::BeaconMissed,
+                     with([](HubBelief &b) { b.beacon_missed = true; })});
+    cases.push_back({"firmware unknown", TxRefusal::FirmwareUnknown,
+                     with([](HubBelief &b) { b.firmware_known = false; })});
+    cases.push_back({"rule 4", TxRefusal::SingleShotUnacked,
+                     with([](HubBelief &b) { b.single_shot_unacked = true; })});
+    cases.push_back({"no phase report", TxRefusal::NoPhaseReport,
+                     with([](HubBelief &b) { b.phase_reported = false; })});
+    cases.push_back({"internal RC", TxRefusal::BadClockSource,
+                     with([](HubBelief &b) { b.rtc_src = RtcSlowSrc::InternalRc; })});
+    cases.push_back({"too few samples", TxRefusal::TooFewSamples,
+                     with([](HubBelief &b) { b.phase_samples = kPromotionPhaseSamples - 1; })});
+    cases.push_back({"mean out of guard", TxRefusal::PhaseOutOfGuard,
+                     with([](HubBelief &b) { b.phase_err_us = (int32_t) kGuardUs + 1; })});
+    cases.push_back({"bimodal", TxRefusal::SpreadTooWide,
+                     with([](HubBelief &b) { b.phase_spread_us = (int32_t) kGuardUs + 1; })});
+    cases.push_back({"samples outside", TxRefusal::SamplesOutOfGuard,
+                     with([](HubBelief &b) { b.phase_outside_guard = 1; })});
+    cases.push_back({"stale confirmation", TxRefusal::ConfirmationStale,
+                     with([](HubBelief &b) { b.confirmation_age_s = kResyncMaxS + 1; })});
+
+    for (const auto &c : cases) {
+        EXPECT_EQ(txRefusalFor(c.b, kGuardUs, kResyncMaxS), c.want) << c.what;
+        EXPECT_EQ(txPolicyFor(c.b, kGuardUs, kResyncMaxS), TxPolicy::Burst) << c.what;
+    }
+
+    // NoPublishedMaxAge is the one rung that is not a belief field — it is the
+    // hub having published no resyncMaxS at all, which must fail closed.
+    EXPECT_EQ(txRefusalFor(confident(), kGuardUs, 0), TxRefusal::NoPublishedMaxAge);
+
+    // Exhaustiveness: every enumerator except None must be produced by one of
+    // the cases above. A rung added to the ladder without a case here is a
+    // reason an operator would see as a number with nothing behind it.
+    std::set<TxRefusal> produced;
+    for (const auto &c : cases) produced.insert(c.want);
+    produced.insert(TxRefusal::NoPublishedMaxAge);
+    for (uint8_t v = 1; v <= (uint8_t) TxRefusal::ConfirmationStale; ++v) {
+        EXPECT_EQ(produced.count((TxRefusal) v), 1u)
+            << "TxRefusal value " << (int) v << " is never produced by any case "
+               "in this test — either the ladder gained a rung without a case, "
+               "or the enum gained a value the ladder cannot return";
+    }
+}
+
+TEST(TimedModePolicy, TheAnswerAndTheReasonCannotDisagree) {
+    // txPolicyFor is DERIVED from txRefusalFor rather than repeating the
+    // ladder, which is the point: two copies would drift, and the drift would
+    // be silent — the hub bursting while reporting a reason that says it should
+    // not, or promoting while reporting one that says it should not.
+    //
+    // Swept rather than spot-checked, over every single-field deviation from a
+    // confident belief plus the confident belief itself.
+    std::vector<HubBelief> all;
+    all.push_back(confident());
+    auto push = [&all](void (*mutate)(HubBelief &)) {
+        HubBelief b = confident();
+        mutate(b);
+        all.push_back(b);
+    };
+    push([](HubBelief &b) { b.grid_enabled = false; });
+    push([](HubBelief &b) { b.rebooted_since_confirm = true; });
+    push([](HubBelief &b) { b.session_changed = true; });
+    push([](HubBelief &b) { b.beacon_missed = true; });
+    push([](HubBelief &b) { b.firmware_known = false; });
+    push([](HubBelief &b) { b.single_shot_unacked = true; });
+    push([](HubBelief &b) { b.phase_reported = false; });
+    push([](HubBelief &b) { b.rtc_src = RtcSlowSrc::Unknown; });
+    push([](HubBelief &b) { b.phase_samples = 0; });
+    push([](HubBelief &b) { b.phase_err_us = -((int32_t) kGuardUs) - 1; });
+    push([](HubBelief &b) { b.phase_spread_us = (int32_t) kGuardUs + 1; });
+    push([](HubBelief &b) { b.phase_outside_guard = 3; });
+    push([](HubBelief &b) { b.confirmation_age_s = kResyncMaxS + 1; });
+
+    for (uint32_t max_age : {0u, 60u, (uint32_t) kResyncMaxS}) {
+        for (const auto &b : all) {
+            const bool single = txPolicyFor(b, kGuardUs, max_age) == TxPolicy::SingleShot;
+            const bool none   = txRefusalFor(b, kGuardUs, max_age) == TxRefusal::None;
+            EXPECT_EQ(single, none)
+                << "the published reason and the actual decision disagree at "
+                   "max_age " << max_age;
+        }
+    }
 }
