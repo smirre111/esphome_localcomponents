@@ -569,6 +569,24 @@ namespace esphome
       return static_cast<uint32_t>(wake);   // 0 if neither is configured
     }
 
+    // U-5. See the header for why both clauses are necessary and why this
+    // fails open.
+    bool LORAListener::beacon_overdue_() const
+    {
+      const uint32_t wake_at = this->next_wake_epoch_();
+      if (wake_at == 0)
+        return false;                   // cannot predict — never "missed"
+      if (this->time == nullptr || !this->time->now().is_valid())
+        return false;                   // no clock — cannot compare
+      const uint32_t now = static_cast<uint32_t>(this->time->now().timestamp);
+      if (now < wake_at + kBeaconOverdueGraceS)
+        return false;                   // not yet due, or inside the grace
+      // Heard from since the predicted wake? Then it is not missed, whatever
+      // the prediction says — an imminent scheduled event can pin wake_at near
+      // now, and without this an awake, beaconing node reads as overdue.
+      return this->last_beacon_epoch_ < wake_at;
+    }
+
     bool LORAListener::is_node_awake_() const
     {
       const uint32_t wake_at = this->next_wake_epoch_();
@@ -3581,6 +3599,12 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     {
       timedmode::HubBelief b = this->belief_;
       b.grid_enabled   = this->timed_mode_enabled_ && this->grid_aligned_;
+      // U-5: computed here rather than stored, for the same reason
+      // confirmation_age_s is — it is a fact about the passage of time, and a
+      // stored copy would be right only at the instant it was written. It was
+      // a txPolicyFor guard that nothing ever set, so single-shot was decided
+      // without the one question that asks whether the node is still there.
+      b.beacon_missed  = this->beacon_overdue_();
       // Known only once the node has told us, in a beacon we decrypted.
       b.firmware_known = (this->node_fw_version_ != 0);
 

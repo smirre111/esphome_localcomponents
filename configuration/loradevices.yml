@@ -580,6 +580,25 @@ sensor:
     accuracy_decimals: 0
     lambda: 'return (float) (uint8_t) id(rol_2)->txRefusalNow();'
 
+  # U-5: the node has missed a check-in the hub PREDICTED it would make.
+  #
+  # The prediction is next_wake_epoch_(), which the hub already computes from
+  # the node's own vendored scheduler so it does not transmit at a sleeping
+  # node — the comparison against what was actually observed is all that was
+  # missing. It gates single-shot (refusal reason 4 above) and is published
+  # here because "this node has gone quiet" is a thing an operator acts on
+  # directly.
+  #
+  # 0 for a node the hub cannot predict — never heard from, or no hub clock.
+  # A prediction that cannot be made must not read as a failure.
+  - platform: template
+    name: "Node overdue — missed a predicted check-in (node 2)"
+    id: rol_2_overdue
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return id(rol_2)->node_overdue() ? 1.0f : 0.0f;'
+
   # MAC ping, stage 0 of the funnel. pings_offered is the only number in this
   # system that the HUB alone can know.
   - platform: template

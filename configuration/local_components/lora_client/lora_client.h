@@ -235,6 +235,30 @@ namespace esphome
                            bool mac_echo, int32_t arm_offset_us = 0);
       void stop_mode_test();
       bool mode_test_active() const { return this->mode_test_active_; }
+      // U-5: whether this node has missed a check-in it was predicted to make.
+      // Published as a diagnostic because that is what an operator acts on; it
+      // also gates single-shot through HubBelief::beacon_missed.
+      bool node_overdue() const { return this->beacon_overdue_(); }
+
+      // How long past a predicted check-in the node is given before it counts
+      // as missed. Longer than its whole beacon ladder, which is what has to
+      // complete before a missed check-in is real: the node beacons within
+      // seconds of waking and re-beacons twice before its resume fallback
+      // fires, and automode::kQuietWindowMinMs (17 s) is sized to cover that
+      // entire sequence. 60 s is comfortably past it, and the node's clock
+      // comes FROM this hub so there is no skew term to budget for.
+      //
+      // Public for the same reason kUplinkOffsetUs is: it is a protocol
+      // constant, and a test that restated it could not fail when it changed.
+      static constexpr uint32_t kBeaconOverdueGraceS = 60;
+
+      // For tests. Production sets this from the hub clock when a beacon
+      // arrives (handle_beacon_); a test needs to place it independently of
+      // `now` to exercise the comparison, which is the whole of U-5.
+      void noteBeaconEpochForTest(uint32_t epoch) {
+        this->last_beacon_epoch_ = epoch;
+      }
+
       // U-2: the node's radio-busy skip count, as of its last PhaseReport.
       //
       // This is the one Mode B failure the KPIs cannot see. A window the node
@@ -863,6 +887,30 @@ namespace esphome
       // Understands BOTH sleeps: the interactive fixed sleep_duration_, and
       // automatic mode's schedule-derived wake. See the definition.
       uint32_t next_wake_epoch_() const;
+
+      // U-5: has this node failed to appear when it said it would?
+      //
+      // §11b called this "a feature rather than a fix" — the hub having to
+      // compare a predicted check-in against an observed one. It turned out
+      // the hub already HAS the prediction: next_wake_epoch_() above, computed
+      // from the node's own vendored scheduler for a different purpose (not
+      // transmitting at a sleeping node). Only the comparison was missing.
+      //
+      // BOTH clauses are needed:
+      //   * the predicted wake has passed by more than the grace, AND
+      //   * nothing has been heard SINCE that predicted wake.
+      // The second is not belt-and-braces. In automatic mode the prediction can
+      // be pinned near `now` by an imminent scheduled event, so the first
+      // clause alone would mark an awake, healthy, beaconing node overdue once
+      // the grace elapsed.
+      //
+      // FAILS OPEN on a node it cannot predict (wake_at == 0: never heard
+      // from, or no hub clock). A prediction the hub cannot make must never
+      // deny single-shot permanently — that is precisely how the old in-slot
+      // criterion became unsatisfiable.
+      bool beacon_overdue_() const;
+
+
       bool     is_node_awake_() const;
       uint32_t ms_until_node_awake_() const;
       void     schedule_startup_login_();

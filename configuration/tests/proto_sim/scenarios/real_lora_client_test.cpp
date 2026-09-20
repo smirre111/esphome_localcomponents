@@ -2803,3 +2803,140 @@ TEST(PlacedDownlinks, ARoutineDownlinkDoesNotEraseRuleFoursExposure) {
         << "an unacked single shot must put this node back on bursts, however "
            "many routine downlinks happened in between";
 }
+
+// ---------------------------------------------------------------------------
+// U-5: beacon_missed — a txPolicyFor guard that nothing ever set
+//
+// §11b called closing it "a feature rather than a fix": the hub would have to
+// compare a predicted check-in against an observed one. It turned out the hub
+// ALREADY HAS the prediction — next_wake_epoch_(), computed from the node's own
+// vendored scheduler so the hub does not transmit at a sleeping node. Only the
+// comparison was missing, and until it existed single-shot was decided without
+// ever asking whether the node is still there.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A node the hub can predict: interactive, with a known last beacon.
+//
+// NOTE WHICH KNOB. next_wake_epoch_ uses sleep_duration_ on the interactive
+// branch and checkin_interval_ only on the automatic-mode branch — my first
+// draft set the latter and the prediction stayed at the 86400 s default, so
+// nothing was ever overdue and three tests failed. They are different
+// questions: how long the hub told it to sleep, versus how often it wakes
+// itself.
+void makePredictable(real_helpers::RealHubHarness &h, uint32_t cycle_s,
+                     uint32_t beacon_at, uint32_t now) {
+    h.rol.registered_ = true;
+    h.rol.set_sleep_duration(cycle_s);
+    h.rol.set_checkin_interval(cycle_s);
+    h.rol.noteBeaconEpochForTest(beacon_at);
+    h.time.set_now(now, /*valid=*/true);
+}
+
+}  // namespace
+
+TEST(BeaconMissed, ANodeInsideItsCheckinIntervalIsNotOverdue) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    makePredictable(h, /*cycle_s=*/600, /*beacon_at=*/1000, /*now=*/1300);
+    EXPECT_FALSE(h.rol.node_overdue()) << "it is not even due yet";
+    EXPECT_FALSE(h.rol.hubBelief().beacon_missed);
+}
+
+TEST(BeaconMissed, TheGraceCoversTheNodesWholeBeaconLadder) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    // Due at 1600. The node beacons within seconds of waking and re-beacons
+    // twice before its resume fallback fires; kQuietWindowMinMs (17 s) is sized
+    // to cover that whole sequence, so a verdict inside the grace would call a
+    // node missing while it is still working through its own retries.
+    makePredictable(h, /*cycle_s=*/600, /*beacon_at=*/1000, /*now=*/1600 + 30);
+    EXPECT_FALSE(h.rol.node_overdue()) << "inside the grace";
+
+    h.time.set_now(1600 + LORAClient::kBeaconOverdueGraceS, /*valid=*/true);
+    EXPECT_TRUE(h.rol.node_overdue()) << "past it, and nothing heard since";
+}
+
+TEST(BeaconMissed, AMissedCheckinDeniesSingleShotWithItsOwnReason) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    give_phase_report(h);
+    makePredictable(h, /*cycle_s=*/600, /*beacon_at=*/1000, /*now=*/1000);
+    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot)
+        << "precondition: everything else says this node may take one copy";
+
+    // Now it fails to appear.
+    h.time.set_now(1600 + LORAClient::kBeaconOverdueGraceS + 1, /*valid=*/true);
+
+    EXPECT_TRUE(h.rol.hubBelief().beacon_missed);
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst)
+        << "a node that missed the check-in it was predicted to make is not a "
+           "node to spend the one copy on";
+    EXPECT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::BeaconMissed)
+        << "and the published reason must be this one, not a later rung that "
+           "happens to also fail";
+}
+
+TEST(BeaconMissed, AnAwakeNodeWithAnImminentEventIsNotOverdue) {
+    // THE FALSE POSITIVE THAT MADE THE SECOND CLAUSE NECESSARY.
+    //
+    // In automatic mode next_wake_epoch_ takes the EARLIER of the next
+    // scheduled event (minus the beacon lead) and the periodic check-in, and
+    // the scheduled-event branch clamps to `now` when the lead exceeds the
+    // remaining time. So the prediction can sit at `now` indefinitely for a
+    // node with an imminent event — and "the predicted wake has passed by more
+    // than the grace" alone would then call a node overdue while it is awake
+    // and beaconing normally.
+    //
+    // The second clause — nothing heard SINCE the predicted wake — is what
+    // makes the verdict about the node rather than about the prediction.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    makePredictable(h, /*cycle_s=*/600, /*beacon_at=*/1000, /*now=*/1000);
+
+    // Heard from AFTER the predicted wake instant.
+    h.rol.noteBeaconEpochForTest(5000);
+    h.time.set_now(5000 + LORAClient::kBeaconOverdueGraceS + 1, /*valid=*/true);
+    EXPECT_FALSE(h.rol.node_overdue())
+        << "the last beacon is more recent than the predicted wake, so this "
+           "node has appeared — whatever the prediction says";
+}
+
+TEST(BeaconMissed, ANodeTheHubCannotPredictIsNeverMissed) {
+    // FAILS OPEN, deliberately. A prediction the hub cannot make must not deny
+    // single-shot permanently: that is exactly how the old in-slot criterion
+    // became unsatisfiable, and a guard that can never be cleared is worse
+    // than one that never fires.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.time.set_now(900000, /*valid=*/true);
+    // nothing has ever been heard from this node
+    EXPECT_FALSE(h.rol.node_overdue());
+
+    // And with no hub clock at all, which is the other way the comparison
+    // cannot be made.
+    makePredictable(h, /*cycle_s=*/600, 1000, 900000);
+    h.time.set_now(900000, /*valid=*/false);
+    EXPECT_FALSE(h.rol.node_overdue());
+}
+
+TEST(BeaconMissed, ABeaconClearsItBecauseThePredictionMovesWithIt) {
+    // No explicit reset anywhere: next_wake_epoch_ is computed from the last
+    // thing the hub heard, so every beacon pushes the prediction forward and
+    // the verdict follows. Worth pinning — a stored flag would have needed a
+    // clearing path, and a missed clearing path is how rebooted_since_confirm
+    // spent a release stuck true.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    makePredictable(h, /*cycle_s=*/600, /*beacon_at=*/1000,
+                    /*now=*/1600 + LORAClient::kBeaconOverdueGraceS + 1);
+    ASSERT_TRUE(h.rol.node_overdue());
+
+    h.rol.noteBeaconEpochForTest(static_cast<uint32_t>(1600 + LORAClient::kBeaconOverdueGraceS + 1));
+    EXPECT_FALSE(h.rol.node_overdue())
+        << "it turned up; the next verdict is due one check-in interval later";
+}
