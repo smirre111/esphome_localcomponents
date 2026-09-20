@@ -166,13 +166,25 @@ From `tests/proto_sim/README.md`, all learned the hard way:
   asleep with interrupts cleared, DIO1 mapped to `RX_TIMEOUT`,
   `sendPacketBytes()` byte-exact, and `maxUplinkAimWaitUs() == 290 ms`.
   The other targets still shim `LoraInterface.h`, so they see none of this.
-  What remains untestable is task ordering, the DIO0 interrupt task, cross-core
-  access and window arming: all of it lives in task loops. Two real defects (a
-  Mode A window completing the Class A sequence; a torn 64-bit read of
+  Window arming and the transmit sequence are reachable as of the same
+  increment: `loraRxTask`'s body became `serviceRxWindow` / `armTimedRxWindow`
+  / `armContinuousRx` / `noteRxWindowSkipped` / `transmitOneQueuedFrame` /
+  `beginCad`, and the tests hold them to the six-write window order, the
+  symbol timeout the guard band is computed from, the arm-once rule for the
+  drift test, the busy-window count, and — spot-check verified by deleting the
+  production code — the CAD queue reset, the buffer return on the exhausted
+  retry path, and `clearInterrupts` before `rxSingle`.
+  What remains untestable is the DIO0/DIO1 interrupt task and cross-core
+  access, all of it in `frtosTasks.cpp`. Two real defects (a Mode A window
+  completing the Class A sequence; a torn 64-bit read of
   `classa_.t0_uplink_us`) were fixed without any test able to reach them, and
   that is still so. A dispatcher-level test that calls `noteUplinkSent` then
   `noteClassAWindowResult` in order on one object is asserting the sequence
   that does *not* occur in production.
+  **And a limit no extraction lifts:** these tests assert the ORDER of radio
+  operations, never the elapsed time across the aimed critical path. The
+  ~3.5 ms log line that once sat there is HW-7's measurement, not a host
+  test's.
 - **The shim tracker models no transmit queue.** `shims/.../lora_tracker.cpp`'s
   `send()` records the policy and emits into the SimRadio immediately, and
   `busy_until_us` is a field tests set that `send()` never updates. So a

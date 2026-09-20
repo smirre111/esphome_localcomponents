@@ -190,15 +190,33 @@ asleep-with-interrupts-cleared start state, DIO1 → `RX_TIMEOUT` (the only
 edge that ends a receive window), byte-exactness of `sendPacketBytes()`,
 and `maxUplinkAimWaitUs() == 290 ms`.
 
-What it cannot reach: the `for(;;)` bodies. The transmit sequence in
-`loraRxTask` — reset the CAD queue, CAD, the aimed wait, fire — and the
-interrupt handling in `frtosTasks.cpp` are task loops, so a log line
-inside the aimed critical path (~3.5 ms of UART inside a ±14 080 µs guard
-band; this actually happened) still would not be caught. `frtosTasks.cpp`
-is not compiled at all: it needs an ADC shim and the motor/battery task
-surface. Extracting those bodies is the same move that made the node's
-uplink path testable (`CmdDispatcher::serviceTxCommand` /
-`runOneTxCommand`).
+It also reaches the receive task's body. `loraRxTask` was a ~370-line
+`for(;;)`, so the extraction that made the node's uplink path testable
+(`CmdDispatcher::serviceTxCommand` / `runOneTxCommand`) was applied to it
+as well: `serviceRxWindow`, `armTimedRxWindow`, `armContinuousRx`,
+`noteRxWindowSkipped`, `transmitOneQueuedFrame` and `beginCad`. The loop
+keeps the watchdog feed and the two bounded waits, and nothing else.
+
+Answering a CAD from a test needs the `Recorder::on_cad` hook rather than
+seeding the queue, and that is the point rather than a quirk: production
+resets `lora_cad_queue_` immediately before `lora_cad()`, so any answer
+placed earlier is wiped. Delete that reset and
+`AStaleCadAnswerIsNotConsumedAsThisCadsAnswer` transmits — which is the
+real failure, since the 2 s CAD receive abandons an answer that stays
+queued and the next CAD consumes it. One wart to know about: the queue is
+created with a one-byte item size while the consumer reads into an `int`,
+so a test must queue a `uint8_t`.
+
+What it cannot reach: `frtosTasks.cpp`, which is not compiled at all (it
+needs an ADC shim and the motor/battery task surface), and therefore the
+DIO0/DIO1 handler, the TX_DONE branch that pairs with `last_tx_len_`, and
+the ISR timestamps every phase measurement rests on.
+
+And a limit that closing that gap will not lift: these tests assert the
+ORDER of radio operations and which branch ran, never how long the
+critical path took. A log line inside the aimed critical path (~3.5 ms of
+UART inside a ±14 080 µs guard band; this actually happened) still would
+not be caught here. That one needs a scope.
 
 ### Remaining phase-3 work
 
@@ -211,9 +229,11 @@ uplink path testable (`CmdDispatcher::serviceTxCommand` /
   what `e2e_test` and the older hub scenarios drive, so it remains true
   that those cannot see frame placement, the prepare/fire split or queue
   supersession; only the real target can.
-* Extract the `loraRxTask` transmit sequence and the `frtosTasks.cpp`
-  interrupt body out of their task loops, and compile `frtosTasks.cpp`
-  (needs an ADC shim + the motor/battery surface). See the section above.
+* ~~Extract the `loraRxTask` transmit sequence~~ — **done**; see the
+  section above.
+* Compile `frtosTasks.cpp` (needs an ADC shim + the motor/battery
+  surface) and extract its interrupt body out of its task loop. That is
+  what is left of T-1.
 
 ### Portability bug fixed by phase 3
 
