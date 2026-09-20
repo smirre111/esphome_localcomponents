@@ -1594,7 +1594,7 @@ const ProtobufCMessageDescriptor base_nonce_exchange__descriptor =
   (ProtobufCMessageInit) base_nonce_exchange__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor phase_report__field_descriptors[7] =
+static const ProtobufCFieldDescriptor phase_report__field_descriptors[8] =
 {
   {
     "samples",
@@ -1680,6 +1680,18 @@ static const ProtobufCFieldDescriptor phase_report__field_descriptors[7] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "rxBusySkips",
+    8,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(PhaseReport, rxbusyskips),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned phase_report__field_indices_by_name[] = {
   1,   /* field[1] = errUs */
@@ -1687,13 +1699,14 @@ static const unsigned phase_report__field_indices_by_name[] = {
   5,   /* field[5] = ppmEstimate */
   6,   /* field[6] = ppmSamples */
   4,   /* field[4] = rtcSlowSrc */
+  7,   /* field[7] = rxBusySkips */
   0,   /* field[0] = samples */
   2,   /* field[2] = spreadUs */
 };
 static const ProtobufCIntRange phase_report__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 7 }
+  { 0, 8 }
 };
 const ProtobufCMessageDescriptor phase_report__descriptor =
 {
@@ -1703,7 +1716,7 @@ const ProtobufCMessageDescriptor phase_report__descriptor =
   "PhaseReport",
   "",
   sizeof(PhaseReport),
-  7,
+  8,
   phase_report__field_descriptors,
   phase_report__field_indices_by_name,
   1,  phase_report__number_ranges,

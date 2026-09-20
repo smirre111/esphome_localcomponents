@@ -535,3 +535,47 @@ TEST_F(E2E, TheHubAnswersAReBeaconSoTheNodeRecoversByReAsking) {
         << "and the answer to the re-beacon is what recovers the session, "
            "before the 12 s REGISTER fallback ever escalates";
 }
+
+TEST_F(E2E, TheNodesBusyWindowCountReachesTheHubOnItsAck) {
+    // U-2, end to end, with no mirror anywhere in it: the real node fills
+    // PhaseReport.rxBusySkips, the real ack carries it, the real hub parses it.
+    //
+    // Why it needs carrying at all: a window the node never armed is invisible
+    // to WMR by construction, because noteMarkArmed() is what opens a mark. So
+    // a node whose radio is wedged at every mark reports a FLAWLESS
+    // window-mark rate while hearing nothing — the one Mode B failure the KPIs
+    // cannot see. LoraInterface had counted it since it was added and nothing
+    // carried it off the node, so it was unseeable twice over.
+    bringUpSession();
+    drainNodeOps();
+
+    // The login path already carries a PhaseReport, so the hub has heard from
+    // this node and `valid` is true with a count of 0. That is the honest
+    // reading, and my first draft of this test asserted the opposite: `valid`
+    // cannot mean "this firmware has the field", because rxBusySkips is a
+    // proto3 scalar and absent and 0 are the same bytes. It means a report has
+    // arrived, so the sensor publishes NAN only for a node that has said
+    // nothing at all.
+    EXPECT_TRUE(rol.node_rx_busy_skips().valid)
+        << "the login's own PhaseReport is a report";
+    EXPECT_EQ(rol.node_rx_busy_skips().count, 0u) << "and a clean radio so far";
+
+    lif.setRxBusySkipsForTest(7);
+
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                             COV_OPERATION__CMD_OPEN, 0.0f);
+    settle();
+    ASSERT_FALSE(rol.awaitingAck()) << "precondition: the ack did arrive";
+
+    const auto skips = rol.node_rx_busy_skips();
+    EXPECT_TRUE(skips.valid);
+    EXPECT_EQ(skips.count, 7u) << "the count the node holds, as the hub sees it";
+
+    // And it follows the node rather than latching, because the number is
+    // cumulative and what an operator watches is whether it GROWS.
+    lif.setRxBusySkipsForTest(9);
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                             COV_OPERATION__CMD_CLOSE, 0.0f);
+    settle();
+    EXPECT_EQ(rol.node_rx_busy_skips().count, 9u);
+}

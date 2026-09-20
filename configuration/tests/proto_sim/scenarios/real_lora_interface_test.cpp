@@ -501,3 +501,92 @@ TEST_F(Iface, ServicingAWindowDispatchesOnTheDriftTestFlag) {
     EXPECT_EQ(r().count("lora_receive"), 1u);
     EXPECT_EQ(r().count("lora_rxSingle"), 0u);
 }
+
+// ---------------------------------------------------------------------------
+// U-2: the radio-busy skip, and what a failed transmit does to a drift test
+// ---------------------------------------------------------------------------
+
+TEST_F(Iface, AFailedTransmitDoesNotLeaveTheNodeDeafInADriftTest) {
+    // v1.0.33 again, through a door noteRadioSlept() did not cover.
+    //
+    // cont_rx_armed_ means "the radio is already sitting in continuous RX, so
+    // do not idle and re-arm it every ~500 ms". Every path that SLEEPS the
+    // radio clears it (frtosTasks, five call sites). But the transmit path does
+    // not sleep the radio, it IDLES it — in beginCad(), and again in the
+    // stuck-mutex recovery — and idling stops reception just as dead.
+    //
+    // On the success path that self-heals: TX_DONE sleeps the radio and clears
+    // the flag. The FAILING paths have no TX_DONE. So a transmit whose CAD
+    // never comes back clear leaves the radio in standby with the flag still
+    // claiming it is armed, and armContinuousRx() then does nothing on every
+    // subsequent pass — the node is deaf for the rest of the drift test, which
+    // is the one measurement session whose numbers have to be trustworthy.
+    lif.continuous_rx_ = true;
+    lif.armContinuousRx();
+    ASSERT_TRUE(lif.cont_rx_armed_);
+    ASSERT_EQ(r().count("lora_receive"), 1u);
+
+    const uint8_t frame[] = {0x5A};
+    queueOneFrame(lif, frame, (int) sizeof(frame));
+    answerCadWith(lif, 1 /* busy every time, so every retry is exhausted */);
+    lif.transmitOneQueuedFrame();
+
+    ASSERT_TRUE(r().packets.empty()) << "nothing went out, as set up";
+    ASSERT_GT(r().count("lora_idle"), 0u) << "but the radio WAS idled";
+    EXPECT_FALSE(lif.cont_rx_armed_)
+        << "the radio was idled out of continuous RX, so the flag must not "
+           "still claim it is armed — the next pass has to re-arm or the node "
+           "stays deaf for the rest of the drift test";
+
+    // And the next pass must actually re-arm it.
+    lif.armContinuousRx();
+    EXPECT_EQ(r().count("lora_receive"), 2u);
+}
+
+TEST_F(Iface, ABusyRadioIsNotASkippedWindowWhileTheDriftTestHoldsIt) {
+    // The skip counter answers "a window the node meant to open never opened",
+    // which is the one Mode B failure the KPIs cannot see: an unarmed window is
+    // invisible to WMR by construction, because noteMarkArmed is what opens a
+    // mark.
+    //
+    // During a drift test the radio is deliberately held in continuous RX, and
+    // the mutex is released only by an interrupt — so most passes find it busy.
+    // Counting those makes the number say "this node is failing to open
+    // windows" throughout a bench run that is working exactly as designed, and
+    // the count is reported to the hub. A diagnostic that cries wolf for the
+    // duration of a measurement is worse than no diagnostic.
+    lif.continuous_rx_ = true;
+
+    lif.noteRxWindowSkipped();
+    lif.noteRxWindowSkipped();
+    EXPECT_EQ(lif.rxBusySkips(), 0u)
+        << "the radio being busy IS the drift test — not a failure to arm";
+
+    lif.continuous_rx_ = false;
+    lif.noteRxWindowSkipped();
+    EXPECT_EQ(lif.rxBusySkips(), 1u) << "and in normal mode it still counts";
+}
+
+TEST_F(Iface, TheSkipWarningIsThrottledButTheCountIsNot) {
+    // The log line fires per PASS — every rxIntervalMs, so about twice a second
+    // — and whatever wedges the radio mutex wedges it for a while. Unthrottled
+    // it buried every other line the node emits while the interesting event
+    // was scrolling past, and at 115200 baud each line costs ~3.5 ms of UART,
+    // which is a term in the very arm residual this path exists to diagnose.
+    //
+    // The COUNT must stay exact regardless: it is the payload, and it is what
+    // travels on PhaseReport.
+    ::testing::internal::CaptureStderr();
+    for (int i = 0; i < 40; ++i) lif.noteRxWindowSkipped();
+    const std::string logged = ::testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(lif.rxBusySkips(), 40u) << "every skip counts";
+
+    size_t lines = 0;
+    for (size_t at = logged.find("RX window skipped");
+         at != std::string::npos;
+         at = logged.find("RX window skipped", at + 1))
+        ++lines;
+    EXPECT_EQ(lines, 4u)
+        << "first three, then every 32nd — not forty lines of the same fact";
+}

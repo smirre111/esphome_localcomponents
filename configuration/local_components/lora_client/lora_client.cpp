@@ -3535,6 +3535,20 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       this->last_phase_report_us_ = esp_timer_get_time();
       this->have_phase_report_    = true;
 
+      // U-2. Logged only when it GROWS: the node throttles its own warning and
+      // this report arrives on every ack, so an unconditional line here would
+      // restate a static number several times a minute. A rising count is the
+      // event — it means marks are passing unarmed, and every window-mark rate
+      // taken over that stretch has an empty denominator rather than a clean
+      // one.
+      if (pr->rxbusyskips > this->node_rx_busy_skips_)
+        ESP_LOGW(TAG, "node skipped %u RX window(s) on a busy radio (%u since its boot) "
+                      "— WMR over this period is measuring fewer marks than it appears to",
+                 (unsigned) (pr->rxbusyskips - this->node_rx_busy_skips_),
+                 (unsigned) pr->rxbusyskips);
+      this->node_rx_busy_skips_ = pr->rxbusyskips;
+      this->have_rx_busy_skips_ = true;
+
       // This report IS the fresh confirmation the three guards were waiting
       // for. They used to be cleared by an observed in-slot uplink, and that
       // has to move with the evidence: leaving them keyed on placement would

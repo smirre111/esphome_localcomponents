@@ -35,6 +35,15 @@ public:
         }
     }
 
+    // U-2: windows the node meant to open and never did. Production counts
+    // these in noteRxWindowSkipped() and CmdDispatcher::fillPhaseReport carries
+    // the count on every PhaseReport, so the shim has to answer it too.
+    // Settable here because the real counter is driven by a semaphore timeout
+    // this shim has no way to produce — the real one is asserted against the
+    // real file in real_lora_interface_test.
+    uint32_t rxBusySkips() const { return rx_busy_skips_; }
+    void     setRxBusySkipsForTest(uint32_t n) { rx_busy_skips_ = n; }
+
     rx_buffer_t* get_free_tx_buffer(uint32_t /*timeout*/) {
         if (free_.empty()) return nullptr;
         auto* b = free_.back();
@@ -71,6 +80,8 @@ public:
     bool continuousRx() const { return continuous_rx_; }
 
 private:
+    uint32_t rx_busy_skips_{0};
+
     bool                     continuous_rx_{false};
     rx_buffer_t              pool_[POOL_SIZE];
     std::vector<rx_buffer_t*> free_;

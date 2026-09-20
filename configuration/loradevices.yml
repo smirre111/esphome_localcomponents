@@ -492,6 +492,32 @@ sensor:
                  ? (float) id(rol_2)->mode_test_summary().turnaround_p99_us
                  : NAN;'
 
+  # U-2: windows the node MEANT to open and never did, because its radio was
+  # still busy when the mark came round. Not a ModeTest number — it is counted
+  # continuously and rides every PhaseReport, so it is live rather than
+  # per-run.
+  #
+  # READ IT BESIDE the window miss rate above, never instead of it. A mark that
+  # was never armed is invisible to WMR by construction, because noteMarkArmed()
+  # is what opens a mark at all: a node whose radio is wedged reports a flawless
+  # WMR while hearing nothing. This is the number that says so, and it is why a
+  # perfect miss rate is not on its own evidence of a working link.
+  #
+  # NAN until a PhaseReport has arrived, so "this node has not answered" does
+  # not plot as a flat clean zero. It does NOT distinguish firmware without the
+  # field — rxBusySkips is a proto3 scalar, so absent and 0 are the same bytes
+  # on the air. Nothing is deployed yet, so no such firmware exists to confuse
+  # it with.
+  - platform: template
+    name: "RX windows skipped — radio busy (node 2)"
+    id: rol_2_rx_busy_skips
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return id(rol_2)->node_rx_busy_skips().valid
+                 ? (float) id(rol_2)->node_rx_busy_skips().count
+                 : NAN;'
+
   # MAC ping, stage 0 of the funnel. pings_offered is the only number in this
   # system that the HUB alone can know.
   - platform: template

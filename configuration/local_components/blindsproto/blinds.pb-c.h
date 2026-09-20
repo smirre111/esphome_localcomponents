@@ -332,10 +332,22 @@ struct  PhaseReport
    * 0 => ppmEstimate carries no information
    */
   uint32_t ppmsamples;
+  /*
+   * Windows the node MEANT to open and never did, because the radio was
+   * still busy when the mark came round. Counted since boot.
+   * It belongs beside the phase numbers because it is their complement: the
+   * fields above measure the hub's transmissions against the marks the node
+   * ARMED, and an unarmed mark is invisible to all of them — WMR included,
+   * since noteMarkArmed() is what opens a mark at all. So a node can report
+   * a perfect window-mark rate while hearing nothing, which is the one Mode B
+   * failure the KPIs cannot see. The count was kept on the node and never
+   * carried, which made it unseeable in a different way.
+   */
+  uint32_t rxbusyskips;
 };
 #define PHASE_REPORT__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&phase_report__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  CommandAck

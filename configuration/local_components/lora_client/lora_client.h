@@ -235,6 +235,32 @@ namespace esphome
                            bool mac_echo, int32_t arm_offset_us = 0);
       void stop_mode_test();
       bool mode_test_active() const { return this->mode_test_active_; }
+      // U-2: the node's radio-busy skip count, as of its last PhaseReport.
+      //
+      // This is the one Mode B failure the KPIs cannot see. A window the node
+      // never armed is invisible to WMR by construction — noteMarkArmed() is
+      // what opens a mark — so a node whose radio is wedged reports a perfect
+      // window-mark rate while hearing nothing at all. Publish it beside WMR,
+      // never instead of it: a rising count here is what says a perfect WMR is
+      // measuring an empty denominator.
+      //
+      // `valid` means A REPORT HAS ARRIVED, exactly as ModeTestSummary::valid
+      // does — not "this firmware has the field". It cannot mean that:
+      // rxBusySkips is a proto3 scalar, so absent and 0 are the same bytes.
+      // The submessage around it is detectable (notePhaseReport_ takes nullptr
+      // for a node that sends no PhaseReport at all) but a scalar inside it is
+      // not.
+      //
+      // That distinction is moot here rather than papered over: nothing is
+      // deployed, so no firmware predating this field will ever report to this
+      // hub. If any ever did, it would publish 0 and read as a clean radio —
+      // and the fix then is the node's fwVersion, which the hub already tracks,
+      // not a companion bool in this message.
+      struct RxBusySkips { bool valid{false}; uint32_t count{0}; };
+      RxBusySkips node_rx_busy_skips() const {
+        return RxBusySkips{this->have_rx_busy_skips_, this->node_rx_busy_skips_};
+      }
+
       // The report the node sent back, verbatim. Empty until one arrives.
       //
       // Kept, but it is not the entity to publish: Home Assistant caps a
@@ -609,6 +635,12 @@ namespace esphome
       // "at boot", which a zero timestamp cannot.
       int64_t              last_phase_report_us_{0};
       bool                 have_phase_report_{false};
+      // U-2: windows the node meant to open and never did, because its radio
+      // was still busy at the mark. Carried on PhaseReport since 2026-09.
+      // The flag says a report has arrived, so the sensor can publish NAN for
+      // "no answer yet" rather than a 0 that reads as a healthy link.
+      uint32_t             node_rx_busy_skips_{0};
+      bool                 have_rx_busy_skips_{false};
       bool                 config_push_pending_{false};
       std::vector<uint8_t> pending_register_frame_;
       uint32_t plaintext_hwm_{0};
