@@ -1285,13 +1285,15 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     std::vector<uint8_t> payload{1, 2, 3, 4};
     EXPECT_EQ(rol_1.node_mode_, (uint32_t) NODE_MODE__MODE_INTERACTIVE)
         << "the safe default: a node that has not said otherwise is not Class A";
-    EXPECT_FALSE(rol_1.send_into_class_a_window_(payload.data(), payload.size()))
+    EXPECT_EQ(rol_1.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::NotClassA)
         << "an interactive node has no RX1 to aim at; the caller must burst";
 
     // Now the node tells us, in a beacon, that it is in AUTO. It is on no grid,
     // so Class A is exactly the mode it is in.
     rol_1.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
-    ASSERT_TRUE(rol_1.send_into_class_a_window_(payload.data(), payload.size()));
+    ASSERT_EQ(rol_1.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::Placed);
     EXPECT_EQ(tracker.last_copies, 1)
         << "a burst is the opposite construction to a single placed copy";
 
@@ -1475,7 +1477,8 @@ TEST(RealLoraClient, AReplyTooLateForRx1GoesToRx2RatherThanToABurst) {
     // that was the "falling back" branch.
     proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx1DelayUs + 50'000);
 
-    ASSERT_TRUE(n.rol.send_into_class_a_window_(payload.data(), payload.size()))
+    ASSERT_EQ(n.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::Placed)
         << "RX1 is gone, but RX2 is still ahead — that is a placeable window";
     EXPECT_EQ(n.tracker.last_copies, 1)
         << "a burst is the opposite construction to a single placed copy";
@@ -1510,7 +1513,8 @@ TEST(RealLoraClient, AWindowTooCloseToFireOnIsNotAWindow) {
         loratiming::fireInstantUs(kT0Uplink + (int64_t) classa::kRx1DelayUs, 0);
     proto_sim_timer_set_now_us(rx1_fire - txqueue::kPrepareLeadUs / 10);
 
-    ASSERT_TRUE(n.rol.send_into_class_a_window_(payload.data(), payload.size()));
+    ASSERT_EQ(n.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::Placed);
     const int64_t seen_t0 =
         n.tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us;
     EXPECT_EQ(seen_t0, kT0Uplink + (int64_t) classa::kRx2DelayUs)
@@ -1518,9 +1522,11 @@ TEST(RealLoraClient, AWindowTooCloseToFireOnIsNotAWindow) {
 }
 
 TEST(RealLoraClient, OnceBothWindowsArePastTheHubDeclines) {
-    // Declining is not a failure: the caller falls back to the burst, which is
-    // what this path did before C2 existed. What must not happen is a placed
-    // copy aimed at a window that has already closed.
+    // What must not happen is a placed copy aimed at a window that has already
+    // closed. The REASON matters as much as the refusal: this is a Class A
+    // node the hub can place exactly, and the placement it computes is
+    // "nowhere" — which is a different instruction to the caller than "I do
+    // not know where this node listens".
     ClassANode n;
     std::vector<uint8_t> payload{1, 2, 3, 4};
 
@@ -1528,7 +1534,10 @@ TEST(RealLoraClient, OnceBothWindowsArePastTheHubDeclines) {
     n.rol.last_uplink_t0_us_ = kT0Uplink;
     proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx2DelayUs + 1);
 
-    EXPECT_FALSE(n.rol.send_into_class_a_window_(payload.data(), payload.size()));
+    EXPECT_EQ(n.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::WindowsPast)
+        << "both windows shut on a node the hub CAN place: it is asleep, and "
+           "that must not be reported as an unplaceable node";
 }
 
 TEST(RealLoraClient, AnInteractiveNodeGetsNeitherWindow) {
@@ -1544,7 +1553,8 @@ TEST(RealLoraClient, AnInteractiveNodeGetsNeitherWindow) {
     n.rol.last_uplink_t0_us_ = kT0Uplink;
     proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx1DelayUs + 50'000);
 
-    EXPECT_FALSE(n.rol.send_into_class_a_window_(payload.data(), payload.size()));
+    EXPECT_EQ(n.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::NotClassA);
 }
 
 TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
@@ -2910,6 +2920,35 @@ TEST(PlacedDownlinks, ATimeSyncIsPlacedButAlwaysABurst) {
     EXPECT_NE(h.tracker.last_copies, 1)
         << "an unacked frame must not be reduced to one copy: nothing would "
            "ever learn it was lost";
+}
+
+TEST(PlacedDownlinks, ATimeSyncIsDroppedRatherThanBurstAtASleepingNode) {
+    // The burst above is justified by "a TimeSync carries no ack, so a lost
+    // single copy is silent". That argument assumes something is LISTENING.
+    //
+    // A Class A node whose RX1 and RX2 have both closed is asleep until its
+    // next wake, and the hub knows it exactly — it placed those windows off
+    // the node's own uplink. 17 copies then buy nothing and cost 1408 ms of
+    // air that collides with every other node's window.
+    //
+    // The test above is this one's positive control: a node the hub CANNOT
+    // place still bursts. Only the case the hub can place, and places to
+    // "nowhere", is dropped.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    // Class A: the node said AUTO in a beacon, and it is on no grid.
+    h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
+
+    constexpr int64_t kT0Uplink = 1'000'000;
+    h.rol.last_uplink_t0_us_ = kT0Uplink;
+    proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx2DelayUs + 1);
+
+    const size_t before = h.tracker.sent_earliest_us.size();
+    h.rol.send_timesync();
+    EXPECT_EQ(h.tracker.sent_earliest_us.size(), before)
+        << "both windows are past: nothing is listening, so nothing goes out";
 }
 
 TEST(PlacedDownlinks, ABaseNonceExchangeIsPlacedAndAlwaysABurst) {

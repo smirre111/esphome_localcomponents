@@ -3996,10 +3996,11 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // Returns false when the hub has no usable stamp for this node's uplink, in
     // which case the caller must fall back to today's behaviour rather than
     // guess an origin.
-    bool LORAListener::send_into_class_a_window_(const uint8_t *buf, size_t len)
+    LORAListener::ClassAPlacement
+    LORAListener::send_into_class_a_window_(const uint8_t *buf, size_t len)
     {
       if (this->parent_ == nullptr || buf == nullptr || len == 0)
-        return false;
+        return ClassAPlacement::NotSendable;
 
       // Does this node actually OPEN a Class A window? Aiming one copy at a
       // window that is not there is strictly worse than the burst it replaces:
@@ -4028,7 +4029,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         ESP_LOGD(TAG, "[%s] not a Class A node (mode %u, grid %d) — burst",
                  this->get_name().c_str(), (unsigned) this->node_mode_,
                  (int) (this->timed_mode_enabled_ && this->grid_aligned_));
-        return false;
+        return ClassAPlacement::NotClassA;
       }
 
       // This node's own last uplink, captured in admit_frame_ — never the
@@ -4036,7 +4037,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // transmitted most recently.
       const int64_t t0_uplink = this->last_uplink_t0_us_;
       if (t0_uplink <= 0)
-        return false;
+        return ClassAPlacement::NoUplinkStamp;
 
       const int64_t now = esp_timer_get_time();
 
@@ -4102,14 +4103,15 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       else
       {
         // Both gone. The node is asleep or about to be, and a burst now would
-        // be 1408 ms of air with nothing listening for it — but declining is
-        // still the caller's decision to make, and its fallback is what this
-        // path did before C2 existed.
+        // be 1408 ms of air with nothing listening for it. This is reported as
+        // its OWN reason, not as a generic decline: the caller must be able to
+        // tell it apart from "I cannot place this node", which wants the
+        // opposite answer.
         ESP_LOGW(TAG, "[%s] both Class A windows past (RX2 by %lld us) — "
-                      "falling back",
+                      "the node is asleep",
                  this->get_name().c_str(),
                  (long long) (earliest_usable - rx2_target));
-        return false;
+        return ClassAPlacement::WindowsPast;
       }
 
       TxPolicy p;
@@ -4125,7 +4127,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                this->get_name().c_str(), window, (long long) t0_uplink,
                (long long) wanted_t0, (long long) target,
                (unsigned) this->last_uplink_unc_us_);
-      return true;
+      return ClassAPlacement::Placed;
     }
 
     void LORAListener::send_timesync()
@@ -4197,7 +4199,29 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         // burst otherwise. Not a switch: the fallback IS the old behaviour, so
         // a node the hub cannot place still gets its TimeSync the way it always
         // did.
-        if (!this->send_into_class_a_window_(buf, len))
+        const ClassAPlacement placement =
+            this->send_into_class_a_window_(buf, len);
+        bool sent = (placement == ClassAPlacement::Placed);
+
+        if (placement == ClassAPlacement::WindowsPast)
+        {
+          // The node is ASLEEP, and this end is the one that knows it.
+          //
+          // The burst below rests on "a TimeSync carries no ack, so a lost
+          // single copy is silent" — an argument that assumes something is
+          // LISTENING. Both Class A windows have closed: no number of copies
+          // is heard, so 17 of them is 1408 ms of air, colliding with every
+          // other node's window, to achieve exactly nothing.
+          //
+          // Dropping costs nothing the burst would have won. The node beacons
+          // on its next wake and P2b answers every beacon with a TimeSync
+          // 750 ms later — while RX1 is still 250 ms out, so THAT one places.
+          ESP_LOGI(TAG, "[%s] TimeSync dropped — both Class A windows past, "
+                        "the node is asleep; its next beacon gets one",
+                   this->get_name().c_str());
+        }
+        else if (placement == ClassAPlacement::NotClassA ||
+                 placement == ClassAPlacement::NoUplinkStamp)
         {
           // PLACED, and as a BURST. Placement is the fix: through the bare
           // send() this left whenever the queue drained, so in Mode B it
@@ -4209,14 +4233,21 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
           // rests on the loss being visible; for an unacked frame a missed
           // single copy is silent, and the node runs on a stale clock until
           // the next push. Airtime is the cheaper side of that trade.
+          //
+          // Both reasons are named rather than negated: these two are the
+          // cases where the hub does NOT know where the node listens, and the
+          // burst spans every window it might open. WindowsPast is the case
+          // where it knows precisely, and knows the answer is "nowhere".
           TxPolicy p;
           p.copies = this->parent_->defaultBurstCopies();
           this->send_aligned_(buf, len, p);
+          sent = true;
         }
         free(buf);
-        ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
-                 this->get_name().c_str(), (unsigned long long) epoch,
-                 (int) utcoffset, (unsigned) header.msgid);
+        if (sent)
+          ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
+                   this->get_name().c_str(), (unsigned long long) epoch,
+                   (int) utcoffset, (unsigned) header.msgid);
       }
       else
       {

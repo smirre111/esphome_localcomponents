@@ -382,14 +382,31 @@ namespace esphome
       // (11.7 min) of missed windows before demoting itself — and the beacon
       // that would re-anchor it is on a grid it no longer shares.
       void send_grid_sync(bool enable);
-      // C2: send a single copy timed to land in the node's RX1 window, using
-      // the hub's own receive stamp as the shared origin. False when there is
-      // no usable stamp, so the caller falls back to today's burst.
+      // WHY a placed Class A copy did or did not go out.
+      //
+      // This was a bool, and the bool collapsed two decline reasons that want
+      // OPPOSITE answers from the caller. A node the hub cannot PLACE — not
+      // Class A, or never heard from — still wants the burst, because the hub
+      // does not know where it listens and 17 copies span every window it
+      // might open. A Class A node whose RX1 and RX2 have BOTH closed is
+      // asleep, and the hub knows it exactly: a burst aimed there is 1408 ms
+      // of air with nothing listening for it, colliding with every other
+      // node's window for no chance of being heard.
+      //
+      // Numbered for the log line, not published to Home Assistant.
+      enum class ClassAPlacement : uint8_t
+      {
+        Placed        = 0,  // one copy is queued on an open window
+        NotClassA     = 1,  // this node opens no Class A window — burst
+        NoUplinkStamp = 2,  // never heard an uplink from it — burst
+        WindowsPast   = 3,  // Class A, both windows closed: it is ASLEEP
+        NotSendable   = 4,  // no tracker or no payload — send nothing
+      };
+
       // Place one copy in this node's next OPEN Class A window — RX1 if the
       // queue can still fire on it, otherwise RX2, which the node arms exactly
-      // when RX1 passed with no data. False means neither is reachable and the
-      // caller should fall back to the burst.
-      bool send_into_class_a_window_(const uint8_t *buf, size_t len);
+      // when RX1 passed with no data.
+      ClassAPlacement send_into_class_a_window_(const uint8_t *buf, size_t len);
       // The mark a placed frame for this node would go out on. Shared with
       // send_grid_sync, which must declare the round it will be transmitted in.
       // The frame's SHAPE is required, not optional: clearance depends on how
@@ -877,7 +894,8 @@ namespace esphome
       // SFD end), and how uncertain that stamp is. Captured in admit_frame_,
       // because that is the only moment the tracker's single global receive
       // stamp is known to belong to this node. 0 = no usable origin, in which
-      // case send_into_class_a_window_() declines and the caller falls back to the burst.
+      // case send_into_class_a_window_() answers NoUplinkStamp and the caller
+      // falls back to the burst.
       int64_t  last_uplink_t0_us_{0};
       // msgId of the frame last_uplink_t0_us_ belongs to.
       uint32_t last_uplink_msgid_{0};
