@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,16 @@ struct Recorder {
     long     preamble_len{0};
     int      sync_word{0};
     bool     crc_on{false};
+
+    // Called FROM lora_cad(), which is where the real DIO0 CAD-DONE interrupt
+    // posts its answer into LoraInterface::lora_cad_queue_. A test answers
+    // this CAD by pushing into that queue from here, and it has to be from
+    // here: production resets the queue immediately before calling lora_cad,
+    // so an answer seeded any earlier is wiped. That is the invariant the
+    // reset exists for, not an inconvenience to work around — a stale "channel
+    // free" consumed as this CAD's answer is what makes the node transmit into
+    // a running burst.
+    std::function<void()> on_cad;
 
     void reset() { *this = Recorder{}; }
 

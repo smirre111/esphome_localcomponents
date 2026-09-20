@@ -85,7 +85,7 @@ uint8_t lora_getPayloadLength()   { return (uint8_t) R().rx_payload.size(); }
 
 void lora_idle(void)              { R().note("lora_idle"); }
 void lora_sleep(void)             { R().note("lora_sleep"); }
-void lora_cad(void)               { R().note("lora_cad"); }
+void lora_cad(void)               { R().note("lora_cad"); if (R().on_cad) R().on_cad(); }
 void lora_tx()                    { R().note("lora_tx"); }
 void lora_rxSingle()              { R().note("lora_rxSingle"); }
 void lora_rxContinuous()          { R().note("lora_rxContinuous"); }
