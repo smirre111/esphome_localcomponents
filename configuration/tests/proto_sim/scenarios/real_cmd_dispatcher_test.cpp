@@ -4501,3 +4501,118 @@ TEST_F(RealNodeFixture, AHubThatStopsConfirmingTakesThePromotionBack) {
         << "the hub withdrew its confirmation, so the node must go back to "
            "sweeping three windows rather than trust a stale promotion";
 }
+
+// ---------------------------------------------------------------------------
+// U-3: the hub saying "nothing further for you" ends the Class A sequence
+//
+// noteClassASleepOk() had zero production callers, and §11a recorded that
+// wiring one "would break the invariant that `active` means a window is still
+// to open". It does not — the invariant says what to do: sleep_ok is the SECOND
+// way for nextAction() to return Sleep, so it needs the same clearing rule the
+// first one already had.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, SleepOkEndsTheSequenceRatherThanJustSilencingIt) {
+    sys.setAutoMode(true);
+    disp.noteUplinkSent(/*t_txdone_us=*/5'000'000, /*uplink_len=*/60);
+    ASSERT_TRUE(disp.classAActive());
+    ASSERT_EQ(disp.classAAction(), classa::WakeAction::OpenRx1);
+    ASSERT_NE(disp.classAArmInstantUs(), 0);
+
+    // The hub has nothing queued for this node.
+    disp.noteClassASleepOk(true);
+
+    EXPECT_EQ(disp.classAAction(), classa::WakeAction::Sleep);
+    EXPECT_FALSE(disp.classAActive())
+        << "'active' means a window is still to open, and there is none — left "
+           "active, the node holds the shared one-shot for a sequence with "
+           "nothing left in it and armNextRxWindow keeps taking the Class A "
+           "branch to fall through on a delay of zero";
+    EXPECT_EQ(disp.classAArmInstantUs(), 0)
+        << "and nothing to schedule, which the caller must not read as 'now'";
+}
+
+TEST_F(RealNodeFixture, SleepOkArrivingAfterRx1SkipsRx2) {
+    // The case it is actually for. RX2 exists because the hub's reply may miss
+    // RX1; once the hub says its queue is empty there is nothing for RX2 to
+    // catch, and opening it costs a wake for a window the hub will not
+    // transmit in.
+    sys.setAutoMode(true);
+    disp.noteUplinkSent(/*t_txdone_us=*/5'000'000, /*uplink_len=*/60);
+    disp.noteClassAWindowResult(/*had_data=*/false);   // RX1 closed empty
+    ASSERT_EQ(disp.classAAction(), classa::WakeAction::OpenRx2);
+
+    disp.noteClassASleepOk(true);
+    EXPECT_EQ(disp.classAAction(), classa::WakeAction::Sleep);
+    EXPECT_FALSE(disp.classAActive());
+}
+
+TEST_F(RealNodeFixture, ASleepOkDoesNotLeakIntoTheNextUplinksWindows) {
+    // The sharp edge if the flag were sticky: one round's "nothing further"
+    // would suppress the NEXT round's RX1, and the node would sleep through a
+    // reply it had just asked for. noteUplinkSent assigns a fresh WakeState per
+    // uplink, which is what makes wiring this safe at all.
+    sys.setAutoMode(true);
+    disp.noteUplinkSent(5'000'000, 60);
+    disp.noteClassASleepOk(true);
+    ASSERT_FALSE(disp.classAActive());
+
+    disp.noteUplinkSent(9'000'000, 60);
+    EXPECT_TRUE(disp.classAActive());
+    EXPECT_EQ(disp.classAAction(), classa::WakeAction::OpenRx1)
+        << "a new uplink is a new sequence: last round's sleepOk says nothing "
+           "about this one";
+}
+
+TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
+    // Through the real handler, so the wiring itself is under test rather than
+    // the method it calls. This is the U-3 gap: the field was decoded and acted
+    // on for auto-sleep, and the Class A sequence was never told.
+    sys.setAutoMode(true);
+    disp.noteUplinkSent(5'000'000, 60);
+    ASSERT_TRUE(disp.classAActive());
+
+    // SMALL MSGIDS DELIBERATELY. My first draft used 3100 and the handler was
+    // never reached: SessionManager::kMsgIdWindow bounds a forward jump to
+    // 1024, because msgid increments by one per frame and a huge jump is a
+    // corrupt frame that would wedge the link until the next login. The
+    // assertion below is what caught it — without it the test would have
+    // "passed" the sleepOk-unset case for the wrong reason.
+    auto ts = pack_timesync_op(/*msgid=*/31, /*epoch=*/1787000000ULL,
+                               /*utcoffset=*/0);
+    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
+    ASSERT_TRUE(CmdDispatcher::isClockValid())
+        << "precondition: the handler ran at all";
+    EXPECT_TRUE(disp.classAActive())
+        << "sleepOk unset must mean KEEP WAITING — proto3 sends zero for a hub "
+           "that predates the field, and the safe default is the one that costs "
+           "power, never the one that drops a reply";
+
+    auto ts_ok = pack_timesync_op(/*msgid=*/3101, /*epoch=*/1787000000ULL,
+                                  /*utcoffset=*/0);
+    {
+        // Rebuild with sleepOk set. The builder does not take it, so this is
+        // the one place the frame is assembled by hand.
+        LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+        LoraHeader hdr               = LORA_HEADER__INIT;
+        hdr.destaddress   = kNodeAddr;
+        hdr.destsubnet    = kSubnet;
+        hdr.senderaddress = kHubAddr;
+        hdr.msgid         = 33;
+        op.header         = &hdr;
+        TimeSync ts2  = TIME_SYNC__INIT;
+        ts2.epoch     = 1787000000ULL;
+        ts2.utcoffset = 0;
+        ts2.sleepok   = true;
+        op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+        op.timesync   = &ts2;
+        size_t len = lora_client_operation_message__get_packed_size(&op);
+        ts_ok.assign(len, 0);
+        lora_client_operation_message__pack(&op, ts_ok.data());
+    }
+    disp.onReceiveNew(ts_ok.data(), static_cast<int>(ts_ok.size()));
+
+    EXPECT_FALSE(disp.classAActive())
+        << "the hub said its queue is empty, so there is nothing for RX1 or "
+           "RX2 to catch";
+}
