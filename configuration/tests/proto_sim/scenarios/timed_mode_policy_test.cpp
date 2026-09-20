@@ -25,10 +25,8 @@ NodeState healthy() {
     s.grid_enabled = true;
     s.phase_valid = true;
     s.phase_err_us = 0;
-    s.consecutive_missed_marks = 0;
     s.s_since_addressed_frame = 1;
     s.in_slot_uplinks = kPromotionUplinks;
-    s.s_since_demotion = 0xFFFFFFFF;
     return s;
 }
 
@@ -79,9 +77,6 @@ TEST(TimedModePolicy, DemotionIsImmediateOnEveryTrigger) {
     struct { const char *what; NodeState s; Demotion want; } cases[] = {
         {"grid withdrawn",  [] { auto s = healthy(); s.grid_enabled = false; return s; }(),
          Demotion::GridDisabled},
-        {"missed marks",    [] { auto s = healthy();
-                                 s.consecutive_missed_marks = kMaxMissedMarks; return s; }(),
-         Demotion::MissedMarks},
         {"sync stale",      [] { auto s = healthy();
                                  s.s_since_addressed_frame = kResyncMaxS + 1; return s; }(),
          Demotion::SyncStale},
@@ -139,14 +134,51 @@ TEST(TimedModePolicy, PromotionDoesNotWaitForTheHubsInSlotCount) {
     }
 }
 
-TEST(TimedModePolicy, NoPromotionWithin10MinutesOfDemotion) {
+TEST(TimedModePolicy, TheBeaconHeartbeatIsTheOnlyLinkHealthCriterion) {
+    // 2026-09-20. MissedMarks (3) and RecentlyDemoted (7) are retired; this is
+    // what replaced NoPromotionWithin10MinutesOfDemotion.
+    //
+    // MissedMarks counted hub SILENCE: the hub publishes an all-listening
+    // pending mask, so every node arms every round and almost every window is
+    // legitimately empty. Three of them is 4.5 s of ordinary quiet. SyncStale
+    // asks the question that actually matters — has ANY frame arrived within
+    // the published resyncMaxS — and it is sufficient because the mark window
+    // and the beacon window hang off one anchor and drift together.
     NodeState s = healthy();
-    s.s_since_demotion = kRepromotionHoldS - 1;
-    EXPECT_EQ(modeFor(s, kResyncMaxS, kGuardUs), Mode::A);
-    EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::RecentlyDemoted);
+    EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::None);
 
-    s.s_since_demotion = kRepromotionHoldS;
-    EXPECT_EQ(modeFor(s, kResyncMaxS, kGuardUs), Mode::B);
+    s.s_since_addressed_frame = kResyncMaxS;
+    EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::None)
+        << "exactly at the limit is still inside it";
+
+    s.s_since_addressed_frame = kResyncMaxS + 1;
+    EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::SyncStale);
+    EXPECT_EQ(modeFor(s, kResyncMaxS, kGuardUs), Mode::A);
+}
+
+TEST(TimedModePolicy, RetiredReasonsAreNeverReturned) {
+    // The enum values stay — they are published to Home Assistant and the
+    // numbers are a wire format — but no state may produce them. Swept over
+    // every field the ladder still reads, because a retired rung coming back
+    // would be invisible: an operator would see a number with nothing behind
+    // it, exactly as the TxRefusal exhaustiveness test guards against.
+    for (auto src : {RtcSlowSrc::Unknown, RtcSlowSrc::InternalRc, RtcSlowSrc::Crystal})
+    for (bool grid : {false, true})
+    for (bool pv : {false, true})
+    for (bool pc : {false, true})
+    for (bool imb : {false, true})
+    for (int32_t err : {0, (int32_t) kGuardUs, (int32_t) kGuardUs + 1})
+    for (uint32_t age : {0u, kResyncMaxS, kResyncMaxS + 1})
+    {
+        NodeState s;
+        s.rtc_src = src; s.grid_enabled = grid; s.phase_valid = pv;
+        s.phase_consistent = pc; s.in_mode_b = imb; s.phase_err_us = err;
+        s.s_since_addressed_frame = age;
+        const Demotion d = demotionReason(s, kResyncMaxS, kGuardUs);
+        EXPECT_NE(d, Demotion::MissedMarks)    << "retired 2026-09-20";
+        EXPECT_NE(d, Demotion::RecentlyDemoted) << "retired 2026-09-20";
+        EXPECT_NE(d, Demotion::NotConfirmed)    << "retired 2026-09-14";
+    }
 }
 
 TEST(TimedModePolicy, RefusalOrderPutsTheActionableReasonFirst) {
@@ -155,7 +187,7 @@ TEST(TimedModePolicy, RefusalOrderPutsTheActionableReasonFirst) {
     NodeState s = healthy();
     s.grid_enabled = false;
     s.rtc_src = RtcSlowSrc::InternalRc;
-    s.consecutive_missed_marks = 99;
+    s.s_since_addressed_frame = kResyncMaxS + 1;
     EXPECT_EQ(demotionReason(s, kResyncMaxS, kGuardUs), Demotion::GridDisabled);
 }
 
@@ -219,10 +251,13 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
     for (bool grid : {false, true})
     for (bool phase_valid : {false, true})
     for (int32_t err : {0, (int32_t) kGuardUs, (int32_t) kGuardUs + 1})
-    for (uint32_t miss : {0u, kMaxMissedMarks - 1, kMaxMissedMarks})
+    // The `miss` and `sd` dimensions stood here until 2026-09-20. They swept
+    // consecutive_missed_marks and s_since_demotion, fields the ladder no
+    // longer reads at all — see the Demotion banner in TimedModePolicy.h. The
+    // space is not narrowed in any way that matters: `age` below is the
+    // criterion that replaced them.
     for (uint32_t age : {1u, kResyncMaxS, kResyncMaxS + 1})
     for (uint32_t upl : {0u, kPromotionUplinks})
-    for (uint32_t sd : {0u, kRepromotionHoldS})
     for (bool reboot : {false, true})
     for (bool sess : {false, true})
     for (bool beacon : {false, true})
@@ -239,9 +274,8 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
     {
         NodeState n;
         n.rtc_src = src; n.grid_enabled = grid; n.phase_valid = phase_valid;
-        n.phase_err_us = err; n.consecutive_missed_marks = miss;
+        n.phase_err_us = err;
         n.s_since_addressed_frame = age; n.in_slot_uplinks = upl;
-        n.s_since_demotion = sd;
 
         HubBelief h;
         h.grid_enabled = grid; h.in_slot_acks = upl; h.confirmation_age_s = cage;

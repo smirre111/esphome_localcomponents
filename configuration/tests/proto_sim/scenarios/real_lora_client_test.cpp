@@ -348,10 +348,11 @@ TEST(RealLoraClient, GridSyncRepublishingIsBounded) {
 // reservation — so a short frame whose air was free BEFORE a later burst was
 // pushed past that burst instead of being placed in the hole. Measured
 // 2026-09-15: two of node 2's marks never sent around a beacon, two empty
-// windows, one short of demotion. Three consecutive empty windows trip
-// kMaxMissedMarks, and a demoted node runs Mode A's three windows per round
-// plus the promotion trial's one instead of Mode B's single window — so the
-// hub was causing the very receive-duty cost Mode B exists to avoid.
+// windows. At the time that was one short of demotion — three empty windows
+// tripped kMaxMissedMarks and dropped the node to Mode A's three windows per
+// round plus the promotion trial's one instead of Mode B's single window, so
+// the hub was causing the very receive-duty cost Mode B exists to avoid. That
+// demotion was retired on 2026-09-20; the fix now buys latency instead.
 //
 // The five-argument form was written to replace it and says so in its own
 // comment; only the ModeTest mark scheduler had ever been converted.

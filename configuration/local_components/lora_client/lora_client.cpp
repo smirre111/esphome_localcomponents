@@ -2121,11 +2121,16 @@ namespace esphome
     // demotion. The five-argument form was written to replace it and says so in
     // its own comment; only the ModeTest mark scheduler was ever converted.
     //
-    // This is the production path — every placed downlink comes through here —
-    // and the cost of skipping a mark is not one late frame: three consecutive
-    // empty windows trip kMaxMissedMarks, and a demoted node drops from one
-    // window per round to Mode A's three plus the promotion trial's one. The
-    // hub was causing the exact receive-duty cost Mode B exists to avoid.
+    // This is the production path — every placed downlink comes through here.
+    // A skipped mark costs a whole round of latency on a command someone is
+    // waiting for.
+    //
+    // It used to cost far more: three consecutive empty windows tripped
+    // kMaxMissedMarks and demoted the node from one window per round to Mode
+    // A's three plus the promotion trial's one, so the hub was causing the
+    // exact receive-duty cost Mode B exists to avoid. That demotion was retired
+    // on 2026-09-20 — it counted hub silence, not link health — so this fix now
+    // buys latency rather than rescuing the node's mode.
     int64_t LORAListener::nextPlacementT0_(int64_t now_us, int copies, size_t len,
                                            bool expects_reply) const
     {

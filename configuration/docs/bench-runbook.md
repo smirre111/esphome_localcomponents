@@ -520,9 +520,15 @@ edge, and the early side must agree (`asymmetry = early + late ~ 0`) or the
 result is to be distrusted rather than averaged.
 
 **The procedure that produced it: press the sweep ALONE.** No warm-up, no
-chaining. Wait out any anti-flap hold first (`sweep_solo.sh <offset> [pre_s]`,
-default 640 s). The sweep feeds itself ~8 phase samples in ~12 s from its own
-on-mark marks, promotes unaided, and arms for the rest of the run.
+chaining. The sweep feeds itself ~8 phase samples in ~12 s from its own on-mark
+marks, promotes unaided, and arms for the rest of the run.
+
+**From node fw 1.0.100 there is no anti-flap hold to wait out.**
+`sweep_solo.sh <offset> [pre_s]` defaults to a 640 s pre-wait, and that number
+existed only to sit out the 600 s `RecentlyDemoted` hold. Both that hold and the
+missed-mark demotion which triggered it are retired, so the next point can be
+pressed as soon as the previous one ends. Still read the demotion-reason sensor
+first: reasons 1, 2, 4 and 5 are live and each still voids a point.
 
 Three fixes were needed to get here, and all three were necessary:
 1. the grid period must be the round — node 1.0.97 exempts MODE_SWEEP from the
@@ -562,9 +568,9 @@ demote the node — so the sweep ran its whole 300 s inside the 600 s
 
 **The warm-up is now obsolete.** It existed only because a sweep could not
 bootstrap itself; with marks placed, the sweep feeds itself ~8 samples in ~12 s
-and promotes unaided. Press the sweep ALONE, after any hold has expired
-(`sweep_solo.sh`). The chaining that was the fix for defect 4 is now the cause
-of defect 7.
+and promotes unaided. Press the sweep ALONE (`sweep_solo.sh`). The chaining that
+was the fix for defect 4 is now the cause of defect 7. The "after any hold has
+expired" caveat above no longer applies — node fw 1.0.100 retired the hold.
 
 **CORRECTION 2026-09-19: the "outside_guard latches" theory was WRONG.** It was
 recorded as the blocker after the placement fix, on the reasoning that one

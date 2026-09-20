@@ -531,10 +531,15 @@ namespace esphome
       // infer the node's arming state from side effects.
       //
       // That inference cost two void HW-2 points (2026-09-19): a sweep started
-      // inside the 600 s anti-flap hold (Demotion::RecentlyDemoted) arms nothing
-      // and reports `windows 0/0`, which is indistinguishable from "no reception
-      // at this offset" — a false edge. Published, the precondition is readable
-      // before pressing instead of reconstructed from timestamps afterwards.
+      // inside the 600 s anti-flap hold (Demotion::RecentlyDemoted) armed
+      // nothing and reported `windows 0/0`, indistinguishable from "no
+      // reception at this offset" — a false edge.
+      //
+      // That PARTICULAR trap is gone: the hold and the missed-mark demotion
+      // that triggered it were retired 2026-09-20. The reason for publishing is
+      // unchanged, because reasons 1, 2, 4 and 5 are still live and any
+      // non-zero one still voids a point — the precondition should be readable
+      // before pressing, not reconstructed from timestamps afterwards.
       uint32_t node_demotion_reason() const { return this->belief_.node_demotion; }
       bool     node_timed_rx_active() const { return this->belief_.node_timed_rx; }
       // The four inputs phaseTrustworthy() actually tests, so a NoPhase can be

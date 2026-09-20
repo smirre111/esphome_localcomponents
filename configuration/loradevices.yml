@@ -738,15 +738,23 @@ sensor:
   #
   # It is the difference between a bench procedure that waits and hopes and one
   # that checks. HW-2 cost two void points to this: a sweep started inside the
-  # 600 s anti-flap hold (Demotion::RecentlyDemoted = 7) arms NOTHING and
-  # reports windows 0/0, which reads exactly like "no reception at this offset".
-  # Read this before pressing: anything but 0 (None) means the point will be
-  # void, whatever the offset.
+  # 600 s anti-flap hold (Demotion::RecentlyDemoted = 7) armed NOTHING and
+  # reported windows 0/0, which reads exactly like "no reception at this
+  # offset". That hold was retired 2026-09-20, so this particular trap cannot
+  # recur — but the rule is unchanged and still worth obeying: read this before
+  # pressing, and anything but 0 (None) means the point will be void, whatever
+  # the offset.
   #
-  # Legend (timedmode::Demotion, TimedModePolicy.h:53 — read from the enum, not
-  # from memory): 0 None, 1 GridDisabled, 2 BadClockSource, 3 MissedMarks,
-  # 4 SyncStale, 5 NoPhase, 6 NotConfirmed (RETIRED, never returned),
-  # 7 RecentlyDemoted (the 600 s anti-flap hold).
+  # Legend (timedmode::Demotion, TimedModePolicy.h — read from the enum, not
+  # from memory): 0 None, 1 GridDisabled, 2 BadClockSource,
+  # 3 MissedMarks (RETIRED 2026-09-20, never returned),
+  # 4 SyncStale, 5 NoPhase, 6 NotConfirmed (RETIRED 2026-09-14, never returned),
+  # 7 RecentlyDemoted (RETIRED 2026-09-20, never returned).
+  #
+  # The numbers are a wire format: a retired reason keeps its value and stops
+  # being produced. In practice a node is now out of Mode B for one of 1, 2, 4
+  # or 5 — where 4 (SyncStale) is the beacon heartbeat: nothing addressed to it
+  # and no beacon for the published resyncMaxS, ~5.9 min.
   - platform: template
     name: "Timed RX — demotion reason (node 2)"
     id: rol_2_demotion_reason

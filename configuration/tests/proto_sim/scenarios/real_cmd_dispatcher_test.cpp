@@ -3028,22 +3028,30 @@ TEST_F(RealNodeFixture, ArmInstantLeadsTheMarkByTheArmLead) {
     EXPECT_EQ(t0 - arm, (int64_t) timedgrid::kArmLeadUs);
 }
 
-TEST_F(RealNodeFixture, ADemotionKeepsTheGridSoTheNodeCanReturnWithoutAGridSync) {
-    // Measured 2026-09-15 on node 2 (fw 1.0.88): a demotion cleared the grid,
-    // nothing re-published it, and every later ModeTest was refused "no adopted
-    // grid". Kept, the node re-earns Mode B through the promotion trial.
+TEST_F(RealNodeFixture, MissedMarksCountButNeitherDemoteNorCostTheGrid) {
+    // This asserted, until 2026-09-20, that three missed marks demote.
+    //
+    // They no longer do. The hub publishes pending::allListening() in both
+    // GridSync and GridBeacon — deliberately — so every node arms its window
+    // every round and almost every one of those windows is legitimately empty.
+    // Three of them is 4.5 s of ordinary quiet, not evidence of a broken link.
+    // Demotion rests on the beacon heartbeat (SyncStale) instead; see the
+    // Demotion banner in TimedModePolicy.h.
+    //
+    // The count SURVIVES: WMR is built on it. It is the demotion that went.
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/820);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
 
-    for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
+    for (uint32_t i = 0; i < 6; ++i) {
         disp.noteMarkArmed(kTestWindowGen);
         disp.noteMarkMissed(kTestWindowGen);
     }
-    EXPECT_TRUE(disp.gridState().active) << "demoted, but still holding the grid";
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u) << "the count starts again";
-    EXPECT_EQ(disp.phaseStats().n, 0u) << "phase has to be earned again";
-    EXPECT_FALSE(disp.timedRxActive()) << "and it is out of Mode B until it has";
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 6u)
+        << "counted, and well past the old threshold of three";
+    EXPECT_TRUE(disp.gridState().active)
+        << "the grid was kept across a demotion since fw 1.0.89, and now there "
+           "is no demotion here to keep it across";
 }
 
 TEST_F(RealNodeFixture, AMarkThatHeardNothingForThisNodeIsMissedAtTheNextMark) {
@@ -3192,24 +3200,23 @@ TEST_F(RealNodeFixture, MarkOutcomesAreTheOnlySourceOfWmr) {
     EXPECT_EQ(macfunnel::wmrPpm(disp.macFunnel()), 500000u) << "one of two missed";
 }
 
-TEST_F(RealNodeFixture, EnoughMissedMarksDemoteUnilaterally) {
+TEST_F(RealNodeFixture, NoteMarkOutcomeCountsMissesWithoutDemoting) {
+    // The one-call counting path, beside noteMarkArmed/Hit/Missed. It demoted
+    // after kMaxMissedMarks until 2026-09-20 — see
+    // MissedMarksCountButNeitherDemoteNorCostTheGrid for why that went.
     auto g = build_grid_sync(true, 4, 740);
     disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
     ASSERT_TRUE(disp.gridState().active);
 
-    for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i)
+    for (uint32_t i = 0; i < 5; ++i)
         disp.noteMarkOutcome(false);
 
-    // Demoted: out of Mode B, with the evidence for it thrown away. The grid is
-    // KEPT since 2026-09-15 (fw 1.0.89) so the node can re-earn Mode B through the
-    // promotion trial; clearing it left a demoted node in Mode A until its next
-    // login, because nothing re-publishes a grid the hub believes the node holds.
-    EXPECT_FALSE(disp.timedRxActive())
-        << "staying in a window the hub no longer transmits into is the unsafe "
-           "direction; dropping to Mode A is always safe";
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
-    EXPECT_EQ(disp.phaseStats().n, 0u);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 5u) << "every one of them counted";
     EXPECT_TRUE(disp.gridState().active);
+
+    // The other half is unchanged: an addressed frame zeroes the run.
+    disp.noteMarkOutcome(true);
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -3438,31 +3445,12 @@ TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
            "which is what put phaseTrustworthy() permanently false";
 }
 
-TEST_F(RealNodeFixture, MissedMarksActuallyDemote) {
-    // The demotion body lived inside noteMarkOutcome, which has no callers, so
-    // when the radio paths were split onto noteMarkArmed/Hit/Missed the counter
-    // kept incrementing and nothing ever acted on it. grid_.active stayed true
-    // forever and the node held a grid it should have abandoned.
-    auto gs = build_grid_sync(true, /*slot=*/7, /*msgid=*/720);
-    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 20'000'000);
-    ASSERT_TRUE(disp.gridState().active);
-
-    for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
-        disp.noteMarkArmed(kTestWindowGen);
-        disp.noteMarkMissed(kTestWindowGen);
-    }
-
-    // The demotion ACTS: the missed-mark count is consumed and the node leaves
-    // Mode B. (It keeps the grid itself since fw 1.0.89 — see
-    // ADemotionKeepsTheGridSoTheNodeCanReturnWithoutAGridSync.)
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
-        << "the node must act on the missed marks, not merely count them";
-    EXPECT_FALSE(disp.timedRxActive());
-    EXPECT_TRUE(disp.timedRxEnabledForTest())
-        << "but timed RX stays ENABLED, so a later GridSync re-adopts without "
-           "needing anything else to happen — clearing it would recreate the "
-           "original bug as a flag nothing sets again";
-}
+// MissedMarksActuallyDemote stood here until 2026-09-20. Its subject — that the
+// counter must be ACTED on, not merely incremented — was real when the demotion
+// body sat in a callerless noteMarkOutcome. The criterion itself is now retired
+// (it measured hub silence), so the test asserted the opposite of the contract.
+// The counting half it also covered lives in
+// MissedMarksCountButNeitherDemoteNorCostTheGrid.
 
 TEST_F(RealNodeFixture, AnAddressedFrameResetsTheMissedMarkCount) {
     auto gs = build_grid_sync(true, /*slot=*/7, /*msgid=*/730);
@@ -3978,15 +3966,23 @@ TEST_F(RealNodeFixture, ModeTestBActuallyPutsTheNodeInTimedRx) {
 // HW-2: a sweep must not demote itself.
 //
 // MODE_SWEEP arms its windows deliberately off the mark to find the reception
-// edge, so the marks it loses ARE the measurement. Counting them as evidence
-// that the grid is stale ends the very run being performed: three of them
-// (kMaxMissedMarks) make demotionReasonNow() return MissedMarks, timedRxActive()
-// goes false, and the node arms nothing for the rest of the test. A point
-// outside the guard would report ~3 armed windows instead of ~109 — below
-// SweepAnalysis::Point::receives()'s min_armed of 8, so it would read "no
-// reception" for the wrong reason — and the 600 s anti-flap hold would then make
-// every LATER point read the same way. The first failing offset would plant a
-// false edge and poison the rest of the sweep.
+// edge, so the marks it loses ARE the measurement.
+//
+// WHAT THIS USED TO PREVENT, and no longer has to: three such misses tripped
+// kMaxMissedMarks, demotionReasonNow() returned MissedMarks, timedRxActive()
+// went false and the node armed nothing for the rest of the test. A point
+// outside the guard reported ~3 armed windows instead of ~109 — below
+// SweepAnalysis::Point::receives()'s min_armed of 8, so it read "no reception"
+// for the wrong reason — and the 600 s anti-flap hold made every LATER point
+// read the same way. The first failing offset planted a false edge and
+// poisoned the rest of the sweep.
+//
+// Both of those were retired on 2026-09-20 (see the Demotion banner in
+// TimedModePolicy.h), so the guard no longer protects the run from ending
+// itself. It is kept because it still keeps the DIAGNOSTIC honest: a sweep's
+// deliberate misses are not evidence about the link, and WMR is built on that
+// counter. The pair below — the sweep and its ordinary-run control — is what
+// stops the guard from quietly becoming "never count anything".
 // ---------------------------------------------------------------------------
 
 TEST_F(RealNodeFixture, ASweepsOwnMissedMarksNeitherCountNorDemote) {
@@ -4045,12 +4041,14 @@ TEST_F(RealNodeFixture, AnOrdinaryTimedRunStillCountsItsMissedMarks) {
     EXPECT_EQ(disp.consecutiveMissedMarks(), 2u)
         << "without a sweep offset the misses are real evidence and must count";
 
-    // The third is the demotion itself, which resets the counter as it fires —
-    // which is exactly why the assertions above stop at two.
+    // A third miss used to BE the demotion, which consumed the counter as it
+    // fired — which is why the assertions above stopped at two. Retired
+    // 2026-09-20: nothing demotes on missed marks now, so the run keeps
+    // counting and the guard above is still the only thing that stops it.
     disp.noteMarkArmed(/*generation=*/3);
     disp.noteMarkMissed(/*generation=*/3);
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
-        << "kMaxMissedMarks reached: demoteIfMarksMissed_ resets the count";
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 3u)
+        << "counted, not consumed: the count is a WMR diagnostic now";
 }
 
 TEST_F(RealNodeFixture, ModeTestBIsRefusedWithNoGridRatherThanMislabelled) {
@@ -5196,33 +5194,22 @@ TEST_F(RealNodeFixture, TheNodePromotesOnItsOwnPhaseEvidence) {
     EXPECT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::None);
 }
 
-TEST_F(RealNodeFixture, ADemotedNodeKeepingItsGridEarnsPromotionAgain) {
-    // Since fw 1.0.89 a demotion keeps the grid, so nothing but the forgotten
-    // decision stops the thin-evidence allowance (in_mode_b && an empty, hence
-    // "consistent", phase) from re-promoting the node on zero samples the moment
-    // the anti-flap hold runs out.
-    bringNodeToTheEdgeOfPromotion(disp);
-    ASSERT_TRUE(disp.timedRxActive());
-
-    for (uint32_t i = 0; i < timedmode::kMaxMissedMarks; ++i) {
-        disp.noteMarkArmed(kTestWindowGen);
-        disp.noteMarkMissed(kTestWindowGen);
-    }
-    ASSERT_TRUE(disp.gridState().active);
-
-    proto_sim_timer_set_now_us(esp_timer_get_time()
-                               + (int64_t) (timedmode::kRepromotionHoldS + 60) * 1'000'000);
-    // The hub is still talking to it, so the link is not stale — but this frame
-    // lands more than half a pitch off the mark and adds no phase sample.
-    auto f = pack_sysop_op(/*msgid=*/1500, CLIENT_OPERATION__CMD_STATUS);
-    disp.onReceiveNew(f.data(), static_cast<int>(f.size()),
-                      rxOnMark(disp, f.size(), esp_timer_get_time(),
-                               (int64_t) timedgrid::kSlotPitchUs / 2 + 5'000));
-    ASSERT_EQ(disp.phaseStats().n, 0u);
-    EXPECT_FALSE(disp.timedRxActive())
-        << "past the hold, a demoted node with no phase samples must not be in Mode B";
-    EXPECT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::NoPhase);
-}
+// ADemotedNodeKeepingItsGridEarnsPromotionAgain stood here until 2026-09-20.
+//
+// It drove the node out of Mode B with missed marks, advanced past the 600 s
+// anti-flap hold, and asserted NoPhase. All three of those things are gone: the
+// misses no longer demote, the hold no longer exists, and demoteIfMarksMissed_
+// no longer resets last_reason_logged_ to force promotion to be re-earned.
+//
+// That reset is not missed, and this is the subtle part worth recording. The
+// thin-evidence allowance (in_mode_b && a consistent, possibly EMPTY phase) is
+// deliberate — it exists so a rate update that resets the statistics does not
+// demote a working node (measured 2026-09-14 on fw 1.0.72). A REAL demotion
+// still clears it, because timedRxActive() writes last_reason_logged_ on every
+// change, so in_mode_b goes false on the next evaluation by itself.
+//
+// The policy-level contract is covered by
+// TimedModePolicy.AResetThinsTheEvidenceButDoesNotDemoteAModeBNode.
 
 // ---------------------------------------------------------------------------
 // Keeping a kept grid honest. Measured 2026-09-15 on node 2 (fw 1.0.92): after

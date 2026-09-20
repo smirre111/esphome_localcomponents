@@ -50,19 +50,56 @@ enum class Mode : uint8_t { A = 0, B = 1 };
 
 // Ordered by how actionable they are: the first reason a caller can do
 // something about comes first.
+// Numbered explicitly because the value is published to Home Assistant, so the
+// numbers are a wire format: append, never renumber. A retired reason keeps its
+// value and stops being returned.
 enum class Demotion : uint8_t {
     None = 0,
     GridDisabled,      // the hub withdrew the grid (incl. its startup demote)
     BadClockSource,    // rtcSlowSrc is not the crystal
-    MissedMarks,       // K consecutive marks with no frame ADDRESSED to me
-    SyncStale,         // no addressed frame for resyncMaxS
+    MissedMarks,       // RETIRED 2026-09-20 — see below
+    SyncStale,         // no addressed frame for resyncMaxS: the beacon heartbeat
     NoPhase,           // never measured, or the measurement is out of guard
     NotConfirmed,      // RETIRED 2026-09-14: no longer returned (see demotionReason)
-    RecentlyDemoted,   // anti-flap hold
+    RecentlyDemoted,   // RETIRED 2026-09-20 — see below
 };
 
-// K consecutive missed marks before demoting.
-static constexpr uint32_t kMaxMissedMarks = 3;
+// --- Why MissedMarks and RecentlyDemoted are retired (2026-09-20) -----------
+//
+// MissedMarks COUNTED HUB SILENCE, NOT LINK HEALTH.
+//
+// The hub publishes pending::allListening() in both GridSync and GridBeacon —
+// deliberately, because a cleared bit is a promise it cannot keep for an
+// interactive node (lora_tracker.cpp, "ALL LISTENING, deliberately"). So every
+// node arms its window every round, and on a fleet at ~3.5 commands/day almost
+// every one of those windows is legitimately empty. Three of them — 4.5
+// seconds of ordinary quiet — demoted a perfectly healthy node. That is the
+// "several times a day" flap kRepromotionHoldS was bought to rate-limit: the
+// hold was compensating for a criterion that measured the wrong thing.
+//
+// THE BEACON HEARTBEAT ALREADY ANSWERS THE REAL QUESTION. SyncStale fires when
+// no frame has arrived for the hub's published resyncMaxS — 352 s, one beacon
+// interval (349.5 s) plus margin, half the guard/ppm coast limit. And it is
+// SUFFICIENT: gridstate::nextWindow derives the mark window and the beacon
+// window from ONE anchor, so they drift together. Hearing beacons proves the
+// anchor is inside the guard, which proves a mark would be heard if one were
+// sent. A node that has genuinely lost its window stops hearing beacons too.
+//
+// WHAT BOUNDS THE COST OF BEING WRONG: the hub's own half of the asymmetry
+// rule. One unacked single shot sets single_shot_unacked (Rule 4) and reverts
+// that node to a 17-copy burst spanning 1408 ms, which hits its window whatever
+// the aim. The node does not need a 4.5-second criterion of its own.
+//
+// ACCEPTED COST, stated plainly: a node whose own slot is jammed while the
+// beacon slot stays clear now sits in Mode B, deaf, for up to ~5.9 min instead
+// of 4.5 s, recovering on the hub's first burst. That trade was made knowingly.
+//
+// RecentlyDemoted goes with it, not on its own merits: last_demotion_us_ was
+// written ONLY by demoteIfMarksMissed_, so with that path gone nothing could
+// ever set the hold and the rung was unreachable.
+//
+// missed_marks_ itself SURVIVES on the node as a WMR diagnostic. It is the
+// demotion that is retired, not the measurement.
 
 // In-slot uplinks the hub must have OBSERVED before the node is considered
 // promoted. A node claiming readiness is not evidence: a beacon saying "I am
@@ -106,9 +143,11 @@ static constexpr uint32_t kPromotionUplinks = 3;
 // innocent).
 static constexpr uint32_t kPromotionPhaseSamples = 8;
 
-// No promotion within 10 minutes of a demotion. Without this a node at
-// beacon_interval_s = 0 flaps several times a day.
-static constexpr uint32_t kRepromotionHoldS = 600;
+// The 600 s anti-flap hold (kRepromotionHoldS) stood here until 2026-09-20.
+// It existed because MissedMarks demoted on hub silence, so a node promoted and
+// demoted again within seconds of every command; the hold rate-limited that
+// cycle rather than fixing it. With MissedMarks retired the flap has no source,
+// and the hold had no writer left — see the banner above the Demotion enum.
 
 // How stale the hub's confirmation may be before single-shot is withdrawn is
 // NOT a constant here: it is the resyncMaxS the hub itself published, passed
@@ -136,14 +175,13 @@ struct NodeState
     bool       grid_enabled            = false;  // hub published a grid
     bool       phase_valid             = false;  // T0 has been measured
     int32_t    phase_err_us            = 0;      // measured - predicted
-    // Consecutive marks at which NO FRAME ADDRESSED TO ME arrived. It must not
-    // count "nothing received": a window walked through by another node's burst
-    // is not empty, and keying on silence would let ordinary Mode A traffic
-    // demote the very node this policy is protecting.
-    uint32_t   consecutive_missed_marks = 0;
+    // consecutive_missed_marks and s_since_demotion stood here until
+    // 2026-09-20. Both fed rungs that are now retired, and a struct whose only
+    // purpose is to feed demotionReason must not carry values nothing reads.
+    // The node still COUNTS missed marks (CmdDispatcher::missed_marks_); it
+    // simply no longer demotes on them.
     uint32_t   s_since_addressed_frame  = 0;
     uint32_t   in_slot_uplinks          = 0;     // consecutive, hub-confirmed
-    uint32_t   s_since_demotion         = 0xFFFFFFFF;
     // Already in Mode B (the node's previous decision was None), and whether its
     // phase evidence is merely THIN rather than contradicted: no sample outside
     // the guard and the spread inside it, however few samples there are.
@@ -164,7 +202,9 @@ constexpr Demotion demotionReason(const NodeState &s, uint32_t resync_max_s,
 {
     if (!s.grid_enabled)                                    return Demotion::GridDisabled;
     if (s.rtc_src != RtcSlowSrc::Crystal)                   return Demotion::BadClockSource;
-    if (s.consecutive_missed_marks >= kMaxMissedMarks)      return Demotion::MissedMarks;
+    // The beacon heartbeat, and now the only evidence that this node's window
+    // has stopped working. MissedMarks used to sit here and fired on 4.5 s of
+    // ordinary hub silence.
     if (s.s_since_addressed_frame > resync_max_s)           return Demotion::SyncStale;
     // Promotion needs trustworthy phase. STAYING in Mode B needs only that
     // nothing contradicts it: a reset (rate update, re-anchor) thins the evidence
@@ -183,7 +223,6 @@ constexpr Demotion demotionReason(const NodeState &s, uint32_t resync_max_s,
     // inside the guard, spread inside the guard) and phase_err_us are that
     // evidence. The node reports its decision to the hub (PhaseReport
     // timedRxActive), and the hub follows it — see txRefusalFor.
-    if (s.s_since_demotion < kRepromotionHoldS)             return Demotion::RecentlyDemoted;
     return Demotion::None;
 }
 
