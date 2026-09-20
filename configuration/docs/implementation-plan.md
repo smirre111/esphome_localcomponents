@@ -2407,6 +2407,45 @@ production profile, Timed Mode ON, `checkin_interval` 1 h.
 | phase error p99 | **4 065 us** — inside the 14 080 us guard |
 | hub marks | placed every round at `dt=1500 ms`, RSSI −44 dBm |
 
+**PROMOTE-AND-HOLD, 2026-09-20 19:27–19:40, fw 1.1.0.** A single continuous
+780 s serial capture across promotion and the quiet period that follows, taken
+to answer "how long does promotion take, and what keeps a node in sync
+afterwards".
+
+| promote and hold | value |
+|---|---|
+| promotion: `ModeTest: ON` → `timed RX: reason 0` | **15.69 s** (8 samples / 8 frames) |
+| the run itself | mode 2, refusal 0, **189/189** windows, FER 0 ppm, `detected 199 crcValid 199 addressed 199`, 0 seq gaps, phase p99 2 726 us |
+| held in Mode B after the run | **754 s (12.6 min)** with NO reason transition |
+| maintenance traffic during the hold | **none** — no marks, no commands |
+| beacons heard | **2**, gap **349 590 us** (the design interval) |
+| empty mark windows after the deadline | **313**, mean interval **1 500 021 us** |
+| RX duty while holding | **2.44 %** — Mode B's one window per round |
+
+* **Promotion is seconds, not minutes.** 8 phase samples at one placed mark per
+  1.5 s round is 8 rounds. Nothing about promotion is slow; a sparse cadence is
+  slow only if it is asked to do the PROMOTING, which it should not be.
+* **Sync is maintained by the BEACON alone.** The node crossed the 352 s
+  `SyncStale` limit twice during the hold and a beacon refreshed it each time,
+  on 2.4 s of margin (349.5 s interval vs 352 s limit). No additional
+  "keep-alive" frame is needed for sync — the beacon already is that frame.
+  The margin is thin by design (§11 finding 11); one lost beacon demotes.
+* **`MissedMarks` retired, confirmed again at length:** 313 consecutive empty
+  marks, versus the 3 that used to demote.
+
+**THE HUB CANNOT SEE ANY OF IT — and that costs the mode its purpose.**
+Throughout those 12.6 minutes the hub reported `Timed RX — demotion reason 5`,
+`active per the node 0`, `Single shot refused — reason 7` (`NoPhaseReport`),
+while the node was demonstrably at reason 0. `belief_.node_timed_rx` and
+`phase_reported` come from a `PhaseReport`, which rides a node UPLINK — a wake
+beacon or a CommandAck. A quiet interactive node never sleeps, so it never
+wakes, so it never beacons, and it has no command to ack. **So `txRefusalFor`
+can never clear `NoPhaseReport` for exactly the node that most deserves single
+shot: a promoted node with no traffic.** Mode B's 17→1 airtime saving is
+unreachable in the quiet regime Mode B exists for. Recorded here rather than
+fixed; the fix is a carrier for the node's phase report that does not require
+the node to have something else to say.
+
 **THE RETIREMENT, OBSERVED.** When the run ends the hub stops placing marks,
 which is precisely the case `MissedMarks` used to fire on. Node 2 serial, 90 s
 captured immediately afterwards:
