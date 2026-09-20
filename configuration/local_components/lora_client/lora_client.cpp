@@ -3779,6 +3779,18 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       ts.utcoffset = utcoffset;
       ts.dstnext   = 0;   // not yet computed; the node treats 0 as "unknown"
 
+      // U-4: what the hub has OBSERVED of this node's uplink placement.
+      //
+      // The node's own promotion criterion needs it and cannot measure it: the
+      // placement is produced by the node's transmit path and the question is
+      // where the frame ARRIVED, which only this end knows. It was hardcoded
+      // optimistic on the node, so Demotion::NotConfirmed could never fire.
+      //
+      // Same counter the hub keeps as a diagnostic (noteUplinkPlacement_), not
+      // a second measurement — one definition, and the node's view of it can
+      // only ever be this one's echo.
+      ts.inslotuplinks = this->belief_.in_slot_acks;
+
       // TIER 1: tell the node whether it may sleep immediately.
       //
       // The node otherwise waits out a fixed 20 s of hub silence, because

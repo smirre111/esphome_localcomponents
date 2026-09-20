@@ -431,10 +431,30 @@ struct  TimeSync
    * never the one that drops a command.
    */
   protobuf_c_boolean sleepok;
+  /*
+   * U-4: how many of this node's uplinks the HUB has seen land inside its
+   * slot, consecutively. The node's own promotion criterion
+   * (NodeState::in_slot_uplinks, Demotion::NotConfirmed) requires it and had
+   * no way to know it, so it was hardcoded optimistic and the criterion could
+   * never fire.
+   * It has to come from here rather than be measured locally, and that is the
+   * whole point of the field: §4.6 rejects a node's own claim as evidence —
+   * "a beacon saying I am ready says nothing about where its window actually
+   * landed" — because the placement is produced by the node's TRANSMIT path
+   * and the question is about where the frame ARRIVED. Only the hub can
+   * answer that.
+   * Proto3 omits defaults, so a hub predating this field sends 0, which the
+   * node reads as "not confirmed" and stays in Mode A. That is the correct
+   * direction to fail: the policy is a list of reasons to fall BACK, so an
+   * unset field costs airtime rather than a command. Note the node can still
+   * EARN the count from Mode A — the uplink aim places its frames on its mark
+   * regardless of mode, which is what makes this measurable at all.
+   */
+  uint32_t inslotuplinks;
 };
 #define TIME_SYNC__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&time_sync__descriptor) \
-    , 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0 }
 
 
 /*

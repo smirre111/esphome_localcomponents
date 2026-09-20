@@ -2641,6 +2641,56 @@ TEST(PlacedDownlinks, ABaseNonceExchangeIsPlacedAndAlwaysABurst) {
     EXPECT_NE(h.tracker.last_copies, 1) << "never one copy for a key install";
 }
 
+TEST(PlacedDownlinks, ATimeSyncCarriesTheHubsInSlotCountToTheNode) {
+    // U-4. NodeState::in_slot_uplinks is §4.6's own promotion criterion and the
+    // node cannot measure it: where its uplink landed is produced by its
+    // TRANSMIT path — CAD, a burst-end deferral, a random backoff — and the
+    // question is where the frame ARRIVED. "A beacon saying I am ready says
+    // nothing about where its window actually landed."
+    //
+    // So the node had it hardcoded to the value that satisfies the criterion,
+    // which meant Demotion::NotConfirmed could never fire. The hub has been
+    // counting the real thing all along (noteUplinkPlacement_) with no way to
+    // tell the node. TimeSync is the carrier because the hub answers every
+    // beacon with one.
+    //
+    // Decoded with the REAL generated stub rather than the mirror, so this
+    // asserts the wire bytes and not a second definition of them.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+
+    // Three uplinks landing in this node's slot: what the node is not allowed
+    // to claim for itself.
+    feed_in_slot_uplink(h, 41);
+    feed_in_slot_uplink(h, 42);
+    feed_in_slot_uplink(h, 43);
+    ASSERT_EQ(h.rol.hubBelief().in_slot_acks, 3u)
+        << "precondition: the hub has observed three in slot";
+
+    const size_t before = h.radio.hub_to_node_frames().size();
+    h.rol.send_timesync();
+    ASSERT_GT(h.radio.hub_to_node_frames().size(), before);
+
+    int seen = 0;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        LoraClientOperationMessage *m = lora_client_operation_message__unpack(
+            nullptr, f.bytes.size(), f.bytes.data());
+        if (m == nullptr) continue;
+        if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC &&
+            m->timesync != nullptr) {
+            EXPECT_EQ(m->timesync->inslotuplinks, 3u)
+                << "the hub must tell the node what it has actually observed — "
+                   "this is the only route by which the node's own promotion "
+                   "criterion can ever be satisfied";
+            ++seen;
+        }
+        lora_client_operation_message__free_unpacked(m, nullptr);
+    }
+    EXPECT_EQ(seen, 1) << "exactly one TimeSync";
+}
+
 TEST(PlacedDownlinks, ARefusedBaseNonceExchangeLeavesTheSessionWorking) {
     // T-2's sharp edge, and the reason send_aligned_ stopped returning void.
     //

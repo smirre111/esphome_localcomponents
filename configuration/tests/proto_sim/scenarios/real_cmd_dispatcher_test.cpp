@@ -451,7 +451,8 @@ std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what,
 }
 
 std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
-                                      int32_t utcoffset, uint64_t dstnext = 0) {
+                                      int32_t utcoffset, uint64_t dstnext = 0,
+                                      uint32_t in_slot_uplinks = 0) {
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     LoraHeader hdr               = LORA_HEADER__INIT;
     hdr.destaddress   = kNodeAddr;
@@ -464,6 +465,10 @@ std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
     ts.epoch     = epoch;
     ts.utcoffset = utcoffset;
     ts.dstnext   = dstnext;
+    // U-4. Defaults to 0, which is what a hub predating the field sends and
+    // what keeps the node in Mode A — so every existing caller keeps the
+    // conservative reading without saying anything.
+    ts.inslotuplinks = in_slot_uplinks;
     op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
     op.timesync  = &ts;
 
@@ -4377,4 +4382,122 @@ TEST_F(RealNodeFixture, APlaintextFrameCannotFeedThePhaseFit) {
     EXPECT_EQ(disp.phaseStats().n, n_before)
         << "a frame the node refuses to ACT on must not move the belief that "
            "decides where it listens";
+}
+
+// ---------------------------------------------------------------------------
+// U-4: the node's own promotion, and the criterion that could never fire
+//
+// EVERY OTHER timedRxActive() test in this file asserts FALSE. Until these,
+// nothing anywhere asserted that the node EVER promotes — which is the whole
+// point of Mode B, and it is why in_slot_uplinks being hardcoded optimistic
+// went unnoticed: with the criterion disabled, nothing that depended on it
+// could fail either way.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Take a node from nothing to the edge of promotion: grid adopted, crystal,
+// and a phase baseline of `samples` addressed frames landing exactly on its
+// marks. Everything except the hub's confirmation.
+void bringNodeToTheEdgeOfPromotion(CmdDispatcher &disp, uint32_t samples = 8) {
+    disp.setTimedRxEnabled(true);
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
+
+    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/900);
+    const int64_t t0 = 40'000'000;
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()),
+                      t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // Addressed frames, each ON this node's mark, so every sample is a zero
+    // error and the spread stays inside the guard. A phase sample is committed
+    // only for a frame that PARSES and is ADDRESSED here, which is why these
+    // are real operations rather than raw bytes — a status request, because it
+    // reaches the phase path without moving a motor.
+    //
+    // The marks are computed from the grid state the node adopted, and the
+    // errors are therefore exactly zero by construction. That is deliberate:
+    // what is under test here is the promotion DECISION, and §4.6's geometry
+    // has its own tests.
+    for (uint32_t i = 0; i < samples; ++i) {
+        const int64_t mark = gridstate::nextT0Us(
+            disp.gridState(), t0 + (int64_t) i * (int64_t) timedgrid::kRoundUs);
+        auto f = pack_sysop_op(/*msgid=*/1000 + i, CLIENT_OPERATION__CMD_STATUS);
+        disp.onReceiveNew(f.data(), static_cast<int>(f.size()),
+                          mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size()));
+    }
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, WithoutTheHubsConfirmationTheNodeStaysInModeA) {
+    // §4.6's NotConfirmed criterion, which until U-4 could not fire: the field
+    // it reads was hardcoded to the value that satisfies it.
+    //
+    // The node MUST NOT promote on its own evidence. Where its uplink landed is
+    // produced by its own transmit path — CAD, a burst-end deferral, a random
+    // backoff — and the question is where the frame ARRIVED. "A beacon saying I
+    // am ready says nothing about where its window actually landed."
+    bringNodeToTheEdgeOfPromotion(disp);
+
+    ASSERT_TRUE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs))
+        << "precondition: everything EXCEPT the hub's confirmation is in place";
+    EXPECT_EQ(disp.hubInSlotUplinks(), 0u) << "the hub has not confirmed one";
+    EXPECT_FALSE(disp.timedRxActive())
+        << "a node with a perfect phase baseline and no hub confirmation must "
+           "stay in Mode A — this is the criterion that was disabled";
+}
+
+TEST_F(RealNodeFixture, TheHubsConfirmationOnATimeSyncIsWhatPromotesTheNode) {
+    // The positive case, asserted here for the first time anywhere: the node
+    // DOES enter Mode B, and what tips it is the hub's count arriving on a
+    // TimeSync.
+    bringNodeToTheEdgeOfPromotion(disp);
+    ASSERT_FALSE(disp.timedRxActive());
+
+    auto ts = pack_timesync_op(/*msgid=*/2000, /*epoch=*/1787000000ULL,
+                               /*utcoffset=*/0, /*dstnext=*/0,
+                               /*in_slot_uplinks=*/timedmode::kPromotionUplinks);
+    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
+
+    EXPECT_EQ(disp.hubInSlotUplinks(), timedmode::kPromotionUplinks);
+    EXPECT_TRUE(disp.timedRxActive())
+        << "grid, crystal, a trustworthy phase and the hub's confirmation — "
+           "there is no reason left to fall back, so the node arms one window "
+           "per round instead of three";
+}
+
+TEST_F(RealNodeFixture, OneConfirmationShortIsStillModeA) {
+    // The threshold, not merely non-zero. kPromotionUplinks is 3 because one
+    // in-slot arrival can be luck.
+    bringNodeToTheEdgeOfPromotion(disp);
+
+    auto ts = pack_timesync_op(/*msgid=*/2001, /*epoch=*/1787000000ULL,
+                               /*utcoffset=*/0, /*dstnext=*/0,
+                               /*in_slot_uplinks=*/timedmode::kPromotionUplinks - 1);
+    disp.onReceiveNew(ts.data(), static_cast<int>(ts.size()));
+
+    EXPECT_EQ(disp.hubInSlotUplinks(), timedmode::kPromotionUplinks - 1);
+    EXPECT_FALSE(disp.timedRxActive());
+}
+
+TEST_F(RealNodeFixture, AHubThatStopsConfirmingTakesThePromotionBack) {
+    // The count is the hub's current belief, not a latch. noteUplinkPlacement_
+    // resets it to 0 on an uplink that lands outside the slot, and the node has
+    // to follow that down — otherwise a node that drifts out of its slot keeps
+    // arming one window per round on the strength of a confirmation that has
+    // since been withdrawn, and Mode B's single copy lands in a closed window.
+    bringNodeToTheEdgeOfPromotion(disp);
+    auto good = pack_timesync_op(2002, 1787000000ULL, 0, 0,
+                                 timedmode::kPromotionUplinks);
+    disp.onReceiveNew(good.data(), static_cast<int>(good.size()));
+    ASSERT_TRUE(disp.timedRxActive());
+
+    auto withdrawn = pack_timesync_op(2003, 1787000000ULL, 0, 0, /*reset=*/0);
+    disp.onReceiveNew(withdrawn.data(), static_cast<int>(withdrawn.size()));
+
+    EXPECT_EQ(disp.hubInSlotUplinks(), 0u);
+    EXPECT_FALSE(disp.timedRxActive())
+        << "the hub withdrew its confirmation, so the node must go back to "
+           "sweeping three windows rather than trust a stale promotion";
 }

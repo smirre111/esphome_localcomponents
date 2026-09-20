@@ -1838,7 +1838,7 @@ const ProtobufCMessageDescriptor encrypted_payload__descriptor =
   (ProtobufCMessageInit) encrypted_payload__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor time_sync__field_descriptors[4] =
+static const ProtobufCFieldDescriptor time_sync__field_descriptors[5] =
 {
   {
     "epoch",
@@ -1888,17 +1888,30 @@ static const ProtobufCFieldDescriptor time_sync__field_descriptors[4] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "inSlotUplinks",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(TimeSync, inslotuplinks),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned time_sync__field_indices_by_name[] = {
   2,   /* field[2] = dstNext */
   0,   /* field[0] = epoch */
+  4,   /* field[4] = inSlotUplinks */
   3,   /* field[3] = sleepOk */
   1,   /* field[1] = utcOffset */
 };
 static const ProtobufCIntRange time_sync__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 4 }
+  { 0, 5 }
 };
 const ProtobufCMessageDescriptor time_sync__descriptor =
 {
@@ -1908,7 +1921,7 @@ const ProtobufCMessageDescriptor time_sync__descriptor =
   "TimeSync",
   "",
   sizeof(TimeSync),
-  4,
+  5,
   time_sync__field_descriptors,
   time_sync__field_indices_by_name,
   1,  time_sync__number_ranges,
