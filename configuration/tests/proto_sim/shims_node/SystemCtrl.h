@@ -128,6 +128,20 @@ private:
     uint32_t  battery_interval_s_{900};  // production default: 15 min
     int       deepsleep_calls_{0};
 
+public:
+    // --- surface frtosTasks.cpp needs (T-1) ------------------------------
+    // Both record only: the ADC teardown and the deep-sleep entry are the two
+    // things the battery task does on its way out, and neither is protocol.
+    void unloadBatteryMonitoringADC() { adc_unloads_++; }
+    unsigned adcUnloads() const { return adc_unloads_; }
+    void enterDeepSleepTask(void * /*pvParameters*/) { deep_sleep_tasks_++; }
+    unsigned deepSleepTaskCalls() const { return deep_sleep_tasks_; }
+
+private:
+    unsigned adc_unloads_{0};
+    unsigned deep_sleep_tasks_{0};
+
+public:
     // P3 — defaults mirror the production struct Config.
     bool      auto_mode_{false};
     uint32_t  sched_version_{0};

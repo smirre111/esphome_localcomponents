@@ -733,11 +733,17 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # recompiles it.
     set(IFACE_STAGE ${CMAKE_BINARY_DIR}/iface_stage)
     file(MAKE_DIRECTORY ${IFACE_STAGE})
-    foreach(f CmdDispatcher.cpp SessionManager.cpp comm_utils.c LoraInterface.cpp)
+    # frtosTasks.cpp joins them as of T-1's last increment. It is the whole
+    # interrupt path — the DIO0 handler that pairs TxDone with lastTxLen(), and
+    # the DIO1 RX_TIMEOUT branch that is the only source of noteMarkMissed() and
+    # therefore of demotion — and no test in either repository had ever compiled
+    # it, let alone run it. Two real defects were fixed blind in there.
+    foreach(f CmdDispatcher.cpp SessionManager.cpp comm_utils.c LoraInterface.cpp
+              frtosTasks.cpp)
         configure_file(${BLINDS_ESP_MAIN}/${f} ${IFACE_STAGE}/${f} COPYONLY)
     endforeach()
     foreach(h CmdDispatcher.h SessionManager.h comm_utils.h common.h Packet.h
-              LoraInterface.h myinterrupts.h)
+              LoraInterface.h myinterrupts.h frtosTasks.h)
         configure_file(${BLINDS_ESP_MAIN}/include/${h} ${IFACE_STAGE}/${h} COPYONLY)
     endforeach()
     # Only the siblings that are genuinely not under test here.
@@ -747,11 +753,13 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
 
     add_library(real_lora_interface STATIC
         ${IFACE_STAGE}/LoraInterface.cpp
+        ${IFACE_STAGE}/frtosTasks.cpp
         ${IFACE_STAGE}/CmdDispatcher.cpp
         ${IFACE_STAGE}/SessionManager.cpp
         ${IFACE_STAGE}/comm_utils.c
         ${BLINDS_ESP_MAIN}/Scheduler.cpp
         ${NODE_SHIM_DIR}/lora_hal_stub_node.cpp
+        ${NODE_SHIM_DIR}/adc_stub.c
         ${NODE_SHIM_DIR}/esp_idf_stubs.c
         ${NODE_SHIM_DIR}/host_clock.c
         ${NODE_SHIM_DIR}/extern_stubs.cpp
@@ -774,6 +782,9 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
             ${BLINDSPROTO_DIR}
             ${PROTOBUF_C_INCLUDE_DIRS}
     )
+    # This target has the real spawnTaskBatteryMonitor / spawnTaskMotorCurrentMonitor
+    # from frtosTasks.cpp, so extern_stubs.cpp must not define them too.
+    target_compile_definitions(real_lora_interface PRIVATE PROTO_SIM_HAVE_REAL_FRTOSTASKS)
     target_link_libraries(real_lora_interface PUBLIC ${PROTOBUF_C_LIBRARIES} mbedcrypto)
     target_compile_options(real_lora_interface PRIVATE
         -Wno-sign-compare -Wno-format -Wno-unused-function -Wno-unused-variable
@@ -781,6 +792,10 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
 
     add_executable(real_lora_interface_test
         scenarios/real_lora_interface_test.cpp
+        # The interrupt path, in the same binary because it needs the same real
+        # LoraInterface and the same recording HAL. See its banner: this is the
+        # last of T-1.
+        scenarios/frtos_tasks_test.cpp
         ${NODE_SHIM_DIR}/host_clock.c)
     target_include_directories(real_lora_interface_test BEFORE PRIVATE
         ${IFACE_STAGE}

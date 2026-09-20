@@ -62,7 +62,39 @@ public:
     uint32_t open_slack_s()  const { return open_slack_s_; }
     uint32_t close_slack_s() const { return close_slack_s_; }
 
+    // --- surface frtosTasks.cpp needs, as of T-1's last increment ---------
+    //
+    // The motor FSM and the battery supply switch are not protocol, so these
+    // record rather than model. What compiling frtosTasks.cpp buys is the
+    // INTERRUPT path (serviceDio0Event / serviceDio1Event); the motor tasks
+    // come along because they are in the same translation unit, and their real
+    // behaviour belongs on a bench next to HW-1.
+    void fsmProcess(void * /*pvParameters*/) { fsm_calls_++; }
+    unsigned fsmCalls() const { return fsm_calls_; }
+
+    // The 12 V supply the battery divider hangs off. Production refcounts it
+    // through these so a concurrent motor move cannot pull it out from under a
+    // reading; the pair is recorded so a test can assert it BALANCES, which is
+    // the only property that matters here.
+    bool batteryAcquireSupply() { supply_acquires_++; return supply_ok_; }
+    void batteryReleaseSupply() { supply_releases_++; }
+    unsigned supplyAcquires() const { return supply_acquires_; }
+    unsigned supplyReleases() const { return supply_releases_; }
+    void     setSupplyAvailable(bool ok) { supply_ok_ = ok; }
+
+    // Where taskMotorCurrentSensing publishes its averaged reading. Created
+    // lazily so a test that never touches the motor path pays nothing.
+    QueueHandle_t motorCurrentAdcValDataQueue{nullptr};
+    void ensureMotorCurrentQueue() {
+        if (motorCurrentAdcValDataQueue == nullptr)
+            motorCurrentAdcValDataQueue = xQueueCreate(8, sizeof(int));
+    }
+
 private:
+    unsigned fsm_calls_{0};
+    unsigned supply_acquires_{0};
+    unsigned supply_releases_{0};
+    bool     supply_ok_{true};
     bool  busy_{false};
     float restore_to_{0.0f};
     State state_;
