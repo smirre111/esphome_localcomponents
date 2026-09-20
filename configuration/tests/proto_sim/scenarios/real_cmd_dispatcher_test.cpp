@@ -1997,6 +1997,15 @@ TEST(FirmwareVersion, ReportsZeroRatherThanAMisleadingNumber) {
     // Out of range: 100 in any field would carry into the next one.
     EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("1.100.0"), 0u);
     EXPECT_EQ(CmdDispatcher::parseFirmwareVersion("1.0.100"), 0u);
+    // THIS TEST WAS GREEN WHILE THE SHIPPED PROJECT_VER WAS "1.0.100"
+    // (2026-09-20), because nothing connected the two. The node was built,
+    // committed and flashed, and the only evidence was one line in its boot
+    // log. A node reporting 0 is FirmwareUnknown to the hub, which then bursts
+    // 17 copies forever — the failure this file's header warns about, in a new
+    // direction: the field no longer lies with a WRONG number, it lies with
+    // "unknown". The build-time guard now sits beside PROJECT_VER in the
+    // node's CMakeLists.txt; this test is the behaviour that guard protects,
+    // so if one changes the other must.
 }
 
 TEST(FirmwareVersion, ComesFromTheRunningImageNotAConstant) {
