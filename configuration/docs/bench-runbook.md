@@ -628,6 +628,16 @@ the hub cannot see.
 adoption gave `windows 0/0`; pressed at 73 s and at 171 s it gave 193/192 and
 191/191. Allow at least ~60 s between `GridSync acknowledged` and the press.
 
+**⚠️ AFTER EVERY FLASH: force an explicit OFF→ON republish and gate on the ack.**
+Observed identically after the 1.0.98 and 1.0.99 flashes. On boot the node adopts
+a grid on its own (`GridSync: fleet key adopted`) but logs
+`node clock not settled yet — anchor provisional` — the adoption is provisional
+BY CONSTRUCTION. A hub re-publish landing in that window is not acknowledged, so
+a point started then returns `NO GRID ACK` at best, or measures the switch at
+worst. An explicit OFF→ON a minute or two later acked in **2–3 seconds** both
+times (`GridSync acknowledged (msgid=8, 0 re-publishes)`). Do the toggle, wait
+for the ack line, THEN settle ≥60 s before pressing.
+
 **⚠️ BEFORE EVERY SWEEP SESSION: check `Timed Mode (Mode B) — node 2` is ON.**
 The switch is declared `restore_mode: ALWAYS_OFF` (`loradevices.yml:874`), so it
 comes up OFF after **every hub reboot** — an OTA, a restart, a power cut. With it
