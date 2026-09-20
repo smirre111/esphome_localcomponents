@@ -38,7 +38,7 @@ Row ids are prefixed **D** (defect), **U** (unwired), **T** (testability) and
 **K** (known and accepted). They are deliberately NOT in the `B-1 … B5 / C2 /
 HW-n` families, which name the PHASES of this plan and are already spoken for.
 
-**Nothing below is deployed.** The host suite is green at 918 and says nothing
+**Nothing below is deployed.** The host suite is green at 927 and says nothing
 about a roof. That is the largest open item and it is not a row.
 
 ### Fixed by the end-to-end suite
@@ -82,7 +82,7 @@ with work nobody has argued for is how a real item gets lost.
 
 | # | what | why it matters | §ref |
 |---|---|---|---|
-| T-1 | **`frtosTasks.cpp` is not compiled by the host suite, so the whole interrupt path is unreachable.** — *`LoraInterface.cpp` compiles AND its task body is now callable.* `real_lora_interface_test` builds the real driver and the real file; `loraRxTask`'s body was lifted into `serviceRxWindow` / `armTimedRxWindow` / `armContinuousRx` / `noteRxWindowSkipped` / `transmitOneQueuedFrame` / `beginCad` with no behaviour change (verified by diffing the stripped statement sets, not asserted). 13 tests, three spot-check-verified by breaking production. | What remains is `frtosTasks.cpp` — the DIO0/DIO1 handler, the TX_DONE branch that pairs with `last_tx_len_`, and the ISR timestamps every phase measurement rests on. It needs an ADC shim and the motor/battery task surface. **And one limit that closing T-1 will not lift:** these tests assert the *order* of radio operations, never how long the critical path took, so the log line that sat between the aimed instant and the CAD would still not be caught. That needs a scope, and it is HW-7's number. | §11b |
+| ~~T-1~~ | ~~`LoraInterface.cpp` and `frtosTasks.cpp` are not compiled by the host suite~~ — **CLOSED.** Both compile and both task bodies are callable: `LoraInterface.cpp` via `real_lora_interface_test` (which also pins the PHY every timing number is derived from — `kSymbolTimeUs` 256 and `kCadUs` 320 *recomputed* from what the radio was handed, not re-asserted), and `frtosTasks.cpp` via `frtos_tasks_test.cpp`. `loraRxTask` became `serviceRxWindow`/`transmitOneQueuedFrame`/`beginCad` and the two interrupt tasks became `serviceDio0Event`/`serviceDio1Event`, each verified behaviour-preserving by diffing the stripped statement sets. | **What it bought:** the TX_DONE branch that pairs the edge with `lastTxLen()` is tested, so C2's window origin is no longer arithmetic nobody checked; and the DIO1 `RX_TIMEOUT` branch — the only source of `noteMarkMissed()` and therefore of every demotion — now runs under test. Both spot-check verified. **What remains, and no extraction will reach it:** the ISRs themselves (interrupt context, and they capture the timestamps every phase measurement rests on), and **elapsed time** — these tests assert the *order* of radio operations, never how long the critical path took, so the ~3.5 ms log line that once sat inside the aimed critical path would still pass every one of them. That is HW-7's measurement and it needs a scope. | §11b |
 | T-2 | **Tested and mostly closed; one sized choice left.** The pool is `POOL_SIZE` = 5 against a queue of 20, and a placed frame holds its buffer from `send()` until its mark — so the pool, not the queue, is the real depth, and `real_lora_tracker_test` now pins that: a placed push is accepted exactly 5 times, the refusal is counted (`poolAllocationFailures()`, published as a tracker-wide sensor), and a fired frame returns its buffer, which is why a *rate-limited* fleet push fits in five and an all-at-once one does not. | **This row was wrong in both directions.** "`send()` drops silently" was already false — it returns bool, and `send_aligned_` declined to consume the mark and logged. But `send_aligned_` returned **void**, so no producer could see the refusal, and `send_base_nonce_exchange` committed the new base nonce *before* the send: a refused frame left the hub deriving IVs from a nonce the node had never been told, so nothing either end sent could be decrypted and only a REGISTER recovered it. Both overloads return `bool` now and the nonce is committed only after a successful handoff, leaving both ends on the previous base. **Left open:** whether `POOL_SIZE` should rise to 32 for a simultaneous fleet push (~6.9 KB more static RAM). It is a throughput question rather than a correctness one now that every refusal path recovers, and the hub's RAM headroom is not measurable from a host test. | §8 B1a |
 | ~~T-3~~ | ~~`processTxCommand` is not covered end to end~~ — **CLOSED.** Its body is now `serviceTxCommand`, and `runOneTxCommand()` drives one iteration, so the host suite reaches the code that builds every uplink the node sends. The task still loops and blocks; behaviour is unchanged. | This is what made `e2e_test` possible at all. | §11b |
 
@@ -1639,8 +1639,8 @@ Recorded here rather than left to look maintained.
   `LORATracker` and are tested against it in `real_lora_tracker_test`.
   What NEITHER can reach is the two task loops — see the entry below, which is
   the one that is actually still open.
-- **`frtosTasks.cpp` is not compiled at all, so the interrupt path is
-  unreachable.** *Most of this closed 2026-09:* `real_lora_interface_test`
+- ~~**Neither `LoraInterface.cpp` nor `frtosTasks.cpp` is compiled.**~~ —
+  **CLOSED 2026-09, both of them.** `real_lora_interface_test`
   now compiles the real `components/lora` driver and the real
   `LoraInterface.cpp` — the first test anywhere to build the file — and pins the
   PHY that every timing number in this plan is derived from: it reads back
@@ -1661,12 +1661,32 @@ Recorded here rather than left to look maintained.
   2 s CAD receive abandons an answer that stays queued), the buffer return on
   the exhausted retry path (a real leak that starved the 5-entry pool until a
   reboot), and `clearInterrupts` before `rxSingle`.
-  What is still blind is `frtosTasks.cpp` — the DIO0/DIO1 handler, the TX_DONE
-  branch that pairs with `last_tx_len_`, and the ISR timestamps every phase
-  measurement rests on. It needs an ADC shim and the motor/battery task
-  surface. The Class A task-ordering defect and the cross-core `classa_` read
-  were both fixed blind, and that is still true of anything in there.
-  **A limit that closing the rest of T-1 will not lift.** These tests assert
+  `frtosTasks.cpp` followed, and with it the interrupt path. It needed an ADC
+  shim (`esp_adc/adc_oneshot.h` + `adc_stub.c`, which reproduces one real
+  driver behaviour deliberately: a second open of the same unit returns
+  `ESP_ERR_INVALID_STATE`, which is why *both* spawn guards in that file
+  exist) and the motor/battery surface on the sibling shims. The two task
+  bodies became `serviceDio0Event` and `serviceDio1Event`, checked
+  behaviour-preserving the same way.
+  Nine tests, two spot-check verified: the **TX_DONE branch** pairs the edge
+  with the length the transmit loop recorded, so a Class A window hangs off
+  `T0_uplink = TxDone − the frame's own air time` (drop the length and it
+  fails, which is the historical defect exactly — recovered from the driver
+  instead, where `lora_lastTxDoneUs()` is 0 forever on the async path, every
+  window was anchored to CAD-done, early by 42–95 ms against a 29.44 ms
+  window, and the node slept believing it had listened); and the **DIO1
+  `RX_TIMEOUT` branch**, the only place the node learns a window closed empty
+  and therefore the only source of `noteMarkMissed()` and of every demotion.
+  Two linker findings fixed rather than worked around: `extern_stubs.cpp` and
+  `frtosTasks.cpp` both defined the two spawn helpers and it linked
+  **silently**, with the winner decided by archive member-extraction order; and
+  `intQueueDio0/1` are defined by `LoraInterface.cpp`, in the same target.
+  The Class A task-ordering defect and the cross-core `classa_` read were both
+  fixed blind, and that class of change is now testable.
+  **Two limits no extraction lifts.** The ISRs themselves stay out of reach —
+  they run in interrupt context and capture the timestamps every phase
+  measurement rests on; what is reachable is everything downstream of the queue
+  they post to. And these tests assert
   the *order* of radio operations and which branch ran; they cannot assert how
   long the critical path took. The log line that had been sitting inside the
   aimed critical path — ~3.5 ms of UART in a ±14 080 µs guard band, found by

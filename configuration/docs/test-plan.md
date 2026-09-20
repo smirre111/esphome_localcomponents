@@ -154,9 +154,9 @@ From `tests/proto_sim/README.md`, all learned the hard way:
   inside `classa::rx1OpenUs/rx1CloseUs`, that a placed T0 is a fixed point of
   `nextT0ForSlotUs` for that slot. Those fail when the arithmetic is wrong;
   restatements cannot.
-- **`frtosTasks.cpp` is not compiled by the host suite, and neither file's
-  `for(;;)` body can be entered.** *Corrected 2026-09:* `LoraInterface.cpp` IS
-  compiled now, by `real_lora_interface_test`, which links the real
+- ~~**Neither `LoraInterface.cpp` nor `frtosTasks.cpp` is compiled by the host
+  suite.**~~ — **CLOSED 2026-09, both, and both task bodies are callable.**
+  `LoraInterface.cpp` is compiled by `real_lora_interface_test`, which links the real
   `components/lora` driver against a recording HAL
   (`shims_node/lora_hal_stub_node.cpp`). What that buys is the PHY and the
   start state — `init()` programs SF7/BW500/CR4-8, preamble 8, sync 0x12, CRC
@@ -174,17 +174,25 @@ From `tests/proto_sim/README.md`, all learned the hard way:
   drift test, the busy-window count, and — spot-check verified by deleting the
   production code — the CAD queue reset, the buffer return on the exhausted
   retry path, and `clearInterrupts` before `rxSingle`.
-  What remains untestable is the DIO0/DIO1 interrupt task and cross-core
-  access, all of it in `frtosTasks.cpp`. Two real defects (a Mode A window
-  completing the Class A sequence; a torn 64-bit read of
-  `classa_.t0_uplink_us`) were fixed without any test able to reach them, and
-  that is still so. A dispatcher-level test that calls `noteUplinkSent` then
-  `noteClassAWindowResult` in order on one object is asserting the sequence
-  that does *not* occur in production.
-  **And a limit no extraction lifts:** these tests assert the ORDER of radio
-  operations, never the elapsed time across the aimed critical path. The
-  ~3.5 ms log line that once sat there is HW-7's measurement, not a host
-  test's.
+  `frtosTasks.cpp` is compiled too, by `frtos_tasks_test.cpp`, which is
+  effectively `main.cpp` for that target — the task bodies reach the firmware
+  through globals that live there, so the fixture points them at its own
+  objects and deliberately leaves some null, since every use of
+  `cmdDispatcher` and `loraIf` in the interrupt path is null-checked. Its two
+  bodies are `serviceDio0Event` / `serviceDio1Event`, and the tests cover the
+  TX_DONE-to-`lastTxLen()` pairing (C2's window origin) and the DIO1
+  `RX_TIMEOUT` branch (the only source of `noteMarkMissed()`), both
+  spot-check verified. The two defects fixed blind in there — a Mode A window
+  completing the Class A sequence, and a torn 64-bit read of
+  `classa_.t0_uplink_us` — are now the sort of thing a test can reach.
+  A dispatcher-level test that calls `noteUplinkSent` then
+  `noteClassAWindowResult` in order on one object is still asserting a
+  sequence that does *not* occur in production; drive the handlers instead.
+  **Two limits no extraction lifts:** the ISRs themselves (interrupt context,
+  and they capture the timestamps every phase measurement rests on), and
+  elapsed time — these tests assert the ORDER of radio operations, never how
+  long the aimed critical path took. The ~3.5 ms log line that once sat there
+  is HW-7's measurement, not a host test's.
 - **The shim tracker models no transmit queue.** `shims/.../lora_tracker.cpp`'s
   `send()` records the policy and emits into the SimRadio immediately, and
   `busy_until_us` is a field tests set that `send()` never updates. So a

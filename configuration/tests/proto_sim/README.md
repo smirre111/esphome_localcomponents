@@ -207,16 +207,55 @@ queued and the next CAD consumes it. One wart to know about: the queue is
 created with a one-byte item size while the consumer reads into an `int`,
 so a test must queue a `uint8_t`.
 
-What it cannot reach: `frtosTasks.cpp`, which is not compiled at all (it
-needs an ADC shim and the motor/battery task surface), and therefore the
-DIO0/DIO1 handler, the TX_DONE branch that pairs with `last_tx_len_`, and
-the ISR timestamps every phase measurement rests on.
+### The real `frtosTasks.cpp` — the interrupt path
 
-And a limit that closing that gap will not lift: these tests assert the
-ORDER of radio operations and which branch ran, never how long the
-critical path took. A log line inside the aimed critical path (~3.5 ms of
-UART inside a ±14 080 µs guard band; this actually happened) still would
-not be caught here. That one needs a scope.
+`frtos_tasks_test.cpp` compiles and runs it, in the same binary because it
+needs the same real `LoraInterface` and the same recording HAL. It is the
+last of T-1.
+
+That file **is `main.cpp`** for the target: the task bodies reach the
+firmware through `motCtrl` / `sysCtrl` / `loraIf` / `cmdDispatcher`, which
+live in `main.cpp` on the node, so the fixture points them at its own
+objects — and deliberately leaves some null, because every use of
+`cmdDispatcher` and `loraIf` in the interrupt path is null-checked and
+those guards are worth exercising rather than sidestepping.
+
+Both `for(;;)` bodies were lifted into `serviceDio0Event()` and
+`serviceDio1Event()`. What the tests hold them to is the TX_DONE branch
+pairing the edge with the length the transmit loop recorded (C2's window
+origin: `T0_uplink = TxDone − the frame's own air time`) and the DIO1
+`RX_TIMEOUT` branch, which is the only place the node learns a window
+closed empty and therefore the only source of `noteMarkMissed()` and of
+every demotion.
+
+Two things to know before touching it:
+
+* `extern_stubs.cpp`'s `spawnTaskBatteryMonitor` /
+  `spawnTaskMotorCurrentMonitor` are behind
+  `PROTO_SIM_HAVE_REAL_FRTOSTASKS`, which this target defines. With both
+  definitions present it linked **silently**, and which one won was decided
+  by archive member-extraction order.
+* `intQueueDio0` / `intQueueDio1` are defined by `LoraInterface.cpp`, not
+  by the shims. Defining them again is a multiple definition.
+
+The ADC shim (`esp_adc/adc_oneshot.h` + `adc_stub.c`) models nothing
+analogue — that belongs on a bench next to HW-1 — but it does reproduce
+one real driver behaviour on purpose: a second open of the same unit
+returns `ESP_ERR_INVALID_STATE`, which is why *both* spawn guards in
+`frtosTasks.cpp` exist.
+
+### Two limits no extraction lifts
+
+The **ISRs themselves** stay out of reach: `myinterrupts.h`'s handlers run
+in interrupt context and capture the timestamps every phase measurement
+rests on. What is reachable is everything downstream of the queue they
+post to.
+
+And **elapsed time**. These tests assert the ORDER of radio operations and
+which branch ran, never how long the critical path took. A log line inside
+the aimed critical path (~3.5 ms of UART inside a ±14 080 µs guard band;
+this actually happened) still would not be caught here. That one needs a
+scope, and it is HW-7's number.
 
 ### Remaining phase-3 work
 
@@ -231,9 +270,8 @@ not be caught here. That one needs a scope.
   supersession; only the real target can.
 * ~~Extract the `loraRxTask` transmit sequence~~ — **done**; see the
   section above.
-* Compile `frtosTasks.cpp` (needs an ADC shim + the motor/battery
-  surface) and extract its interrupt body out of its task loop. That is
-  what is left of T-1.
+* ~~Compile `frtosTasks.cpp` and extract its interrupt body~~ — **done**;
+  see above. T-1 is closed.
 
 ### Portability bug fixed by phase 3
 
