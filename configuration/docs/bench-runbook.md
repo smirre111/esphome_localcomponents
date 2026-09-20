@@ -12,6 +12,50 @@ all (HW-6) and two need an external instrument (HW-1's mean, HW-4).
 
 ---
 
+## 0a. Which code, and from where
+
+| | |
+|---|---|
+| **Hub** | `github.com/smirre111/esphome_localcomponents` — ESPHome custom components under `configuration/` |
+| **Node** | `github.com/smirre111/blindsesp` — ESP-IDF firmware under `main/`, driver under `components/lora/` |
+| **Branch, both repos** | **`claude/analysis-only-t4ter8`** |
+
+**That branch is NOT merged into `main`, and in both repos it shares no common
+ancestor with `main` at all** — `git merge-base origin/main
+origin/claude/analysis-only-t4ter8` returns nothing, and the two have different
+root commits. This is not an old-vs-new difference that a rebase would settle:
+they are separate trees. The hub differs by 404 files and about 103 000 lines.
+
+**So a session that starts from `main` gets none of this.** No runbook, none of
+the 927 host tests, no `ModeTest` mode, no `TxRefusal`, no Mode B. Check the
+branch before anything else:
+
+```
+git -C <hub>  rev-parse --abbrev-ref HEAD    # claude/analysis-only-t4ter8
+git -C <node> rev-parse --abbrev-ref HEAD    # claude/analysis-only-t4ter8
+```
+
+**Where `main` is nonetheless ahead, and why it does not appear to matter.**
+`main` carries ~1 360 lines this branch does not, and they were checked rather
+than assumed: they are almost entirely in files this branch rewrote wholesale
+(`lora_client.cpp`, the regenerated `blinds.pb-c.c`) plus a block of
+commented-out BLE dead code in `loracover/sensor/lora_sensor.cpp` that this
+branch deleted. `main`'s named features — `battery_update_interval`, the
+secrets.yaml credential move, the cover-duration calibrations, slim on-air
+packets, downlink encryption gated on a confirmed session — are all present
+here. **No file exists only on `main`.**
+
+That is evidence, not proof: it was established by diffing trees, not by
+replaying 15 hub commits. If a bench result contradicts something you believe
+`main` fixed, this is the first thing to re-check, and the honest answer is to
+diff the specific file rather than to assume either branch is complete.
+
+**The two trees will have to be reconciled eventually.** That is a merge with no
+common ancestor, so it is a deliberate piece of work and not a bench task. Do
+not start it in a measurement session.
+
+---
+
 ## 0. Before anything
 
 | Check | Why it is first |
