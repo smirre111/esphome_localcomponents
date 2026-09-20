@@ -709,6 +709,86 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         PRIVATE real_cmd_dispatcher_seam real_lora_client proto_sim
                 GTest::gtest GTest::gtest_main)
     gtest_discover_tests(e2e_test)
+
+    # ------------------------------------------------------------------
+    # §11b's LAST STRUCTURAL GAP: LoraInterface.cpp compiled at all.
+    #
+    # Every other node target shims LoraInterface.h wholesale, which is why
+    # that file has never been compiled by the harness — and why two defects
+    # this year were invisible: the uplink-aim call site went in untested, and a
+    # log line inside the aimed critical path was caught by reading the diff
+    # rather than by any test. Every fix in it was made blind.
+    #
+    # This target uses the REAL header and the REAL driver header
+    # (components/lora/include/lora.h), with the driver IMPLEMENTATION replaced
+    # by a recorder — the same arrangement real_lora_tracker has had on the hub
+    # side since it landed. Using the real driver header rather than a
+    # paraphrase is the point: a signature that drifts is a build error here
+    # instead of a surprise on the roof.
+    #
+    # CmdDispatcher.cpp is RECOMPILED rather than linked from
+    # real_cmd_dispatcher, because that archive was built against the
+    # LoraInterface SHIM. Linking the two would put two different layouts of
+    # the same class in one binary. Same reason real_cmd_dispatcher_seam
+    # recompiles it.
+    set(IFACE_STAGE ${CMAKE_BINARY_DIR}/iface_stage)
+    file(MAKE_DIRECTORY ${IFACE_STAGE})
+    foreach(f CmdDispatcher.cpp SessionManager.cpp comm_utils.c LoraInterface.cpp)
+        configure_file(${BLINDS_ESP_MAIN}/${f} ${IFACE_STAGE}/${f} COPYONLY)
+    endforeach()
+    foreach(h CmdDispatcher.h SessionManager.h comm_utils.h common.h Packet.h
+              LoraInterface.h myinterrupts.h)
+        configure_file(${BLINDS_ESP_MAIN}/include/${h} ${IFACE_STAGE}/${h} COPYONLY)
+    endforeach()
+    # Only the siblings that are genuinely not under test here.
+    foreach(shim MotorCtrl.h SystemCtrl.h)
+        configure_file(${NODE_SHIM_DIR}/${shim} ${IFACE_STAGE}/${shim} COPYONLY)
+    endforeach()
+
+    add_library(real_lora_interface STATIC
+        ${IFACE_STAGE}/LoraInterface.cpp
+        ${IFACE_STAGE}/CmdDispatcher.cpp
+        ${IFACE_STAGE}/SessionManager.cpp
+        ${IFACE_STAGE}/comm_utils.c
+        ${BLINDS_ESP_MAIN}/Scheduler.cpp
+        ${NODE_SHIM_DIR}/lora_hal_stub_node.cpp
+        ${NODE_SHIM_DIR}/esp_idf_stubs.c
+        ${NODE_SHIM_DIR}/host_clock.c
+        ${NODE_SHIM_DIR}/extern_stubs.cpp
+        # The generated stubs, compiled INTO this target rather than taken from
+        # proto_sim: that library carries the hub's esp_timer and esp_random,
+        # and linking it here would put two of each in one binary — the same
+        # reason real_cmd_dispatcher_seam recompiles what it needs.
+        ${BLINDSPROTO_DIR}/blinds.pb-c.c
+    )
+    target_include_directories(real_lora_interface
+        BEFORE PUBLIC
+            ${IFACE_STAGE}                      # real LoraInterface.h wins
+            # BEFORE the node shims, which carry a 13-line lora.h of their own
+            # (all CmdDispatcher ever needed). Here the REAL driver header has
+            # to win, or the file under test sees a paraphrase of the API it
+            # actually calls — which is the drift this target exists to remove.
+            ${BLINDS_ESP_ROOT}/components/lora/include
+            ${NODE_SHIM_DIR}                    # FreeRTOS, ESP-IDF, the recorder
+            ${BLINDS_ESP_MAIN}/include
+            ${BLINDSPROTO_DIR}
+            ${PROTOBUF_C_INCLUDE_DIRS}
+    )
+    target_link_libraries(real_lora_interface PUBLIC ${PROTOBUF_C_LIBRARIES} mbedcrypto)
+    target_compile_options(real_lora_interface PRIVATE
+        -Wno-sign-compare -Wno-format -Wno-unused-function -Wno-unused-variable
+        -Wno-unused-but-set-variable -Wno-format-extra-args -Wno-unused-parameter)
+
+    add_executable(real_lora_interface_test
+        scenarios/real_lora_interface_test.cpp
+        ${NODE_SHIM_DIR}/host_clock.c)
+    target_include_directories(real_lora_interface_test BEFORE PRIVATE
+        ${IFACE_STAGE}
+        ${BLINDS_ESP_ROOT}/components/lora/include
+        ${NODE_SHIM_DIR})
+    target_link_libraries(real_lora_interface_test
+        PRIVATE real_lora_interface GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(real_lora_interface_test)
 else()
     message(STATUS "BlindsESP node source not found at ${BLINDS_ESP_MAIN} — "
                    "skipping real_cmd_dispatcher target")

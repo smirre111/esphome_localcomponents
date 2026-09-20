@@ -91,12 +91,36 @@ inline BaseType_t xQueuePeek(QueueHandle_t q, void* out, TickType_t /*wait*/) {
 inline UBaseType_t uxQueueMessagesWaiting(QueueHandle_t q) {
     return q ? static_cast<UBaseType_t>(q->items.size()) : 0;
 }
+// Drop everything queued. The REAL LoraInterface.cpp resets the CAD queue
+// before starting a CAD, so a stale "channel free" from a timed-out earlier CAD
+// cannot be consumed as this one's answer — which is precisely the answer that
+// makes the node transmit into a running burst. It therefore has to drain for
+// real rather than return success.
+inline BaseType_t xQueueReset(QueueHandle_t q) {
+    if (q == nullptr) return pdFALSE;
+    q->items.clear();
+    return pdTRUE;
+}
+
 inline void vQueueDelete(QueueHandle_t q) { delete q; }
 inline void vQueueAddToRegistry(QueueHandle_t, const char*) {}
 
 // Semaphore — degenerate (always succeeds).
 using SemaphoreHandle_t = void*;
 inline SemaphoreHandle_t xSemaphoreCreateMutex()          { return (SemaphoreHandle_t)(uintptr_t)1; }
+// The radio mutex and the two window semaphores are binary, and the REAL
+// LoraInterface.cpp creates them. xSemaphoreTake below always succeeds, so
+// nothing here models contention — what the tests assert is the SEQUENCE the
+// file drives the radio through, not scheduling.
+inline SemaphoreHandle_t xSemaphoreCreateBinary()        { return (SemaphoreHandle_t)(uintptr_t)1; }
+inline BaseType_t xSemaphoreGiveFromISR(SemaphoreHandle_t, BaseType_t *) { return pdTRUE; }
+
+// A yield request from an ISR. Nothing to yield to here — the harness has one
+// thread — but the macro has to exist, and it must not be a no-op that hides a
+// missing argument.
+// Variadic because ESP-IDF's own form takes either zero arguments or a
+// higher-priority-task-woken flag, and the node uses both spellings.
+#define portYIELD_FROM_ISR(...) do { } while (0)
 inline BaseType_t xSemaphoreTake(SemaphoreHandle_t, TickType_t) { return pdTRUE; }
 inline BaseType_t xSemaphoreGive(SemaphoreHandle_t)             { return pdTRUE; }
 

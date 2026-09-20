@@ -45,3 +45,16 @@ void proto_sim_set_ext1_status(uint64_t pins);
 #ifdef __cplusplus
 }
 #endif
+
+// Light-sleep GPIO wake. LoraInterface.cpp arms DIO0/DIO1 as wake sources
+// around each receive window; §12.8 records that whether an esp_timer one-shot
+// reliably wakes the node is still an open MEASUREMENT, so nothing here
+// pretends to model it — the calls only have to resolve.
+#ifdef __cplusplus
+extern "C" {
+#endif
+esp_err_t esp_sleep_enable_gpio_wakeup(void);
+esp_err_t esp_sleep_disable_wakeup_source_gpio_stub_(void);
+#ifdef __cplusplus
+}
+#endif

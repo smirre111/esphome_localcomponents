@@ -273,3 +273,37 @@ const esp_app_desc_t *esp_app_get_description(void) { return &s_app_desc; }
 static uint64_t g_ext1_status = 0;
 uint64_t esp_sleep_get_ext1_wakeup_status(void) { return g_ext1_status; }
 void proto_sim_set_ext1_status(uint64_t pins) { g_ext1_status = pins; }
+
+// --- GPIO / RTC-GPIO / light-sleep wake ------------------------------------
+//
+// Added so the REAL LoraInterface.cpp can be compiled and linked (§11b's last
+// structural gap). None of this is modelled: the file under test configures
+// DIO0/DIO1 as interrupt sources and light-sleep wake sources, and what the
+// tests assert is the SEQUENCE it drives the radio through, not the pins.
+#include "driver/gpio.h"
+#include "driver/rtc_io.h"
+
+esp_err_t gpio_config(const gpio_config_t *cfg) { (void) cfg; return ESP_OK; }
+esp_err_t gpio_install_isr_service(int flags) { (void) flags; return ESP_OK; }
+esp_err_t gpio_isr_handler_add(gpio_num_t pin, void (*fn)(void *), void *arg) {
+    (void) pin; (void) fn; (void) arg; return ESP_OK;
+}
+esp_err_t gpio_isr_handler_remove(gpio_num_t pin) { (void) pin; return ESP_OK; }
+esp_err_t gpio_set_intr_type(gpio_num_t pin, gpio_int_type_t t) { (void) pin; (void) t; return ESP_OK; }
+esp_err_t gpio_intr_enable(gpio_num_t pin) { (void) pin; return ESP_OK; }
+esp_err_t gpio_intr_disable(gpio_num_t pin) { (void) pin; return ESP_OK; }
+esp_err_t gpio_set_level(gpio_num_t pin, uint32_t level) { (void) pin; (void) level; return ESP_OK; }
+int       gpio_get_level(gpio_num_t pin) { (void) pin; return 0; }
+esp_err_t gpio_wakeup_enable(gpio_num_t pin, gpio_int_type_t t) { (void) pin; (void) t; return ESP_OK; }
+esp_err_t gpio_wakeup_disable(gpio_num_t pin) { (void) pin; return ESP_OK; }
+
+esp_err_t rtc_gpio_init(gpio_num_t pin) { (void) pin; return ESP_OK; }
+esp_err_t rtc_gpio_deinit(gpio_num_t pin) { (void) pin; return ESP_OK; }
+esp_err_t rtc_gpio_set_direction(gpio_num_t pin, rtc_gpio_mode_t m) { (void) pin; (void) m; return ESP_OK; }
+esp_err_t rtc_gpio_pullup_en(gpio_num_t pin) { (void) pin; return ESP_OK; }
+esp_err_t rtc_gpio_pullup_dis(gpio_num_t pin) { (void) pin; return ESP_OK; }
+esp_err_t rtc_gpio_pulldown_en(gpio_num_t pin) { (void) pin; return ESP_OK; }
+esp_err_t rtc_gpio_pulldown_dis(gpio_num_t pin) { (void) pin; return ESP_OK; }
+int       rtc_gpio_is_valid_gpio(gpio_num_t pin) { (void) pin; return 1; }
+
+esp_err_t esp_sleep_enable_gpio_wakeup(void) { return ESP_OK; }
