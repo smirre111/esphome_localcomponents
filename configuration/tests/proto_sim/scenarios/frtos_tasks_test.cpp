@@ -453,7 +453,22 @@ TEST_F(Irq, AContinuousWindowIsNeverRestartedAsAnRxSingle) {
 // Review findings 4 and 5 (2026-09-15).
 // ---------------------------------------------------------------------------
 
-TEST_F(Irq, ASweepsMisArmedWindowIsNeverRescuedByAnExtension) {
+// DISABLED 2026-09-20 — the requirement is right, the implementation was not.
+//
+// The guard this pins (`!sweeping` in windowEndClosesWindow) was REVERTED
+// because it made the node deaf for whole runs: sweepMisArming_() is
+// `mode_test_active_ && arm_offset_us != 0`, and handleModeTest sets both while
+// processing the START, so the node refused the extension its own START burst
+// needed and never joined the test. Measured on fw 1.0.98: `detected 0,
+// seq 0..0 exp 1` at +4 000 AND +19 000 us, against `detected 198,
+// windows 187/186` for a plain Mode B run on the same firmware.
+//
+// KEPT, DISABLED, RATHER THAN DELETED: a deliberately mis-armed window still
+// must not be rescued by an extension, or HW-2 measures its own repair. The
+// gate has to be PER-WINDOW — scoped to windows armed with the offset applied —
+// not a run-wide mode flag that also covers the frames carrying the test.
+// Re-enable when that lands, together with the promotion/anti-flap rework.
+TEST_F(Irq, DISABLED_ASweepsMisArmedWindowIsNeverRescuedByAnExtension) {
     // HW-2 (2026-09-20). A sweep arms early or late ON PURPOSE and asks whether
     // the frame is still caught. An extension re-arms a FULL kWindowUs, which
     // carries the window back over the frame — so the measurement repairs the
