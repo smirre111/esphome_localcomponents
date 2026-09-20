@@ -77,10 +77,15 @@ time:
         days_of_week: MON-SUN
         then:
           - loracover.on_sleep_start: rol_1
-          # rol_2 (bench node) nightly sleep DISABLED 2026-09-14 for Mode B MAC-0
-          # debugging: the 23:00 sleep ended a 900 s run with no report. Restore
-          # this line when the measurement campaign ends.
-          # - loracover.on_sleep_start: rol_2
+          # RESTORED 2026-09-20 — the Mode B MAC-0 campaign that disabled this
+          # (cfbe988) has ended.
+          #
+          # READ BEFORE STARTING A LONG BENCH RUN: this fires at 23:00 and deep
+          # sleeps the bench node mid-run. It killed a 900 s Mode B run at 869 s
+          # on 2026-09-14 and the run reported nothing. Start long runs with
+          # enough margin before 23:00, or comment this line out again for the
+          # duration and restore it afterwards.
+          - loracover.on_sleep_start: rol_2
 
 
 
