@@ -430,8 +430,22 @@ phaseErr p50 2400 p99 2910 max 2927 n 197 | armResidual p99 432
 oneShot p99 -425 n 190 | ppm 8 period 1500014 us | 199 marks placed, dt=1500 ms
 ```
 
+**FIXED IN NODE 1.0.98 (2026-09-20) — RE-MEASURE BEFORE TRUSTING THE TABLE
+BELOW.** The four causes are addressed (review finding 13): the hit is now
+window-scoped via a generation carried with the frame, broadcast frames no
+longer book hits, a frame with no generation resolves nothing, and extensions
+are suppressed while a sweep offset is active — that last one being what
+carried a mis-armed window back over the frame. All four mutation-verified,
+host suite 1099/1099.
+
+**The table below is the 1.0.97 result and is expected to change.** The test
+that matters: a point at **+19 000 us** should now read `receives=no` with a
+HIGH armed count. High armed + low hit is the apparatus discriminating; a low
+armed count is still VOID and means the node was not in Mode B.
+
 **THE SWEEP'S VERDICT DOES NOT RESPOND TO THE OFFSET — four points, both
-extremes, 2026-09-20 00:41. HW-2 cannot be measured through `windows hit`.**
+extremes, 2026-09-20 00:41, ON FW 1.0.97. HW-2 could not be measured through
+`windows hit`.**
 
 | offset | armed | hit | verdict | window opens |
 |---|---|---|---|---|
