@@ -959,6 +959,12 @@ nothing but a running hub — and its expected answer, ±5 ms, is already known 
 fail C2's gate, so what it really measures is how much worse than nominal the
 poll gap gets in practice.
 
+**`bench-runbook.md` is the operational companion to this section**: the same
+ten items as a step-by-step bench procedure — setup preconditions, which
+entities to press, which numbers to read first and why, and what result closes
+each item. It adds no design claims; where a number is a gate, the gate is
+quoted from here. This section stays authoritative on method.
+
 **Ordering.** HW-9 is free and immediate. HW-2 gates B3 and needs only a bench
 node. HW-5 needs B0. HW-7 should run before §5.2's servable-slot constants are
 fixed, or that test will be written around an assumption.

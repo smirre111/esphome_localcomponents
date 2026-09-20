@@ -1774,6 +1774,12 @@ latency becomes binding and the ULP is the only way through sleep.
 
 ## 12. Open measurements
 
+**To actually run these, see `bench-runbook.md`** — the step-by-step bench
+procedure for all ten, with the preconditions, the entity to press, the numbers
+to read first, and what closes each item. `test-plan.md` §10.6 remains
+authoritative on method; this section remains authoritative on why each number
+matters and what rests on it.
+
 Nothing here can be settled from the repositories. `test-plan.md` §10.6 maps each
 item to a bench procedure — seven of the nine close on-node with no external
 instrument, using the `ModeTest` mode; only 12.1's *mean* and 12.4 need a scope
