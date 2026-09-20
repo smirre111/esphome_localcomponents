@@ -88,13 +88,26 @@ std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce) {
     return out;
 }
 
+// The mark-hit gate is TWO guards in series: the unknown-window sentinel, then
+// the generation match. Host-injected frames never travel through rx_buffer_t,
+// so last_rx_window_gen_ stays kNoWindowGen and the sentinel rejects them before
+// the unicast check is reached. A mutant restoring `if (mine)` therefore
+// SURVIVED (2026-09-20): the test could not see the behaviour it named.
+// Exposing the member lets a test neutralise one guard to isolate the other.
+struct NodeProbe : CmdDispatcher {
+    NodeProbe(MotorCtrl *m, SystemCtrl *s, LoraInterface *l,
+              portMUX_TYPE &mm, portMUX_TYPE &bm)
+        : CmdDispatcher(m, s, l, mm, bm) {}
+    using CmdDispatcher::last_rx_window_gen_;
+};
+
 struct RealNodeFixture : public ::testing::Test {
     MotorCtrl     mot;
     SystemCtrl    sys;
     LoraInterface lif;
     portMUX_TYPE  motorMux{};
     portMUX_TYPE  buttonMux{};
-    CmdDispatcher disp{&mot, &sys, &lif, motorMux, buttonMux};
+    NodeProbe     disp{&mot, &sys, &lif, motorMux, buttonMux};
 
     void SetUp() override {
         // Production initialises PSA Crypto in app_main ("PSA Crypto subsystem
@@ -2797,9 +2810,14 @@ namespace {
 std::vector<uint8_t> build_grid_sync(bool enable, uint32_t slot, uint32_t msgid,
                                      uint32_t slot_count = timedgrid::kSlotCount,
                                      uint32_t pitch_us = timedgrid::kSlotPitchUs,
-                                     uint32_t burst_index = 0) {
+                                     uint32_t burst_index = 0,
+                                     // Defaulted so every existing caller is
+                                     // unchanged. Overridden only to build the
+                                     // BROADCAST frame finding 13 turns on:
+                                     // GridBeacon and GridDemote go to 0xFF.
+                                     uint32_t dest_address = kNodeAddr) {
     LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = kNodeAddr;
+    hdr.destaddress   = dest_address;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
     hdr.msgid         = msgid;
@@ -3046,10 +3064,94 @@ TEST_F(RealNodeFixture, AMarkThatHeardNothingForThisNodeIsMissedAtTheNextMark) {
     EXPECT_EQ(disp.consecutiveMissedMarks(), 1u)
         << "the previous mark was armed and nothing addressed to this node arrived";
 
-    // A hit resolves a mark, so the one after it owes nothing.
-    disp.noteMarkHit();
+    // A hit resolves a mark, so the one after it owes nothing — but only when it
+    // comes from the mark's OWN window, so it is passed that generation.
+    disp.noteMarkHit(kTestWindowGen + 1);
     disp.noteMarkArmed(kTestWindowGen + 2);
     EXPECT_EQ(disp.consecutiveMissedMarks(), 1u) << "a hit is not a miss";
+}
+
+// ---------------------------------------------------------------------------
+// Review finding 13 (2026-09-20): a mark is kept only by the window that armed
+// it. Before this, the hit keyed on "addressed to me" alone, so any frame heard
+// by ANY window resolved whatever mark was open — and a sweep deliberately
+// mis-arming its windows still reported `armed 189, hit 189` at every offset,
+// including +19 000 us (window opens 760 us AFTER T0) and -20 000 us (38 ms
+// early). The miss path had carried the generation since finding 5; the hit
+// path never got it.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, AWindowThatIsNotTheMarksOwnCannotHitIt) {
+    disp.noteMarkArmed(kTestWindowGen);
+
+    // Some other window heard the frame. It proves the node was served; it says
+    // nothing about whether THIS mark's window opened in the right place.
+    disp.noteMarkHit(kTestWindowGen + 7);
+    EXPECT_TRUE(disp.markWindowOpen())
+        << "a foreign window must not resolve the mark";
+
+    disp.noteMarkHit(kTestWindowGen);
+    EXPECT_FALSE(disp.markWindowOpen()) << "the mark's own window keeps it";
+}
+
+TEST_F(RealNodeFixture, ABroadcastFrameDoesNotBookAMarkHit) {
+    // The beacon half of finding 13. GridBeacon and GridDemote are addressed to
+    // the BROADCAST address, and the node's "is this mine" test accepts
+    // broadcast — so every beacon used to close whatever grid mark was open,
+    // inflating windows_hit by ~1 per 233 rounds and resetting the demotion
+    // counter on a frame that says nothing about whether this node's own window
+    // worked. The phase path has always refused CMD_GRIDBEACON explicitly; the
+    // hit path did not.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/781);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    disp.noteMarkArmed(kTestWindowGen);
+    ASSERT_TRUE(disp.markWindowOpen());
+
+    // NEUTRALISE THE SENTINEL so the unicast check is the only thing deciding.
+    // A host-injected frame carries no window generation, so without this the
+    // sentinel rejects it first and this test passes whatever the unicast check
+    // does — which is exactly how a mutant restoring `if (mine)` survived.
+    disp.last_rx_window_gen_ = kTestWindowGen;
+
+    // Same frame shape, but addressed to everyone rather than to this node.
+    auto bcast = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/782,
+                                 timedgrid::kSlotCount, timedgrid::kSlotPitchUs,
+                                 /*burst_index=*/0,
+                                 /*dest_address=*/LoraInterface::broadcastAddressing);
+    disp.onReceiveNew(bcast.data(), static_cast<int>(bcast.size()));
+
+    EXPECT_TRUE(disp.markWindowOpen())
+        << "a broadcast frame is not evidence that THIS node's window worked";
+
+    // POSITIVE CONTROL. Without it the assertion above could hold simply because
+    // nothing in this fixture can ever book a hit — a negative that proves
+    // nothing. A unicast frame in the mark's own window must close it.
+    auto uni = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/783);
+    disp.last_rx_window_gen_ = kTestWindowGen;
+    disp.onReceiveNew(uni.data(), static_cast<int>(uni.size()));
+    EXPECT_FALSE(disp.markWindowOpen())
+        << "a unicast frame in the mark's own window must still keep the mark";
+}
+
+TEST_F(RealNodeFixture, AFrameCarryingNoWindowGenerationResolvesNothing) {
+    // kNoWindowGen is what every non-radio path carries: host-injected frames,
+    // anything that did not come through rx_buffer_t. Such a frame cannot say
+    // which window heard it, so it must not be allowed to claim a mark — the
+    // sentinel has to fail CLOSED, or the gate is decorative on exactly the
+    // paths that bypass the radio.
+    //
+    // THE MARK IS ARMED WITH kNoWindowGen ITSELF, and that is the whole point.
+    // Armed with any other generation, the plain generation check below the
+    // sentinel would reject the frame anyway, so the test would pass whether or
+    // not the sentinel existed — a mutation removing the sentinel SURVIVED
+    // exactly that way (2026-09-20). Only when the unknown generation collides
+    // with the armed one does the sentinel become separately observable.
+    disp.noteMarkArmed(CmdDispatcher::kNoWindowGen);
+    disp.noteMarkHit(CmdDispatcher::kNoWindowGen);
+    EXPECT_TRUE(disp.markWindowOpen())
+        << "an unknown window must not resolve the mark, even one armed as unknown";
 }
 
 TEST_F(RealNodeFixture, AWindowThatIsNotTheMarksOwnCannotMissIt) {
