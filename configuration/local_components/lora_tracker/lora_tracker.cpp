@@ -1247,6 +1247,13 @@ namespace esphome
     }
 
     // Get a free buffer from the pool (thread-safe)
+    // Defined here rather than inline in the header because pool_stats is a
+    // file-static in this translation unit.
+    uint32_t LORATracker::poolAllocationFailures() const
+    {
+      return pool_stats.allocation_failures;
+    }
+
     rx_buffer_t *LORATracker::get_free_buffer(TickType_t timeout)
     {
       rx_buffer_t *buffer = NULL;

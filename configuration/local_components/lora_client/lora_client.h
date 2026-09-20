@@ -466,8 +466,15 @@ namespace esphome
       // buffer immediately after handing it over.
       // Two overloads rather than a default argument: TxPolicy is only
       // forward-declared here, and `= {}` needs the complete type.
-      void send_aligned_(const uint8_t *buf, size_t len);
-      void send_aligned_(const uint8_t *buf, size_t len, const TxPolicy &policy);
+      // Both return whether the frame ENTERED THE TRANSMIT QUEUE. They used to
+      // return void, and that was the hole T-2 turned out to be about: the
+      // mark-consumption was handled correctly inside, but no producer could
+      // see a refusal, so a frame lost to an exhausted buffer pool was lost
+      // full stop. It matters most for the frames that carry no ack and have
+      // no retry — send_base_nonce_exchange above all, which installs a key the
+      // node persists.
+      bool send_aligned_(const uint8_t *buf, size_t len);
+      bool send_aligned_(const uint8_t *buf, size_t len, const TxPolicy &policy);
 
       // B4: the exact bytes of the tracked op in flight, so a retry
       // retransmits them rather than re-packing from live state.

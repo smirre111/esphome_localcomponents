@@ -518,6 +518,26 @@ sensor:
                  ? (float) id(rol_2)->node_rx_busy_skips().count
                  : NAN;'
 
+  # T-2: frames the HUB refused because its transmit buffer pool was empty.
+  #
+  # The pool is POOL_SIZE = 5 and the handoff queue is 20, but nothing enters
+  # the queue without a buffer and a PLACED frame holds its buffer from send()
+  # until its mark — so the pool, not the queue, is the real depth. A
+  # fleet-wide push places one frame per node with all 32 marks inside one
+  # round, and the sixth onwards is refused.
+  #
+  # Refusal is handled rather than silent: the node's mark is not consumed, the
+  # schedule push has an ack-driven retry, and BaseNonceExchange keeps the
+  # previous nonce so the session survives. This number is how you find out it
+  # is happening at all — it is tracker-wide, not per node, because the pool is.
+  - platform: template
+    name: "Transmit pool exhausted — frames refused"
+    id: lora_pool_refusals
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(my_lora_tracker)->poolAllocationFailures();'
+
   # MAC ping, stage 0 of the funnel. pings_offered is the only number in this
   # system that the HUB alone can know.
   - platform: template

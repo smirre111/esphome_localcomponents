@@ -236,6 +236,21 @@ namespace esphome
       // that the supersession path is doing anything.
       uint32_t  supersededDrops() const { return this->tx_superseded_drops_; }
 
+      // T-2: frames refused because the buffer pool was empty.
+      //
+      // The pool (POOL_SIZE = 5) is the real depth of a queue that advertises
+      // RX_QUEUE_SIZE (20), because nothing enters the queue without a buffer
+      // and a PLACED frame holds its buffer from send() until its mark. A
+      // fleet-wide push places one frame per node and all 32 marks fall inside
+      // one round, so the sixth send onwards is refused.
+      //
+      // send() returns false for each, which the caller must act on — it used
+      // to return void, and a mark was then recorded as spent for a frame that
+      // never entered the queue. This is the same fact as a total: a push that
+      // silently loses most of a fleet looks exactly like one that worked, and
+      // the count was already being kept with nothing able to read it.
+      uint32_t  poolAllocationFailures() const;
+
       // For tests: how many beacons have actually been queued.
       uint32_t  beaconsSent() const { return this->beacons_sent_; }
       int64_t   gridAnchorUs() const { return this->grid_anchor_us_; }

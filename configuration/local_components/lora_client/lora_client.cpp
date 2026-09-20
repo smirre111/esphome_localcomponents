@@ -1916,9 +1916,9 @@ namespace esphome
                this->get_name().c_str(), (unsigned) len);
     }
 
-    void LORAListener::send_aligned_(const uint8_t *buf, size_t len)
+    bool LORAListener::send_aligned_(const uint8_t *buf, size_t len)
     {
-      this->send_aligned_(buf, len, TxPolicy{});
+      return this->send_aligned_(buf, len, TxPolicy{});
     }
 
     // The mark a placed frame for this node would go out on.
@@ -1935,11 +1935,11 @@ namespace esphome
       return t0;
     }
 
-    void LORAListener::send_aligned_(const uint8_t *buf, size_t len,
+    bool LORAListener::send_aligned_(const uint8_t *buf, size_t len,
                                      const TxPolicy &in_policy)
     {
       if (buf == nullptr || len == 0)
-        return;
+        return false;
 
       // §4.6, rules 1-4. ONE copy instead of seventeen, but only while the hub
       // has recent, authenticated evidence that this node's window will be open
@@ -1979,8 +1979,7 @@ namespace esphome
 
       if (!this->grid_aligned_ || !this->parent_->gridStarted())
       {
-        this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
-        return;
+        return this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
       }
 
       // The next mark that is CLEAR of the hub's own burst, not simply the next
@@ -2026,13 +2025,13 @@ namespace esphome
       if (this->parent_->send(const_cast<uint8_t *>(buf), len, policy))
       {
         this->last_placed_t0_us_ = t0;
+        return true;
       }
-      else
-      {
-        ESP_LOGW(TAG, "[%s] placed frame dropped by the transmit queue — mark "
-                      "%lld not consumed",
-                 this->get_name().c_str(), (long long) t0);
-      }
+
+      ESP_LOGW(TAG, "[%s] placed frame dropped by the transmit queue — mark "
+                    "%lld not consumed",
+               this->get_name().c_str(), (long long) t0);
+      return false;
     }
 
     uint32_t LORAListener::tx_tracked_op_()
@@ -2396,8 +2395,13 @@ namespace esphome
       // start encrypting responses.  Also resets the frame-counter state so
       // both sides start from zero after every (re-)login.
       uint32_t base = esp_random();
-      s_base_nonce_map[this->short_address_] = base;
-
+      // NOT COMMITTED YET. This used to be stored here, before the frame went
+      // anywhere, and that is how an exhausted buffer pool broke a session
+      // outright: the hub would start deriving its IVs from a base nonce the
+      // node had never been told, nothing either end sent could be decrypted by
+      // the other, and only a REGISTER recovered it. Committing after a
+      // successful handoff leaves BOTH ends on the previous nonce, which is a
+      // working session. See the commit below.
       uint8_t bn[4];
       // Encode base nonce as 4-byte big-endian
       bn[0] = (base >> 24) & 0xFF;
@@ -2432,9 +2436,22 @@ namespace esphome
       // burst is asked for explicitly rather than left to the policy.
       TxPolicy p;
       p.copies = this->parent_->defaultBurstCopies();
-      this->send_aligned_(buf, len, p);
+      const bool queued = this->send_aligned_(buf, len, p);
       delete[] buf;
 
+      if (!queued)
+      {
+        // The frame never entered the transmit queue, so the node will never
+        // hear this nonce. Leave the map alone: both ends stay on the previous
+        // base and the session keeps working, which is the whole reason the
+        // commit moved below the send. The caller retries the exchange.
+        ESP_LOGE(TAG, "BaseNonceExchange to peer %u was not queued — keeping the "
+                      "previous base nonce so the session survives",
+                 (unsigned) this->short_address_);
+        return;
+      }
+
+      s_base_nonce_map[this->short_address_] = base;
       ESP_LOGI(TAG, "Sent BaseNonceExchange (base=0x%08x) to peer %u",
                (unsigned)base, (unsigned)this->short_address_);
     }

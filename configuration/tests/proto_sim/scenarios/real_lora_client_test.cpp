@@ -2641,6 +2641,82 @@ TEST(PlacedDownlinks, ABaseNonceExchangeIsPlacedAndAlwaysABurst) {
     EXPECT_NE(h.tracker.last_copies, 1) << "never one copy for a key install";
 }
 
+TEST(PlacedDownlinks, ARefusedBaseNonceExchangeLeavesTheSessionWorking) {
+    // T-2's sharp edge, and the reason send_aligned_ stopped returning void.
+    //
+    // send() refuses a frame when the buffer pool is exhausted — five buffers
+    // against a queue of twenty, and a placed frame holds its buffer until its
+    // mark, so a fleet-wide push runs out. The mark is correctly not consumed,
+    // and that was already handled. What was NOT is that no producer could see
+    // the refusal.
+    //
+    // For this frame that was a session break: the new base nonce was stored in
+    // s_base_nonce_map BEFORE the send, so on a refusal the hub began deriving
+    // its IVs from a nonce the node had never been told. Nothing either end
+    // sent could be decrypted by the other and only a REGISTER recovered it —
+    // from a full buffer pool, with one warning line in the log.
+    //
+    // Committing after a successful handoff leaves BOTH ends on the previous
+    // base, which is a working session that the caller can simply retry.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();          // real AEAD, not a stub: the tag is the point
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+
+    // Establish a working session, so there is a nonce that must survive.
+    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(h.rol.session_confirmed_);
+
+    // Now the pool is full: the next handoff is refused.
+    h.tracker.drop_next_sends = 1;
+    h.rol.send_base_nonce_exchange();
+
+    EXPECT_TRUE(h.rol.session_confirmed_)
+        << "a frame that never left the hub must not take the session with it";
+
+    // The proof is that the PREVIOUS nonce still decrypts. An encrypted beacon
+    // the node builds with the base it actually holds must still verify here,
+    // and the phase report inside it is the observable that says it did — the
+    // GCM tag gates handle_beacon_, so a hub that had rolled its nonce forward
+    // would reject this frame and report nothing.
+    proto_sim::LoraClientResponseMessage inner;
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = 2;
+    inner.header.senderAddress = 18;
+    inner.header.msgId         = h.rol.frame_counter_.rx_message_id + 1;
+    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Beacon;
+    inner.beacon.fwVersion          = 0x00010203;
+    inner.beacon.phasePresent       = true;
+    inner.beacon.phase.rtcSlowSrc   = 2;
+    inner.beacon.phase.errUs        = 77;
+    inner.beacon.phase.spreadUs     = 88;
+    inner.beacon.phase.samples      = timedmode::kPromotionPhaseSamples;
+    inner.beacon.phase.outsideGuard = 0;
+
+    auto plain = proto_sim::serialize_resp_payload(inner);
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
+                                inner.header.senderAddress, inner.header.msgId, aad);
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
+    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
+                                          plain.data(), plain.size());
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = inner.header;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.ciphertext = enc.ciphertext;
+    auto frame = proto_sim::serialize_resp(outer);
+    h.rol.set_response(frame.data(), frame.size());
+
+    EXPECT_EQ(h.rol.hubBelief().phase_err_us, 77)
+        << "the hub must still be on the base nonce the node actually holds — "
+           "this beacon was encrypted with it, and a rolled-forward nonce "
+           "would have failed its tag and reported nothing";
+}
+
 TEST(PlacedDownlinks, ARoutineDownlinkDoesNotEraseRuleFoursExposure) {
     // The defect routing these through send_aligned_ would have made routine.
     //

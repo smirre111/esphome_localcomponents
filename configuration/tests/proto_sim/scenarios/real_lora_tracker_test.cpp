@@ -1077,3 +1077,107 @@ TEST(RealTrackerTx, TheBufferOfADroppedFrameGoesBackToThePool) {
     EXPECT_EQ(firstByteOfPacket(1), 8);
     EXPECT_EQ(firstByteOfPacket(2), 12);
 }
+
+// ---------------------------------------------------------------------------
+// T-2: the buffer pool against the queue it feeds
+//
+// The queue holds RX_QUEUE_SIZE (20) entries, but nothing can ENTER it without
+// a buffer from a pool of POOL_SIZE (5), and a PLACED frame holds its buffer
+// from send() until its mark. So the pool, not the queue, is the real depth —
+// and the scenario that finds out is a fleet-wide push, where each node's frame
+// is placed on that node's own mark and all 32 marks fall inside one round.
+//
+// This was T-2 in the plan's index, filed under "gaps in what can be tested at
+// all". These tests are what it asked for: the limit, measured, and what the
+// hub does at it.
+// ---------------------------------------------------------------------------
+
+TEST(RealTrackerTx, ThePoolIsTheRealQueueDepthNotTheQueueSize) {
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    // Place frames far enough out that every one is still holding its buffer.
+    TxPolicy placed;
+    placed.copies      = 1;
+    placed.earliest_us = 10'000'000;
+
+    size_t accepted = 0;
+    for (int i = 0; i < RX_QUEUE_SIZE; ++i) {
+        auto f = tagged((uint8_t) (0xC0 + i));
+        if (t.send(f.data(), f.size(), placed)) ++accepted;
+    }
+
+    EXPECT_EQ(accepted, (size_t) POOL_SIZE)
+        << "the queue advertises " << RX_QUEUE_SIZE << " slots and cannot use "
+           "them: a frame needs a buffer to enter it, and a placed frame holds "
+           "its buffer until its mark";
+    EXPECT_LT(accepted, (size_t) RX_QUEUE_SIZE)
+        << "if these are ever equal the sizing has been reconciled and this "
+           "test should be re-read rather than re-baselined";
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0)
+        << "nothing is eligible yet, so nothing has gone out";
+}
+
+TEST(RealTrackerTx, AnExhaustedPoolIsReportedRatherThanDroppedSilently) {
+    // send() returns bool for exactly this. It used to return void, so a mark
+    // was recorded as spent for a frame that never entered the queue — pushing
+    // the next real command a further round out, with nothing said.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    TxPolicy placed;
+    placed.copies      = 1;
+    placed.earliest_us = 10'000'000;
+    for (int i = 0; i < POOL_SIZE; ++i) {
+        auto f = tagged((uint8_t) (0xD0 + i));
+        ASSERT_TRUE(t.send(f.data(), f.size(), placed)) << "buffer " << i;
+    }
+
+    // A DELTA, not an absolute, and the reason matters beyond this test: the
+    // pool and its statistics are FILE-STATICS in lora_tracker.cpp, not
+    // members. So every LORATracker in a process shares one pool of five, and
+    // init_memory_pool() re-initialises that shared pool rather than its own.
+    // Harmless on a hub, which has exactly one tracker; it is why this test
+    // cannot read the count as a fresh zero, and worth knowing before anyone
+    // constructs a second tracker.
+    const uint32_t before = t.poolAllocationFailures();
+
+    auto overflow = tagged(0xDF);
+    EXPECT_FALSE(t.send(overflow.data(), overflow.size(), placed))
+        << "the caller MUST be able to see that this frame was not accepted, "
+           "or it will consume the node's mark for a frame that never existed";
+    EXPECT_EQ(t.poolAllocationFailures(), before + 1u)
+        << "and it has to be countable, not only loggable — a schedule push "
+           "that silently loses a third of a fleet looks exactly like a push "
+           "that worked";
+}
+
+TEST(RealTrackerTx, DrainingAPlacedFrameReturnsItsBufferForTheNextOne) {
+    // The pool is only a hard ceiling while frames are WAITING. Once a placed
+    // frame fires, its buffer comes back and the next send succeeds — which is
+    // why a rate-limited fleet push works within a pool of five and an
+    // all-at-once one does not.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    TxPolicy placed;
+    placed.copies      = 1;
+    placed.earliest_us = 1'000'000;
+    for (int i = 0; i < POOL_SIZE; ++i) {
+        auto f = tagged((uint8_t) (0xE0 + i));
+        ASSERT_TRUE(t.send(f.data(), f.size(), placed));
+    }
+    auto rejected = tagged(0xEF);
+    ASSERT_FALSE(t.send(rejected.data(), rejected.size(), placed));
+
+    // Let one fire.
+    ASSERT_TRUE(t.serviceTxQueue(1'000'000));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+
+    auto now_ok = tagged(0xEE);
+    EXPECT_TRUE(t.send(now_ok.data(), now_ok.size(), placed))
+        << "the fired frame's buffer must be back in the pool";
+}
