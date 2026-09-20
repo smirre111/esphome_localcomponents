@@ -154,14 +154,25 @@ From `tests/proto_sim/README.md`, all learned the hard way:
   inside `classa::rx1OpenUs/rx1CloseUs`, that a placed T0 is a fixed point of
   `nextT0ForSlotUs` for that slot. Those fail when the arithmetic is wrong;
   restatements cannot.
-- **Neither `LoraInterface.cpp` nor `frtosTasks.cpp` is compiled by the host
-  suite** — `proto_sim/CMakeLists.txt` shims `LoraInterface.h`. Everything about
-  task ordering, the DIO0 interrupt task, cross-core access and radio arming is
-  therefore untestable here, and two real defects (a Mode A window completing
-  the Class A sequence; a torn 64-bit read of `classa_.t0_uplink_us`) were fixed
-  without any test able to reach them. A dispatcher-level test that calls
-  `noteUplinkSent` then `noteClassAWindowResult` in order on one object is
-  asserting the sequence that does *not* occur in production.
+- **`frtosTasks.cpp` is not compiled by the host suite, and neither file's
+  `for(;;)` body can be entered.** *Corrected 2026-09:* `LoraInterface.cpp` IS
+  compiled now, by `real_lora_interface_test`, which links the real
+  `components/lora` driver against a recording HAL
+  (`shims_node/lora_hal_stub_node.cpp`). What that buys is the PHY and the
+  start state — `init()` programs SF7/BW500/CR4-8, preamble 8, sync 0x12, CRC
+  on; the test recomputes `kSymbolTimeUs` (256) and `kCadUs` (320) from the
+  values the radio was handed, so it fails if a PHY change invalidates the
+  timing arithmetic instead of merely restating the constants — plus radio
+  asleep with interrupts cleared, DIO1 mapped to `RX_TIMEOUT`,
+  `sendPacketBytes()` byte-exact, and `maxUplinkAimWaitUs() == 290 ms`.
+  The other targets still shim `LoraInterface.h`, so they see none of this.
+  What remains untestable is task ordering, the DIO0 interrupt task, cross-core
+  access and window arming: all of it lives in task loops. Two real defects (a
+  Mode A window completing the Class A sequence; a torn 64-bit read of
+  `classa_.t0_uplink_us`) were fixed without any test able to reach them, and
+  that is still so. A dispatcher-level test that calls `noteUplinkSent` then
+  `noteClassAWindowResult` in order on one object is asserting the sequence
+  that does *not* occur in production.
 - **The shim tracker models no transmit queue.** `shims/.../lora_tracker.cpp`'s
   `send()` records the policy and emits into the SimRadio immediately, and
   `busy_until_us` is a field tests set that `send()` never updates. So a

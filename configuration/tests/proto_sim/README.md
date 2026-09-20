@@ -160,15 +160,60 @@ Each test is spot-check-verified: e.g. reverting `LOGIN_RATE_LIMIT_MS =
 5000` to `0` in production source makes the rate-limit test fail; restore
 and it passes.
 
+### The real `LoraInterface.cpp` and the real driver
+
+`real_lora_interface_test` is the one target that does NOT shim
+`LoraInterface.h`. It compiles the real
+`components/lora/lora.c` driver and the real `main/LoraInterface.cpp`,
+with `shims_node/lora_hal_stub_node.cpp` standing in for the SPI/GPIO
+layer and recording every register write, PHY setting, DIO mapping and
+transmitted payload into `shims_node/lora_node_recorder.h`.
+
+Two things to know before touching it:
+
+* It has its own `IFACE_STAGE` and its own copy of `CmdDispatcher.cpp`,
+  because `real_cmd_dispatcher` was compiled against the *shim*
+  `LoraInterface.h` and the two definitions cannot be linked together.
+* The real driver's include directory must be ordered **before**
+  `NODE_SHIM_DIR`, and `lora_hal_stub_node.cpp` includes its header as
+  `<lora.h>`, not `"lora.h"`. A quoted include resolves to the shims' own
+  13-line `lora.h` stub first, whose inline bodies then collide with the
+  real ones.
+
+What it pins is the PHY the whole design is derived from: `init()`
+programs SF7 / BW500 / CR4-8 / preamble 8 / sync 0x12 / CRC on, and the
+test *recomputes* `LoraTiming.h`'s `kSymbolTimeUs` (256) and `kCadUs`
+(320) from the values the radio was handed rather than re-asserting the
+constants — so a PHY change that quietly invalidates every timing number
+in the plan fails here instead of in the field. It also pins the
+asleep-with-interrupts-cleared start state, DIO1 → `RX_TIMEOUT` (the only
+edge that ends a receive window), byte-exactness of `sendPacketBytes()`,
+and `maxUplinkAimWaitUs() == 290 ms`.
+
+What it cannot reach: the `for(;;)` bodies. The transmit sequence in
+`loraRxTask` — reset the CAD queue, CAD, the aimed wait, fire — and the
+interrupt handling in `frtosTasks.cpp` are task loops, so a log line
+inside the aimed critical path (~3.5 ms of UART inside a ±14 080 µs guard
+band; this actually happened) still would not be caught. `frtosTasks.cpp`
+is not compiled at all: it needs an ADC shim and the motor/battery task
+surface. Extracting those bodies is the same move that made the node's
+uplink path testable (`CmdDispatcher::serviceTxCommand` /
+`runOneTxCommand`).
+
 ### Remaining phase-3 work
 
 * Port the remaining hub-side scenarios (A4, B3, C1–C3, D1–D5, E1–E6) to
   the real LORAListener via the same adapter pattern.
 * Add more node-side scenarios (CLIENTCONFIG happy path, encrypted reply
   round-trip with pack_response_message, geometry application).
-* Compile the real `lora_tracker.cpp` against shims (currently the hub
-  test uses a minimal shim implementation of `LORATracker::send` /
-  `register_client`).
+* ~~Compile the real `lora_tracker.cpp` against shims~~ — **done**, as
+  `real_lora_tracker_test`. The shim `LORATracker` still exists and is
+  what `e2e_test` and the older hub scenarios drive, so it remains true
+  that those cannot see frame placement, the prepare/fire split or queue
+  supersession; only the real target can.
+* Extract the `loraRxTask` transmit sequence and the `frtosTasks.cpp`
+  interrupt body out of their task loops, and compile `frtosTasks.cpp`
+  (needs an ADC shim + the motor/battery surface). See the section above.
 
 ### Portability bug fixed by phase 3
 

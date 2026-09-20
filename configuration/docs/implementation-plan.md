@@ -38,7 +38,7 @@ Row ids are prefixed **D** (defect), **U** (unwired), **T** (testability) and
 **K** (known and accepted). They are deliberately NOT in the `B-1 … B5 / C2 /
 HW-n` families, which name the PHASES of this plan and are already spoken for.
 
-**Nothing below is deployed.** The host suite is green at 848 and says nothing
+**Nothing below is deployed.** The host suite is green at 880 and says nothing
 about a roof. That is the largest open item and it is not a row.
 
 ### Fixed by the end-to-end suite
@@ -56,9 +56,12 @@ that agreed with each other by construction.
 
 ### Bugs — something behaves wrongly today
 
-Two. Both are known, both have a reason they are still here, and neither is a
-repair — each needs a decision first. The list is short on purpose: a backlog
-padded with work nobody has argued for is how a real item gets lost.
+**None open.** Both rows that stood here needed a decision before they could be
+touched, and both decisions were made: D-1 became a new frame type, D-2 turned
+out to be already handled by a mechanism pointing the other way. They are kept
+struck through rather than deleted, because what each one *concluded* is the
+part worth not re-deriving. The list stayed short on purpose: a backlog padded
+with work nobody has argued for is how a real item gets lost.
 
 | # | what | where | why it is not done | §ref |
 |---|---|---|---|---|
@@ -79,7 +82,7 @@ padded with work nobody has argued for is how a real item gets lost.
 
 | # | what | why it matters | §ref |
 |---|---|---|---|
-| T-1 | **`LoraInterface.cpp` and `frtosTasks.cpp` are not compiled by the host suite.** | This is why two defects this year were invisible: the uplink-aim call site is untested, and a log line inside the aimed critical path was caught by reading the diff rather than by a test. Every fix in those files is made blind. **Highest-value structural item.** | §11b |
+| T-1 | **`frtosTasks.cpp` is not compiled by the host suite, and the two `for(;;)` task bodies are unreachable.** — *`LoraInterface.cpp` now compiles.* `real_lora_interface_test` builds the real driver and the real file, and pins the PHY every timing number is derived from (SF7/BW500/CR4-8 → `kSymbolTimeUs` 256, `kCadUs` 320, recomputed from what the radio was handed, not re-asserted), plus the asleep-with-interrupts-cleared start state, DIO1→`RX_TIMEOUT`, and the 290 ms `maxUplinkAimWaitUs()` bound. | What remains is the part that hurt: the transmit sequence in `loraRxTask` (CAD, the aimed wait, the fire) and the interrupt handling in `frtosTasks.cpp` are task loops, so the log line that sat inside the aimed critical path would *still* not be caught by a test. Extracting those bodies is the same move that made the uplink path testable (`serviceTxCommand`); `frtosTasks.cpp` additionally needs an ADC shim and the motor/battery surface. **Highest-value structural item.** | §11b |
 | T-2 | The 5-entry buffer pool (`POOL_SIZE`) against a 16-entry queue, and a placed frame holds its buffer until its mark. | A fleet pushing schedules could starve the pool, and `send()` drops silently when it does. | §8 B1a |
 | ~~T-3~~ | ~~`processTxCommand` is not covered end to end~~ — **CLOSED.** Its body is now `serviceTxCommand`, and `runOneTxCommand()` drives one iteration, so the host suite reaches the code that builds every uplink the node sends. The task still loops and blocks; behaviour is unchanged. | This is what made `e2e_test` possible at all. | §11b |
 
@@ -1492,9 +1495,13 @@ Recorded here rather than left to look maintained.
   offset misses EVERY mark and that is **HW-7's number showing itself in the one
   place it can be seen without a scope**; a silent fallback would look exactly
   like the offset working.
-  **Not covered:** the `LoraInterface.cpp` call site. That file is not compiled
-  by the host suite at all (§11a), so the aim is tested through the real
-  `CmdDispatcher` and the headers, and the wiring is not.
+  **Coverage, corrected 2026-09:** the file compiles now, and
+  `maxUplinkAimWaitUs()` is asserted to be 290 ms — larger than the 60 ms
+  offset, which is the bug that moved the bound off `aimUplink` in the first
+  place. The *call site* is still not covered: the wait itself lives inside
+  `loraRxTask`'s `for(;;)`, so the aim is tested through the real
+  `CmdDispatcher`, the headers, and the PHY the driver was handed, but the
+  sequence that consumes it is not.
   The exhaustive safety sweep was extended with the hub's phase dimensions and
   the bounded-exposure property still holds.
 
@@ -1624,12 +1631,28 @@ Recorded here rather than left to look maintained.
   The e2e harness drives the SHIM tracker, so it cannot reach frame placement,
   the prepare/fire split, or queue supersession; those need the real
   `LORATracker` and are tested against it in `real_lora_tracker_test`.
-  What NEITHER can reach is `LoraInterface.cpp` and `frtosTasks.cpp` — see the
-  entry below, which is the one that is actually still open.
-- **`LoraInterface.cpp` and `frtosTasks.cpp` are not compiled by the host suite
-  at all** (the CMake shims `LoraInterface.h`). The Class A task-ordering defect
-  and the cross-core `classa_` read were both fixed blind, and no test in either
-  repo can reach them.
+  What NEITHER can reach is the two task loops — see the entry below, which is
+  the one that is actually still open.
+- **The two `for(;;)` task bodies are unreachable, and `frtosTasks.cpp` is not
+  compiled at all.** *Half of this closed 2026-09:* `real_lora_interface_test`
+  now compiles the real `components/lora` driver and the real
+  `LoraInterface.cpp` — the first test anywhere to build the file — and pins the
+  PHY that every timing number in this plan is derived from: it reads back
+  SF/BW/CR/preamble/sync/CRC from the radio and *recomputes* `kSymbolTimeUs`
+  (256) and `kCadUs` (320) from them rather than re-asserting the constants, so
+  a PHY change that silently invalidates §4's arithmetic fails here. It also
+  pins the asleep-with-interrupts-cleared start state and DIO1→`RX_TIMEOUT`,
+  which is the only edge that produces `noteMarkMissed()`.
+  What is still blind is the part that cost something: the transmit sequence in
+  `loraRxTask` (reset the CAD queue, CAD, the aimed wait, fire) and the
+  interrupt handling in `frtosTasks.cpp`. The log line that had been sitting
+  *inside* the aimed critical path — ~3.5 ms of UART in a ±14 080 µs guard band,
+  found by reading the diff — would still not be caught by any test. Extracting
+  those bodies is the move that made the node's uplink path testable
+  (`CmdDispatcher::serviceTxCommand`); `frtosTasks.cpp` additionally needs an
+  ADC shim and the motor/battery task surface. The Class A task-ordering defect
+  and the cross-core `classa_` read were both fixed blind, and that is still
+  true of anything inside those loops.
 
 **What was sound all along:** the nonce design itself. `send_login()` mints a
 fresh base nonce *and* zeroes both counters together; `send_base_nonce_exchange()`
