@@ -14,7 +14,11 @@ instrument (HW-1's mean, HW-4).
 **The bench node now runs fw 1.1.2** (`6030a2c`) against hub `6c77067`
 (2026-09-21). The HW table immediately below was last re-verified on
 **2026-09-19** against fw 1.0.95 / hub `3970436`, and nothing since has
-re-measured those ten items — so read the table as of that date, not this one.
+re-measured those ten items EXCEPT **HW-5**, which was re-verified on fw 1.1.2
+on 2026-09-21: a 300 s single-copy Mode B run gave `residual 0 ppm, n 198 over
+297 s`, `raw +9 ppm`, `windows 198/198`, `WMR 0`, `refusal 0`, `mode actually
+run 2`, and oneShot n 198 against 198 armed — every clause of the pass line met.
+Read the REST of the table as of 2026-09-19, not this date.
 
 **Status as of 2026-09-19** (fw 1.0.95, hub `3970436`):
 

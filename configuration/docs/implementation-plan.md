@@ -2465,6 +2465,48 @@ two others noted below that were not controlled.
   residual −24 anomaly therefore remains open, and still needs its single-copy
   re-measure before anything is concluded about the clock.
 
+**THE SINGLE-COPY RE-MEASURE (07:48–07:54) — the ppm anomaly is CLOSED, and
+Mode B MAC-0 PASSES on 1.1.2.** `Mode Test B — timed windows`: 300 s, grid
+1500 ms, ONE copy, production profile, node up since 07:33 (anchor settled).
+
+| Mode B, MAC-0 (1.1.2, single copy) | value | against the pass line |
+|---|---|---|
+| mode actually run / arm refusal | **2** / **0** | mode engaged |
+| windows armed / hit | **198 / 198** | armed > 0 |
+| WMR / DUP | **0 ppm** / 0 ppm | — |
+| detected / crcValid / addressed / micValid | 198 / 198 / 198 / 198 of 199 sent | **true FER 0** |
+| FER_link | 5 025 ppm — one mark lost | — |
+| phaseErr p50 / p99 / max | **+47** / **925** / 933 us, n 198 | inside the 14 080 us guard |
+| armResidual p99 / oneShot p99 | 453 us / −469 us | — |
+| **HW-8:** oneShot n vs windows armed | **198 vs 198 → 0 missed** | zero misses |
+| raw clock rate / period | **+9 ppm**, n 198, 1 500 014 us | — |
+| **residual — \|ppm\| < 20** | **0 ppm**, n 198 over 297 s | **PASS** |
+
+* **`ppm −25` was an artefact of the 8-copy run, not a clock regression.** The
+  clock reads +9 raw / 0 residual, agreeing with every earlier figure on this
+  node (+9/+10 raw, −1/0 residual) and with DriftTest's +8. The anomaly recorded
+  above is CLOSED and nothing about the clock changed. Recording it as anomalous
+  rather than as a regression was the right call.
+* **The 88 ms p99 is dominated by the PROVISIONAL ANCHOR, not by copy count.**
+  Three runs on one day separate the two terms, which no single run could:
+
+  | run | copies | anchor | phaseErr p99 |
+  |---|---|---|---|
+  | 07:14 (1.1.1) | 8 | **provisional** — node up since 06:56 | **88 276 us** |
+  | 07:40 (1.1.2) | 8 | settled | 3 625 us |
+  | 07:48 (1.1.2) | 1 | settled | **925 us** |
+
+  Copies cost ~2.7 ms of tail; the anchor costs ~85 ms. This SUPERSEDES both the
+  original copy-stride claim and the hedged correction above. It is still three
+  runs rather than a controlled experiment — a deliberate boot-minute grid
+  adoption would confirm it, and the mechanism is already documented above at
+  −7 917 us and −18 330 us on earlier re-solves.
+* **A THIRD confirmation of the visibility gap, now with no burst involved.** No
+  beacon was emitted during the run, and the hub read `5 / 0 / 7 / 0` throughout
+  while the node armed and hit 198 Mode B windows. Burst or single copy, the hub
+  cannot see a node that has nothing else to say. Three runs, two firmwares, two
+  copy counts, one result.
+
 **MEASURED 2026-09-21 — fw 1.1.1: reception is flawless, and the hub still cannot
 see it.** Node 2 fw 1.1.1 (`62563ba`), hub `6c77067`, production profile, Timed
 Mode ON, node **INTERACTIVE** (never sleeps, so never beacons of its own accord),
