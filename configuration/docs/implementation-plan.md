@@ -2530,6 +2530,44 @@ reported v=0.00 for a healthy battery.
   `AWakeWithAnUnchangedReasonSpendsOneUplinkNotTwo`: deterministic, red-first
   proven, and it dies under a mutant that stops the state surviving a wake.
 
+**MODE A ON 1.1.4 — RAN, DID NOT PASS, CAUSE NOT YET ATTRIBUTED (21:36–21:52).**
+900 s, grid 1093 ms, Timed Mode OFF. Recorded as taken rather than held back,
+because a run that failed is evidence and a run quietly re-taken until it
+passes is not.
+
+| Mode A | 1.1.2 (passed) | 1.1.4 |
+|---|---|---|
+| mode actually run / arm refusal | 1 / 0 | **1 / 0** |
+| detected / crcValid / addressed | 51 / 51 / 51 | **58 / 58 / 58** — true FER **0 of 58** |
+| ppmSamples over elapsed | 51 over 899 s | **57 over 899 s** |
+| FER_link | 935 196 ppm | 914 956 ppm — listening duty, NOT loss |
+| DUP | 0 | **17 241 ppm** |
+| seq range | 5..791 | **19..700** — joined LATE |
+| **raw clock rate** | **+10 ppm**, 1 093 012 us | **−251 ppm**, **1 092 605 us** |
+
+Every clause holds except the rate, and that one is far out: −251 ppm where
+every previous run on this node reads +9/+10. The measured period is 395 us
+short of the 1 093 000 us nominal, consistent in sign and size with the ppm
+figure, so it is not a display artefact.
+
+**NOT attributed to 1.1.4**, and deliberately so. The 1.1.4 change is RTC-backed
+announcement bookkeeping; it touches neither the clock nor the mark path. Two
+setup suspects come first:
+
+* **The run was pressed TWICE** (21:36:53, then again at 21:38:56 while it was
+  already running). The node refuses a re-arm — "already running; the frames are
+  the test" — but the HUB restarted its mark stream, so the hub's marks and the
+  node's own deadline were no longer aligned. `seq 19..700` rather than from 1
+  says the node joined late, and the rate is a run-scoped fit over mark T0
+  against nominal index x period. A desynchronised stream is exactly what
+  corrupts that fit.
+* **DUP 17 241 ppm**, absent from the 1.1.2 run: something was counted twice,
+  which is the signature the double press would leave.
+
+Re-run single-press before drawing any conclusion about the clock. The same
+discipline the `ppm −25` anomaly got on 2026-09-21, and that one turned out to
+be an artefact of the 8-copy run rather than a regression.
+
 **CAMPAIGN VERDICT — two of three modes on one build.**
 
 | step | result |
