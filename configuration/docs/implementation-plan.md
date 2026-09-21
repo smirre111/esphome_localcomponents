@@ -2506,6 +2506,23 @@ hold on 1.1.2 — which has never been true before.** Mode C's node-side behavio
 is indistinguishable from its 1.0.94 pass; what has moved is the hub's counter
 fit, and until that is explained the mode cannot honestly be called measured.
 Not a regression in the node, and not a pass either.
+
+**MODE C's ppm IS DEPRIORITISED — decided 2026-09-21, with the arithmetic.**
+The wake-clock rate does not gate reception in Class A. The RX windows open at a
+fixed delay after the node's OWN uplink, so hub↔node clock drift cannot move a
+window relative to the frame it is waiting for. What the rate actually feeds is
+the hub's PREDICTION of when a sleeping node will next check in
+(`next_wake_epoch_`, `node_overdue`, and the awake-gating that stops the hub
+bursting at a sleeping node).
+
+At the measured −49 ppm, a 900 s sleep is mispredicted by **44 ms** — against a
+check-in window measured in seconds. The error is three orders of magnitude
+inside what the prediction needs.
+
+So Mode C's `|ppm| < 20` line stays on the books as a *quality* measure, not a
+gate: the counter-fit discrepancy above is recorded, is not a node regression,
+and is **not a blocker for anything**. Re-open it only if the hub's check-in
+prediction is ever observed to be wrong in practice.
   above predicts.
 
 **MEASURED 2026-09-21 — fw 1.1.2: the mode announcement reaches the hub, and the
