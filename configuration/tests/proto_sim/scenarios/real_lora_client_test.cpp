@@ -232,10 +232,12 @@ TEST(RealLoraClient, DoLoginAndArmRetryResetsBeforeSend) {
 
 namespace real_helpers {
 
-inline std::vector<uint8_t> serialize_register(uint64_t mac) {
+inline std::vector<uint8_t> serialize_register(uint64_t mac,
+                                              bool needs_config = false) {
     proto_sim::LoraClientResponseMessage m;
-    m.proto        = proto_sim::LoraClientResponseMessage::Proto::Register;
-    m.reg.mac_addr = mac;
+    m.proto            = proto_sim::LoraClientResponseMessage::Proto::Register;
+    m.reg.mac_addr     = mac;
+    m.reg.needs_config = needs_config;
     return proto_sim::serialize_resp(m);
 }
 
@@ -284,7 +286,10 @@ TEST(RealLoraClient, RegisterTriggersClientConfigAndLoginTimer) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
 
-    auto reg = serialize_register(kMacRol2);
+    // An UNPROVISIONED node: it holds no session, so plaintext is the only way
+    // to reach it and accepting it is the bootstrap. This is the one case where
+    // the config goes out immediately, in the clear.
+    auto reg = serialize_register(kMacRol2, /*needs_config=*/true);
     h.rol.set_response(reg.data(), reg.size());
 
     EXPECT_TRUE(h.rol.registered_)
@@ -615,6 +620,68 @@ TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
     ASSERT_EQ(found, 1) << "exactly one TimeSync must follow session confirmation";
     EXPECT_EQ(got.epoch,     static_cast<uint64_t>(kHubEpoch));
     EXPECT_EQ(got.utcOffset, 7200);
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
+    // send_remote_config() packed raw, so ClientConfig ALWAYS went out in the
+    // clear — including to a provisioned node, which refuses plaintext commands
+    // because ClientConfig sets its address, subnet, name and sleep duration and
+    // an unauthenticated frame must not be able to re-address a node. The hub
+    // sent it anyway on the first REGISTER after every hub boot, set
+    // config_synced_ = true regardless, and never retried: a config change
+    // flashed into the hub was lost with nothing logged as a failure.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    // A PROVISIONED node re-registering after a hub reboot: needs_config false,
+    // but this hub boot has not pushed yet.
+    auto reg = real_helpers::serialize_register(kMacRol2, /*needs_config=*/false);
+    rol.set_response(reg.data(), reg.size());
+
+    auto count_plaintext_config = [&]() {
+        int n = 0;
+        for (const auto& f : radio.hub_to_node_frames()) {
+            auto m = proto_sim::as_op(f);
+            if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::ClientConfig)
+                ++n;
+        }
+        return n;
+    };
+    EXPECT_EQ(count_plaintext_config(), 0)
+        << "a provisioned node would drop this; sending it is wasted airtime "
+           "and the config change is lost";
+    EXPECT_FALSE(rol.config_synced_)
+        << "a push that did not happen must not be recorded as one that did";
+
+    // Now the session comes up. That is the first moment the config CAN be
+    // encrypted, and it must go then.
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(rol.session_confirmed_);
+
+    EXPECT_TRUE(rol.config_synced_)
+        << "the deferred push must actually happen once the session exists";
+    EXPECT_EQ(count_plaintext_config(), 0)
+        << "and it must go out ENCRYPTED — a readable ClientConfig on the air "
+           "is one the node refuses";
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);

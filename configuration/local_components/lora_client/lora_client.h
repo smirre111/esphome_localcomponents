@@ -504,6 +504,12 @@ namespace esphome
       // the authenticated counter. Deliberately separate from
       // frame_counter_.rx_message_id and never persisted: it exists only to
       // stop the same unauthenticated frame being replayed without limit.
+      // handle_register_ defers a provisioned node's config push to
+      // confirm_session_, which is the first moment it can be encrypted. The
+      // REGISTER frame is kept so the child components still get their
+      // dispatch (CoverConfig and friends) at the same time.
+      bool                 config_push_pending_{false};
+      std::vector<uint8_t> pending_register_frame_;
       uint32_t plaintext_hwm_{0};
       bool     have_plaintext_hwm_{false};
       uint32_t node_sched_version_{0};

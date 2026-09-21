@@ -831,16 +831,29 @@ namespace esphome
         // Free before dispatching — nodes re-parse the raw bytes independently.
         lora_client_response_message__free_unpacked(rcv_message, NULL);
 
-        if (push_config)
+        // An unprovisioned node holds no session, so plaintext is the only way
+        // to reach it and it accepts it — that is the bootstrap. A PROVISIONED
+        // node is the opposite case: it has a session and refuses plaintext
+        // commands, so pushing now would send two ~1.5 s bursts the node drops
+        // on the floor. Defer that push to confirm_session_, which is the first
+        // moment the hub can encrypt it.
+        if (push_config && needs_cfg)
         {
-          ESP_LOGI(TAG, "[%s] Pushing config (needs_config=%d synced_this_boot=%d)",
-                   this->get_name().c_str(), (int)needs_cfg, (int)this->config_synced_);
+          ESP_LOGI(TAG, "[%s] Pushing config in the clear (node reports unprovisioned)",
+                   this->get_name().c_str());
           this->send_remote_config();   // ClientConfig (address, subnet, name, sleepDuration)
           // Dispatch REGISTER to all nodes so each can send its own configuration
           // (e.g. LoraCoverComponent sends CoverConfig; sensor is a no-op).
           for (auto *node : this->nodes_)
             node->set_response(data, len);
           this->config_synced_ = true;
+        }
+        else if (push_config)
+        {
+          ESP_LOGI(TAG, "[%s] Config push deferred until the session is confirmed",
+                   this->get_name().c_str());
+          this->config_push_pending_ = true;
+          this->pending_register_frame_.assign(data, data + len);
         }
         else
         {
@@ -1013,6 +1026,27 @@ namespace esphome
     void LORAListener::confirm_session_()
     {
       this->session_confirmed_ = true;
+
+      // The deferred config push from handle_register_. This is the first
+      // moment it can be encrypted, and a provisioned node will not accept it
+      // any other way. config_synced_ is set HERE rather than at the point the
+      // push was decided, so a push that never happened is not recorded as one
+      // that did.
+      if (this->config_push_pending_)
+      {
+        this->config_push_pending_ = false;
+        ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred config push",
+                 this->get_name().c_str());
+        this->send_remote_config();
+        if (!this->pending_register_frame_.empty())
+        {
+          for (auto *node : this->nodes_)
+            node->set_response(this->pending_register_frame_.data(),
+                               this->pending_register_frame_.size());
+          this->pending_register_frame_.clear();
+        }
+        this->config_synced_ = true;
+      }
       if (!this->login_acked_)
       {
         this->login_acked_         = true;
@@ -1098,10 +1132,25 @@ namespace esphome
         // If we don't have a base nonce for this peer (e.g. recovery after reboot),
         // re-provision one, send it, and discard this packet — the node will restart
         // its encryption with the new nonce on the next transmission.
+        //
+        // Through send_login(), NOT send_base_nonce_exchange(). Both mint a
+        // nonce and store it in s_base_nonce_map, but BaseNonceExchange goes out
+        // as a plaintext CMD_BASENONCE, and a provisioned node refuses plaintext
+        // commands — it holds a session, so an unauthenticated frame offering it
+        // a new key is exactly what it must not act on. CMD_LOGIN is the one
+        // exemption the node makes, because LoginMsg carries the base nonce and
+        // IS the bootstrap; it is the designed recovery path and the only one
+        // that works here.
+        //
+        // This matters most after a HUB reboot: s_base_nonce_map lives in RAM,
+        // so the hub comes back holding no nonce for any node while every node
+        // still holds its own in NVS. Re-provisioning by a route the node
+        // refuses would leave a whole provisioned fleet unreachable until it was
+        // re-flashed.
         if (s_base_nonce_map.find(sender) == s_base_nonce_map.end())
         {
-          ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning", sender);
-          this->send_base_nonce_exchange();
+          ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", sender);
+          this->send_login();
           return;
         }
 
@@ -3417,15 +3466,23 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
 
       op_message.clientconfig = &clientconfig;
 
-      uint8_t *txBuf;
-      unsigned len;
-      len = lora_client_operation_message__get_packed_size(&op_message);
-      txBuf = new uint8_t[len];
-      lora_client_operation_message__pack(&op_message, txBuf);
-
-      // this->parent_->sendPacketOnce(txBuf, len);
+      // Packed through s_pack_operation_message so it is ENCRYPTED whenever a
+      // session exists. This used to pack raw and therefore always went out in
+      // the clear — and a provisioned node refuses a plaintext ClientConfig,
+      // because ClientConfig sets its address, subnet, name and sleep duration
+      // and an unauthenticated frame must not be able to re-address a node.
+      // The hub then set config_synced_ = true regardless and never retried, so
+      // a config change flashed into the hub was lost silently.
+      uint8_t *txBuf = nullptr;
+      size_t   len   = 0;
+      if (!s_pack_operation_message(&op_message, this->session_confirmed_,
+                                    &txBuf, &len))
+      {
+        ESP_LOGE(TAG, "[%s] Failed to pack ClientConfig", this->get_name().c_str());
+        return;
+      }
       this->parent_->send(txBuf, len);
-      delete[] txBuf;
+      free(txBuf);
     }
 
   } // namespace lora_tracker
