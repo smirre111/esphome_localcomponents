@@ -1,5 +1,20 @@
 # MAC-0 final verification campaign — all three modes, ONE build
 
+> **RUN AND CONCLUDED 2026-09-21 on node fw 1.1.4.** A **PASS** (true FER 0 of
+> 52, +9 ppm, n 52 over 899 s). B **PASS** (residual 0 ppm, windows 593/591,
+> HW-8 595 ≥ 593 → 0 missed, FER 0 of 599, phase p99 864 us). C **deprioritised
+> by decision** — the wake-clock ppm gates nothing in Class A, since the RX
+> window hangs off the node's own uplink; −49 ppm is a 44 ms misprediction over
+> a 15 min sleep. Numbers in `implementation-plan.md` §12.
+>
+> The campaign was first taken on 1.1.2 and re-run on 1.1.4 after the
+> one-uplink fix, so the property and the fix are verified on the same image.
+>
+> **Two rules this cost two runs to learn — both now in the steps below:**
+> press a ModeTest **once** (a double press gave `DUP 17 241 ppm` and a nonsense
+> −251 ppm rate; one press gave +9), and **settle ~90 s after a reset** before
+> pressing — 18 s was not enough and the START was silently dropped.
+
 **Why this exists.** MAC-0 has passed in all three modes, but never on the same
 firmware. Mode B passed on fw **1.1.2** (2026-09-21); Mode A and Mode C last
 passed on **1.0.94** (2026-09-16). Between those builds the node retired the
