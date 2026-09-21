@@ -2393,6 +2393,32 @@ node's serial port resets a sleeping node, which is the thing under test.
   missed": that needs the node's own funnel, and the node's serial port is exactly what
   a Mode C run may not touch.
 
+**MAC-0 FINAL VERIFICATION CAMPAIGN — 2026-09-21.** Node 2 fw **1.1.2**
+(`6030a2c`), hub `731e979`, production profile. All three modes on ONE build,
+per `docs/mac0-final-campaign.md`. Step 0 complete: check-in 15 min, a single
+hub upload, and NO node flash — node 2 already ran the build under test, which
+is the property the campaign exists to establish.
+
+**STEP 1 — Mode A: PASS.** 900 s, grid 1093 ms, one copy, Timed Mode OFF.
+
+| Mode A, MAC-0 (1.1.2) | value | against the pass line |
+|---|---|---|
+| mode actually run / arm refusal | **1** / **0** | mode engaged |
+| detected / crcValid / addressed / micValid | **51 / 51 / 51 / 51** | **true FER 0 of 51** (95 % bound ≈ 5.9 %) |
+| marks sent / caught | 828 / 51 = **6.16 %** | matches the 6.26 % free-running duty |
+| FER_link | 935 196 ppm (93.5 %) | listening duty, **NOT loss** |
+| raw clock rate | **+10 ppm**, n 51, period 1 093 012 us | reported; Mode A has no residual |
+| ppmSamples | **51 over 899 s** | ≥ 30 over ≥ 200 s |
+| windows armed / WMR | 0 / 0 | n/a — Mode A arms no timed windows |
+| rtcSlowSrc / tick / cpu | **2** / 100 Hz / 240 MHz | crystal confirmed |
+
+* **Agrees with the last Mode A measurement** (fw 1.0.66, 2026-09-13): +10 ppm,
+  n 49, true FER 0 of 50, FER_link 93.6 %. Nothing about Mode A moved across
+  eleven firmware versions — which is the result a baseline is supposed to give.
+* The 6.16 % catch rate IS the free-running listen duty (29.44 ms every 470 ms =
+  6.26 %). That is why `FER_link` reads 93.5 %, and why that figure must never be
+  read as loss: the true FER is the stage 2→3 figure, and it is 0.
+
 **MEASURED 2026-09-21 — fw 1.1.2: the mode announcement reaches the hub, and the
 defect that had stopped it.** Node 2 fw 1.1.2 (`6030a2c`), hub `6c77067`.
 
