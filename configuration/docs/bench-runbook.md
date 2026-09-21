@@ -18,43 +18,33 @@ all (HW-6) and two need an external instrument (HW-1's mean, HW-4).
 |---|---|
 | **Hub** | `github.com/smirre111/esphome_localcomponents` — ESPHome custom components under `configuration/` |
 | **Node** | `github.com/smirre111/blindsesp` — ESP-IDF firmware under `main/`, driver under `components/lora/` |
-| **Branch, both repos** | **`claude/analysis-only-t4ter8`** |
+| **Branch, both repos** | **`main`** |
 
-**That branch is NOT merged into `main`, and in both repos it shares no common
-ancestor with `main` at all** — `git merge-base origin/main
-origin/claude/analysis-only-t4ter8` returns nothing, and the two have different
-root commits. This is not an old-vs-new difference that a rebase would settle:
-they are separate trees. The hub differs by 404 files and about 103 000 lines.
-
-**So a session that starts from `main` gets none of this.** No runbook, none of
-the 927 host tests, no `ModeTest` mode, no `TxRefusal`, no Mode B. Check the
-branch before anything else:
+`main` is the code. As of 2026-09-21 it carries everything: the protocol work,
+the 927 host tests, `ModeTest`, Mode B, and the battery-voltage ADC fixes.
+Nothing else needs checking out and nothing needs merging first.
 
 ```
-git -C <hub>  rev-parse --abbrev-ref HEAD    # claude/analysis-only-t4ter8
-git -C <node> rev-parse --abbrev-ref HEAD    # claude/analysis-only-t4ter8
+git -C <hub>  checkout main && git -C <hub>  pull
+git -C <node> checkout main && git -C <node> pull
 ```
 
-**Where `main` is nonetheless ahead, and why it does not appear to matter.**
-`main` carries ~1 360 lines this branch does not, and they were checked rather
-than assumed: they are almost entirely in files this branch rewrote wholesale
-(`lora_client.cpp`, the regenerated `blinds.pb-c.c`) plus a block of
-commented-out BLE dead code in `loracover/sensor/lora_sensor.cpp` that this
-branch deleted. `main`'s named features — `battery_update_interval`, the
-secrets.yaml credential move, the cover-duration calibrations, slim on-air
-packets, downlink encryption gated on a confirmed session — are all present
-here. **No file exists only on `main`.**
+**Why the history looks odd.** `main` was *adopted* rather than merged: the
+development line shared no common ancestor with the old `main`, so the adoption
+commit takes the development tree wholesale and records the old `main` as a
+second parent. Every old commit stays reachable. `git log main` therefore shows
+two unrelated root lines, and that is expected rather than damage. See
+`merge-to-main.md`.
 
-That is evidence, not proof: it was established by diffing trees, not by
-replaying 15 hub commits. If a bench result contradicts something you believe
-`main` fixed, this is the first thing to re-check, and the honest answer is to
-diff the specific file rather than to assume either branch is complete.
+**If you need the previously deployed code**, it is the branch
+`main-before-adopt-2026-09` in both repos — not a tag, because this
+environment's credential cannot push tags.
 
-**The two trees will have to be reconciled eventually.** That is a merge with no
-common ancestor, so it is a deliberate piece of work and not a bench task. Do
-not start it in a measurement session.
-
----
+**Branches you can ignore.** `claude/analysis-only-t4ter8` is the development
+branch `main` was adopted from and is now redundant with it. `auto-mode-p0` is
+an ancestor of `main`. `claude/blindsesp-battery-voltage-adc-78srik` was merged
+in by CONTENT, so its commits are *not* in `main`'s history and it is preserved
+as `retired/battery-voltage-adc`. None of them is where work happens now.
 
 ## 0. Before anything
 

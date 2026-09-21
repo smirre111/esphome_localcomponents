@@ -1,5 +1,37 @@
 # Getting to `main` before the bench session
 
+> **DONE, 2026-09-21.** Both repos are adopted: hub `main` = `5241ce9`, node
+> `main` = `0187123`, each an adoption commit whose tree is the development
+> tree and whose second parent is the old `main`. Gates A (tree identical to
+> what was tested), B (fast-forward) and C (927 tests) all passed before each
+> push. The audit re-run against the preserved old `main` reports every path
+> surviving.
+>
+> **Three things went differently from the plan below; the plan is left as
+> written and the differences recorded here, because they are the parts a
+> reader will hit.**
+>
+> 1. **The safety net is a BRANCH, not a tag.** This environment's GitHub
+>    credential can create and update branches but cannot push tags (HTTP 403)
+>    or delete branches. So the old `main` is preserved as the branch
+>    **`main-before-adopt-2026-09`** in both repos. Same guarantee, different
+>    ref type; recovery is
+>    `git push --force-with-lease origin main-before-adopt-2026-09:main`.
+> 2. **The legacy branches could not be deleted from here** — deletion is
+>    refused by the same credential. They are harmless (see §5) but still
+>    listed. To finish the job:
+>    ```
+>    git push origin --delete auto-mode-p0                               # both repos
+>    git push origin --delete claude/blindsesp-battery-voltage-adc-78srik # both repos
+>    ```
+>    Do **not** delete `retired/battery-voltage-adc`: the ADC work was merged
+>    by CONTENT, not by commit, so those commits are *not* in `main`'s history
+>    and that branch is the only place they exist.
+> 3. **The battery-voltage ADC branch was merged in first**, which was not in
+>    the original plan and turned out to be the most valuable part of the whole
+>    exercise. See §7.
+
+
 **Goal:** one branch — `main`, in both repos — carrying the code the hardware
 measurements will run against, with nothing lost and the currently-deployed
 state recoverable by name.
@@ -188,16 +220,77 @@ git push origin --delete auto-mode-p0
 
 ## 6. Afterwards, before the bench
 
-1. Both repos on `main`, both green, `git status` clean.
-2. Re-run `tools/audit_main_adoption.sh main-before-adopt-2026-09 main` — it
-   should now report the same clean result against the tag.
-3. **Update `bench-runbook.md` §0a**: it currently tells the session to use
-   `claude/analysis-only-t4ter8` and that `main` must not be used. Once this is
-   done that instruction is not merely stale, it is backwards, and a bench
-   session that follows it would test a branch nobody is maintaining any more.
-4. Then flash from `main` and start at the runbook's §0 preconditions.
+1. ~~Both repos on `main`, both green, `git status` clean.~~ **Done.**
+2. ~~Re-run the audit against the preserved old `main`.~~ **Done** — clean in
+   both repos (`tools/audit_main_adoption.sh origin/main-before-adopt-2026-09
+   origin/main`).
+3. ~~**Update `bench-runbook.md` §0a**~~ — **Done.** It said to use
+   `claude/analysis-only-t4ter8` and explicitly not `main`, which after the
+   adoption was not merely stale but backwards: a session following it would
+   have tested a branch nobody maintains. It now points at `main`, explains why
+   `git log` shows two unrelated root lines, and names
+   `main-before-adopt-2026-09` for the previously deployed code.
+4. **Remaining, and it needs a credential this session does not have:** delete
+   `auto-mode-p0` and `claude/blindsesp-battery-voltage-adc-78srik` in both
+   repos (commands in the banner at the top). Keep
+   `retired/battery-voltage-adc`.
+5. Then flash from `main` and start at the runbook's §0 preconditions.
 
 **If the adoption is deferred**, change nothing: the runbook as written is
 correct, and the bench session should run off
 `claude/analysis-only-t4ter8`. Deferring costs nothing except the confusion of
 two live trees. What is not safe is doing half of it.
+
+---
+
+## 7. The battery-ADC branch, and why merging it first mattered
+
+Not in the original concept. It was raised as "would it make sense to merge this
+as well, while the old main is still available", and the answer was yes for a
+reason neither of us had in view: **the development tree had a real battery bug
+and did not know it.**
+
+`claude/blindsesp-battery-voltage-adc-78srik` exists in **both** repos, descends
+from old `main`, and shares no ancestor with the development line. Its node half
+fixes:
+
+- **A ~11 % scale error.** The full scale was `3.95 / 2` V for a channel
+  configured at 6 dB, whose true full scale is ~2.2 V. A 12.1 V pack read as
+  ~10.7 V — already "empty" on the hub's 9.6–12.6 V 3S scale. **Every battery
+  number a bench session took on the development tree would have come through
+  that error.**
+- **A panic.** `ESP_ERROR_CHECK` around the motor current-sense read reset the
+  node mid-move whenever Wi-Fi held the ADC2 lock — provisioning or OTA, both of
+  which a bench session uses.
+- One unaveraged sample per measurement; unvalidated readings entering the
+  last-known-good cache that *every* battery and position frame echoes; a cache
+  starting at 0 V after each deep-sleep wake.
+
+**How it was merged.** Three-way with old `main` as the base (`git merge-file`),
+which is available precisely because the ADC branch descends from `main`. The two
+ADC tasks were taken **wholesale** rather than hunk-merged: they are the debugged
+implementation of a measurement this tree had wrong, and interleaving would have
+produced a third version nobody has run. Everything else in `frtosTasks.cpp` is
+the development tree's — the interrupt bodies and task loops from T-1. The two
+sets of changes do not overlap, which is why this was tractable.
+
+**The coupling that made "merge both halves together" load-bearing.** Read alone,
+the hub branch's `UNIT_AMPERE` change was *wrong*: the development tree's node
+filled `CoverPosition.current` with `getLastMotorCurrentAdcRaw()`, so declaring
+amps would have labelled raw counts as amps — a wrong number wearing a confident
+unit, and it is the current the endstop in `MotorPolicy.h` is judged against. A
+note to that effect was written and then had to be reversed, because the **node**
+repo's same-named branch is exactly the missing half: it converts on-node. Either
+half alone ships the mislabelled number; both together are correct. That was only
+visible with both repos' branches in view at once.
+
+**It was verified by compiling**, which is only possible because T-1 got
+`frtosTasks.cpp` under test first. The build found four things a flash would have
+reported less clearly: a missing shim accessor, two absent ADC calibration
+headers, a missing `ESP_ERR_NOT_SUPPORTED`, and two globals my splice had
+duplicated. 927 tests pass.
+
+**Still unverified on hardware**, and this belongs in the bench session: compare
+the `Battery: raw=… -> …V` log line against a multimeter at the pack terminals
+and adjust `kBattTrimFactor` in `main/frtosTasks.cpp` if the divider resistors
+are off nominal.
