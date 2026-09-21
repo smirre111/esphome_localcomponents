@@ -27,6 +27,11 @@ take whatever count ctest reports as the baseline; do not trust a number
 written in a document.
 
 START HERE, in this order:
+  0. configuration/docs/mac0-final-campaign.md — IF the task is the MAC-0 final
+     verification. A, B and C on ONE build in one sitting, with the
+     preconditions, the pass line for each mode, and what a green sweep does
+     NOT close. It sequences the runbook; it does not replace it. Node 2
+     already runs the build under test, so do not reflash to start it.
   1. configuration/docs/bench-runbook.md   — the procedure and the CURRENT
      status of every HW item. Follow it; do not re-derive it.
   2. configuration/docs/test-plan.md §10.6 — authoritative on METHOD.
