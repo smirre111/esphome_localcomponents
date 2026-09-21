@@ -97,8 +97,15 @@ public:
     bool    grid_started_{false};
 
     // Hub→node TX: emits an AirFrame{HubToNode, bytes} into the active SimRadio.
-    void send(uint8_t* data, size_t len) { send(data, len, TxPolicy{}); }
-    void send(uint8_t* data, size_t len, const TxPolicy& policy);
+    // Returns false when the frame was dropped, mirroring production.
+    bool send(uint8_t* data, size_t len) { return send(data, len, TxPolicy{}); }
+    bool send(uint8_t* data, size_t len, const TxPolicy& policy);
+
+    // Test hook: make the next `drop_next_sends` calls to send() report a drop,
+    // the way production does when the buffer pool is exhausted or the handoff
+    // queue is full. Production has no return-value-free way to signal this, so
+    // a caller that mishandles a drop is otherwise untestable.
+    int drop_next_sends{0};
 
     // Per-frame record of how each send was requested, so tests can assert that
     // a normal command is never silently reduced to one copy.

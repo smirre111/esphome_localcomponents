@@ -80,6 +80,16 @@ namespace esphome
     // needs and what B-1 deliberately left out until there was a scheduler
     // that could honour it — a FIFO cannot express "later than the frame
     // behind me".
+    //
+    // THIS IS A FIRE INSTANT, NOT A T0. It is the moment lora_tx() is called,
+    // i.e. when the first chirp leaves the antenna. The receiver's reference
+    // T0 is kPreambleToT0Us (3136 us) LATER, plus the unmeasured PA ramp.
+    //
+    // A producer that knows the T0 it wants must convert:
+    //     policy.earliest_us = loratiming::fireInstantUs(t0, d_tx_ramp_us);
+    // Passing a wanted T0 here directly puts the frame 3136 us late at the
+    // receiver, which spends 22 % of a 14080 us guard band before the link
+    // has done anything at all.
     int64_t  earliest_us{0};
     // Lower numbers go first; matches txqueue::Priority, kept as a plain
     // integer so this header does not force TxQueue.h on every includer.
@@ -183,8 +193,13 @@ namespace esphome
       int64_t   nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const;
       uint32_t  msUntilNextClearT0(uint8_t slot) const;
 
-      void send(uint8_t *data, size_t len) { this->send(data, len, TxPolicy{}); }
-      void send(uint8_t *data, size_t len, const TxPolicy &policy);
+      // Returns false when the frame was DROPPED rather than queued — no free
+      // pool buffer, or the handoff queue full. Callers that merely want the
+      // frame out may ignore it; a caller that consumed a scarce resource to
+      // build the frame (a grid mark, a tracked-op slot) must not record that
+      // resource as spent when the frame never entered the queue.
+      bool send(uint8_t *data, size_t len) { return this->send(data, len, TxPolicy{}); }
+      bool send(uint8_t *data, size_t len, const TxPolicy &policy);
       void sendPacketOnce(uint8_t *data, size_t len);
       // How early the scheduler releases a PLACED frame so the caller has time
       // to prepare before firing. It has to cover one FreeRTOS tick of wake

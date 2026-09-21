@@ -1700,13 +1700,30 @@ namespace esphome
       if (t0 <= this->last_placed_t0_us_)
         t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_,
                                                  this->last_placed_t0_us_ + 1);
-      this->last_placed_t0_us_ = t0;
-
-      policy.earliest_us = t0;
+      // earliest_us is a FIRE instant; t0 is where the node expects the frame's
+      // reference to land. They differ by kPreambleToT0Us, and the node's
+      // window is built around the T0, so the conversion belongs here. See
+      // TxPolicy::earliest_us; d_tx_ramp is 0 for the reason given in
+      // send_into_rx1_.
+      policy.earliest_us = loratiming::fireInstantUs(t0, 0);
       ESP_LOGD(TAG, "[%s] placing %u B at slot %u T0, %lld ms out",
                this->get_name().c_str(), (unsigned) len,
                (unsigned) this->grid_slot_, (long long) ((t0 - now) / 1000));
-      this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
+
+      // The mark is spent only if the frame actually entered the queue. send()
+      // drops silently when the buffer pool is exhausted or the handoff queue
+      // is full; recording the mark anyway would push the NEXT command for this
+      // node a further round out to make room for a frame that does not exist.
+      if (this->parent_->send(const_cast<uint8_t *>(buf), len, policy))
+      {
+        this->last_placed_t0_us_ = t0;
+      }
+      else
+      {
+        ESP_LOGW(TAG, "[%s] placed frame dropped by the transmit queue — mark "
+                      "%lld not consumed",
+                 this->get_name().c_str(), (long long) t0);
+      }
     }
 
     uint32_t LORAListener::tx_tracked_op_()
@@ -3134,6 +3151,36 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       if (this->parent_ == nullptr || buf == nullptr || len == 0)
         return false;
 
+      // Does this node actually OPEN a Class A window? Aiming one copy at a
+      // window that is not there is strictly worse than the burst it replaces:
+      // an interactive node sweeps a 29.44 ms window through a 500 ms period,
+      // so a single copy at a fixed offset hits it about 6 % of the time,
+      // while the 17-copy burst spans 1408 ms and hits it every time.
+      //
+      // This mirrors the node's own predicate exactly (CmdDispatcher's
+      // noteUplinkSent: auto_mode && !grid_.active). Both halves must agree or
+      // the frame is aimed into silence, so this asks the two questions the
+      // node asks, from the hub's own knowledge:
+      //
+      //   - the node last told us it was in AUTO, in a beacon we decrypted;
+      //     node_mode_ defaults to MODE_INTERACTIVE, so an unheard node
+      //     declines rather than guesses.
+      //   - the node is not on a grid. A gridded node arms off the hub's
+      //     marks, not off its own uplink, so Class A does not apply to it.
+      //
+      // Declining is not a failure: the caller falls back to the burst, which
+      // is what this path did before C2 existed.
+      const bool node_is_class_a =
+          (this->node_mode_ == (uint32_t) NODE_MODE__MODE_AUTO) &&
+          !(this->timed_mode_enabled_ && this->grid_aligned_);
+      if (!node_is_class_a)
+      {
+        ESP_LOGD(TAG, "[%s] not a Class A node (mode %u, grid %d) — burst",
+                 this->get_name().c_str(), (unsigned) this->node_mode_,
+                 (int) (this->timed_mode_enabled_ && this->grid_aligned_));
+        return false;
+      }
+
       // This node's own last uplink, captured in admit_frame_ — never the
       // tracker's live stamp, which by now belongs to whichever node
       // transmitted most recently.
@@ -3142,11 +3189,25 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         return false;
 
       const int64_t now = esp_timer_get_time();
-      // Fire so the frame's PREAMBLE starts at the window's centre, not its
-      // edge: the hub's own stamp carries an uncertainty of half a poll gap
-      // (Bx reports it), and centring spends that uncertainty against the guard
-      // band on both sides instead of all of it on one.
-      const int64_t target = t0_uplink + (int64_t) classa::kRx1DelayUs;
+      // The T0 we want the node to see: one RX1 delay after its own uplink's
+      // T0. This is a RECEIVER-side instant, and the two ends have no shared
+      // anchor here to absorb a constant offset the way the grid does — RX1
+      // hangs off an absolute delay from the node's own transmit — so the
+      // conversion below is not cosmetic.
+      const int64_t wanted_t0 = t0_uplink + (int64_t) classa::kRx1DelayUs;
+
+      // T0 is 3136 us AFTER the first chirp leaves the antenna, and earliest_us
+      // is the instant lora_tx() is called. Handing the wanted T0 over as-is
+      // puts the frame 3136 us late at the node — 22 % of the 14080 us guard,
+      // spent before the link has done anything.
+      //
+      // d_tx_ramp is passed as 0 on purpose. Its only provenance is a
+      // commented-out delayMicroseconds(220) (section 12.1 lists it as
+      // unmeasured), and fireInstantUs takes it as a parameter precisely so a
+      // placeholder cannot be mistaken for a measurement. Correcting the known
+      // 3136 and leaving the unknown ~220 as residual is strictly better than
+      // correcting neither.
+      const int64_t target = loratiming::fireInstantUs(wanted_t0, 0);
       if (target <= now)
       {
         ESP_LOGW(TAG, "[%s] RX1 already past by %lld us — falling back",
@@ -3162,10 +3223,10 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                                       // reply, and the next one is a wake away
       this->parent_->send(const_cast<uint8_t *>(buf), len, p);
 
-      ESP_LOGI(TAG, "[%s] reply aimed at RX1: T0_uplink %lld, fire %lld "
-                    "(hub stamp +/-%u us)",
+      ESP_LOGI(TAG, "[%s] reply aimed at RX1: T0_uplink %lld, wanted T0 %lld, "
+                    "fire %lld (hub stamp +/-%u us)",
                this->get_name().c_str(), (long long) t0_uplink,
-               (long long) target,
+               (long long) wanted_t0, (long long) target,
                (unsigned) this->last_uplink_unc_us_);
       return true;
     }

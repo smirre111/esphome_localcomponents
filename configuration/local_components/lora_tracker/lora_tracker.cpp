@@ -575,13 +575,13 @@ namespace esphome
       return d <= 0 ? 0u : (uint32_t) ((d + 999) / 1000);
     }
 
-    void LORATracker::send(uint8_t *data, size_t len, const TxPolicy &policy)
+    bool LORATracker::send(uint8_t *data, size_t len, const TxPolicy &policy)
     {
       // Validate inputs first
       if (!data || len == 0)
       {
         ESP_LOGW(TAG, "Invalid send parameters: data=%p, len=%zu", data, len);
-        return;
+        return false;
       }
 
       // Check queue initialization
@@ -589,7 +589,7 @@ namespace esphome
       {
         ESP_LOGE(TAG, "Queues not initialized. free_buffer_queue=%p, data_queue=%p",
                  free_buffer_queue, data_queue);
-        return;
+        return false;
       }
       // if (free_buffer_queue == NULL)
       // {
@@ -632,12 +632,13 @@ namespace esphome
         {
           ESP_LOGW(TAG, "Data queue full, dropping data");
           this->return_buffer_to_pool(rx_buffer);
+          return false;
         }
+        return true;
       }
-      else
-      {
-        ESP_LOGW(TAG, "No free buffers, dropped %d bytes", len);
-      }
+
+      ESP_LOGW(TAG, "No free buffers, dropped %d bytes", len);
+      return false;
     }
 
     void LORATracker::sendPacketBurst(uint8_t *data, size_t len, int copies,

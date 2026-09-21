@@ -17,6 +17,7 @@
 #include "blinds.pb-c.h"
 #include "TimedGrid.h"
 #include "ClassAWindows.h"
+#include "LoraTiming.h"
 
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
@@ -742,14 +743,57 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
         << "a frame from another node must not become this node's window origin";
     EXPECT_EQ(rol_2.last_uplink_t0_us_, kT0Node18);
 
-    // Now the reply to node 17.
+    // A node the hub has never heard from is MODE_INTERACTIVE, and an
+    // interactive node opens no Class A window at all — it sweeps a free-running
+    // one. Aiming a single copy at a window that is not there is strictly worse
+    // than the burst it replaces, so the hub must DECLINE and let the caller
+    // fall back.
     std::vector<uint8_t> payload{1, 2, 3, 4};
+    EXPECT_EQ(rol_1.node_mode_, (uint32_t) NODE_MODE__MODE_INTERACTIVE)
+        << "the safe default: a node that has not said otherwise is not Class A";
+    EXPECT_FALSE(rol_1.send_into_rx1_(payload.data(), payload.size()))
+        << "an interactive node has no RX1 to aim at; the caller must burst";
+
+    // Now the node tells us, in a beacon, that it is in AUTO. It is on no grid,
+    // so Class A is exactly the mode it is in.
+    rol_1.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
     ASSERT_TRUE(rol_1.send_into_rx1_(payload.data(), payload.size()));
-    EXPECT_EQ(tracker.last_earliest_us,
-              kT0Node17 + (int64_t) classa::kRx1DelayUs)
-        << "RX1 must be placed from node 17's uplink, not from node 18's";
     EXPECT_EQ(tracker.last_copies, 1)
         << "a burst is the opposite construction to a single placed copy";
+
+    // The contract is NOT "earliest_us equals the expression send_into_rx1_
+    // computes" — restating the code's own arithmetic back at it proves
+    // nothing. It is that the frame's T0 lands inside the window the NODE
+    // opens, which the node builds with classa::rx1OpenUs/rx1CloseUs off its
+    // own uplink. earliest_us is a FIRE instant, so the T0 the node sees is
+    // kPreambleToT0Us later; a producer that forgets that conversion puts the
+    // frame 3136 us late and this is the assertion that catches it.
+    const int64_t fire      = tracker.last_earliest_us;
+    const int64_t seen_t0   = fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t win_open  = classa::rx1OpenUs(kT0Node17);
+    const int64_t win_close = classa::rx1CloseUs(kT0Node17);
+    EXPECT_GE(seen_t0, win_open)
+        << "frame arrives before node 17's RX1 window opens";
+    EXPECT_LT(seen_t0, win_close)
+        << "frame arrives after node 17's RX1 window has closed";
+    EXPECT_EQ(seen_t0, kT0Node17 + (int64_t) classa::kRx1DelayUs)
+        << "and it lands on the design point, guard G inside the open edge — "
+           "placed from node 17's uplink, not from node 18's";
+
+    // The margin the design promises, stated so a future edit that eats it
+    // fails here rather than in the field. The guard is measured to the first
+    // CHIRP, not to T0: the node must already be listening a full G before the
+    // preamble starts, which is why the window opens kArmLeadUs (= T_pre + G)
+    // ahead of the expected T0 rather than G ahead of it.
+    EXPECT_EQ(fire - win_open, (int64_t) timedgrid::kGuardUs)
+        << "the frame's first chirp must sit a full guard inside the window";
+    EXPECT_EQ(seen_t0 - win_open, (int64_t) classa::kArmLeadUs);
+
+    // And the late side: what is left between T0 and the window closing. This
+    // is the budget the hub's own stamp uncertainty is spent against, so a
+    // change that quietly halves it should fail here.
+    EXPECT_EQ(win_close - seen_t0,
+              (int64_t) timedgrid::kWindowUs - (int64_t) classa::kArmLeadUs);
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);
@@ -1549,12 +1593,48 @@ TEST(GridAligned, WithAlignmentOnTheFrameIsDeferredToT0) {
     // back of the queue — the queue owns the radio, so only the queue can fire
     // it ON the mark (B5). What "deferred" means, therefore, is the instant
     // that travels with it, not whether send() has been called yet.
-    const int64_t expected =
-        h.tracker.nextClearT0ForSlotUs(h.rol.grid_slot(), h.tracker.sim_now_us);
-    EXPECT_EQ(h.tracker.last_earliest_us, expected)
-        << "an aligned frame must be placed at its own next clear mark";
-    EXPECT_GT(h.tracker.last_earliest_us, h.tracker.sim_now_us)
+    // earliest_us is a FIRE instant; what the node's window is built around is
+    // the T0, kPreambleToT0Us later. Asserting the fire instant against
+    // nextClearT0ForSlotUs() — the very expression send_aligned_ evaluates —
+    // would restate the code back at itself AND hide the missing conversion,
+    // which is exactly how a 3136 us placement error survived review.
+    const int64_t fire    = h.tracker.last_earliest_us;
+    const int64_t seen_t0 = fire + (int64_t) loratiming::kPreambleToT0Us;
+
+    // The real contract: that T0 is a mark of THIS node's slot. A mark is a
+    // fixed point of nextT0ForSlotUs — asking for the next mark strictly after
+    // the instant just before it must return it.
+    EXPECT_EQ(h.tracker.nextT0ForSlotUs(h.rol.grid_slot(), seen_t0 - 1), seen_t0)
+        << "the frame's T0 must land ON a mark of this node's slot, not "
+           "kPreambleToT0Us past one";
+    EXPECT_GT(seen_t0, h.tracker.sim_now_us)
         << "and that mark must be in the future, or nothing was placed at all";
+}
+
+TEST(GridAligned, ADroppedFrameDoesNotConsumeItsMark) {
+    // send() drops silently when the buffer pool is exhausted or the handoff
+    // queue is full — it used to return void, so the placement path could not
+    // tell. It recorded the mark as spent anyway, which pushed the NEXT command
+    // for this node a further round out to make room for a frame that had never
+    // been queued: a real command delayed 1.5 s by a phantom.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
+
+    uint8_t frame[4] = {1, 2, 3, 4};
+
+    // First frame is dropped by the transmit queue.
+    h.tracker.drop_next_sends = 1;
+    h.rol.send_aligned_for_test(frame, sizeof(frame));
+    const int64_t dropped_at = h.tracker.last_earliest_us;
+
+    // The next real command must get THAT mark, not the one after it. The
+    // placement is unchanged; only the bookkeeping was wrong.
+    h.rol.send_aligned_for_test(frame, sizeof(frame));
+    EXPECT_EQ(h.tracker.last_earliest_us, dropped_at)
+        << "a mark spent on a frame that was never queued is a mark lost";
 }
 
 TEST(GridAligned, ASecondCommandInTheSameRoundGoesToTheNextMark) {

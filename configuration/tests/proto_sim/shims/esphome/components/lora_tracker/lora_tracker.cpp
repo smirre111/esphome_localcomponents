@@ -60,7 +60,7 @@ uint32_t LORATracker::msUntilNextClearT0(uint8_t slot) const {
     return d <= 0 ? 0u : (uint32_t)((d + 999) / 1000);
 }
 
-void LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
+bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     // Record the per-frame policy BEFORE the radio check, so a test can assert
     // what was requested even when no radio is attached.
     last_copies = policy.copies;
@@ -69,8 +69,16 @@ void LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     sent_earliest_us.push_back(policy.earliest_us);
     last_priority = policy.priority;
 
+    // A simulated drop happens AFTER the policy is recorded and BEFORE anything
+    // reaches the air: production drops in send() too, having already computed
+    // the policy its caller asked for.
+    if (drop_next_sends > 0) {
+        --drop_next_sends;
+        return false;
+    }
+
     auto* r = shim_hooks::active_radio();
-    if (!r) return;
+    if (!r) return true;
     proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode,
                           std::vector<uint8_t>(data, data + len)};
 
@@ -79,6 +87,7 @@ void LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
                       : 1;
     for (int i = 0; i < n; ++i)
         r->send(f);
+    return true;
 }
 
 void LORATracker::register_client(LORAClient* client) {
