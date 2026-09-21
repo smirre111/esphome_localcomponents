@@ -11,6 +11,11 @@ design; where a number is a gate, the gate is quoted from the plan.
 open, of which one is not a measurement at all (HW-6) and two need an external
 instrument (HW-1's mean, HW-4).
 
+**The bench node now runs fw 1.1.2** (`6030a2c`) against hub `6c77067`
+(2026-09-21). The HW table immediately below was last re-verified on
+**2026-09-19** against fw 1.0.95 / hub `3970436`, and nothing since has
+re-measured those ten items — so read the table as of that date, not this one.
+
 **Status as of 2026-09-19** (fw 1.0.95, hub `3970436`):
 
 | item | state |

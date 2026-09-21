@@ -10,7 +10,7 @@ posture, and name the things the session cannot work out for itself.
 which instruments are on the bench). If you leave them, the session will ask,
 which is fine but wastes a turn.
 
-**Last updated 2026-09-20.** If the status list below disagrees with
+**Last updated 2026-09-21.** If the status list below disagrees with
 `bench-runbook.md`, the runbook wins — it sits next to the code.
 
 ---
@@ -22,7 +22,7 @@ Repos, both on branch `main`:
   github.com/smirre111/esphome_localcomponents   — the hub (ESPHome components)
   github.com/smirre111/blindsesp                 — the node firmware (ESP-IDF)
 
-Node 2 (the bench node) runs fw 1.1.0. The host suite is green — run it and
+Node 2 (the bench node) runs fw 1.1.2. The host suite is green — run it and
 take whatever count ctest reports as the baseline; do not trust a number
 written in a document.
 
@@ -76,6 +76,18 @@ Ground rules I care about:
   Anything but 0 voids the point whatever the offset. Live reasons are now
   1 GridDisabled, 2 BadClockSource, 4 SyncStale, 5 NoPhase; 3 and 7 are
   retired and never returned.
+- The node now TELLS the hub when its mode changes (`WAKE_MODE_CHANGED`, node
+  1.1.2). A reason change spends one uplink, throttled to 60 s, and the hub's
+  `Timed RX — demotion reason` follows it within a beacon. Before this the hub's
+  view of a quiet node could lag arbitrarily. If that sensor looks stuck,
+  confirm the node is on 1.1.2 or later before believing what it says.
+- The MAC ping CANNOT promote a cold node — it is a turnaround instrument, not
+  a promotion one. Measured 2026-09-21: 190 placed pings at 1100 ms over 280 s
+  promoted nothing and exhausted the transmit pool (68 frames refused, placed
+  frames dropped with their mark unconsumed). Promote with `Mode Test B —
+  bootstrap burst`; every promotion on record (12 / 13.4 / 15.69 s) came from a
+  ModeTest placing one mark per round. Note a ModeTest RESETS the node's phase
+  accumulators when it ends, so the hub's `Phase — samples` returns to 0.
 - Report what the instrument said, including when it contradicts the plan.
   Several numbers in the plan are assumptions whose stated provenance is "never
   measured". If the bench disagrees, the plan is what changes.
@@ -143,6 +155,19 @@ mask, so every node arms every round and three legitimately empty windows,
 existed only to rate-limit the resulting flap, so it went with it. Demotion now
 rests on the beacon heartbeat (`SyncStale`, ~5.9 min). Sweeps therefore no
 longer need a pre-wait to sit out a hold.
+
+**Why the announcement rule earns a line.** The mechanism shipped in node 1.1.1
+and did not work: `timedRxActive()` returned early on `!timed_rx_enabled_`
+*before* the edge was detected, so a withdrawn grid — the transition the hub most
+needs — could never be announced. The node announced once at boot and was silent
+for the rest of its life. Four mutation-killed witnesses missed it because every
+one of them ran with timed RX ENABLED, so the early-returning path was never
+entered; one even exercised the same REASON by a different PATH, which made the
+coverage look complete. Fixed in 1.1.2 and confirmed on hardware
+(`Beacon: reason=MODE_CHANGED … fw=10102`, hub reason tracking to 1). The general
+lesson, which applies to every guard clause here: **a mutant only shows an
+assertion is load-bearing for the lines the tests REACH — it says nothing about a
+path no test visits.** Prove a regression test red-first.
 
 **Why the two blanks exist.** Both are facts about the physical bench that no
 amount of reading the repo will establish, and both change what the session

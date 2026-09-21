@@ -2393,6 +2393,44 @@ node's serial port resets a sleeping node, which is the thing under test.
   missed": that needs the node's own funnel, and the node's serial port is exactly what
   a Mode C run may not touch.
 
+**MEASURED 2026-09-21 — fw 1.1.2: the mode announcement reaches the hub, and the
+defect that had stopped it.** Node 2 fw 1.1.2 (`6030a2c`), hub `6c77067`.
+
+**The defect.** `timedRxActive()` returned early on `!timed_rx_enabled_` BEFORE
+comparing the reason against `last_reason_announced_`, so withdrawing the grid
+could never raise `mode_announce_pending_`. The node announced once at boot and
+then stayed silent for the rest of its life, and `last_reason_announced_` went
+stale across every off/on cycle — leaving the hub to decide single shot against
+a belief the node had already left. Introduced with the announcement itself
+(`62563ba`) and found the same day, by trying to reproduce its payoff.
+
+| the same experiment, both firmwares | fw 1.1.1 | fw 1.1.2 |
+|---|---|---|
+| Timed Mode withdrawn, hub log | **no beacon in 120 s** | `Beacon: reason=MODE_CHANGED … fw=10102` |
+| hub's demotion reason | republished **5**, stale | tracked to **1** (`GridDisabled`) |
+| single-shot refusal | 7 (`NoPhaseReport`) | **1** (`GridDisabled`) |
+| second capture, Timed Mode restored | no beacon in 110 s | — |
+| boot announcement | reason 5 | **reason 1** — only reachable with the fix |
+
+* **The chain is confirmed end to end:** the node detects the edge, throttles it
+  to `kModeAnnounceMinS`, spends one uplink, and the hub decrypts it, decodes
+  `WAKE_MODE_CHANGED`, renders it by NAME rather than `?`, and updates `belief_`.
+  The `fw=10102` on that same line also confirms the 1.0.100 version defect is
+  dead: the field parses on the wire.
+* **Why four mutation-killed witnesses missed it.** Every one of them runs with
+  timed RX ENABLED, so the early-returning path was never entered — and one even
+  exercises the same REASON (`GridDisabled`) by a different PATH (enabled, no
+  grid adopted), which is exactly what made the coverage look complete. A mutant
+  only shows an assertion is load-bearing for the lines the tests REACH; it says
+  nothing about a path no test visits. The new witness (`d6f0805`) is proven
+  RED-FIRST — it passes on the fix and dies when the pre-fix ordering is restored
+  as a mutant. Suite 1109/1109.
+* **What this does NOT close.** The gap recorded below is "the hub cannot see a
+  PROMOTED QUIET node". This proves the carrier exists and works for a reason
+  CHANGE. The payoff case — a promoted quiet node reporting reason 0 so single
+  shot can engage — still needs a promotion that outlives its ModeTest, which no
+  run on this date produced.
+
 **MEASURED 2026-09-21 — fw 1.1.1: reception is flawless, and the hub still cannot
 see it.** Node 2 fw 1.1.1 (`62563ba`), hub `6c77067`, production profile, Timed
 Mode ON, node **INTERACTIVE** (never sleeps, so never beacons of its own accord),
