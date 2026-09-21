@@ -2507,6 +2507,59 @@ Mode B MAC-0 PASSES on 1.1.2.** `Mode Test B — timed windows`: 300 s, grid
   cannot see a node that has nothing else to say. Three runs, two firmwares, two
   copy counts, one result.
 
+**THE CARRIER QUESTION, ANALYSED (2026-09-21).** What should carry a promoted
+quiet node's `PhaseReport`, with §4.4's own arithmetic rather than a remembered
+ratio.
+
+**First, a correction to the 2026-09-20 framing above.** "Mode B's 17→1 airtime
+saving is unreachable in the quiet regime Mode B exists for" is too strong. The
+`CommandAck` carrier works and is the one §11b says does the real work: every
+addressed frame feeds the phase tracker, so a node acking a command refreshes
+the belief at the one moment it is about to be read. The cost of a stale belief
+is therefore **one burst per conversation**, not a permanent loss — the first
+downlink after an idle gap bursts (always safe), its ack refreshes the belief,
+and every frame within `resyncMaxS` (352 s) after it can be a single shot.
+
+How bad that is depends entirely on whether traffic CLUSTERS, which is §12.6
+(the interactive/automatic split) and is unmeasured. At 3.5 commands/node/day
+spread evenly, every command is a first-after-gap and single shot never engages;
+clustered, it engages for all but the first of each cluster.
+
+| option | cost | verdict |
+|---|---|---|
+| (a) periodic unicast keepalive @5.8 min | 274.5 s/day at 32 nodes, 0.318 % — **3.4× worse than all-burst** | **rejected by §4.4 with numbers**; "32 per-listener beacons would BE the unicast keepalive" |
+| (b) do nothing, accept one burst per conversation | 715 ms per idle gap | viable; severity unknown until §12.6 is answered |
+| (c) **optimistic single shot, Rule 4 fallback** | 42 ms on success, 42 + 715 ms on failure | **recommended, not implemented** |
+
+**(c) in detail.** The ladder bursts whenever `NoPhaseReport` or
+`ConfirmationStale` is the first failing rung. But §4.6 Rule 4 already states
+that being wrong costs exactly one frame: an unacked single shot is retried as a
+burst immediately (`afterUnackedSingleShot`). So for **those two rungs only** —
+never for `RebootedSinceConfirm`, `SessionChanged`, `BeaconMissed` or
+`FirmwareUnknown`, which are positive evidence the node may not be where the hub
+thinks — the hub could send the real command as one placed copy and let Rule 4
+cover the miss.
+
+```
+expected airtime = p x 42 ms + (1 - p) x 757 ms,   against 715 ms always
+break-even at p = 6 %
+```
+
+A node genuinely in Mode B hits its window essentially always: measured
+**198/198** and **194/194** windows armed and hit, WMR 0 ppm, on 2026-09-21. So
+p ≈ 1 when the node really is promoted, and ≈ the Mode A free-running catch rate
+(~6 %) when it is not — which IS the break-even, so the change is close to free
+even when the hub's optimism is misplaced.
+
+**This is not the rejected keepalive.** It is demand-driven: it costs nothing
+while the fleet is idle and adds no periodic traffic at all. §4.4 priced a
+*periodic* unicast and that rejection stands untouched.
+
+**NOT IMPLEMENTED, deliberately.** It relaxes §4.6's "any hub uncertainty →
+burst", which is the whole safety argument, so it wants a decision rather than a
+patch. What it would NOT change: Rule 4 itself, the node's unilateral right to
+demote at any moment, and the burst fallback on an unacked shot.
+
 **MEASURED 2026-09-21 — fw 1.1.1: reception is flawless, and the hub still cannot
 see it.** Node 2 fw 1.1.1 (`62563ba`), hub `6c77067`, production profile, Timed
 Mode ON, node **INTERACTIVE** (never sleeps, so never beacons of its own accord),
@@ -2627,7 +2680,8 @@ wakes, so it never beacons, and it has no command to ack. **So `txRefusalFor`
 can never clear `NoPhaseReport` for exactly the node that most deserves single
 shot: a promoted node with no traffic.** Mode B's 17→1 airtime saving is
 unreachable in the quiet regime Mode B exists for. Recorded here rather than
-fixed; the fix is a carrier for the node's phase report that does not require
+fixed. **The "unreachable" here is TOO STRONG — corrected 2026-09-21; see the
+carrier analysis in the 1.1.2 entry.** The fix is a carrier that does not require
 the node to have something else to say.
 
 **THE RETIREMENT, OBSERVED.** When the run ends the hub stops placing marks,
