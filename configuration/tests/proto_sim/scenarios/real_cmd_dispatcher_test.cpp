@@ -5470,6 +5470,60 @@ TEST_F(RealNodeFixture, TheLastStateWinsWhenTheModeFlickersInsideTheFloor) {
            "flag, which no longer holds";
 }
 
+// THE PATH NO WITNESS VISITED, and the defect it hid (found on hardware
+// 2026-09-21, fixed in node 1.1.2).
+//
+// timedRxActive() returned early on !timed_rx_enabled_ BEFORE comparing the
+// reason, so withdrawing the grid — the transition the hub most needs — could
+// never raise mode_announce_pending_. The node announced at boot and then went
+// silent forever, and last_reason_announced_ stayed stale across every off/on
+// cycle.
+//
+// Why the three sibling tests above missed it, which is the part worth
+// remembering: TheLastStateWins DOES exercise GridDisabled, but with timed RX
+// ENABLED and no grid adopted. That reaches the comparison. Production's
+// withdrawal sets timed_rx_enabled_ FALSE, which does not. Same reason, a
+// different path — and all four tests were mutation-killed, which proves a
+// test CAN fail, never that a path is visited.
+//
+// Measured before the fix: Timed Mode withdrawn on node 2, 120 s of hub log,
+// not one beacon, the hub's demotion-reason sensor still republishing 5.
+TEST_F(RealNodeFixture, AWithdrawnGridIsAnnouncedAlthoughTimedRxIsNowOff) {
+    proto_sim_timer_set_now_us(1'000'000);
+    promoteAndSettle(disp);
+    (void) disp.timedRxActive();
+    disp.announceModeChangeIfPending();
+    drainTx(disp);
+    ASSERT_EQ(disp.last_reason_announced_, (uint8_t) timedmode::Demotion::None)
+        << "precondition: the hub has been told the node is in Mode B";
+
+    // PAST THE FLOOR FIRST. Withdrawing inside kModeAnnounceMinS would be
+    // suppressed by the throttle, and the test could not tell "the edge was
+    // never detected" (the bug) from "the floor held it" (correct behaviour) —
+    // the same trap that made an earlier version of the sibling test vacuous.
+    proto_sim_timer_set_now_us(esp_timer_get_time()
+                               + (int64_t) (timedmode::kModeAnnounceMinS + 1) * 1'000'000);
+
+    // The hub withdraws the grid. demotionReasonNow() reports GridDisabled for
+    // exactly this, so there IS a true reason to carry.
+    disp.setTimedRxEnabled(false);
+    ASSERT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::GridDisabled)
+        << "precondition: the node really did leave Mode B";
+
+    (void) disp.timedRxActive();
+    disp.announceModeChangeIfPending();
+
+    auto beacons = beaconsIn(drainTx(disp));
+    ASSERT_EQ(beacons.size(), 1u)
+        << "a node that left Mode B must SAY SO: without this the hub keeps "
+           "believing the last reason it was told and single shot is decided "
+           "on a stale belief";
+    EXPECT_EQ(beacons[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED);
+    EXPECT_EQ(disp.last_reason_announced_,
+              (uint8_t) timedmode::Demotion::GridDisabled)
+        << "and it carries GridDisabled, not the None it used to be in";
+}
+
 TEST_F(RealNodeFixture, ANodeWithAStaleAnchorAsksTheHubForItsGrid) {
     disp.setTimedRxEnabled(true);
     proto_sim_timer_set_now_us(1'000'000);
