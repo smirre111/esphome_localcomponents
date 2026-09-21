@@ -2393,6 +2393,74 @@ node's serial port resets a sleeping node, which is the thing under test.
   missed": that needs the node's own funnel, and the node's serial port is exactly what
   a Mode C run may not touch.
 
+**MEASURED 2026-09-21 — fw 1.1.1: reception is flawless, and the hub still cannot
+see it.** Node 2 fw 1.1.1 (`62563ba`), hub `6c77067`, production profile, Timed
+Mode ON, node **INTERACTIVE** (never sleeps, so never beacons of its own accord),
+`checkin_interval` 1 h. Two runs, in order.
+
+**(i) MAC ping, 07:05–07:10 — 300 pings at 1100 ms, echo on.** The first attempt
+to drive promotion with ordinary placed traffic instead of a ModeTest.
+
+| MAC ping (1100 ms, one placed copy) | value |
+|---|---|
+| pings offered (i.e. actually queued) | **190** |
+| echoes received | **0** |
+| transmit pool exhausted — frames refused | **68** |
+| placed frames dropped, mark not consumed | 11 in one 90 s sample |
+| phase samples the hub saw | **2** in 280 s |
+| promotion | **none** — reason 5 (`NoPhase`) → 4 (`SyncStale`) |
+
+* **A 1100 ms cadence against a 1500 ms round does not place cleanly.** Once the
+  pool drained, ~26 % of pings were refused outright and placed frames were
+  dropped with their mark unconsumed. `pings_offered` counts only frames that
+  entered the queue, so even 190 overstates what reached the air.
+* **The MAC ping is not a promotion instrument.** Every recorded promotion (12 s,
+  13.4 s, 15.69 s) came from a ModeTest placing one mark per round. This placed
+  far fewer marks than its counter suggests and promoted nothing in 280 s.
+* The 0 echoes are **not** evidence of a broken echo responder: the node's
+  handler is present and correct, `mc.wantecho` is set by the hub, and the hub
+  dispatches `PROTO_MACCONTROL` to `handle_mac_echo_`. With only a couple of
+  frames demonstrably landing, 0 echoes is what too few trials looks like.
+
+**(ii) Bootstrap burst ModeTest, 07:14–07:19 — 300 s, grid 1500 ms, mode 2,
+8 copies, macEcho on.**
+
+| Mode B, MAC-0 (1.1.1, 8-copy bootstrap) | value |
+|---|---|
+| arm refusal / mode actually run | **0** / **2** |
+| detected / crcValid / addressed / micValid | **205 / 205 / 205 / 205**, 204 marks sent |
+| seq gaps | **0** (seq 1..195, exp 195) |
+| windows armed / hit | **187 / 187** |
+| true FER / FER_link / WMR | **0** / 0 ppm / 0 ppm |
+| DUP | 39 024 ppm — the 8 copies, expected |
+| phaseErr p50 / p99 / max | **+1 508** / +88 276 / +88 307 us, n **195** |
+| oneShot p99 | −353 us, n 187 |
+| raw ppm / residual | **−25** / **−24**, n 195, period 1 500 011 us |
+| rtcSlowSrc / tick / cpu | 2 / 100 Hz / 240 MHz |
+
+* **Reception is flawless.** Every mark detected, every armed window opened and
+  hit, zero arm refusals, zero link FER. Whatever blocks promotion here is not
+  the radio, not the anchor and not the window geometry — three hypotheses this
+  run killed outright.
+* **p99 88 276 us is one copy stride (88 ms), not a timing fault.** It appears
+  only in the 8-copy run: the burst-copy back-out recovers copy 0's T0 from
+  whichever copy was caught, and a mis-attributed copy index lands exactly one
+  stride out. p50 +1 508 us sits well inside the ±14 080 us guard.
+* **`ppm −25` / residual −24 FAILS the |ppm| < 20 pass line**, and contradicts
+  every prior run on this node (+9/+10 raw, −1/0 residual). Recorded as
+  ANOMALOUS, not as a regression: the rate fit consumes the same phase samples
+  whose tail is polluted by copy mis-attribution above. Re-measure with a
+  single-copy Mode B run before concluding anything about the clock.
+
+**"THE HUB CANNOT SEE ANY OF IT" reproduced, now with the node's own numbers on
+the other side.** Throughout (ii) the hub read `demotion reason 5`, `active per
+the node 0`, `Single shot refused 7` (`NoPhaseReport`) and `Phase — samples 0`,
+while the node's own report for the same 300 s shows **195 phase samples at p50
++1 508 us**. The node measured itself perfectly and the hub learned none of it
+until the final report. This is the same defect recorded on 2026-09-20, seen
+from both ends at once: a `PhaseReport` needs an uplink, and a node running a
+ModeTest — like a promoted quiet node — has nothing else to say.
+
 **MEASURED 2026-09-20 — MAC-0 Mode B on fw 1.1.0, and the retired `MissedMarks`
 demotion confirmed on hardware.** Node 2 fw 1.1.0 (`85fb418`), hub `a82e292`,
 production profile, Timed Mode ON, `checkin_interval` 1 h.
