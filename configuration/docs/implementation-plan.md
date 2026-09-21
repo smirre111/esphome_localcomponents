@@ -2595,6 +2595,44 @@ recorded rather than acted on, and it was right.
   the HUB restarts its mark stream regardless, and the node's deadline does not
   move with it. Aborting a monitoring script does NOT stop the hub's test.
 
+**MODE B PASSES ON 1.1.4 (22:16–22:32) — AND MAC-0 IS CONCLUDED.** 900 s, grid
+1500 ms, ONE copy, Timed Mode ON, one press, settled clock (node up since
+~21:16, so the anchor was not provisional).
+
+| clause | value | pass line |
+|---|---|---|
+| **residual rate** | **0 ppm**, n 594 over 900 s | **\|ppm\| < 20** |
+| mode actually run / arm refusal | **2** / **0** | mode engaged |
+| windows armed / hit | **593 / 591** (WMR 3 372 ppm) | armed > 0 |
+| **HW-8:** oneShot n vs armed | **595 vs 593 → 0 missed** | zero misses |
+| detected / crcValid / addressed | **599 / 599 / 599** | **true FER 0 of 599** |
+| FER_link / seq gaps | 0 ppm / 1 of 595 | — |
+| phaseErr p50 / p99 / max | **−262 / 864 / 914 us**, n 594 | inside the 14 080 us guard |
+| armResidual p99 / oneShot p99 | 473 us / −343 us | — |
+| raw clock rate | +10 ppm, period 1 500 016 us | — |
+
+Tighter than the 1.1.2 run on the thing that matters most: phase p99 **864 us**
+against 3 195 us. Two empty windows of 593 against one of 594 — noise at this
+scale, not a trend.
+
+**THE CAMPAIGN'S PROPERTY NOW HOLDS ON THE BUILD THAT SHIPS.**
+
+| mode | on 1.1.4 | |
+|---|---|---|
+| **A** | **PASS** | true FER 0 of 52, +9 ppm, n 52 over 899 s, refusal 0 |
+| **B** | **PASS** | residual 0 ppm, 593/591 windows, HW-8 0 missed, FER 0 of 599 |
+| **C** | **DEPRIORITISED BY DECISION** | wake-clock ppm gates nothing in Class A: the RX window is anchored to the node's OWN uplink, so hub↔node drift cannot move it. At −49 ppm a 900 s sleep mispredicts by **44 ms**, three orders inside what the hub's check-in prediction needs. Behaviour was clean and identical to the 1.0.94 pass. |
+
+1.1.4 is also the build that fixed the double uplink — **one uplink per wake**,
+measured — so the campaign and that fix are verified on the same firmware
+rather than on two.
+
+**What this does NOT close**, restated so a green sweep cannot be over-read: the
+hub still cannot see a promoted QUIET node (a `PhaseReport` needs an uplink);
+HW-8 passes on weaker evidence than its own gate asks for, since `oneShot n`
+counts Grid and Beacon arms alike; HW-1/2/3/4 are untouched; and Mode C's
+counter-fit discrepancy is deprioritised, not explained.
+
 **CAMPAIGN VERDICT — two of three modes on one build.**
 
 | step | result |

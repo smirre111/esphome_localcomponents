@@ -37,7 +37,28 @@ the extra beacon cannot mispair the fit (`addReported` requires
 `prev_msgid == heard_msgid`), and the short 61 s pair does not dilute out (four
 further 900 s pairs moved the counter by 2 ppm).
 
-**Also found, and worth fixing before the next Mode C run:** on fw 1.1.2 every
+**RE-RUN AND CONCLUDED ON fw 1.1.4 (2026-09-21 evening).** The campaign above
+was taken on 1.1.2; the node then moved to 1.1.4 (the one-uplink fix), so A and
+B were re-run to establish the property on the build that actually ships.
+
+| mode | on 1.1.4 | |
+|---|---|---|
+| **A** | **PASS** | true FER 0 of 52, +9 ppm, n 52 over 899 s, refusal 0 |
+| **B** | **PASS** | residual 0 ppm, windows 593/591, HW-8 595 ≥ 593 → 0 missed, FER 0 of 599, phase p99 864 us |
+| **C** | **deprioritised by decision** | the wake-clock ppm gates nothing in Class A — the RX window hangs off the node's own uplink, and −49 ppm is a 44 ms misprediction over a 15 min sleep |
+
+**Two procedural rules this cost two runs to learn, both worth obeying:**
+* **Press a ModeTest ONCE.** The node refuses a re-arm ("already running; the
+  frames are the test"), but the HUB restarts its mark stream regardless and the
+  node's deadline does not move with it. A double press produced `DUP 17 241 ppm`
+  and a nonsense **−251 ppm** rate; one press gave **+9 ppm**. Aborting a
+  monitoring script does NOT stop the hub's test.
+* **Settle ~90 s after a reset before pressing.** 18 s was not enough — the START
+  arrived before the session was confirmed and was silently dropped. And note a
+  Mode A mark logs as `mark: mode 1 UNPLACED`, NOT `placing … at slot`; grepping
+  for the wrong one aborted a healthy run.
+
+**Also found, and now FIXED in 1.1.4 — one uplink per wake:** on fw 1.1.2 every
 Mode C wake spends **two** uplinks — a `MODE_CHANGED` and a `TIMER_CHECKIN` —
 because the mode announcement fires on the reason edge at wake. That doubles a
 check-in's uplink cost on a battery node and was not intended.

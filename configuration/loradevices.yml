@@ -178,16 +178,13 @@ lora_client:
     # switch off). Interval and mode are independent: an interactive node is
     # awake and reachable, which is what the remaining bench work needs — this
     # change only slows the check-in cadence, it does not let the node sleep.
-    # TEMPORARILY 15min FOR THE MAC-0 FINAL CAMPAIGN (2026-09-21) — see
-    # docs/mac0-final-campaign.md step 0.3. Mode C is measured from check-ins:
-    # each one is a wake-clock sample and a Class A funnel report, and the pass
-    # line needs at least two paired samples for a rate. Harmless during Modes A
-    # and B, because an interactive node never sleeps and so never checks in.
-    #
-    # RESTORE TO 1h when the campaign ends. The reasoning for 1h is directly
-    # above and is unchanged: the 15 min pace costs ~290 s awake per day against
-    # hourly's 185 s, and buys nothing once MAC-0 is measured.
-    checkin_interval: 15min
+    # RESTORED to 1h on 2026-09-21 after the MAC-0 final campaign concluded.
+    # It was temporarily 15min for that campaign's Mode C step (each check-in is
+    # one wake-clock sample and one Class A funnel report, and a rate needs at
+    # least two paired samples). The reasoning for 1h is directly above and is
+    # unchanged: 15 min costs ~290 s awake per day against hourly's 185 s, and
+    # buys nothing now that MAC-0 is measured.
+    checkin_interval: 1h
     catchup_window: 0min
     # Two events eight minutes apart so one run observes both a first entry
     # into auto mode AND a wake out of deep sleep with the RTC markers already
