@@ -407,6 +407,87 @@ void confirmedGrid(real_helpers::RealHubHarness &h) {
 }
 }  // namespace
 
+// THE SWITCH MUST ACTUALLY REACH THE LADDER (2026-09-21).
+//
+// timed_mode_policy_test has four witnesses for optimistic single shot, and
+// none of them can see this: they build a HubBelief by hand and call
+// txRefusalFor directly, so they would pass unchanged if
+// enable_optimistic_single_shot() wrote to a field nothing reads. That is the
+// shape of the two fixes this session that a green suite certified and hardware
+// proved inert.
+//
+// This drives the PRODUCTION path instead: setter -> optimistic_single_shot_ ->
+// hubBeliefNow_()'s stamp -> txRefusalNow(). The preference is stamped in
+// hubBeliefNow_() rather than stored in belief_ on purpose — belief_ holds only
+// what the hub has OBSERVED, and an operator's choice is not an observation.
+TEST(RealLoraClient, TheOptimisticSwitchChangesThisListenersOwnDecision) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    confirmedGrid(h);
+
+    // The hub only knows a firmware version once a decrypted beacon has carried
+    // one (hubBeliefNow_: firmware_known = node_fw_version_ != 0), and
+    // FirmwareUnknown is tested BEFORE either staleness rung. Without this the
+    // ladder stops at refusal 5 and the staleness rungs are never reached —
+    // which is exactly what the precondition below caught on the first run.
+    h.rol.node_fw_version_ = 10104;   // 1.1.4
+
+    // A node that reported a good phase: every rung passes and single shot is
+    // granted, which is the only starting point from which "stale" is the ONLY
+    // thing that can later refuse it.
+    h.rol.notePhaseReportForTest(/*rtc_slow_src=*/2, /*err_us=*/500,
+                                 /*spread_us=*/800, /*samples=*/8,
+                                 /*outside_guard=*/0, /*node_timed_rx=*/true);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None)
+        << "precondition: a fresh, good phase report grants single shot";
+
+    // Age it past the hub's own published bound. Now the ONLY failing rung is
+    // the staleness one — asserted, not assumed, so a setup that lands on some
+    // other rung fails here instead of passing for the wrong reason.
+    proto_sim_timer_advance_us((int64_t) 24 * 60 * 60 * 1'000'000LL);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::ConfirmationStale)
+        << "precondition: staleness, and nothing else, is what now refuses";
+    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst);
+
+    // THE ASSERTION: the switch, on the real listener, changes the real
+    // decision. Default off, so this is also the proof the default was inert.
+    ASSERT_FALSE(h.rol.optimistic_single_shot()) << "must default OFF";
+    h.rol.enable_optimistic_single_shot(true);
+
+    EXPECT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None)
+        << "the switch must reach hubBeliefNow_() and the ladder — if this "
+           "still reads ConfirmationStale the setter is writing to a field "
+           "nothing reads, which is a switch that toggles nothing";
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot);
+
+    // ...and turning it back off restores the refusal, so the effect is the
+    // switch's and not something latched once on the way through.
+    h.rol.enable_optimistic_single_shot(false);
+    EXPECT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::ConfirmationStale);
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst);
+}
+
+TEST(RealLoraClient, TheOptimisticSwitchStillBurstsOnPositiveEvidence) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    confirmedGrid(h);
+    // FirmwareUnknown is tested before either staleness rung — see the sibling
+    // test above. Without a version the ladder stops at refusal 5.
+    h.rol.node_fw_version_ = 10104;   // 1.1.4
+    h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, true);
+    proto_sim_timer_advance_us((int64_t) 24 * 60 * 60 * 1'000'000LL);
+    h.rol.enable_optimistic_single_shot(true);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None)
+        << "precondition: the switch has granted single shot on a stale belief";
+
+    // Now withdraw the grid: positive evidence that the node is NOT on it. The
+    // switch relaxes aged-out evidence only, never a fact the hub observed.
+    h.rol.enable_timed_mode(false);
+    EXPECT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::GridDisabled)
+        << "optimism must never outrank something the hub actually knows";
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst);
+}
+
 TEST(RealLoraClient, ANodeAskingForItsGridIsSentItAgain) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};

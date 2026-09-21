@@ -463,6 +463,25 @@ namespace esphome
       // `armOffsetUs`, and until now the hub emitted none.
       void enable_timed_mode(bool on);
       bool timed_mode_enabled() const { return this->timed_mode_enabled_; }
+
+      // OPTIMISTIC SINGLE SHOT — opt-in, defaulting OFF, exposed as a switch
+      // for the same reason enable_timed_mode is: it relaxes §4.6's "any hub
+      // uncertainty -> burst", which is the safety argument.
+      //
+      // It lets the hub spend ONE placed copy instead of a 17-copy burst when
+      // the only rung refusing single shot is that its confirmation has aged
+      // out. Rule 4 bounds a wrong guess to one frame (an unacked single shot
+      // is retried as a burst immediately). Break-even is p = 6 %; a node
+      // genuinely in Mode B measured 198/198 and 194/194 windows hit.
+      //
+      // An OPERATOR PREFERENCE, not an observation — which is why it is a
+      // member here and stamped into the struct by hubBeliefNow_(), rather
+      // than a field of belief_. belief_ carries only what the hub has
+      // observed; a setter on it would be exactly the "claim" §4.6 rejects.
+      void enable_optimistic_single_shot(bool on) {
+        this->optimistic_single_shot_ = on;
+      }
+      bool optimistic_single_shot() const { return this->optimistic_single_shot_; }
       // §4.6's hub belief, as the policy sees it. Read-only: every field is
       // maintained from an observed event, and a setter would be the "claim"
       // the whole section exists to reject.
@@ -635,6 +654,10 @@ namespace esphome
       bool     grid_aligned_{false};
       // B3 opt-in; see enable_timed_mode().
       bool     timed_mode_enabled_{false};
+      // Optimistic single shot opt-in; see enable_optimistic_single_shot().
+      // Deliberately NOT a field of belief_: that struct holds only observed
+      // evidence, and this is an operator's choice. hubBeliefNow_() stamps it.
+      bool     optimistic_single_shot_{false};
 
       // §4.6's hub half. TimedModePolicy.h defines HubBelief and txPolicyFor()
       // and had no production caller at all: the rule "send ONE copy once the

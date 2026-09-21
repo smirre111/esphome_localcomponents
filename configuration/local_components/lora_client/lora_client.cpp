@@ -4039,6 +4039,16 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
           !this->have_phase_report_
               ? 0xFFFFFFFFu
               : (uint32_t) ((esp_timer_get_time() - this->last_phase_report_us_) / 1000000);
+
+      // The operator's opt-in, stamped here for the same reason the four fields
+      // above are: it is a fact about the hub's configuration NOW, not an event
+      // this node reported. Keeping it out of belief_ leaves that struct purely
+      // evidential — a setter on it would be the "claim" §4.6 exists to reject.
+      //
+      // What it permits is narrow: ConfirmationStale, and nothing else. See
+      // HubBelief::optimistic_single_shot for the arithmetic and for why
+      // NoPhaseReport is deliberately NOT bypassable.
+      b.optimistic_single_shot = this->optimistic_single_shot_;
       return b;
     }
 

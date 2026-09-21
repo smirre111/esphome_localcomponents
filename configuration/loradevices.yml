@@ -990,6 +990,43 @@ switch:
     turn_off_action:
       - lambda: 'id(rol_2)->enable_timed_mode(false);'
 
+  # OPTIMISTIC SINGLE SHOT (node 2). Default OFF, and the default is the point.
+  #
+  # When the ONLY rung refusing single shot is that the hub's confirmation has
+  # aged out (ConfirmationStale), the hub spends ONE placed copy instead of a
+  # 17-copy burst and lets §4.6 Rule 4 cover a wrong guess: an unacked single
+  # shot is retried as a burst immediately, so being wrong costs one frame.
+  #
+  #   expected = p x 42 ms + (1 - p) x 757 ms, against 715 ms always
+  #   break-even at p = 6 %
+  #
+  # Measured 2026-09-21: a node genuinely in Mode B hit 198/198 and 194/194
+  # windows at WMR 0 ppm, so p is near 1 when it really is promoted and near
+  # the Mode A free-running catch rate (~6 %) when it is not — which IS the
+  # break-even, so the change is close to free even when the optimism is wrong.
+  #
+  # NOT §4.4's rejected keepalive: that was a PERIODIC unicast at 5.8 min,
+  # 274.5 s/day at 32 nodes, 3.4x worse than all-burst. This is demand-driven
+  # and costs nothing while the fleet is idle.
+  #
+  # It never bypasses positive evidence that the node moved — no grid, reboot,
+  # new session, missed beacon, unknown firmware, Rule 4, node-not-timed all
+  # still burst — and it does NOT bypass NoPhaseReport, which would be inert
+  # (node_timed_rx rides the same report) and unsafe.
+  #
+  # A switch rather than automatic, for the same reason Timed Mode above is:
+  # it relaxes "any hub uncertainty -> burst", which is the safety argument.
+  - platform: template
+    name: "Optimistic single shot (node 2)"
+    id: rol_2_optimistic_single_shot
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: 'id(rol_2)->enable_optimistic_single_shot(true);'
+    turn_off_action:
+      - lambda: 'id(rol_2)->enable_optimistic_single_shot(false);'
+
   # Per-slot enable switches — part of the SLOT-ENTITY UI, commented out with
   # the rest of it. In the text format a slot is removed by deleting it from
   # the line, so there is nothing to enable or disable.
