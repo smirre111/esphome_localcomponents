@@ -2448,6 +2448,66 @@ adopted on a SETTLED clock (node ~21 min up — the campaign's own precondition)
   extra one-shots (596 vs 594) are the beacon windows, exactly as the HW-8 note
   above predicts.
 
+**STEP 3 — Mode C: NOT DEMONSTRATED.** Grid withdrawn (Timed Mode OFF), Auto
+Mode ON via the HA switch, serial untouched for the whole run. Seven deep-sleep
+wakes over ~1 h 50 m at the 15 min check-in pace, measured hub-side only.
+
+**The BEHAVIOUR is clean and matches the 1.0.94 pass exactly:**
+
+| Mode C behaviour (1.1.2) | value |
+|---|---|
+| wakes heard | **all**, each `reason=TIMER_CHECKIN reset=DEEPSLEEP fw=10102` |
+| session | **`resume=1`** on every wake — no re-login, no REGISTER |
+| deep sleep | requested 900 000 000 us, applied **899 874 298** us (corrected) — identical to 1.0.94 |
+| crystal | period 16 002 235–16 002 240 Q19 → **−139 ppm** — identical to 1.0.94 |
+| battery | 13.40–13.42 V across the run |
+
+**The MEASUREMENT does not meet its pass line, and the fit does not converge:**
+
+| n | span | counter ppm | wake-timing error (pass: \|ppm\| < 20) |
+|---|---|---|---|
+| 2 | 61 s | 4 149 | +4 289 |
+| 4 | 2 944 s | −191 | −51 |
+| 5 | 3 850 s | −224 | −84 |
+| 6 | 4 757 s | −207 | −67 |
+| 7 | 5 663 s | −213 | −73 |
+| 8 | 6 570 s | −189 | **−49** |
+
+* **The counter rate is the anomaly; the error is arithmetically downstream.**
+  `wakeTimingErrorPpm` is `(1 + counter) x requested / applied − 1`, so a wrong
+  counter yields a wrong error directly. The counter reads −189…−224 ppm where
+  1.0.94 measured **−132** and 1.0.67 **−128**, while the crystal and the applied
+  sleep are unchanged. Whatever moved, it is not the node's clock or its sleep.
+* **TWO EXPLANATIONS TESTED AND BOTH FALSIFIED**, recorded so neither is
+  re-proposed:
+  1. *The extra beacon mispairs the fit.* No — `addReported` requires
+     `prev_msgid == heard_msgid`, and a mismatch contributes nothing. A second
+     beacon cannot corrupt a sample.
+  2. *The 61 s pair poisons an unweighted least-squares and will dilute out.*
+     No — four further 900 s pairs moved the counter from −191 to −189. That is
+     oscillation, not convergence.
+* **A REAL COST INTRODUCED BY 1.1.2, independent of the fit:** every Mode C wake
+  now spends **two** uplinks — a `MODE_CHANGED` and a `TIMER_CHECKIN` (4 and 4 in
+  the extended run) — because the mode announcement fires on the reason edge at
+  wake. On a battery node that doubles a check-in's uplink cost, and it was not
+  intended. Worth a throttle or a suppression while a check-in beacon is already
+  due.
+
+**CAMPAIGN VERDICT — two of three modes on one build.**
+
+| step | result |
+|---|---|
+| Mode A | **PASS** — true FER 0 of 51, +10 ppm, n 51 over 899 s |
+| Mode B | **PASS** — residual −1 ppm, 594/593 windows, HW-8 0 missed, FER 0 of 599 |
+| Mode C | **NOT DEMONSTRATED** — behaviour clean, wake-timing error −49 ppm against a < 20 line |
+
+The campaign existed to establish all three modes on ONE build. **A and B now
+hold on 1.1.2 — which has never been true before.** Mode C's node-side behaviour
+is indistinguishable from its 1.0.94 pass; what has moved is the hub's counter
+fit, and until that is explained the mode cannot honestly be called measured.
+Not a regression in the node, and not a pass either.
+  above predicts.
+
 **MEASURED 2026-09-21 — fw 1.1.2: the mode announcement reaches the hub, and the
 defect that had stopped it.** Node 2 fw 1.1.2 (`6030a2c`), hub `6c77067`.
 

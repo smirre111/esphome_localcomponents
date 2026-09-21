@@ -20,6 +20,28 @@ on 2026-09-21: a 300 s single-copy Mode B run gave `residual 0 ppm, n 198 over
 run 2`, and oneShot n 198 against 198 armed — every clause of the pass line met.
 Read the REST of the table as of 2026-09-19, not this date.
 
+**MAC-0 FINAL CAMPAIGN, RUN 2026-09-21** (procedure: `mac0-final-campaign.md`;
+numbers: `implementation-plan.md` §12). All three modes on ONE build, node fw
+1.1.2, no reflash between them — which is the property the campaign exists to
+establish, and which had never held before.
+
+| mode | result |
+|---|---|
+| **A** | **PASS** — true FER 0 of 51, +10 ppm, n 51 over 899 s, arm refusal 0 |
+| **B** | **PASS** — residual −1 ppm, windows 594/593, HW-8 0 missed one-shots, true FER 0 of 599 |
+| **C** | **NOT DEMONSTRATED** — wake behaviour clean and identical to the 1.0.94 pass (all wakes heard, `resume=1`, applied sleep 899 874 298 us, crystal −139 ppm), but the hub's wake-clock counter fit reads **−189…−224 ppm** against −132 previously, so the derived wake-timing error is **−49 ppm** against a \|ppm\| < 20 line |
+
+**Two of three hold.** Mode C's cause is unknown and two explanations have
+already been tested and falsified — do not re-propose them without reading §12:
+the extra beacon cannot mispair the fit (`addReported` requires
+`prev_msgid == heard_msgid`), and the short 61 s pair does not dilute out (four
+further 900 s pairs moved the counter by 2 ppm).
+
+**Also found, and worth fixing before the next Mode C run:** on fw 1.1.2 every
+Mode C wake spends **two** uplinks — a `MODE_CHANGED` and a `TIMER_CHECKIN` —
+because the mode announcement fires on the reason edge at wake. That doubles a
+check-in's uplink cost on a battery node and was not intended.
+
 **Status as of 2026-09-19** (fw 1.0.95, hub `3970436`):
 
 | item | state |
