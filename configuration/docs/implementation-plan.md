@@ -2496,11 +2496,46 @@ Mode B MAC-0 PASSES on 1.1.2.** `Mode Test B — timed windows`: 300 s, grid
   | 07:40 (1.1.2) | 8 | settled | 3 625 us |
   | 07:48 (1.1.2) | 1 | settled | **925 us** |
 
-  Copies cost ~2.7 ms of tail; the anchor costs ~85 ms. This SUPERSEDES both the
+  Copies cost ~2.7 ms of tail. The remaining ~85 ms was ATTRIBUTED to the
+  anchor, and that attribution is **NOT VERIFIED** — the controlled test below
+  failed to establish its own precondition, so the 88 ms tail of the 07:14 run
+  remains **UNEXPLAINED**. What is settled is only that the copy-stride claim is
+  wrong. This SUPERSEDES both the
   original copy-stride claim and the hedged correction above. It is still three
   runs rather than a controlled experiment — a deliberate boot-minute grid
   adoption would confirm it, and the mechanism is already documented above at
   −7 917 us and −18 330 us on earlier re-solves.
+
+**THE CONTROLLED TEST FAILED TO RUN (11:49–11:56).** Recorded because an attempt
+that failed its own precondition, but produced a plausible-looking number, is
+more dangerous than no attempt at all.
+
+The plan was: reset the node, let the grid arrive inside the boot minute on an
+unsettled clock, and run single-copy Mode B across the 60 s recalibration so the
+re-solve happened mid-run.
+
+**What actually happened: the node never rebooted.** Its own log timestamps read
+`W (15357693)` — 15 357 s, about 4.3 h of uptime, i.e. the 07:33 boot. Opening
+the port with `serial.Serial(port, 115200)` did NOT toggle DTR/RTS into a reset,
+which is what the procedure assumed. Hence no BOOT banner, no `GridSync:` line
+and no anchor line anywhere in 5 546 captured lines: none of it occurred.
+
+So this is a THIRD SETTLED-ANCHOR run, and it is evidence about repeatability,
+not about anchors:
+
+| run | phaseErr p50 / p99 / max | ppm / residual |
+|---|---|---|
+| 07:48, 1 copy, settled | 47 / 925 / 933 us | +9 / 0 |
+| 11:49, 1 copy, settled (this one) | 148 / 1 090 / 1 200 us | +9 / 0 |
+
+with `detected 199 of 199`, `windows 198/198`, `FER_link 0`, `WMR 0`, `DUP 0`,
+`refusal 0`. Mode B on 1.1.2 reproduces cleanly. The anchor question is untouched.
+
+**To run it properly:** reset with esptool's own sequence
+(`python -m esptool --chip esp32 -p COM6 --after hard-reset chip-id`), which also
+releases the port — so the reset and the capture are SEQUENTIAL, not concurrent —
+and confirm a fresh boot from the log's timestamp prefix before believing
+anything the run reports.
 * **A THIRD confirmation of the visibility gap, now with no burst involved.** No
   beacon was emitted during the run, and the hub read `5 / 0 / 7 / 0` throughout
   while the node armed and hit 198 Mode B windows. Burst or single copy, the hub
