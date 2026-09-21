@@ -394,6 +394,44 @@ TEST(RealTrackerTx, ADeferredFrameIsHeldAndTheWaitIsBounded) {
     EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 1);
 }
 
+TEST(RealTrackerTx, AMiscomputedInstantCannotSpinTheRadioMutexForever) {
+    // kMaxFireBusyWaitUs is documented as "the ceiling for a MISCOMPUTED
+    // instant", but the cap was applied to `remaining` and then `remaining` was
+    // recomputed from not_before_us inside the loop — so the ceiling was
+    // restored to its original value on every iteration and the loop spun all
+    // the way to not_before_us. preparePacket() takes the radio mutex and only
+    // firePacket() gives it, so an uncapped spin holds the mutex that the main
+    // ESPHome loop needs in checkReception(): the watchdog fires before
+    // anything logs a problem.
+    //
+    // Today popDue only releases a frame within kPrepareLeadUs of its instant,
+    // so this is reached only by a caller that computes its own instant — which
+    // is precisely what B5's prepare/fire split was built to allow.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    TxProbe t;
+    t.init();
+
+    constexpr int64_t kStart = 1'000'000;
+    proto_sim_timer_set_now_us(kStart);
+
+    // An instant a full minute out: a caller that computed against the wrong
+    // clock, which is the failure the ceiling exists for.
+    constexpr int64_t kAbsurd = kStart + 60'000'000;
+
+    auto f = tagged(0xC0);
+    ASSERT_TRUE(t.preparePacket(f.data(), f.size()));
+    ASSERT_TRUE(t.firePacket(kAbsurd));
+
+    ASSERT_EQ(lorahal::rec().tx_us.size(), (size_t) 1);
+    const int64_t waited = lorahal::rec().tx_us[0] - kStart;
+    EXPECT_LE(waited, LORATracker::kMaxFireBusyWaitUs)
+        << "the busy wait must be bounded by the ceiling, not by the instant "
+           "the caller got wrong";
+    EXPECT_LT(lorahal::rec().tx_us[0], kAbsurd)
+        << "and it must not have spun all the way to the bad instant";
+}
+
 TEST(RealTrackerTx, APlacedFrameFiresAtItsInstantNotWhenItIsPopped) {
     // B5's gate, end to end. preparePacket/firePacket were built, tested and
     // then called from exactly one site with not_before_us hardcoded to 0, so

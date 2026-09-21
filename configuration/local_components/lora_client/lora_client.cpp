@@ -807,6 +807,18 @@ namespace esphome
         ESP_LOGI(TAG, "%s, Registered with LORA server", this->get_name().c_str());
         this->registered_ = true;
 
+        // §4.6 rule 3: any hub uncertainty means burst. A REGISTER is the hub's
+        // actual notification that this node has restarted — it is the first
+        // thing a node sends after boot — so it is the one place that can
+        // truthfully SET rebooted_since_confirm. The flag defaulted true and
+        // was cleared by the first in-slot uplink, but nothing ever raised it
+        // again: after the first confirmation it was false for the lifetime of
+        // the hub process, and the rule it implements never fired. A rebooted
+        // node has lost its grid phase and must re-earn the hub's confidence.
+        this->belief_.rebooted_since_confirm = true;
+        this->belief_.in_slot_acks           = 0;
+        this->have_in_slot_confirm_          = false;
+
         // Only (re)push configuration when the node reports it is unprovisioned
         // (needs_config), or when this hub boot has not yet pushed to the node
         // (!config_synced_ → delivers config changes flashed into the hub once
@@ -931,28 +943,40 @@ namespace esphome
         }
       }
 
-      // C2: this node's own uplink is the origin of its Class A windows, and
-      // the ONLY moment the hub can attribute the tracker's receive stamp to a
-      // particular node is right here, while the frame that produced it is the
-      // one being admitted.
-      //
-      // send_into_rx1_() used to read parent_->last_rx_t0_us() directly, 750 ms
-      // after the uplink that triggered the reply. That stamp is TRACKER-GLOBAL:
-      // one radio, one variable, overwritten by every frame from every node. On
-      // a 32-node fleet another node transmitting inside that 750 ms window is
-      // the common case, and the reply is a single copy with no burst to save
-      // it — so the hub aimed one frame at a window derived from someone else's
-      // uplink and the node heard nothing.
-      if (this->parent_ != nullptr)
-      {
-        this->last_uplink_t0_us_  = this->parent_->last_rx_t0_us();
-        this->last_uplink_unc_us_ = this->parent_->rx_stamp_uncertainty_us();
-        // §4.6: the same stamp answers a second question — did this uplink land
-        // where the grid says this node transmits?
-        this->noteUplinkPlacement_(this->last_uplink_t0_us_);
-      }
-
       return true;
+    }
+
+    // C2 and §4.6 both hang off ONE measurement: the T0 of this node's own
+    // uplink. The only moment the hub can attribute the tracker's receive stamp
+    // to a particular node is while the frame that produced it is the one being
+    // processed, so it is captured here rather than read later.
+    //
+    // send_into_rx1_() used to read parent_->last_rx_t0_us() directly, 750 ms
+    // after the uplink that triggered the reply. That stamp is TRACKER-GLOBAL:
+    // one radio, one variable, overwritten by every frame from every node. On a
+    // 32-node fleet another node transmitting inside that 750 ms window is the
+    // common case, and the reply is a single copy with no burst to save it — so
+    // the hub aimed one frame at a window derived from someone else's uplink
+    // and the node heard nothing.
+    //
+    // Called from commit_rx_msgid_, NOT from admit_frame_. Admission checks the
+    // address and the replay window, neither of which is authentication: a
+    // crafted plaintext frame, or an encrypted one that later fails its GCM
+    // tag, was admitted and moved both of these. That gave an attacker in radio
+    // range two levers with no key at all — one out-of-slot frame per round
+    // resets in_slot_acks and denies the node single-shot forever, and three
+    // frames timed AT the mark earn it for a node the hub has no evidence
+    // about. Tying the measurement to the same rule as the counter means a
+    // frame moves the hub's beliefs only once it has earned the right to.
+    void LORAListener::noteAuthenticatedUplink_()
+    {
+      if (this->parent_ == nullptr)
+        return;
+      this->last_uplink_t0_us_  = this->parent_->last_rx_t0_us();
+      this->last_uplink_unc_us_ = this->parent_->rx_stamp_uncertainty_us();
+      // §4.6: the same stamp answers a second question — did this uplink land
+      // where the grid says this node transmits?
+      this->noteUplinkPlacement_(this->last_uplink_t0_us_);
     }
 
     // Advance the replay counter, once the frame has earned it.
@@ -966,7 +990,16 @@ namespace esphome
     void LORAListener::commit_rx_msgid_(const LoraClientResponseMessage *m)
     {
       if (m && m->header)
+      {
         this->setRxMessageId(m->header->msgid);
+        // Keep the plaintext high-water mark with the authenticated counter, so
+        // a value left behind by a forged frame cannot outlive the session it
+        // was injected into. See the plaintext path in set_response().
+        this->plaintext_hwm_      = m->header->msgid;
+        this->have_plaintext_hwm_ = true;
+      }
+      // The same frame, having earned the counter, has earned the measurement.
+      this->noteAuthenticatedUplink_();
     }
 
     // A successful decrypt proves the node holds the matching base nonce, so
@@ -1480,7 +1513,42 @@ namespace esphome
       // msgid is the only sequencing the hub has, but once the node is proven
       // to hold the key, an unauthenticated frame must not be able to move it.
       if (!this->session_confirmed_)
+      {
         this->commit_rx_msgid_(rcv_message);
+      }
+      else
+      {
+        // Duplicate suppression for frames that do NOT commit.
+        //
+        // Rejecting a repeat used to be a side effect of the counter
+        // assignment: the frame moved rx_message_id, so the next copy failed
+        // the "msgid > rx_message_id" window. Taking the assignment away to
+        // stop an unauthenticated frame ratcheting the counter took the dedup
+        // with it, and nothing replaced it — the SAME plaintext frame could be
+        // admitted without limit. dispatch_payload_ is not inert: a captured
+        // CommandAck replayed in a loop cleared op_awaiting_ack_ every time,
+        // suppressing the retry ladder indefinitely while the hub reported the
+        // command delivered.
+        //
+        // A separate high-water mark restores the suppression without giving
+        // an unauthenticated frame any say over the authenticated counter. It
+        // can only wedge OTHER plaintext frames, which on a confirmed session
+        // are precisely the ones the hub does not trust; every encrypted frame
+        // bypasses this check entirely, so the 1024-window wedge this split was
+        // written to prevent cannot come back through it.
+        const uint32_t msgid =
+            (rcv_message->header != nullptr) ? rcv_message->header->msgid : 0u;
+        if (this->have_plaintext_hwm_ && msgid <= this->plaintext_hwm_)
+        {
+          ESP_LOGW(TAG, "[%s] plaintext msgid %u not above the high-water mark "
+                        "%u on a confirmed session — dropping as a duplicate",
+                   this->get_name().c_str(), (unsigned) msgid,
+                   (unsigned) this->plaintext_hwm_);
+          return;
+        }
+        this->plaintext_hwm_      = msgid;
+        this->have_plaintext_hwm_ = true;
+      }
       this->dispatch_payload_(rcv_message);
       for (size_t i = 0; i < this->nodes_.size(); i++)
         this->nodes_[i]->set_response(data, len);
@@ -2125,7 +2193,20 @@ namespace esphome
       // counters reset here, the AEAD keying changes, and the node may have
       // rebooted — none of which is compatible with still believing its
       // uplinks land in slot. It earns single-shot back from observation.
+      //
+      // session_changed alone did NOT achieve that. noteUplinkPlacement_ clears
+      // it on the FIRST in-slot uplink, and in_slot_acks survived the login
+      // untouched — so a node that had earned single-shot before re-keying got
+      // it back after one observation instead of kPromotionUplinks. Earning it
+      // back from observation means starting the count again.
       this->belief_.session_changed = true;
+      this->belief_.in_slot_acks    = 0;
+      this->have_in_slot_confirm_   = false;
+
+      // A new session is also a new sequencing space for unauthenticated
+      // frames; a high-water mark from the old one means nothing here.
+      this->plaintext_hwm_      = 0;
+      this->have_plaintext_hwm_ = false;
 
       this->frame_counter_.tx_message_id = 0;
       this->frame_counter_.rx_message_id = 0;

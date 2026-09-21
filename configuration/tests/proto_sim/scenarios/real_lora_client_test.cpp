@@ -620,6 +620,120 @@ TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
     esphome::shim_hooks::set_active_clock(nullptr);
 }
 
+TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrigin) {
+    // admit_frame_ checks the address and the replay window. Neither is
+    // authentication, and both of C2's and section 4.6's inputs were taken
+    // there — so anyone in radio range had two levers with no key at all:
+    //
+    //   * one out-of-slot frame per round resets in_slot_acks, denying the node
+    //     single-shot for as long as the attacker keeps transmitting;
+    //   * three frames timed AT the mark EARN single-shot, after which the hub
+    //     sends one copy to a real node it has no evidence about.
+    //
+    // The measurement now hangs off the same rule as the replay counter: a
+    // frame moves the hub's beliefs only once it has earned the right to.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(rol.session_confirmed_);
+    rol.node_fw_version_ = 0x00010203;
+    rol.enable_timed_mode(true);
+    ASSERT_TRUE(tracker.gridStarted());
+
+    const int64_t origin_before = rol.last_uplink_t0_us_;
+    uint32_t msgid = rol.frame_counter_.rx_message_id;
+
+    // Three PLAINTEXT uplinks placed perfectly at this node's mark — the exact
+    // evidence section 4.6 promotes on, forged.
+    for (int i = 0; i < 3; ++i) {
+        const int64_t mark =
+            tracker.nextT0ForSlotUs(rol.grid_slot(), tracker.gridAnchorUs());
+        tracker.last_rx_t0_us_v = mark + (int64_t) LORAClient::kUplinkOffsetUs;
+        auto forged = real_helpers::serialize_avail(/*sender=*/18, ++msgid);
+        rol.set_response(forged.data(), forged.size());
+    }
+
+    EXPECT_EQ(timedmode::txPolicyFor(rol.hubBelief()), timedmode::TxPolicy::Burst)
+        << "unauthenticated frames must not earn a node single-shot";
+    EXPECT_EQ(rol.last_uplink_t0_us_, origin_before)
+        << "and must not become this node's Class A window origin";
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(RealLoraClient, APlaintextFrameOnAConfirmedSessionCannotBeReplayedWithoutLimit) {
+    // Duplicate rejection used to be a SIDE EFFECT of admit_frame_ assigning the
+    // replay counter: the frame moved rx_message_id, so the next copy failed the
+    // "msgid > rx_message_id" window. Taking that assignment away — correctly,
+    // so an unauthenticated frame cannot ratchet the counter — removed the
+    // dedup with it and nothing replaced it. The SAME captured frame was then
+    // admitted and dispatched without limit, and dispatch_payload_ is not
+    // inert: a replayed CommandAck clears op_awaiting_ack_ every time,
+    // suppressing the retry ladder while the hub reports the command delivered.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(rol.session_confirmed_) << "the replay only applies to a live session";
+
+    const uint32_t rx = rol.frame_counter_.rx_message_id;
+    auto forged = real_helpers::serialize_avail(/*sender=*/18, rx + 5);
+
+    // The first copy is admitted — this path stays open by design, because a
+    // plaintext status frame from a live node is still worth acting on.
+    rol.set_response(forged.data(), forged.size());
+    const int64_t first_seen = rol.last_uplink_t0_us_;
+
+    // Move the tracker's stamp so a SECOND admission would be visible.
+    tracker.last_rx_t0_us_v = first_seen + 777'000;
+
+    for (int i = 0; i < 5; ++i)
+        rol.set_response(forged.data(), forged.size());
+
+    EXPECT_EQ(rol.frame_counter_.rx_message_id, rx)
+        << "still no ratchet — that fix must not regress";
+    EXPECT_EQ(rol.last_uplink_t0_us_, first_seen)
+        << "a replayed plaintext frame must be dropped as a duplicate, not "
+           "re-admitted without limit";
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
 TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
     // The hub's mirror of the node's counter ratchet.
     //
@@ -817,6 +931,68 @@ void feed_in_slot_uplink(RealHubHarness& h, uint32_t msgid, int64_t err_us = 0) 
 
 }  // namespace real_helpers
 }  // namespace
+
+TEST(RealLoraClient, ARelogonMakesTheNodeEarnSingleShotFromScratch) {
+    // §4.6's own rule: "a new session invalidates the hub's confidence... it
+    // earns single-shot back from observation." send_login() set
+    // session_changed and nothing else, but noteUplinkPlacement_ clears that
+    // flag on the FIRST in-slot uplink — and in_slot_acks was still >=
+    // kPromotionUplinks from the old session, so one lucky arrival restored
+    // single-shot immediately. A node that just re-keyed after a reboot got a
+    // one-copy command on the strength of evidence gathered before the reboot.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.tracker.gridStarted());
+
+    feed_in_slot_uplink(h, 1);
+    feed_in_slot_uplink(h, 2);
+    feed_in_slot_uplink(h, 3);
+    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+              timedmode::TxPolicy::SingleShot);
+
+    h.rol.send_login();
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst)
+        << "a new session must not inherit the old session's confidence";
+
+    // And one observation must not be enough to get it back.
+    feed_in_slot_uplink(h, 4);
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst)
+        << "one in-slot uplink is not kPromotionUplinks";
+    feed_in_slot_uplink(h, 5);
+    feed_in_slot_uplink(h, 6);
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+              timedmode::TxPolicy::SingleShot)
+        << "three fresh observations earn it back";
+}
+
+TEST(RealLoraClient, ARegisterMeansTheNodeRebootedAndConfidenceIsGone) {
+    // rebooted_since_confirm is a txPolicyFor guard implementing rule 3, "any
+    // hub uncertainty means burst". It defaulted true and was cleared by the
+    // first in-slot uplink — and NOTHING ever set it again, so after the first
+    // confirmation the guard was false for the life of the hub process and the
+    // rule never fired. A REGISTER is the hub's actual notification that the
+    // node restarted, which is exactly the uncertainty the flag names.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+
+    feed_in_slot_uplink(h, 1);
+    feed_in_slot_uplink(h, 2);
+    feed_in_slot_uplink(h, 3);
+    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+              timedmode::TxPolicy::SingleShot);
+
+    auto reg = serialize_register(kMacRol2);
+    h.rol.set_response(reg.data(), reg.size());
+
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst)
+        << "a node that just told us it rebooted has lost its grid phase";
+}
 
 TEST(RealLoraClient, ThreeInSlotUplinksEarnASingleCopyDownlink) {
     // TimedModePolicy.h's txPolicyFor() and HubBelief had NO production caller.

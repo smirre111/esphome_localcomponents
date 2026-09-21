@@ -209,6 +209,14 @@ namespace esphome
       // a budget to spend.
       static constexpr int64_t kPrepareLeadUs = 5000;
 
+      // Ceiling on firePacket's busy wait. A caller asking for more than this
+      // has computed its instant wrongly — most likely against the wrong clock
+      // — and spinning for it would starve the task and trip the watchdog.
+      // One slot pitch is generous: a correctly prepared frame waits
+      // microseconds. Public so a test can assert the bound rather than
+      // restate the number, which is how two constants drift apart.
+      static constexpr int64_t kMaxFireBusyWaitUs = 46875;
+
       void sendPacketBurst(uint8_t *data, size_t len, int copies = 0,
                            uint32_t stride_ms = 0, int64_t not_before_us = 0);
 
@@ -336,12 +344,7 @@ namespace esphome
 
       // A frame is in the FIFO and the radio mutex is held, waiting for FIRE.
       bool tx_prepared_{false};
-      // Ceiling on firePacket's busy wait. A caller asking for more than this
-      // has computed its instant wrongly — most likely against the wrong clock
-      // — and spinning for it would starve the task and trip the watchdog.
-      // One slot pitch is generous: a correctly prepared frame waits
-      // microseconds.
-      static constexpr int64_t kMaxFireBusyWaitUs = 46875;
+
 
       SemaphoreHandle_t radio_mutex_{nullptr};
       bool lora_tx_busy_{false};

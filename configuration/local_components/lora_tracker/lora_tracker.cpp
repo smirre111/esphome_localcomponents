@@ -1,5 +1,6 @@
 
 
+#include <algorithm>
 #include "lora_tracker.h"
 #include "esphome/core/application.h"
 #include "esphome/core/defines.h"
@@ -826,17 +827,28 @@ namespace esphome
       // wants to wait longer should prepare later.
       if (not_before_us > 0)
       {
-        int64_t remaining = not_before_us - esp_timer_get_time();
-        if (remaining > kMaxFireBusyWaitUs)
+        // The cap has to bound the DEADLINE, not the first sleep. Capping
+        // `remaining` and then recomputing it from not_before_us inside the
+        // loop put the ceiling back where it started on every iteration: the
+        // loop spun to not_before_us however far away that was. Since
+        // preparePacket() takes the radio mutex and only firePacket() gives it,
+        // an uncapped spin here holds the mutex — and so blocks the main
+        // ESPHome loop, which takes it in checkReception() — until the task
+        // watchdog fires, with nothing logged to say why.
+        const int64_t deadline =
+            std::min(not_before_us,
+                     esp_timer_get_time() + (int64_t) kMaxFireBusyWaitUs);
+        if (deadline < not_before_us)
         {
           ESP_LOGW(TAG, "firePacket asked to wait %lld us, capping at %d",
-                   (long long) remaining, (int) kMaxFireBusyWaitUs);
-          remaining = kMaxFireBusyWaitUs;
+                   (long long) (not_before_us - esp_timer_get_time()),
+                   (int) kMaxFireBusyWaitUs);
         }
+        int64_t remaining = deadline - esp_timer_get_time();
         while (remaining > 0)
         {
           esphome::delayMicroseconds((uint32_t) remaining);
-          remaining = not_before_us - esp_timer_get_time();
+          remaining = deadline - esp_timer_get_time();
         }
       }
 

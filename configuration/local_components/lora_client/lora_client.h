@@ -287,6 +287,10 @@ namespace esphome
       // the hub's own receive stamp as the shared origin. False when there is
       // no usable stamp, so the caller falls back to today's burst.
       bool send_into_rx1_(const uint8_t *buf, size_t len);
+      // Capture this node's own uplink T0 and score it against the grid. Called
+      // only for a frame that has earned the replay counter — see
+      // commit_rx_msgid_.
+      void noteAuthenticatedUplink_();
       // §4.6: did this uplink land where the grid says this node transmits?
       // Called with the node's own T0, from admit_frame_.
       void noteUplinkPlacement_(int64_t t0_uplink_us);
@@ -495,6 +499,13 @@ namespace esphome
       int32_t  clock_offset_s_{0};
       uint32_t last_beacon_reason_{0};
       uint32_t node_mode_{0};
+      // Duplicate suppression for plaintext frames that arrive on a CONFIRMED
+      // session — the ones commit_rx_msgid_ deliberately refuses to let move
+      // the authenticated counter. Deliberately separate from
+      // frame_counter_.rx_message_id and never persisted: it exists only to
+      // stop the same unauthenticated frame being replayed without limit.
+      uint32_t plaintext_hwm_{0};
+      bool     have_plaintext_hwm_{false};
       uint32_t node_sched_version_{0};
       uint32_t node_fw_version_{0};
       bool     node_session_resume_{false};
