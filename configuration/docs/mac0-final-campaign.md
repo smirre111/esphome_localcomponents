@@ -173,6 +173,46 @@ the node's state.
 
 ---
 
+## If the node goes silent mid-campaign
+
+Learned the expensive way on 2026-09-21 (about 15 min lost). An **interactive**
+node that loses its session has **no way to re-announce itself**: it never
+sleeps, so it never wakes, so it never beacons on its own initiative. Once the
+hub has finished its startup login stagger it will happily beacon the grid and
+talk to other nodes indefinitely while ignoring this one. The signature is
+`Link RSSI = NA`, `Battery = NA`, and **no mention of the node anywhere in the
+hub log** — not a drop, not a MIC failure, not an address mismatch. Silence, not
+rejection.
+
+Two causes, both self-inflicted and both easy to repeat:
+
+* **A hub upload or restart**, which tears the session down.
+* **A serial capture ENDING.** `serial.Serial(port, 115200)` does *not* reset the
+  node when it opens the port — it resets when it **closes**. So every "is it
+  connected yet?" capture destroys the session it was checking on, and repeated
+  checks manufacture the fault they are investigating. **If the question is
+  "does the node have a session", watch the HUB, never the serial port.**
+
+**Recovery, no physical button press required:**
+
+```
+python -m esptool --chip esp32 -p COM6 --after hard-reset chip-id
+```
+
+It connects (which itself proves the board is alive even when the app is
+silent), hard-resets via RTS into the app, and releases the port. The node boots
+and beacons, and the hub has its session back within seconds — `logged_in=yes`,
+RSSI populated. On fw 1.1.2 that beacon reads **`reason=MODE_CHANGED`**, not
+`BOOT`, because the mode announcement fires on the reason edge at startup; that
+is correct, not a fault.
+
+**Do not reach for `Hub Restart`.** It re-runs the login stagger but cannot make
+a silent interactive node speak — tried on 2026-09-21, after which the hub
+resumed talking to node 1 and still never addressed node 2 — and it resets Timed
+Mode, costing a precondition you then have to re-establish.
+
+---
+
 ## What a clean sweep closes, and what it does not
 
 **Closes:** MAC-0 in all three modes on one build — the property that has never
