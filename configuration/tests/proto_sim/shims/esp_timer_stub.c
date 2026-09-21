@@ -87,3 +87,41 @@ esp_err_t esp_timer_stop(esp_timer_handle_t timer) {
     timer->armed = 0;
     return ESP_OK;
 }
+
+// ---------------------------------------------------------------------------
+// Firing. DECLARED IN esp_timer.h SINCE THE SHIM WAS WRITTEN, DEFINED ONLY
+// NODE-SIDE UNTIL 2026-09-21.
+//
+// The header promises these to both targets; shims_node/esp_idf_stubs.c
+// delivered them and this file only mentioned fire_all in a comment. So every
+// hub-side test that called one failed at LINK, and — exactly as the header
+// warns — the error names the calling test, not the missing shim. Two new
+// MacPing witnesses found it: "undefined reference to proto_sim_timer_fire_all"
+// against real_lora_client_test, which has compiled this file all along
+// (CMakeLists.txt, real_lora_client sources).
+//
+// Semantics mirror the node side deliberately, so a test means the same thing
+// whichever target it runs on.
+// ---------------------------------------------------------------------------
+void proto_sim_timer_fire_all(void) {
+    for (int i = 0; i < TIMER_MAX; i++) {
+        if (g_timers[i].used && g_timers[i].armed) {
+            /* One-shots disarm before firing; periodic timers stay armed, so a
+               callback that stops its own timer is still observable. */
+            if (!g_timers[i].periodic) g_timers[i].armed = 0;
+            if (g_timers[i].callback) g_timers[i].callback(g_timers[i].arg);
+        }
+    }
+}
+
+int proto_sim_timer_armed_count(void) {
+    int n = 0;
+    for (int i = 0; i < TIMER_MAX; i++)
+        if (g_timers[i].used && g_timers[i].armed) n++;
+    return n;
+}
+
+// NOT mirrored: proto_sim_timer_reset(). This file's version above also zeroes
+// g_now_us, because the hub owns the monotonic clock the transmit grid is paced
+// from. The node's memset() version would be a silent behaviour change here, so
+// the two are left divergent on purpose.

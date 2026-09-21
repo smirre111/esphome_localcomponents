@@ -1417,11 +1417,48 @@ namespace esphome
       if (!self->mac_ping_active_ || self->mac_ping_frame_len_ == 0)
         return;
 
-      // ONE copy. This is the whole reason B-1 had to come first.
-      self->parent_->send(self->mac_ping_frame_, self->mac_ping_frame_len_,
-                          {/*copies=*/1, /*stride_ms=*/0});
-      self->mac_stats_.pings_offered++;
-      self->mac_stats_.last_seq_sent = self->mac_ping_seq_;
+      // ONE copy, PLACED on this node's mark. This is the whole reason B-1 had
+      // to come first.
+      //
+      // It went through parent_->send() BARE until 2026-09-20: no earliest_us,
+      // so the frame left whenever the queue drained. Against a Mode B node —
+      // one 29.44 ms window per 1500 ms round — a single unplaced copy lands
+      // about 2 % of the time, so a run reported near-total loss and was
+      // measuring the SEND path rather than reception.
+      //
+      // Why every other bare sender here is unaffected: a 17-copy burst spans
+      // 1408 ms of a 1500 ms round and hits the window by brute force. A frame
+      // reaching a Mode B node must be PLACED or BURSTED; one copy unplaced is
+      // neither aimed nor wide, and that combination is unique to this path and
+      // the drift test.
+      //
+      // send_aligned_ also stamps on_mark, which is the node's licence to read
+      // the arrival as a phase sample (CmdDispatcher, "ONLY A FRAME THE HUB
+      // PLACED ON THIS NODE'S MARK"). So a placed ping both measures reception
+      // and feeds promotion.
+      //
+      // copies is set EXPLICITLY: §4.6's single-shot decision applies only when
+      // the caller asks for no shape (policy.copies == 0), and a ping must be
+      // exactly one copy whatever the hub currently believes about the node.
+      TxPolicy p;
+      p.copies        = 1;
+      p.stride_ms     = 0;
+      p.expects_reply = self->mac_ping_want_echo_;
+      if (self->send_aligned_(self->mac_ping_frame_, self->mac_ping_frame_len_, p))
+      {
+        self->mac_stats_.pings_offered++;
+        self->mac_stats_.last_seq_sent = self->mac_ping_seq_;
+      }
+      else
+      {
+        // Counted only once it has actually entered the queue. pings_offered
+        // documents itself as "marks handed to the transmit queue", and a yield
+        // computed against frames that were never queued is not a measurement —
+        // the same reason serviceBeacon logs a drop rather than recording the
+        // round as queued.
+        ESP_LOGW(TAG, "[%s] MAC ping seq %u was not queued — pool exhausted?",
+                 self->get_name().c_str(), (unsigned) self->mac_ping_seq_);
+      }
 
       self->build_mac_ping_frame_();
     }
@@ -1482,6 +1519,23 @@ namespace esphome
       esp_timer_start_periodic(this->mac_ping_timer_, (uint64_t) grid_ms * 1000ULL);
       this->set_timeout("mac_ping_end", duration_s * 1000,
                         [this]() { this->stop_mac_ping(); });
+
+      // PRECONDITION, said out loud rather than discovered in the numbers.
+      //
+      // send_aligned_ places only when this node is grid-aligned and the hub's
+      // grid is running; otherwise it falls through to an unplaced send. That
+      // is the right fallback for a Mode A node (which sweeps a free-running
+      // window) but it silently turns a Mode B run into the ~2 % lottery this
+      // path was just fixed to escape. A whole run's worth of numbers is an
+      // expensive way to learn the grid was off.
+      if (!this->grid_aligned_ || this->parent_ == nullptr ||
+          !this->parent_->gridStarted())
+      {
+        ESP_LOGW(TAG, "[%s] MAC ping: grid not aligned/started — pings will be "
+                      "UNPLACED. Fine for Mode A; against a Mode B node this "
+                      "measures the send path, not reception.",
+                 this->get_name().c_str());
+      }
 
       // The ping msgids are their own sequence and will not satisfy the node's
       // replay window, so a run needs MAC-1 off on the node (M3). Said out loud

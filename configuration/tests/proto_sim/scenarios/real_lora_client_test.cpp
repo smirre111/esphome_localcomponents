@@ -2209,6 +2209,78 @@ TEST(MacPing, StartIsIdempotentAndDoesNotResetStatsMidRun) {
     h.rol.stop_mac_ping();
 }
 
+TEST(MacPing, IsPlacedOnTheNodesMarkAsASingleCopy) {
+    // 2026-09-21. The ping went out through parent_->send() BARE: no
+    // earliest_us, so it left whenever the queue drained. Against a Mode B node
+    // — one 29.44 ms window per 1500 ms round — a single unplaced copy lands
+    // about 2 % of the time, so a run measured the SEND path and reported it as
+    // reception loss.
+    //
+    // The four MacPing tests above are lifecycle-only: none of them looks at
+    // the send SHAPE, so nothing here would have caught it, and nothing would
+    // catch a revert either. This is that witness.
+    //
+    // on_mark matters as much as the placement: it is the node's only licence
+    // to read the arrival as a phase sample, so a placed ping both measures
+    // reception AND feeds promotion.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);   // startGrid() + set_grid_aligned(true)
+    ASSERT_TRUE(h.tracker.gridStarted())
+        << "precondition: send_aligned_ only places on a running, aligned grid";
+
+    h.rol.start_mac_ping(/*duration_s=*/300, /*grid_ms=*/1100);
+    const size_t before = h.tracker.sent_earliest_us.size();
+
+    proto_sim_timer_fire_all();   // the periodic ping timer
+
+    ASSERT_EQ(h.tracker.sent_earliest_us.size(), before + 1)
+        << "exactly one frame — if another timer also sent, the assertions "
+           "below would be describing the wrong frame";
+    EXPECT_EQ(h.tracker.last_copies, 1)
+        << "ONE copy: copies is set explicitly, so §4.6's single-shot decision "
+           "does not get to turn a ping into a burst";
+    EXPECT_GT(h.tracker.last_earliest_us, 0)
+        << "PLACED: an earliest_us of 0 is the bare send this replaced";
+    EXPECT_TRUE(h.tracker.last_on_mark)
+        << "on the node's own mark, and saying so — without this the node "
+           "cannot read the arrival as a phase sample";
+    EXPECT_EQ(h.rol.mac_stats().pings_offered, 1u)
+        << "counted once it actually entered the queue";
+
+    h.rol.stop_mac_ping();
+}
+
+TEST(MacPing, WithoutAGridThePingIsUnplacedRatherThanRefused) {
+    // The other half of the contract, so the fallback is a decision rather than
+    // an accident. send_aligned_ declines to place when the grid is not running
+    // or this node is not aligned, and falls through to an ordinary send. That
+    // is right for a Mode A node — it sweeps a free-running window and has no
+    // mark to aim at — but it silently turns a Mode B run into the 2 % lottery,
+    // which is why start_mac_ping warns when it sees this state.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    ASSERT_FALSE(h.tracker.gridStarted()) << "precondition: no grid";
+
+    h.rol.start_mac_ping(/*duration_s=*/300, /*grid_ms=*/1100);
+    const size_t before = h.tracker.sent_earliest_us.size();
+
+    proto_sim_timer_fire_all();
+
+    ASSERT_EQ(h.tracker.sent_earliest_us.size(), before + 1);
+    EXPECT_EQ(h.tracker.last_copies, 1) << "still one copy, never a burst";
+    EXPECT_EQ(h.tracker.last_earliest_us, 0) << "unplaced: nothing to aim at";
+    EXPECT_FALSE(h.tracker.last_on_mark)
+        << "and it must NOT claim a mark it never occupied — that flag is what "
+           "the node trusts to take a phase sample";
+
+    h.rol.stop_mac_ping();
+}
+
 TEST(MacPing, EchoIsCountedAndConsumedNotForwarded) {
     using namespace real_helpers;
     RealHubHarness h{2, kMacRol2};
