@@ -163,7 +163,27 @@ typedef enum _WakeReason {
    * physical button -> switches to interactive
    */
   WAKE_REASON__WAKE_BUTTON = 3,
-  WAKE_REASON__WAKE_UNKNOWN = 4
+  WAKE_REASON__WAKE_UNKNOWN = 4,
+  /*
+   * NOT A WAKE AT ALL — the node's Mode B status changed, and it is telling
+   * the hub unprompted.
+   * The PhaseReport that says whether a node is in Mode B rides an UPLINK: a
+   * wake beacon or a CommandAck. An interactive node never sleeps, so it
+   * never wakes, so it never beacons; with no traffic it has nothing to ack.
+   * So the hub's belief about a promoted, QUIET node is stale indefinitely,
+   * and txRefusalFor can never clear NoPhaseReport for exactly the node that
+   * most deserves single shot — Mode B's 17->1 airtime saving is unreachable
+   * in the quiet regime Mode B exists for.
+   * Measured 2026-09-20 on node 2: 12.6 minutes provably in Mode B (reason 0
+   * on its own console, 2.44 % RX, one window per round) while the hub
+   * reported demotion reason 5 and refusal 7 throughout.
+   * A distinct value rather than reusing WAKE_TIMER_CHECKIN: this project has
+   * twice been bitten by a field that quietly lies (fwversion reporting 0,
+   * mode echoing the request rather than what was applied), and a beacon
+   * claiming a check-in that never happened is the same defect in a new
+   * place. Appended, never renumbered — the hub's name table is positional.
+   */
+  WAKE_REASON__WAKE_MODE_CHANGED = 5
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(WAKE_REASON)
 } WakeReason;
 

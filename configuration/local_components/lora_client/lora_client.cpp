@@ -3716,9 +3716,16 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       if (b == nullptr)
         return;
 
+      // POSITIONAL: the index IS the wire value, so a new WakeReason must be
+      // appended here in the same commit or it reads as "?" — the bound below
+      // is the other half and they must move together.
       static const char *const kReason[] = {"BOOT", "TIMER_EVENT", "TIMER_CHECKIN",
-                                            "BUTTON", "UNKNOWN"};
-      const char *reason = (b->reason >= 0 && b->reason <= 4) ? kReason[b->reason] : "?";
+                                            "BUTTON", "UNKNOWN", "MODE_CHANGED"};
+      const char *reason =
+          (b->reason >= 0 &&
+           b->reason < (int) (sizeof(kReason) / sizeof(kReason[0])))
+              ? kReason[b->reason]
+              : "?";
 
       this->last_beacon_reason_  = b->reason;
       this->node_mode_           = b->mode;

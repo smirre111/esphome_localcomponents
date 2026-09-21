@@ -99,6 +99,13 @@ struct NodeProbe : CmdDispatcher {
               portMUX_TYPE &mm, portMUX_TYPE &bm)
         : CmdDispatcher(m, s, l, mm, bm) {}
     using CmdDispatcher::last_rx_window_gen_;
+    // What the HUB was last told, as distinct from what the console last saw.
+    // The flicker test has to assert the state the hub ends up believing, and
+    // that reason travels inside the beacon BODY (built later, in
+    // processTxCommand) rather than in the queued command's arg — so without
+    // this the test could only assert that *a* beacon went out, which is not
+    // the property "the last state wins" at all.
+    using CmdDispatcher::last_reason_announced_;
 };
 
 struct RealNodeFixture : public ::testing::Test {
@@ -5288,6 +5295,179 @@ TEST_F(RealNodeFixture, InModeBTheBeaconNotTheTrialOwnsTheAnchor) {
                   timedmode::kPromotionPhaseSamples, 11'000, 1500);
     EXPECT_EQ(disp.gridState().anchor_us, anchor_before)
         << "a node in Mode B learns its anchor and rate from beacons";
+}
+
+// ---------------------------------------------------------------------------
+// Telling the hub the mode changed (2026-09-21).
+//
+// The hub learns a node's Mode B status ONLY from a PhaseReport, and a
+// PhaseReport rides an UPLINK — a wake beacon or a CommandAck. An interactive
+// node never sleeps, so it never wakes, so it never beacons; with no traffic it
+// has nothing to ack. Measured 2026-09-20 on node 2: 12.6 minutes provably in
+// Mode B (reason 0 on its own console, 2.44 % RX, 313 consecutive empty marks)
+// while the hub reported demotion reason 5 and refusal 7 the entire time — so
+// txRefusalFor could never clear NoPhaseReport for exactly the node that most
+// deserves single shot.
+//
+// nowUs() IS the shimmed esp_timer on the host (NodeClock.h), so
+// proto_sim_timer_set_now_us advances the clock the floor is measured against.
+// ---------------------------------------------------------------------------
+
+// A REAL transition, not a flag toggle. setTimedRxEnabled(false) makes
+// timedRxActive() early-return before demotionReasonNow() is called, and the
+// reason is GridDisabled either way — so toggling it produces NO edge and a
+// test built on it passes while proving nothing. (It did: the first version of
+// these three tests announced once at reason 1 and the flicker case was
+// vacuous.) Promotion to reason 0, then a real ladder rung, is the edge.
+namespace {
+void promoteAndSettle(CmdDispatcher &disp) {
+    bringNodeToTheEdgeOfPromotion(disp);
+    ASSERT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::None);
+}
+
+// Only the BEACONS out of a drain.
+//
+// bringNodeToTheEdgeOfPromotion delivers eight addressed status requests, and
+// the node ANSWERS them — so the transmit queue is legitimately non-empty after
+// a promotion. Asserting drainTx(...).empty() therefore tested "did anything at
+// all go out", which is not the question: these tests care only whether a mode
+// announcement was spent. A helper rather than the filter repeated four times,
+// because the repetition is what let two of the four drift apart.
+std::vector<CmdDispatcher::tx_command_t>
+beaconsIn(const std::vector<CmdDispatcher::tx_command_t> &sent) {
+    std::vector<CmdDispatcher::tx_command_t> out;
+    for (const auto &c : sent)
+        if (c.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_BEACON)
+            out.push_back(c);
+    return out;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, AModeChangeIsAnnouncedToTheHubExactlyOnce) {
+    proto_sim_timer_set_now_us(1'000'000);
+    promoteAndSettle(disp);
+    drainTx(disp);
+
+    // Evaluating the mode is what detects the edge; the announcement is sent
+    // from the arming path, not from the const accessor that raises the flag.
+    (void) disp.timedRxActive();
+    disp.announceModeChangeIfPending();
+
+    auto sent = drainTx(disp);
+    std::vector<CmdDispatcher::tx_command_t> beacons;
+    for (const auto &c : sent)
+        if (c.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_BEACON)
+            beacons.push_back(c);
+
+    ASSERT_EQ(beacons.size(), 1u)
+        << "a mode change must cost exactly one uplink, not one per arming pass";
+    EXPECT_EQ(beacons[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED)
+        << "a distinct reason: reusing TIMER_CHECKIN would be a beacon claiming "
+           "a check-in that never happened";
+    EXPECT_EQ(disp.last_reason_announced_, (uint8_t) timedmode::Demotion::None)
+        << "and the hub was told the state the node is actually in";
+
+    // Nothing changed since, so nothing more is owed however often the arming
+    // path runs.
+    //
+    // PAST THE FLOOR on purpose. Asserting this at the same instant as the
+    // first announcement proved nothing: the throttle returns early whatever
+    // the flag says, so the test could not tell "flag cleared" from "floor
+    // suppressed" and a mutant that never cleared the flag survived it.
+    proto_sim_timer_set_now_us(esp_timer_get_time()
+                               + (int64_t) (timedmode::kModeAnnounceMinS + 1) * 1'000'000);
+    (void) disp.timedRxActive();
+    disp.announceModeChangeIfPending();
+    EXPECT_TRUE(beaconsIn(drainTx(disp)).empty())
+        << "the flag is per CHANGE, not per evaluation — and the floor is not "
+           "what is keeping it quiet here";
+}
+
+TEST_F(RealNodeFixture, AChangeInsideTheFloorIsHeldNotDropped) {
+    proto_sim_timer_set_now_us(1'000'000);
+    promoteAndSettle(disp);
+    (void) disp.timedRxActive();
+    disp.announceModeChangeIfPending();
+    drainTx(disp);   // the first announcement, asserted by the test above
+    ASSERT_EQ(disp.last_reason_announced_, (uint8_t) timedmode::Demotion::None);
+
+    // A REAL second change, immediately: off the crystal is BadClockSource, a
+    // live rung of the ladder. Inside kModeAnnounceMinS it must NOT go out — an
+    // announcement is an uplink on a battery node, and NoPhase <-> None can
+    // oscillate when the phase evidence is marginal.
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::InternalRc);
+    (void) disp.timedRxActive();
+    ASSERT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::BadClockSource)
+        << "precondition: this really is a different reason from the last one "
+           "announced, or the test proves nothing";
+    disp.announceModeChangeIfPending();
+    EXPECT_TRUE(beaconsIn(drainTx(disp)).empty()) << "throttled inside the floor";
+
+    // HELD, not discarded. Past the floor the pending change goes out — a
+    // dropped announcement would leave the hub wrong until the node next
+    // happened to change again, which for a quiet node is never.
+    proto_sim_timer_set_now_us(esp_timer_get_time()
+                               + (int64_t) (timedmode::kModeAnnounceMinS + 1) * 1'000'000);
+    disp.announceModeChangeIfPending();
+
+    auto late = drainTx(disp);
+    ASSERT_EQ(late.size(), 1u) << "the suppressed change must still be owed";
+    EXPECT_EQ(late[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED);
+    EXPECT_EQ(disp.last_reason_announced_,
+              (uint8_t) timedmode::Demotion::BadClockSource)
+        << "and it carries the reason, not merely the fact that something moved";
+}
+
+TEST_F(RealNodeFixture, TheLastStateWinsWhenTheModeFlickersInsideTheFloor) {
+    // THE DESIGN DECISION THIS PINS. The announcement carries the reason as it
+    // is NOW, not the one that raised the flag. A node that flickered
+    // A -> B -> A inside the floor must leave the hub believing A; recording
+    // the flag-raising reason would describe a transition that no longer
+    // holds, which is the "a field that quietly lies" failure this project has
+    // already paid for twice (fwversion reporting 0, mode echoing the request).
+    // THREE DISTINCT STATES, deliberately. An earlier version flickered away
+    // and back to the SAME state, so a mutant that never updated
+    // last_reason_announced_ left it at the first announcement's value and the
+    // assertion still passed. Start, intermediate and final must all differ or
+    // the test cannot tell "the latest state" from "any of them".
+    proto_sim_timer_set_now_us(1'000'000);
+    disp.setTimedRxEnabled(true);
+    (void) disp.timedRxActive();          // no grid yet -> GridDisabled (1)
+    disp.announceModeChangeIfPending();   // first announcement, 0xFF -> 1
+    drainTx(disp);
+    ASSERT_EQ(disp.last_reason_announced_,
+              (uint8_t) timedmode::Demotion::GridDisabled)
+        << "precondition: the hub has been told state 1";
+
+    // Two further changes, BOTH inside the floor: 1 -> 0 -> 2.
+    promoteAndSettle(disp);               // -> None (0), the intermediate
+    (void) disp.timedRxActive();
+    disp.announceModeChangeIfPending();
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::InternalRc);
+    (void) disp.timedRxActive();          // -> BadClockSource (2), the final
+    disp.announceModeChangeIfPending();
+    EXPECT_TRUE(beaconsIn(drainTx(disp)).empty()) << "all of it inside the floor";
+    const uint8_t settled = disp.demotionReasonNow();
+    ASSERT_EQ(settled, (uint8_t) timedmode::Demotion::BadClockSource)
+        << "precondition: the node ended somewhere it did not start";
+
+    // Past the floor: if the node is back where it started, the hub must not be
+    // told about the excursion at all.
+    proto_sim_timer_set_now_us(esp_timer_get_time()
+                               + (int64_t) (timedmode::kModeAnnounceMinS + 1) * 1'000'000);
+    disp.announceModeChangeIfPending();
+    drainTx(disp);
+
+    ASSERT_EQ(disp.demotionReasonNow(), settled)
+        << "precondition: the node really is back in its original state";
+    // THE ASSERTION THAT MATTERS: what the hub was told, not merely that it was
+    // told something. cmd.arg carries the WakeReason; the DEMOTION reason rides
+    // the beacon body built later in processTxCommand, so this reads the field
+    // the announcement committed to.
+    EXPECT_EQ(disp.last_reason_announced_, settled)
+        << "after a flicker that returned to its starting state, the hub must "
+           "be left believing that state — not the excursion that raised the "
+           "flag, which no longer holds";
 }
 
 TEST_F(RealNodeFixture, ANodeWithAStaleAnchorAsksTheHubForItsGrid) {

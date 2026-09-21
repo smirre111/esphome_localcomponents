@@ -523,6 +523,52 @@ SyncRequestState wantsSync() {
 }
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Telling the hub the mode changed (2026-09-21).
+//
+// The hub learns a node's Mode B status ONLY from a PhaseReport, which rides an
+// uplink. An interactive node never sleeps, never wakes, never beacons, and
+// with no traffic has nothing to ack — so the hub's belief about a promoted,
+// quiet node is stale indefinitely and single shot can never be granted to it.
+// Measured 2026-09-20: 12.6 min in Mode B, hub reporting reason 5 throughout.
+//
+// The node therefore announces a CHANGE unprompted. The floor exists because an
+// announcement is an uplink on a battery node and NoPhase <-> None can still
+// oscillate when evidence is marginal (node 2 did 5 -> 5 -> 0 inside 16 s).
+// ---------------------------------------------------------------------------
+
+TEST(ModeAnnounce, NoChangeNeverSpendsAnUplink) {
+    EXPECT_FALSE(shouldAnnounceModeChange(false, 0));
+    EXPECT_FALSE(shouldAnnounceModeChange(false, kModeAnnounceMinS));
+    EXPECT_FALSE(shouldAnnounceModeChange(false, 0xFFFFFFFFu))
+        << "never having announced is not a reason to announce nothing";
+}
+
+TEST(ModeAnnounce, TheFirstAnnouncementIsNeverThrottled) {
+    // 0xFFFFFFFF is "never announced". That one must always pass: it is the
+    // announcement that ends the hub's DEFAULT belief, and throttling it would
+    // leave a node stale for exactly as long as it stays quiet — which is the
+    // whole failure being fixed.
+    EXPECT_TRUE(shouldAnnounceModeChange(true, 0xFFFFFFFFu));
+}
+
+TEST(ModeAnnounce, TheFloorIsInclusiveAtItsEdge) {
+    EXPECT_FALSE(shouldAnnounceModeChange(true, kModeAnnounceMinS - 1))
+        << "inside the floor: the change stays PENDING, it is not dropped";
+    EXPECT_TRUE(shouldAnnounceModeChange(true, kModeAnnounceMinS))
+        << "at the floor exactly — the same >= convention as the rest of the "
+           "policy header, so an off-by-one here cannot silently cost a minute";
+    EXPECT_TRUE(shouldAnnounceModeChange(true, kModeAnnounceMinS + 1));
+}
+
+TEST(ModeAnnounce, AShorterFloorIsExpressibleForABench) {
+    // The interval is a parameter rather than a hardcode so a bench run can
+    // narrow it without editing the policy — the same reason resyncMaxS is
+    // passed in rather than read from a constant.
+    EXPECT_TRUE(shouldAnnounceModeChange(true, 5, /*min_s=*/5));
+    EXPECT_FALSE(shouldAnnounceModeChange(true, 4, /*min_s=*/5));
+}
+
 TEST(SyncRequest, AnAnchorOlderThanResyncMaxSAsks) {
     EXPECT_EQ(syncRequestReason(wantsSync()), SyncRequestReason::AnchorStale);
     SyncRequestState fresh = wantsSync();

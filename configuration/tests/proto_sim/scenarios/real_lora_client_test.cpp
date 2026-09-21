@@ -2054,6 +2054,32 @@ TEST(RealLoraClient, BeaconStillCorrectsTheSwitchOnceTheNodeIsInSync) {
            "HA must not keep showing AUTO for a blind that is not in auto mode";
 }
 
+TEST(RealLoraClient, AModeChangeBeaconIsNamedNotRenderedAsAQuestionMark) {
+    // WAKE_MODE_CHANGED = 5, appended 2026-09-21. The hub's reason table is
+    // POSITIONAL — the index is the wire value — and its bound was a hardcoded
+    // `<= 4`. A new value that reached the hub without both being extended
+    // would log "?" for the one beacon that exists to tell the hub something
+    // new, and the operator would see nothing wrong with the node.
+    //
+    // Pinned here because the table and the enum live in different repos and
+    // are kept in step by hand.
+    constexpr std::time_t kHubEpoch = 1787000000;
+    BeaconRig rig;
+    rig.start(kHubEpoch);
+    ASSERT_NE(rig.base, 0u);
+
+    auto b = make_beacon(kHubEpoch, /*clock_valid=*/true);
+    b.beacon.reason = proto_sim::WakeReason::WAKE_MODE_CHANGED;
+    send_encrypted_uplink(rig.rol, rig.base, /*msgid=*/2, 18, 2, b);
+
+    EXPECT_EQ(rig.rol.last_beacon_reason_, 5u)
+        << "the wire value must survive to the hub unchanged";
+    // The PhaseReport is what the beacon exists to carry: a mode-change beacon
+    // that did not refresh the belief would be an uplink spent for nothing.
+    EXPECT_TRUE(rig.rol.clock_offset_valid_)
+        << "it is a normal beacon in every other respect";
+}
+
 TEST(RealLoraClient, BeaconClockOffsetIsNodeMinusHub) {
     constexpr std::time_t kHubEpoch = 1787000000;
     BeaconRig rig;

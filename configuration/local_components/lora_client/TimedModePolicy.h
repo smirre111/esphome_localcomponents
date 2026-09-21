@@ -149,6 +149,54 @@ static constexpr uint32_t kPromotionPhaseSamples = 8;
 // cycle rather than fixing it. With MissedMarks retired the flap has no source,
 // and the hold had no writer left — see the banner above the Demotion enum.
 
+// --- Telling the hub the mode changed --------------------------------------
+//
+// THE PROBLEM. Whether a node is in Mode B reaches the hub only in a
+// PhaseReport, and a PhaseReport rides an UPLINK: a wake beacon or a
+// CommandAck. An interactive node never sleeps, so it never wakes, so it never
+// beacons; with no traffic it has nothing to ack. The hub's belief about a
+// promoted, QUIET node is therefore stale indefinitely — and txRefusalFor can
+// never clear NoPhaseReport for exactly the node that most deserves single
+// shot. Mode B's 17->1 airtime saving is unreachable in the quiet regime Mode B
+// exists for.
+//
+// Measured 2026-09-20 on node 2: 12.6 minutes provably in Mode B — reason 0 on
+// its own console, 2.44 % RX, one window per round, 313 consecutive empty marks
+// — while the hub reported demotion reason 5 and refusal 7 the whole time.
+//
+// THE FIX. The node announces a CHANGE, unprompted, with a beacon carrying
+// WAKE_MODE_CHANGED. Not periodic: a transition is rare, and a node that is
+// not flapping sends one frame and then nothing.
+//
+// WHY IT NEEDS A FLOOR. An announcement is an UPLINK on a battery node, and
+// NoPhase <-> None can still cycle when phase evidence is marginal — node 2 did
+// 5 -> 5 -> 0 inside 16 s during the promote-and-hold capture. Announcing every
+// transition would reintroduce, as airtime, the very flapping cost the
+// MissedMarks retirement removed. So: at most one announcement per interval,
+// and the LAST state always wins, because a node that settles must not be left
+// described by a transition the hub was never told about.
+//
+// 60 s: the whole point is that the hub stops being wrong, so the floor is
+// short enough to bound staleness at a minute, and long enough that a marginal
+// oscillation costs one frame a minute rather than one per transition.
+static constexpr uint32_t kModeAnnounceMinS = 60;
+
+// Should the node spend an uplink saying its mode changed?
+//
+// `changed` is the caller's own edge detection (the reason differs from the one
+// last reported to the hub, NOT the one last logged — the log and the wire are
+// different audiences). Dependency-free and pure so the floor is host-testable
+// rather than a number buried in a timer callback.
+constexpr bool shouldAnnounceModeChange(bool changed, uint32_t s_since_announce,
+                                        uint32_t min_s = kModeAnnounceMinS)
+{
+    if (!changed)                    return false;
+    // 0xFFFFFFFF is "never announced", which must always be allowed through:
+    // the first announcement is the one that ends the hub's default belief.
+    if (s_since_announce == 0xFFFFFFFFu) return true;
+    return s_since_announce >= min_s;
+}
+
 // How stale the hub's confirmation may be before single-shot is withdrawn is
 // NOT a constant here: it is the resyncMaxS the hub itself published, passed
 // into txPolicyFor.

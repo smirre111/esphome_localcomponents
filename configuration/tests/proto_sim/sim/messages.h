@@ -58,12 +58,19 @@ enum class NodeMode : uint32_t {
     MODE_AUTO        = 1,
 };
 
+// KEEP IN STEP WITH blinds.proto's WakeReason BY HAND. This shim is
+// hand-written, regen_stubs.sh does not touch it, and no drift gate compares
+// the two — so it can lag silently, unlike the generated stubs.
 enum class WakeReason : uint32_t {
     WAKE_BOOT          = 0,
     WAKE_TIMER_EVENT   = 1,
     WAKE_TIMER_CHECKIN = 2,
     WAKE_BUTTON        = 3,
     WAKE_UNKNOWN       = 4,
+    // Not a wake: the node's Mode B status changed and it is saying so
+    // unprompted, because the PhaseReport only rides an uplink and a quiet
+    // interactive node never sends one. See blinds.proto for the measurement.
+    WAKE_MODE_CHANGED  = 5,
 };
 
 struct TimeSync {

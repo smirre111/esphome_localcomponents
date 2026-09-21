@@ -5020,21 +5020,23 @@ const ProtobufCEnumDescriptor node_mode__descriptor =
   node_mode__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue wake_reason__enum_values_by_number[5] =
+static const ProtobufCEnumValue wake_reason__enum_values_by_number[6] =
 {
   { "WAKE_BOOT", "WAKE_REASON__WAKE_BOOT", 0 },
   { "WAKE_TIMER_EVENT", "WAKE_REASON__WAKE_TIMER_EVENT", 1 },
   { "WAKE_TIMER_CHECKIN", "WAKE_REASON__WAKE_TIMER_CHECKIN", 2 },
   { "WAKE_BUTTON", "WAKE_REASON__WAKE_BUTTON", 3 },
   { "WAKE_UNKNOWN", "WAKE_REASON__WAKE_UNKNOWN", 4 },
+  { "WAKE_MODE_CHANGED", "WAKE_REASON__WAKE_MODE_CHANGED", 5 },
 };
 static const ProtobufCIntRange wake_reason__value_ranges[] = {
-{0, 0},{0, 5}
+{0, 0},{0, 6}
 };
-static const ProtobufCEnumValueIndex wake_reason__enum_values_by_name[5] =
+static const ProtobufCEnumValueIndex wake_reason__enum_values_by_name[6] =
 {
   { "WAKE_BOOT", 0 },
   { "WAKE_BUTTON", 3 },
+  { "WAKE_MODE_CHANGED", 5 },
   { "WAKE_TIMER_CHECKIN", 2 },
   { "WAKE_TIMER_EVENT", 1 },
   { "WAKE_UNKNOWN", 4 },
@@ -5046,9 +5048,9 @@ const ProtobufCEnumDescriptor wake_reason__descriptor =
   "WakeReason",
   "WakeReason",
   "",
-  5,
+  6,
   wake_reason__enum_values_by_number,
-  5,
+  6,
   wake_reason__enum_values_by_name,
   1,
   wake_reason__value_ranges,
