@@ -2419,6 +2419,35 @@ is the property the campaign exists to establish.
   6.26 %). That is why `FER_link` reads 93.5 %, and why that figure must never be
   read as loss: the true FER is the stage 2→3 figure, and it is 0.
 
+**STEP 2 — Mode B: PASS.** 900 s, grid 1500 ms, ONE copy, Timed Mode ON, grid
+adopted on a SETTLED clock (node ~21 min up — the campaign's own precondition).
+
+| Mode B, MAC-0 (1.1.2) | value | against the pass line |
+|---|---|---|
+| mode actually run / arm refusal | **2** / **0** | mode engaged |
+| windows armed / hit | **594 / 593** (WMR 1 683 ppm) | armed > 0 |
+| **HW-8:** oneShot n vs windows armed | **596 vs 594 → 0 missed** | zero misses |
+| detected / crcValid / addressed | **599 / 599 / 599** | **true FER 0 of 599** |
+| FER_link / seq gaps | **0 ppm** / **0** (seq 1..595 exp 595) | no marks lost |
+| phaseErr p50 / p99 / max | +1 119 / **3 195** / 3 222 us, n 595 | inside the 14 080 us guard |
+| armResidual p99 / oneShot p99 | 469 us / −399 us | — |
+| raw clock rate | **+10 ppm**, n 595, period 1 500 015 us | — |
+| **residual — \|ppm\| < 20** | **−1 ppm**, n 595 over 900 s | **PASS** |
+| DUP / MIC_FAIL | 1 675 ppm / 0 | single copy, as intended |
+| counterAcc / micValid | 596 / 597 of 599 | MAC-1 diagnostics, not MAC-0 |
+
+* **All four clauses met on one run** — and on the same build as Mode A, which
+  is the property this campaign exists to establish and which has never held
+  before.
+* In family with every prior Mode B pass: 1.0.74 gave 591/590 at residual −1;
+  1.0.94 gave 591/589 at WMR 3 384 ppm and residual 0. The WMR here — **one
+  empty window of 594** — is the best of the three.
+* **Promotion was a non-event**, unlike earlier the same day: 594 windows armed
+  across ~600 rounds means the node promoted within a few rounds of the first
+  mark, through the promotion trial, with no bootstrap burst needed. The two
+  extra one-shots (596 vs 594) are the beacon windows, exactly as the HW-8 note
+  above predicts.
+
 **MEASURED 2026-09-21 — fw 1.1.2: the mode announcement reaches the hub, and the
 defect that had stopped it.** Node 2 fw 1.1.2 (`6030a2c`), hub `6c77067`.
 
