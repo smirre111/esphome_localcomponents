@@ -2568,6 +2568,33 @@ Re-run single-press before drawing any conclusion about the clock. The same
 discipline the `ppm −25` anomaly got on 2026-09-21, and that one turned out to
 be an artefact of the 8-copy run rather than a regression.
 
+**RESOLVED — MODE A PASSES ON 1.1.4 (21:57–22:13). The double press was the
+cause.** One press, 90 s settle, nothing touched during the run:
+
+| Mode A | 1.1.2 (passed) | 1.1.4 double-press | **1.1.4 clean** |
+|---|---|---|---|
+| mode actually run / refusal | 1 / 0 | 1 / 0 | **1 / 0** |
+| detected / crcValid / addressed | 51/51/51 | 58/58/58 | **52 / 52 / 52** — true FER **0 of 52** |
+| DUP | 0 | 17 241 ppm | **0** |
+| **raw clock rate** | +10 ppm | −251 ppm | **+9 ppm** |
+| measured period | 1 093 012 us | 1 092 605 us | **1 093 005 us** (5 us off nominal) |
+| ppmSamples / elapsed | 51 / 899 s | 57 / 899 s | **52 / 899 s** |
+| FER_link | 935 196 ppm | 914 956 ppm | 931 216 ppm — listening duty |
+
+`DUP` returning to **0** is what confirms it: the double press had the hub
+restart its mark stream while the node's test was already armed, so frames were
+counted twice and the run-scoped rate fit was computed over a desynchronised
+stream. Nothing about the clock or about 1.1.4 moved — the suspicion was
+recorded rather than acted on, and it was right.
+
+* **Still present, and not a defect:** `seq 36..791` shows the node joining after
+  the opening marks. With `DUP 0` and the rate back in family that is ordinary
+  arming delay, not a corrupted stream.
+* **Procedural note, since it cost two runs:** a ModeTest must be pressed ONCE.
+  The node refuses a re-arm ("already running; the frames are the test"), but
+  the HUB restarts its mark stream regardless, and the node's deadline does not
+  move with it. Aborting a monitoring script does NOT stop the hub's test.
+
 **CAMPAIGN VERDICT — two of three modes on one build.**
 
 | step | result |
