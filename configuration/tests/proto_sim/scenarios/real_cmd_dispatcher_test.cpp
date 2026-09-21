@@ -5524,6 +5524,59 @@ TEST_F(RealNodeFixture, AWithdrawnGridIsAnnouncedAlthoughTimedRxIsNowOff) {
         << "and it carries GridDisabled, not the None it used to be in";
 }
 
+// ONE UPLINK, NOT TWO (node 1.1.3, after the Mode C measurement of 2026-09-21).
+//
+// Every beacon carries fillPhaseReport, and with it the demotion reason. So a
+// beacon queued for ANY reason has already told the hub what a separate
+// WAKE_MODE_CHANGED frame would say. Before this, a Mode C wake spent TWO
+// uplinks — a MODE_CHANGED and a TIMER_CHECKIN, 4 and 4 across an extended run
+// — because the announcement fires on the reason edge at wake and the check-in
+// beacon follows it. On a battery node that doubles a check-in's cost.
+//
+// The clearing lives in setStatus (the enqueue choke point) rather than in
+// processTxCommand (the build), for two reasons: it closes the race that IS the
+// duplicate, and processTxCommand is a task loop this harness does not run — a
+// fix placed there could not be covered at all. The queue is what every
+// announce witness already asserts on.
+TEST_F(RealNodeFixture, ACheckInBeaconSatisfiesAPendingModeAnnouncement) {
+    proto_sim_timer_set_now_us(1'000'000);
+    promoteAndSettle(disp);
+    (void) disp.timedRxActive();
+    disp.announceModeChangeIfPending();
+    drainTx(disp);
+    ASSERT_EQ(disp.last_reason_announced_, (uint8_t) timedmode::Demotion::None)
+        << "precondition: the hub has been told the node is in Mode B";
+
+    // PAST THE FLOOR first, or the throttle — not the fix — could be what keeps
+    // the second beacon away, and the test could not tell the two apart.
+    proto_sim_timer_set_now_us(esp_timer_get_time()
+                               + (int64_t) (timedmode::kModeAnnounceMinS + 1) * 1'000'000);
+
+    // A REAL change, so an announcement is genuinely owed.
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::InternalRc);
+    (void) disp.timedRxActive();
+    ASSERT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::BadClockSource)
+        << "precondition: an announcement is owed";
+
+    // A beacon now goes out for an UNRELATED reason — a check-in. It carries
+    // the PhaseReport, so this frame tells the hub the current reason.
+    disp.setStatus(BlindsStatusCmd::SYSCMD_BEACON,
+                   (uint32_t) WAKE_REASON__WAKE_TIMER_CHECKIN);
+    auto checkin = beaconsIn(drainTx(disp));
+    ASSERT_EQ(checkin.size(), 1u) << "precondition: the check-in beacon was queued";
+    EXPECT_EQ(checkin[0].arg, (uint32_t) WAKE_REASON__WAKE_TIMER_CHECKIN);
+    EXPECT_EQ(disp.last_reason_announced_,
+              (uint8_t) timedmode::Demotion::BadClockSource)
+        << "the check-in carried the CURRENT reason, so the hub is already up "
+           "to date and owes nothing further";
+
+    // THE ASSERTION THAT MATTERS: no SECOND uplink.
+    disp.announceModeChangeIfPending();
+    EXPECT_TRUE(beaconsIn(drainTx(disp)).empty())
+        << "a beacon already carried the reason — announcing again spends a "
+           "second uplink for nothing, which is exactly what Mode C measured";
+}
+
 TEST_F(RealNodeFixture, ANodeWithAStaleAnchorAsksTheHubForItsGrid) {
     disp.setTimedRxEnabled(true);
     proto_sim_timer_set_now_us(1'000'000);
