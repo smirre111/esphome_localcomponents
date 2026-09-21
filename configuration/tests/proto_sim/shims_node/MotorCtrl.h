@@ -62,6 +62,16 @@ public:
     uint32_t open_slack_s()  const { return open_slack_s_; }
     uint32_t close_slack_s() const { return close_slack_s_; }
 
+    // Motor current in AMPS, as taskMotorCurrentSensing converts it from the
+    // VNH5019 CS reading. CmdDispatcher puts this in the CoverPosition frame
+    // and the hub's sensor declares amps to match — the node-side conversion
+    // and the hub-side unit only make sense together.
+    //
+    // The FSM still consumes RAW counts for its current-sense endstop, so both
+    // accessors exist and they are not interchangeable.
+    float getLastMotorCurrentAmps() const { return last_motor_current_amps_; }
+    void  setLastMotorCurrentAmps(float a) { last_motor_current_amps_ = a; }
+
     // --- surface frtosTasks.cpp needs, as of T-1's last increment ---------
     //
     // The motor FSM and the battery supply switch are not protocol, so these
@@ -91,6 +101,8 @@ public:
     }
 
 private:
+    float last_motor_current_amps_{0.0f};
+
     unsigned fsm_calls_{0};
     unsigned supply_acquires_{0};
     unsigned supply_releases_{0};

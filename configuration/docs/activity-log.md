@@ -16,6 +16,79 @@ nodes). Newest entries first. See also the repo git history for exact diffs.
 
 ## Log
 
+### 2026-09-20 — the battery-ADC branch merged in, and what it was hiding
+
+Merged `claude/blindsesp-battery-voltage-adc-78srik` (both repos) into the
+development line before adopting it as `main`. It shared no ancestor with this
+line, so it was a three-way merge against old `main` as the base; the two ADC
+tasks were taken WHOLESALE rather than hunk-merged, because they are the
+debugged implementation of a measurement this tree had wrong and mixing the two
+would have produced a third version nobody has run.
+
+**This tree had a real battery bug and did not know it.** The full scale was
+`3.95 / 2` V for a channel configured at 6 dB, whose true full scale is ~2.2 V
+(Vref ~1.1 V x 2). A 12.1 V pack therefore read as ~10.7 V — already "empty" on
+the hub's 9.6-12.6 V 3S scale. Anyone measuring battery behaviour at the bench
+would have been measuring through an 11 % scale error. Conversion now goes
+through the chip's eFuse calibration (`adc_cali_raw_to_voltage`, line-fitting on
+the ESP32), which also linearises the SAR curve, with a per-board
+`kBattTrimFactor` and a nominal-full-scale fallback for chips carrying no
+calibration data.
+
+Also carried across:
+
+- **One unaveraged sample per measurement** became a trimmed mean of 16
+  (3 lowest and 3 highest dropped).
+- **Any reading at all entered the last-known-good cache**, which *every*
+  battery **and** position frame echoes until the next measurement — so one bad
+  value was reported frame after frame, not once. Range-checked (6-15 V) before
+  it may be cached, and a pending or in-progress measurement now counts as busy
+  in `checkQueuesIdle()` so a sleep request cannot cut a post-move update short.
+- **The cache is primed at boot.** A deep-sleep wake is a cold boot, so it
+  started at 0 V and every frame carried 0 V until the first measurement.
+- **`ESP_ERROR_CHECK` around the motor CS read panicked the node mid-move**
+  whenever Wi-Fi held the ADC2 lock (provisioning, OTA) or ADC2 flagged an
+  invalid conversion. A failed read skips the tick and pushes no fabricated
+  zero, because the FSM reads zero current as "endstop reached".
+- **Hub-side guard**: battery and voltage are no longer published from STATE or
+  POSITION frames outside 6-15 V, so an un-measured 0 V does not land in HA
+  history as 0 %. This tree had already refactored both publish sites into one
+  `publish_battery_()`, so the guard lands once here rather than twice, and the
+  window is expressed against the named cell constants with static_asserts that
+  it brackets the pack range — a floor above an empty pack would discard a
+  genuinely flat battery as noise.
+
+**Motor current is now in amps, on both ends or neither.** The node converts the
+VNH5019 CS reading (`I_OUT = V_CS * K / R_CS`, K ~7110 at 3 A per the datasheet)
+and the hub's sensor declares `A` with two decimals. Front end confirmed on the
+board: 1 kOhm CS to ground (~0.141 V/A) into the datasheet's 10 kOhm / 33 nF RC
+filter; the series 10 kOhm carries no DC into the ADC pin so it does not change
+the scale, and tau = 11 kOhm x 33 nF = 363 us settles in ~1.8 ms, with the
+20 kHz PWM averaged over ~7 periods. **The FSM still consumes RAW counts** for
+its current-sense endstop, deliberately: that threshold was tuned against counts
+and changing its units would change stop behaviour.
+
+I nearly got this half wrong. Looking at the hub branch alone, its `UNIT_AMPERE`
+change was incorrect — this tree's `CmdDispatcher.cpp` filled the field with
+`getLastMotorCurrentAdcRaw()` and said so on the line — so I recorded a
+"deliberately still raw counts" note against it. That was right for the hub
+branch in isolation and wrong for the pair: the NODE branch is what converts.
+Merging the two repos' branches together is what surfaced it, and either half
+alone would have shipped a wrong number wearing a confident unit.
+
+Noted for later, from the branch and not yet acted on: with 0 dB attenuation and
+a 1 kOhm sense resistor the usable window is ~0.7-7.8 A, and below ~0.7 A the
+ESP32 ADC is inaccurate — which is also the region the "current == 0" endstop
+test lives in. A threshold in amps would be more robust than an exact-zero
+comparison, but that changes stop behaviour and was left alone.
+
+**Not verified on hardware.** After flashing, compare the `Battery: raw=... ->
+...V` log line against a multimeter at the pack terminals and adjust
+`kBattTrimFactor` in `main/frtosTasks.cpp` if the divider resistors are off
+nominal. The host suite compiles and runs all of this now (927 tests) — which is
+only true because T-1 got `frtosTasks.cpp` under test first, and is how the four
+shim gaps this merge needed were found at build time instead of on the bench.
+
 ### 2026-08-27 — the production config runs, both nodes, both events
 
 **First fully successful overnight run.** Both nodes executed both scheduled

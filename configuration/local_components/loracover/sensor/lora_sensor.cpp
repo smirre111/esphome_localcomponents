@@ -49,8 +49,35 @@ namespace esphome
     static constexpr float kCellEmptyV = 3.2f;
     static constexpr float kCellFullV  = 4.2f;
 
+    // A reading outside this window is not a battery state.
+    //
+    // A node that has not completed a measurement yet — fresh boot, or a
+    // deep-sleep wake before its first ADC cycle — reports 0 V out of its
+    // last-known-good cache, and both the STATE and POSITION frames carry that
+    // cached value. Published, it lands in Home Assistant's history as a 0 V /
+    // 0 % point that no battery ever had, and it is the long-run history these
+    // sensors exist for.
+    //
+    // DELIBERATELY WIDER than the 9.6-12.6 V the percentage maps: this rejects
+    // "no measurement" and corruption, not a flat or overcharged pack, which
+    // are real states an operator needs to see. They must bracket the pack
+    // range with room to spare, hence the static_asserts.
+    static constexpr float kPlausibleMinV = 6.0f;
+    static constexpr float kPlausibleMaxV = 15.0f;
+    static_assert(kPlausibleMinV < kCellEmptyV * kCellCount,
+                  "the plausibility floor must sit below an empty pack, or a "
+                  "genuinely flat battery would be discarded as noise");
+    static_assert(kPlausibleMaxV > kCellFullV * kCellCount,
+                  "and the ceiling above a full one");
+
     void LoraCover::publish_battery_(float voltage)
     {
+      if (voltage < kPlausibleMinV || voltage > kPlausibleMaxV)
+      {
+        ESP_LOGW(TAG, "Ignoring implausible battery voltage %.2f V", voltage);
+        return;
+      }
+
       const float empty_v = kCellEmptyV * kCellCount;
       const float full_v  = kCellFullV * kCellCount;
       float battery_level = (voltage - empty_v) / (full_v - empty_v) * 100.0f;

@@ -79,3 +79,58 @@ void proto_sim_adc_reset(void) {
         g_units[i].err  = ESP_OK;
     }
 }
+
+// --- calibration -----------------------------------------------------------
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+
+struct adc_cali_scheme_ctx { float mv_per_count; };
+
+static struct adc_cali_scheme_ctx g_cali = {0.0f};
+static adc_cali_line_fitting_efuse_val_t g_efuse = ADC_CALI_LINE_FITTING_EFUSE_VAL_DEFAULT_VREF;
+
+esp_err_t adc_cali_raw_to_voltage(adc_cali_handle_t h, int raw, int *voltage_mv) {
+    if (h == NULL || voltage_mv == NULL) return ESP_ERR_INVALID_ARG;
+    if (h->mv_per_count <= 0.0f) return ESP_ERR_INVALID_STATE;
+    *voltage_mv = (int) ((float) raw * h->mv_per_count);
+    return ESP_OK;
+}
+
+esp_err_t adc_cali_scheme_line_fitting_check_efuse(adc_cali_line_fitting_efuse_val_t *out) {
+    if (out == NULL) return ESP_ERR_INVALID_ARG;
+    *out = g_efuse;
+    return ESP_OK;
+}
+
+// Both creators fail unless a test installed a factor. Failing is the DEFAULT
+// on purpose: production must survive a chip with no calibration data, and that
+// fallback path is the one a host run should exercise unless a test says
+// otherwise.
+static esp_err_t make_scheme(adc_cali_handle_t *out) {
+    if (out == NULL) return ESP_ERR_INVALID_ARG;
+    if (g_cali.mv_per_count <= 0.0f) return ESP_ERR_NOT_SUPPORTED;
+    *out = &g_cali;
+    return ESP_OK;
+}
+
+esp_err_t adc_cali_create_scheme_line_fitting(const adc_cali_line_fitting_config_t *cfg,
+                                              adc_cali_handle_t *out) {
+    (void) cfg; return make_scheme(out);
+}
+esp_err_t adc_cali_create_scheme_curve_fitting(const adc_cali_curve_fitting_config_t *cfg,
+                                               adc_cali_handle_t *out) {
+    (void) cfg; return make_scheme(out);
+}
+
+void proto_sim_adc_cali_set_linear(float mv_per_count) { g_cali.mv_per_count = mv_per_count; }
+void proto_sim_adc_cali_set_efuse(adc_cali_line_fitting_efuse_val_t v) { g_efuse = v; }
+void proto_sim_adc_cali_reset(void) {
+    g_cali.mv_per_count = 0.0f;
+    g_efuse = ADC_CALI_LINE_FITTING_EFUSE_VAL_DEFAULT_VREF;
+}
+
+// The handle is a file-static here, not an allocation, so deleting it is a
+// no-op rather than a free. Production still calls these on its way out and a
+// missing symbol is a link error.
+esp_err_t adc_cali_delete_scheme_line_fitting(adc_cali_handle_t h) { (void) h; return ESP_OK; }
+esp_err_t adc_cali_delete_scheme_curve_fitting(adc_cali_handle_t h) { (void) h; return ESP_OK; }

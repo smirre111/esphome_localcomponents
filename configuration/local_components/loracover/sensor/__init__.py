@@ -11,6 +11,7 @@ from esphome.const import (
     DEVICE_CLASS_SIGNAL_STRENGTH,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
+    UNIT_AMPERE,
     UNIT_DECIBEL_MILLIWATT,
     UNIT_PERCENT,
     UNIT_SECOND,
@@ -54,12 +55,24 @@ CONFIG_SCHEMA = (
                 accuracy_decimals=0,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
-            # F-11: motor current reported in the CoverPosition frame (raw ADC
-            # counts — apply a calibration filter in YAML to convert to amps).
+            # Motor current from the CoverPosition frame, in AMPS.
+            #
+            # BOTH HALVES OR NEITHER, and this is the "both" state. The node
+            # converts the VNH5019 CS reading on-node (I_OUT = V_CS * K / R_CS,
+            # K ~7100, R_CS 1 kOhm measured on the board) and puts amps in the
+            # field; this declares the unit to match. Declaring amps while the
+            # node still sent raw counts would be a wrong number wearing a
+            # confident unit — worse than an honest unitless one — and it is the
+            # current the endstop in MotorPolicy.h is judged against.
+            #
+            # The node's FSM still consumes RAW counts for that endstop, which
+            # is deliberate: the threshold was tuned against counts and changing
+            # its units would change stop behaviour.
             cv.Optional(CONF_MOTOR_CURRENT): sensor.sensor_schema(
+                unit_of_measurement=UNIT_AMPERE,
                 device_class=DEVICE_CLASS_CURRENT,
                 state_class=STATE_CLASS_MEASUREMENT,
-                accuracy_decimals=0,
+                accuracy_decimals=2,
                 icon="mdi:current-dc",
             ),
             # P2: node clock minus hub clock, reported in the wake beacon.
