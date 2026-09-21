@@ -2431,6 +2431,40 @@ a belief the node had already left. Introduced with the announcement itself
   shot can engage — still needs a promotion that outlives its ModeTest, which no
   run on this date produced.
 
+**THE A/B, RUN TO SETTLE IT (07:40–07:46).** The IDENTICAL bootstrap burst on
+1.1.2, against the 1.1.1 run of 07:14–07:19. One variable intended (firmware);
+two others noted below that were not controlled.
+
+| | fw 1.1.1 | fw 1.1.2 |
+|---|---|---|
+| mode actually run / arm refusal | 2 / 0 | 2 / 0 |
+| windows armed / hit | 187 / 187 | **194 / 194** |
+| FER link | 0 ppm | 0 ppm |
+| phase error p99 | 88 276 us | **3 625 us** |
+| hub: reason / active / refused / phase | 5 / 0 / 7 / 0 for 300 s | **5 / 0 / 7 / 0 for 340 s** |
+
+* **The gap is NOT closed, and the announcement is not what closes it.** The node
+  promoted on both runs and every armed window was hit; the hub learned nothing
+  either time. With 1.1.2 the edge IS detected during promotion, so the blocker
+  lies DOWNSTREAM of the flag — at the uplink. The note recorded above applies: a
+  node running a ModeTest does not beacon, so the only carrier is suppressed
+  during precisely the runs that promote. The remedy is unchanged and still
+  unbuilt: a carrier for the phase report that does not require the node to have
+  something else to say.
+* **CORRECTION to the p99 reading in the 1.1.1 entry.** The 88 ms tail was
+  attributed to burst-copy mis-attribution "present only in the 8-copy run". This
+  is the same 8-copy button at 3 625 us, so copy count does not explain it. What
+  also differed, uncontrolled: the 1.1.1 run followed the MAC-ping flood that
+  exhausted the transmit pool and dropped placed frames, and its node had been up
+  since 06:56 on a PROVISIONAL anchor ("node clock not settled yet"), whereas the
+  1.1.2 run started 7 min after a fresh boot, past the 60 s recalibration. The
+  provisional-anchor mechanism is documented above at −7 917 us and −18 330 us on
+  earlier re-solves. Unresolved: do not quote the copy-stride explanation.
+* **ppm was NOT captured for the 1.1.2 run** — it exists only in the report's log
+  line and the capture window closed before it was emitted. The `ppm −25` /
+  residual −24 anomaly therefore remains open, and still needs its single-copy
+  re-measure before anything is concluded about the clock.
+
 **MEASURED 2026-09-21 — fw 1.1.1: reception is flawless, and the hub still cannot
 see it.** Node 2 fw 1.1.1 (`62563ba`), hub `6c77067`, production profile, Timed
 Mode ON, node **INTERACTIVE** (never sleeps, so never beacons of its own accord),
@@ -2480,7 +2514,9 @@ to drive promotion with ordinary placed traffic instead of a ModeTest.
   hit, zero arm refusals, zero link FER. Whatever blocks promotion here is not
   the radio, not the anchor and not the window geometry — three hypotheses this
   run killed outright.
-* **p99 88 276 us is one copy stride (88 ms), not a timing fault.** It appears
+* **p99 88 276 us — THIS EXPLANATION IS WRONG; see the A/B in the 1.1.2 entry
+  above, which reads 3 625 us from the SAME 8-copy button.** Kept as written so
+  the correction is legible rather than silently rewritten. It appears
   only in the 8-copy run: the burst-copy back-out recovers copy 0's T0 from
   whichever copy was caught, and a mis-attributed copy index lands exactly one
   stride out. p50 +1 508 us sits well inside the ±14 080 us guard.
