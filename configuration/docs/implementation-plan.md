@@ -2493,6 +2493,43 @@ wakes over ~1 h 50 m at the 15 min check-in pace, measured hub-side only.
   intended. Worth a throttle or a suppression while a check-in beacon is already
   due.
 
+**FIXED 2026-09-21 — ONE uplink per wake (node 1.1.4, `909adc2`).** The double
+uplink above is closed, and the cause was not the ordering that two attempts
+tried to patch.
+
+`last_reason_announced_` and `last_mode_announce_us_` were plain members, so
+every deep-sleep wake reset them: the throttle saw `s_since = 0xFFFFFFFF` and
+the edge test saw `0xFF`. **Every wake was a first-ever announcement**, so the
+node announced and then sent its check-in beacon anyway. Both are now
+file-level `static RTC_DATA_ATTR` — a wake keeps them, a power-on clears them —
+matching `s_clock_valid`, and matching the `s_lastBatteryVoltage` precedent,
+which was the SAME defect: a plain member every wake reset, so every beacon
+reported v=0.00 for a healthy battery.
+
+| beacons across two Mode C wakes | 1.1.2 | 1.1.3 | **1.1.4** |
+|---|---|---|---|
+| `MODE_CHANGED` | 2 | 2 | **0** |
+| `TIMER_CHECKIN` | 2 | 2 | **2** |
+| **uplinks per wake** | 2 | 2 | **1** |
+
+`fw=10104`, `reset=DEEPSLEEP`, `resume=1` on both wakes.
+
+* **Two failed attempts are recorded rather than deleted**, because a green
+  bench certified both. 1.1.2 hoisted the edge detection; 1.1.3 cleared the
+  pending announcement in `setStatus` (`c5b4711`) and measurement proved it
+  inert, so it was reverted and the witness written for it deleted with it. An
+  implementation must fix something or go.
+* **A cold boot still announces once, and that is CORRECT.** Power-on clears RTC
+  RAM, so the first evaluation is a genuine edge; the 1.1.4 boot log shows two
+  beacons alongside `rtc_ram=LOST prev=cold`. Boot was never the test — the wake
+  is, and that distinction is what `simulateWakeForTest()` exists to express.
+* **Evidence weight, stated plainly:** two wakes is thin. It establishes that the
+  ordinary case costs one frame instead of two; it does NOT exclude a rarer path
+  where a reason genuinely changes across a sleep, which would legitimately
+  spend a second uplink. The stronger evidence is the host witness
+  `AWakeWithAnUnchangedReasonSpendsOneUplinkNotTwo`: deterministic, red-first
+  proven, and it dies under a mutant that stops the state surviving a wake.
+
 **CAMPAIGN VERDICT — two of three modes on one build.**
 
 | step | result |
