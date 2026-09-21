@@ -105,7 +105,12 @@ struct NodeProbe : CmdDispatcher {
     // processTxCommand) rather than in the queued command's arg — so without
     // this the test could only assert that *a* beacon went out, which is not
     // the property "the last state wins" at all.
-    using CmdDispatcher::last_reason_announced_;
+    // What the HUB was last told now lives in an RTC_DATA_ATTR static, read
+    // through CmdDispatcher::lastReasonAnnounced(). It moved out of the class
+    // because as a plain member every deep-sleep wake reset it, so the node
+    // announced on every wake and then sent its check-in beacon as well —
+    // two uplinks for one fact, measured on fw 1.1.2 and again on 1.1.3.
+    using CmdDispatcher::simulateWakeForTest;
 };
 
 struct RealNodeFixture : public ::testing::Test {
@@ -138,6 +143,21 @@ struct RealNodeFixture : public ::testing::Test {
             (uint8_t)( kNodeMac        & 0xFF),
         };
         proto_sim_set_factory_mac(mac);
+
+        // A COLD BOOT for the mode-announce state.
+        //
+        // It lives in RTC_DATA_ATTR, which the host shim defines away, so it is
+        // process-lifetime state shared by every test in this binary — the
+        // hazard the README already records ("one existing test leaves the
+        // interactive override set to 'interactive forever', which suppresses
+        // auto mode in every test defined after it"). Every witness here
+        // assumes a clean 0xFF start, so each gets one explicitly.
+        //
+        // A test that wants a WAKE rather than a cold boot calls
+        // simulateWakeForTest() instead: that clears what plain RAM loses and
+        // keeps what RTC_DATA_ATTR retains, which is the distinction the bench
+        // failed to model when it passed a fix that does nothing on hardware.
+        CmdDispatcher::resetModeAnnounceState();
     }
 
     // Pump one item off the TX queue and execute one iteration of
@@ -5364,7 +5384,7 @@ TEST_F(RealNodeFixture, AModeChangeIsAnnouncedToTheHubExactlyOnce) {
     EXPECT_EQ(beacons[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED)
         << "a distinct reason: reusing TIMER_CHECKIN would be a beacon claiming "
            "a check-in that never happened";
-    EXPECT_EQ(disp.last_reason_announced_, (uint8_t) timedmode::Demotion::None)
+    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None)
         << "and the hub was told the state the node is actually in";
 
     // Nothing changed since, so nothing more is owed however often the arming
@@ -5389,7 +5409,7 @@ TEST_F(RealNodeFixture, AChangeInsideTheFloorIsHeldNotDropped) {
     (void) disp.timedRxActive();
     disp.announceModeChangeIfPending();
     drainTx(disp);   // the first announcement, asserted by the test above
-    ASSERT_EQ(disp.last_reason_announced_, (uint8_t) timedmode::Demotion::None);
+    ASSERT_EQ(CmdDispatcher::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None);
 
     // A REAL second change, immediately: off the crystal is BadClockSource, a
     // live rung of the ladder. Inside kModeAnnounceMinS it must NOT go out — an
@@ -5413,7 +5433,7 @@ TEST_F(RealNodeFixture, AChangeInsideTheFloorIsHeldNotDropped) {
     auto late = drainTx(disp);
     ASSERT_EQ(late.size(), 1u) << "the suppressed change must still be owed";
     EXPECT_EQ(late[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED);
-    EXPECT_EQ(disp.last_reason_announced_,
+    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(),
               (uint8_t) timedmode::Demotion::BadClockSource)
         << "and it carries the reason, not merely the fact that something moved";
 }
@@ -5435,7 +5455,7 @@ TEST_F(RealNodeFixture, TheLastStateWinsWhenTheModeFlickersInsideTheFloor) {
     (void) disp.timedRxActive();          // no grid yet -> GridDisabled (1)
     disp.announceModeChangeIfPending();   // first announcement, 0xFF -> 1
     drainTx(disp);
-    ASSERT_EQ(disp.last_reason_announced_,
+    ASSERT_EQ(CmdDispatcher::lastReasonAnnounced(),
               (uint8_t) timedmode::Demotion::GridDisabled)
         << "precondition: the hub has been told state 1";
 
@@ -5464,7 +5484,7 @@ TEST_F(RealNodeFixture, TheLastStateWinsWhenTheModeFlickersInsideTheFloor) {
     // told something. cmd.arg carries the WakeReason; the DEMOTION reason rides
     // the beacon body built later in processTxCommand, so this reads the field
     // the announcement committed to.
-    EXPECT_EQ(disp.last_reason_announced_, settled)
+    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(), settled)
         << "after a flicker that returned to its starting state, the hub must "
            "be left believing that state — not the excursion that raised the "
            "flag, which no longer holds";
@@ -5494,7 +5514,7 @@ TEST_F(RealNodeFixture, AWithdrawnGridIsAnnouncedAlthoughTimedRxIsNowOff) {
     (void) disp.timedRxActive();
     disp.announceModeChangeIfPending();
     drainTx(disp);
-    ASSERT_EQ(disp.last_reason_announced_, (uint8_t) timedmode::Demotion::None)
+    ASSERT_EQ(CmdDispatcher::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None)
         << "precondition: the hub has been told the node is in Mode B";
 
     // PAST THE FLOOR FIRST. Withdrawing inside kModeAnnounceMinS would be
@@ -5519,62 +5539,112 @@ TEST_F(RealNodeFixture, AWithdrawnGridIsAnnouncedAlthoughTimedRxIsNowOff) {
            "believing the last reason it was told and single shot is decided "
            "on a stale belief";
     EXPECT_EQ(beacons[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED);
-    EXPECT_EQ(disp.last_reason_announced_,
+    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(),
               (uint8_t) timedmode::Demotion::GridDisabled)
         << "and it carries GridDisabled, not the None it used to be in";
 }
 
-// ONE UPLINK, NOT TWO (node 1.1.3, after the Mode C measurement of 2026-09-21).
+// ACheckInBeaconSatisfiesAPendingModeAnnouncement STOOD HERE and is DELETED
+// with the implementation it pinned (2026-09-21).
 //
-// Every beacon carries fillPhaseReport, and with it the demotion reason. So a
-// beacon queued for ANY reason has already told the hub what a separate
-// WAKE_MODE_CHANGED frame would say. Before this, a Mode C wake spent TWO
-// uplinks — a MODE_CHANGED and a TIMER_CHECKIN, 4 and 4 across an extended run
-// — because the announcement fires on the reason edge at wake and the check-in
-// beacon follows it. On a battery node that doubles a check-in's cost.
+// It asserted that clearing the pending announcement in setStatus() — at
+// enqueue — stops a second uplink. Hardware said otherwise: fw 1.1.3 still
+// spent 2 MODE_CHANGED + 2 TIMER_CHECKIN across two Mode C wakes, because the
+// announcement fires BEFORE the wake beacon is ever queued (the LoRa task at
+// priority 6 preempts app_main at priority 1, so the arming pass runs well
+// ahead of main.cpp:790). The clearing sat permanently on the losing side of
+// that race and fixed nothing.
 //
-// The clearing lives in setStatus (the enqueue choke point) rather than in
-// processTxCommand (the build), for two reasons: it closes the race that IS the
-// duplicate, and processTxCommand is a task loop this harness does not run — a
-// fix placed there could not be covered at all. The queue is what every
-// announce witness already asserts on.
-TEST_F(RealNodeFixture, ACheckInBeaconSatisfiesAPendingModeAnnouncement) {
+// The test passed only because it queued the beacon first and announced second
+// — an order the fix handled and the node never takes. It was written after the
+// fix, around the path the fix handled, which is how it certified a change that
+// does nothing.
+//
+// An implementation must fix something or go; a witness for a deleted
+// implementation goes with it. The replacement below models the wake in the
+// order the node actually performs it, and the real defect turned out to be
+// state loss, not ordering: see s_last_reason_announced in CmdDispatcher.cpp.
+
+// THE WAKE, MODELLED AS THE NODE ACTUALLY ORDERS IT.
+//
+// This test exists because the bench blessed a fix that measurement proved does
+// nothing. ACheckInBeaconSatisfiesAPendingModeAnnouncement queues the beacon
+// FIRST and then announces — an order the fix handles, and one the node never
+// takes. On hardware the order is the opposite, and it is structural:
+//
+//   main.cpp:762  createApplicationTasks()  spawns the LoRa task at priority 6
+//   main.cpp:790  sendWakeBeacon(...)       runs in app_main at priority 1
+//
+// so the tasks preempt app_main and the arming pass calls
+// announceModeChangeIfPending() before the wake beacon is ever queued. Measured
+// fw 1.1.3, 2026-09-21: 2 MODE_CHANGED + 2 TIMER_CHECKIN across two Mode C
+// wakes — the 1.1.2 behaviour, unchanged by the fix.
+//
+// WHAT A WAKE KEEPS. RTC_DATA_ATTR survives deep sleep and is lost only at
+// power-on; plain members are reset by every wake. The host shim models this
+// deliberately (shims_node/esp_attr.h): statics persist for the life of the
+// process and a cold boot resets them explicitly. A fresh dispatcher therefore
+// models a wake for everything that is NOT RTC-backed — which is the whole
+// defect, since last_reason_announced_ and last_mode_announce_us_ are plain
+// members, so every wake looks like a first-ever announcement.
+//
+// Same bug the codebase already fixed once: s_lastBatteryVoltage was a plain
+// member, every wake reset it, and every beacon reported v=0.00 for a healthy
+// battery.
+TEST_F(RealNodeFixture, AWakeWithAnUnchangedReasonSpendsOneUplinkNotTwo) {
     proto_sim_timer_set_now_us(1'000'000);
-    promoteAndSettle(disp);
+
+    // --- BEFORE THE SLEEP: the hub is told the current reason ---
+    // SetUp() reset the announce state, so this is a cold boot: the first
+    // evaluation is genuinely an edge and the announcement is owed.
     (void) disp.timedRxActive();
     disp.announceModeChangeIfPending();
+    const uint8_t told = CmdDispatcher::lastReasonAnnounced();
     drainTx(disp);
-    ASSERT_EQ(disp.last_reason_announced_, (uint8_t) timedmode::Demotion::None)
-        << "precondition: the hub has been told the node is in Mode B";
+    ASSERT_NE(told, (uint8_t) 0xFF)
+        << "precondition: the hub has been told a reason before the sleep";
 
-    // PAST THE FLOOR first, or the throttle — not the fix — could be what keeps
-    // the second beacon away, and the test could not tell the two apart.
+    // --- THE WAKE ---
+    //
+    // simulateWakeForTest() clears exactly what plain RAM loses and keeps
+    // exactly what RTC_DATA_ATTR retains. That split IS the property under
+    // test, which is why this is an explicit call and not a second dispatcher:
+    // building another object tests C++ lifetime, not the node, and that is how
+    // a fix which does nothing on hardware passed this suite twice.
+    //
+    // Note what is deliberately NOT called here: resetModeAnnounceState(). That
+    // is a power-on. Calling it would make this test model a cold boot, it
+    // would pass for the wrong reason, and the bench would be lying again.
+    disp.simulateWakeForTest();
+
+    // Well past the announce floor, so the throttle cannot be what keeps the
+    // second beacon away — only the surviving reason can.
     proto_sim_timer_set_now_us(esp_timer_get_time()
                                + (int64_t) (timedmode::kModeAnnounceMinS + 1) * 1'000'000);
 
-    // A REAL change, so an announcement is genuinely owed.
-    disp.setRtcSlowSrc(phase::RtcSlowSrc::InternalRc);
+    // The arming pass runs FIRST, exactly as the node orders it:
+    //   main.cpp:762  createApplicationTasks()  spawns the LoRa task at prio 6
+    //   main.cpp:790  sendWakeBeacon(...)       runs in app_main at prio 1
+    // so the tasks preempt app_main and the announcement is evaluated before
+    // the wake beacon is ever queued.
     (void) disp.timedRxActive();
-    ASSERT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::BadClockSource)
-        << "precondition: an announcement is owed";
+    disp.announceModeChangeIfPending();
 
-    // A beacon now goes out for an UNRELATED reason — a check-in. It carries
-    // the PhaseReport, so this frame tells the hub the current reason.
+    // ...and only then the wake beacon the node always sends.
     disp.setStatus(BlindsStatusCmd::SYSCMD_BEACON,
                    (uint32_t) WAKE_REASON__WAKE_TIMER_CHECKIN);
-    auto checkin = beaconsIn(drainTx(disp));
-    ASSERT_EQ(checkin.size(), 1u) << "precondition: the check-in beacon was queued";
-    EXPECT_EQ(checkin[0].arg, (uint32_t) WAKE_REASON__WAKE_TIMER_CHECKIN);
-    EXPECT_EQ(disp.last_reason_announced_,
-              (uint8_t) timedmode::Demotion::BadClockSource)
-        << "the check-in carried the CURRENT reason, so the hub is already up "
-           "to date and owes nothing further";
 
-    // THE ASSERTION THAT MATTERS: no SECOND uplink.
-    disp.announceModeChangeIfPending();
-    EXPECT_TRUE(beaconsIn(drainTx(disp)).empty())
-        << "a beacon already carried the reason — announcing again spends a "
-           "second uplink for nothing, which is exactly what Mode C measured";
+    auto sent = beaconsIn(drainTx(disp));
+    ASSERT_EQ(sent.size(), 1u)
+        << "a wake whose reason has NOT changed must spend ONE uplink: the "
+           "check-in beacon already carries the PhaseReport, the demotion "
+           "reason and beacon.mode. Two means the announcement fired as well, "
+           "which is what hardware measured on fw 1.1.2 AND again on 1.1.3.";
+    EXPECT_EQ(sent[0].arg, (uint32_t) WAKE_REASON__WAKE_TIMER_CHECKIN)
+        << "and the one uplink is the check-in, not a separate announcement";
+    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(), told)
+        << "the wake kept what RTC_DATA_ATTR retains — if this is 0xFF the "
+           "state did not survive and the whole defect is back";
 }
 
 TEST_F(RealNodeFixture, ANodeWithAStaleAnchorAsksTheHubForItsGrid) {
