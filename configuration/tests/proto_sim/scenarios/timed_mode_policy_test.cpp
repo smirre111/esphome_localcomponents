@@ -367,6 +367,100 @@ TEST(TimedModePolicy, A60SecondBoundWouldHaveBeenInert) {
 // never the diagnostic; which of fourteen conditions failed is.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// OPTIMISTIC SINGLE SHOT (2026-09-21), behind HubBelief::optimistic_single_shot,
+// which defaults OFF.
+//
+// Rule 4 already bounds the cost of being wrong to one frame: an unacked single
+// shot is retried as a burst immediately. So when the ONLY rung refusing single
+// shot is that the hub's confirmation has aged out, the hub may spend one placed
+// copy (42 ms) instead of a 17-copy burst (715 ms) and let Rule 4 cover a miss.
+//
+//   expected = p x 42 ms + (1 - p) x 757 ms  against  715 ms always
+//   break-even at p = 6 %
+//
+// Measured 2026-09-21: a node genuinely in Mode B hit 198/198 and 194/194
+// windows at WMR 0 ppm, so p is near 1 when it really is promoted and near the
+// Mode A catch rate (~6 %) when it is not — which is the break-even itself.
+//
+// These tests exist to pin the BOUNDARY, not the feature: what the switch may
+// bypass, and everything it may not.
+// ---------------------------------------------------------------------------
+
+TEST(TimedModePolicy, OptimisticSingleShotIsOffByDefaultAndChangesNothing) {
+    // The default must be inert. A switch that alters behaviour when nobody has
+    // enabled it is not a switch.
+    EXPECT_FALSE(HubBelief{}.optimistic_single_shot);
+
+    HubBelief stale = confident();
+    stale.confirmation_age_s = kResyncMaxS + 1;
+    EXPECT_EQ(txRefusalFor(stale, kGuardUs, kResyncMaxS), TxRefusal::ConfirmationStale);
+    EXPECT_EQ(txPolicyFor(stale, kGuardUs, kResyncMaxS), TxPolicy::Burst);
+}
+
+TEST(TimedModePolicy, OptimisticSingleShotClearsAStaleConfirmationAndOnlyThat) {
+    HubBelief b = confident();
+    b.confirmation_age_s        = kResyncMaxS + 1;
+    b.optimistic_single_shot    = true;
+
+    EXPECT_EQ(txRefusalFor(b, kGuardUs, kResyncMaxS), TxRefusal::None)
+        << "an aged-out confirmation is the one rung Rule 4 makes safe to guess "
+           "past: it means the hub's evidence is OLD, not that the node moved";
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::SingleShot);
+
+    // And it does not paper over a hub that published no interval at all, which
+    // must still fail closed.
+    EXPECT_EQ(txRefusalFor(b, kGuardUs, 0), TxRefusal::NoPublishedMaxAge);
+}
+
+TEST(TimedModePolicy, OptimisticSingleShotDoesNotRescueAMissingPhaseReport) {
+    // The first draft of the switch bypassed NoPhaseReport too. That was both
+    // INERT and UNSAFE: node_timed_rx arrives IN the phase report, so with no
+    // report the next rung refuses anyway — and bypassing it would mean sending
+    // one copy at a node the hub has never heard a phase report from, which is
+    // not stale evidence but NO evidence.
+    HubBelief b = confident();
+    b.phase_reported         = false;
+    b.node_timed_rx          = false;   // as it necessarily is without a report
+    b.optimistic_single_shot = true;
+
+    EXPECT_EQ(txRefusalFor(b, kGuardUs, kResyncMaxS), TxRefusal::NoPhaseReport);
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::Burst);
+}
+
+TEST(TimedModePolicy, OptimisticSingleShotNeverBypassesPositiveEvidence) {
+    // The asymmetry rule's "any hub uncertainty -> burst" is relaxed ONLY for
+    // aged-out evidence. Every rung below is the hub KNOWING something changed,
+    // and each must still burst with the switch on.
+    struct Case { const char *what; TxRefusal want; void (*mutate)(HubBelief &); };
+    const Case cases[] = {
+        {"no grid",          TxRefusal::GridDisabled,
+         [](HubBelief &b) { b.grid_enabled = false; }},
+        {"rebooted",         TxRefusal::RebootedSinceConfirm,
+         [](HubBelief &b) { b.rebooted_since_confirm = true; }},
+        {"new session",      TxRefusal::SessionChanged,
+         [](HubBelief &b) { b.session_changed = true; }},
+        {"beacon missed",    TxRefusal::BeaconMissed,
+         [](HubBelief &b) { b.beacon_missed = true; }},
+        {"firmware unknown", TxRefusal::FirmwareUnknown,
+         [](HubBelief &b) { b.firmware_known = false; }},
+        {"rule 4",           TxRefusal::SingleShotUnacked,
+         [](HubBelief &b) { b.single_shot_unacked = true; }},
+        {"node not timed",   TxRefusal::NodeNotTimed,
+         [](HubBelief &b) { b.node_timed_rx = false; }},
+    };
+
+    for (const auto &c : cases) {
+        HubBelief b = confident();
+        c.mutate(b);
+        b.optimistic_single_shot = true;
+        // Stale as well, so the ONLY thing that could rescue it is the switch.
+        b.confirmation_age_s = kResyncMaxS + 1;
+        EXPECT_EQ(txRefusalFor(b, kGuardUs, kResyncMaxS), c.want) << c.what;
+        EXPECT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::Burst) << c.what;
+    }
+}
+
 TEST(TimedModePolicy, EveryRefusalReasonIsReachableAndNamesItsOwnCondition) {
     // One case per rung. If a rung is ever added without a case here, the
     // exhaustiveness check at the bottom of this test fails.

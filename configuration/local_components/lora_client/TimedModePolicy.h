@@ -323,6 +323,34 @@ struct HubBelief
     // Set the moment a single shot goes unacked, cleared by fresh confirmation.
     // Rule 4: this is what bounds the exposure to one frame.
     bool     single_shot_unacked    = false;
+
+    // OPTIMISTIC SINGLE SHOT — off by default, and the default is the point.
+    //
+    // When the ONLY thing refusing single shot is that the hub's evidence has
+    // gone STALE (NoPhaseReport, ConfirmationStale), the hub may spend one
+    // placed copy instead of a 17-copy burst and let §4.6 Rule 4 cover a wrong
+    // guess: an unacked single shot is retried as a burst immediately, so being
+    // wrong costs exactly one frame.
+    //
+    //   expected airtime = p x 42 ms + (1 - p) x 757 ms, against 715 ms always
+    //   break-even at p = 6 %
+    //
+    // Measured 2026-09-21: a node genuinely in Mode B hit 198/198 and 194/194
+    // windows at WMR 0 ppm, so p is near 1 when the node really is promoted and
+    // near the Mode A free-running catch rate (~6 %) when it is not — which is
+    // the break-even itself, so the change is close to free even when the hub's
+    // optimism is misplaced.
+    //
+    // THIS IS NOT §4.4's REJECTED KEEPALIVE. That was a PERIODIC unicast at
+    // 5.8 min: 274.5 s/day at 32 nodes, 3.4x worse than all-burst. This is
+    // demand-driven — it costs nothing while the fleet is idle and adds no
+    // periodic traffic at all.
+    //
+    // It relaxes §4.6's "any hub uncertainty -> burst", which is the safety
+    // argument, so it ships behind a switch defaulting OFF and never applies to
+    // a rung that is POSITIVE evidence the node moved: rebooted_since_confirm,
+    // session_changed, beacon_missed, firmware_known. Those still burst.
+    bool     optimistic_single_shot = false;
 };
 
 // guard_us is passed in for the same reason demotionReason takes it: this
@@ -383,11 +411,31 @@ constexpr TxRefusal txRefusalFor(const HubBelief &b, uint32_t guard_us,
     // test before it arms a timed window, and it is the only end that knows the
     // result: so the hub follows the node's decision instead of a copy of it.
     (void) guard_us;
+
+    // THE TWO STALENESS RUNGS, and the only two the optimistic switch may
+    // bypass. Both mean "the hub's evidence has aged out", never "the node has
+    // moved" — the rungs above (reboot, session change, missed beacon, unknown
+    // firmware) are positive evidence and are tested first, so reaching here at
+    // all means none of them fired.
+    //
+    // Rule 4 is what makes bypassing them safe: an unacked single shot is
+    // retried as a burst immediately, so a wrong guess costs one frame. See
+    // HubBelief::optimistic_single_shot for the arithmetic (break-even p = 6 %,
+    // measured p near 1 for a node genuinely in Mode B).
+    // NoPhaseReport is NOT bypassable, and the reason is worth stating because
+    // the first draft of the switch did bypass it: node_timed_rx arrives IN the
+    // phase report, so whenever phase_reported is false node_timed_rx is false
+    // too and the bypass merely falls through to NodeNotTimed and bursts
+    // anyway. It would also mean single-shotting a node the hub has never heard
+    // a phase report from, which is not stale evidence — it is no evidence.
     if (!b.phase_reported)                          return TxRefusal::NoPhaseReport;
+    // Nor is this one: the node reporting it is not in Mode B is the node's own
+    // decision about its own windows, not an aged-out belief.
     if (!b.node_timed_rx)                           return TxRefusal::NodeNotTimed;
 
     if (max_age_s == 0)                             return TxRefusal::NoPublishedMaxAge;
-    if (b.confirmation_age_s > max_age_s)           return TxRefusal::ConfirmationStale;
+    if (b.confirmation_age_s > max_age_s && !b.optimistic_single_shot)
+                                                    return TxRefusal::ConfirmationStale;
     return TxRefusal::None;
 }
 
