@@ -1333,7 +1333,8 @@ TEST_F(RealNodeFixture, ClearedVersionMakesTheHubRePushAndReArmAutoMode) {
 
 namespace {
 
-std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t mode) {
+std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t mode,
+                                      uint32_t sender = kHubAddr) {
     static ScheduleEntry e1;
     schedule_entry__init(&e1);
     e1.minuteofday = 450;
@@ -1352,7 +1353,7 @@ std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
-    hdr.senderaddress = kHubAddr;
+    hdr.senderaddress = sender;
     hdr.msgid         = msgid;
     op.header   = &hdr;
     op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
@@ -3153,6 +3154,33 @@ TEST_F(RealNodeFixture, AnUnauthenticatedFrameCannotRatchetTheReplayCounter) {
     EXPECT_EQ(disp.rxMsgIdForTest(), before)
         << "a plaintext frame must be refused before it can touch the counter";
     EXPECT_NE(sys.getSchedVersion(), 0xBEEFu);
+}
+
+TEST_F(RealNodeFixture, AnUnknownSenderCannotWalkPastThePlaintextGate) {
+    // The gate used to ask "do I hold a base nonce for the SENDER" — and
+    // senderaddress is a plaintext field the node never validates. Naming a
+    // sender the node has never heard of made get_base_nonce fail, so the gate
+    // did not fire AT ALL: the frame went on to ratchet rx_message_id_, set
+    // destAddress to the attacker's address, and reach ScheduleConfig,
+    // BaseNonceExchange, GridSync, TimeSync and CoverConfig. Four such frames
+    // naming four unknown senders also evict the hub's real base nonce, because
+    // findOrCreatePeer drops slot 0 when the four-entry peer table is full.
+    //
+    // The predicate was keyed on the one field the attacker chooses. The test
+    // that was meant to cover this sent from kHubAddr — the single sender for
+    // which the old gate happened to work.
+    disp.setBaseNonceForTest(kHubAddr, 0xABCDEF01);
+
+    const uint32_t before = disp.rxMsgIdForTest();
+    auto sched = pack_schedule_op(/*msgid=*/before + 1000, /*version=*/0xBEEF,
+                                  NODE_MODE__MODE_INTERACTIVE,
+                                  /*sender=*/0x77);   // never seen by this node
+    disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()), 1'100'000);
+
+    EXPECT_NE(sys.getSchedVersion(), 0xBEEFu)
+        << "naming an unknown sender must not be a way past the gate";
+    EXPECT_EQ(disp.rxMsgIdForTest(), before)
+        << "and it must not ratchet the replay counter on its way through";
 }
 
 TEST_F(RealNodeFixture, LoginItselfStaysAcceptedInPlaintext) {

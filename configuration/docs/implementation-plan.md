@@ -730,6 +730,16 @@ RX1 = [1000 − 17.216, +29.44] = [982.8, 1012.2]  → nearest copies 926, 1014 
 RX2 = [2000 − 17.216, +29.44] = [1982.8, 2012.2] → nearest copies 1982, 2070 — both outside
 ```
 
+**Convention note.** The window bounds above are defined on the arriving frame's
+**T0**, but "copies at 926, 1014" are hub **transmit** instants, and the two are
+`kPreambleToT0Us` = 3136 µs apart. The conclusion here survives the correction —
+the copies miss by tens of milliseconds — but the conflation is not harmless in
+general, and it is where the code's convention came from: both placement
+producers passed a wanted T0 as `TxPolicy::earliest_us`, which is a fire
+instant, so every placed frame arrived 3136 µs late until `fireInstantUs()` was
+finally given a production caller. Whenever a window and an instant appear in
+the same comparison, say which end of the frame each refers to.
+
 and the node then sleeps. Even a fortunate alignment would only be a 33.5 %
 hit (`29.44 / 88`). **Class A requires a single copy at a precisely known
 offset; a burst is the opposite construction.**
@@ -954,7 +964,7 @@ Track B below, not here.
 | **B-1** | ~~`LoraTiming.h` (§2.2) + per-frame TX policy replacing the global `setBurstCopies`~~ — **DONE.** `LoraTiming.h`, `TimedGrid.h`, `TimedModePolicy.h`, `ClassAWindows.h` shared and drift-gated; `send(buf, len, {copies, stride_ms})` carries the policy on the buffer. `first_mark_us` deliberately omitted until B1a's scheduler can honour it. **Fixed a live bug:** `setBurstCopies` was tracker state set at enqueue and read at dequeue, so every frame sent during a 300 s drift test — including a user's blind command — went out as one copy, ~5.8 % delivery. | host tests pin every constant; a single-copy frame is expressible |
 | **B0** | ~~GPIO light-sleep wakeup on DIO0 **and** DIO1, disarmed in step with `gpio_intr_disable` (§2.5)~~ — **WRITTEN AND COMPILED, NOT RUN.** `LoraInterface::wakeSourceEnable/Disable`, paired one-for-one with the four existing `gpio_intr_enable`/`disable` sites; the ISR disarms nothing (`gpio_wakeup_disable` takes a spinlock and is not IRAM-resident), so the handler task does it on dequeue. Compiles clean (xtensa-esp-elf, ESP-IDF v6.0, zero warnings in the changed files); **never run on hardware.** | timestamps lose their 100 ms-scale outliers, jitter < 1 ms, **and light-sleep residency is unchanged** — the residency half is the one this change could plausibly break, and it needs hardware |
 | **B1** | ~~Hub grid anchor; bursts start at the addressed node's `T0`~~ — **DONE**, alignment **default off** (it costs up to 1.5 s of latency and buys nothing until B3; B3 enables it per promoted node). The startup broadcast demote moves to B3, where `GridSync` exists. | bursts observably start on the grid; nothing regresses |
-| **B1a** | **DONE.** `TxQueue.h` (shared, gated) and `sendTask` draining `data_queue` into it and waiting on `nextEligibleUs()` replaced an `xQueueReceive(portMAX_DELAY)` that held a deferred frame not until it was eligible but until unrelated traffic woke the task. `send_aligned_` now produces placed frames for every grid-aligned downlink — `earliest_us` = the node's next mark clear of the hub's own burst — instead of holding them in an ESPHome timeout that could only hand them to the back of the queue near the right time (and that silently REPLACED a second command for the same node inside one round; the second now goes to the following mark). `earliest_us` reaches the air instant too: `popDue()` releases a placed frame one prepare-lead early and `firePacket()` fires it on the mark (B5). `txqueue::deferUntilUs()` is superseded rather than wired — see §11a. | "a frame can be placed 'not before round n+2, behind nothing else'" — **expressible and expressed.** Met. |
+| **B1a** | **DONE.** `TxQueue.h` (shared, gated) and `sendTask` draining `data_queue` into it and waiting on `nextEligibleUs()` replaced an `xQueueReceive(portMAX_DELAY)` that held a deferred frame not until it was eligible but until unrelated traffic woke the task. `send_aligned_` now produces placed frames for every grid-aligned downlink — `earliest_us` = the node's next mark clear of the hub's own burst — instead of holding them in an ESPHome timeout that could only hand them to the back of the queue near the right time (and that silently REPLACED a second command for the same node inside one round; the second now goes to the following mark). `earliest_us` reaches the air instant too: `popDue()` releases a placed frame one prepare-lead early and `firePacket()` fires it on the mark (B5). **Corrected after review:** `earliest_us` is a FIRE instant and both producers were handing it a wanted T0, so every placed frame landed 3136 µs late — `LoraTiming.h`'s own `fireInstantUs()`, the declared conversion for this, had no production caller in either repo. Also corrected: `send()` returned void and drops silently on an exhausted buffer pool, so the mark was recorded as spent for a frame that never entered the queue, pushing the next real command a further round out. **Still open:** the deferral moved from the heap into a 5-entry buffer pool (`POOL_SIZE`) against a 16-entry queue, and a placed frame holds its buffer until its mark; and `send_aligned_` is reached only by the tracked-op path, so GridSync, TimeSync and ScheduleConfig are still unplaced. `txqueue::deferUntilUs()` is superseded rather than wired — see §11a. | "a frame can be placed 'not before round n+2, behind nothing else'" — **expressible and expressed.** Met. |
 | **B2** | ~~Node phase tracking~~ — **DONE.** `PhaseTracker.h` (shared, gated); sample committed only for addressed frames; distribution not mean, so a bimodal set is rejected on spread. Beacon carries `rtcSlowSrc`, ppm, phase error/spread/count. 14 tests. Original text: `T0_measured`, `phaseErrUs`, `ppmEstimate`, `rtcSlowSrc` in the beacon. **Must filter the phase sample by slot/address first**: `noteDriftSample` is called before parsing by design (`frtosTasks.cpp:160-165`), so a node currently stamps its neighbour's frames and `phaseErrUs` would be bimodal at 0 and ±46.9 ms. | `phaseErrUs` inside ±2 ms in the field, on every node, over days |
 | **B3** | ~~**Mode B is unreachable**~~ — **REACHABLE NOW, both ends; still default OFF and still ungated by a bench measurement.** Node: adopting a `GridSync` enables timed RX (`setTimedRxEnabled` had no caller); the phase expectation is predicted from the grid on every sample instead of being frozen at adoption (`setExpectedT0Us` had no caller, so `phaseTrustworthy()` went permanently false on the *second* addressed frame); the demotion body is reachable from the live counting path (it sat in `noteMarkOutcome`, which has none); and `resyncMaxS` and the anti-flap hold now come from real timestamps rather than hardcodes that disabled both criteria. Hub: `LORAListener::enable_timed_mode()` starts the grid, sets alignment and publishes `GridSync(true)` — exposed as a **`switch`** in `loradevices.yml`, default off, per node. **This also unblocks HW-2**, which needs a `GridSync` carrying `armOffsetUs`. **§4.6's hub half now works:** `txPolicyFor()` and `HubBelief` had no production caller at all, so the whole airtime saving of Mode B — 17 copies down to 1 — was written, tested and never asked for; a hub in Mode B paid Mode A's cost for a narrower window. Each listener now maintains its belief from observed events: `admit_frame_` measures every uplink's T0 against the grid (its mark plus the `ulOffsetUs` the hub itself published, within the same guard the node's phase tracking uses) and counts consecutive in-slot arrivals; a login sets `session_changed`; the first retry of a single shot sets `single_shot_unacked`, which is Rule 4's one-frame exposure; `firmware_known` follows the beacon's version. `send_aligned_` asks the policy and sends ONE copy when it says so. **Still open, node half:** `in_slot_uplinks` in the node's `NodeState` is still hardcoded. It is *hub-confirmed* by definition — "a beacon saying I am ready says nothing about where its window actually landed" — so the node cannot fill it in from its own measurements without turning it into the claim §4.6 rejects. It needs the count on the wire, and a wire field is only useful once something sends it regularly: the periodic beacon (`beaconEveryRounds`) is not implemented, so that work belongs with the beacon, not here. Left optimistic meanwhile, as the other criteria gate promotion. And the gate below is unchanged. | `T_detect` on the bench first, then reception ≥ Mode A over a week |
 busy window before each burst (last copy's air-end plus `responseWindowMs`) and
@@ -971,7 +981,7 @@ they are deliberately separate: if the residual is bad but the one-shot is fine
 the cost is software, and if the one-shot is bad it is the sleeping clock and no
 amount of prepare/fire work would help. | p99 fire residual < 200 µs |
 | **Bx** | ~~**Hub RX timestamping**~~ — **CODE HALF DONE; the gate needs hardware.** `checkReception()` stamps the poll, derives `T0` via `LoraTiming.h`, and reports a *measured* uncertainty (midpoint of the poll gap, ±half its width) plus a worst-gap high-water mark, all readable by clients inside `set_response()` and printed by `dump_config()`. 6 tests. **±5 ms at the nominal 10 ms poll**, so the gate is not met and cannot be by software: DIO0 is not wired to the hub's ESP32 (§5.4). | an uplink's `T0` is known to ±1 ms — **blocked on wiring DIO0**, not on code |
-| **C2** | **NODE HALF FIXED; HUB HALF STILL BROKEN.** *Fixed:* the origin. `sendPacketBytes` transmits with `async = true`, so `lora_endPacket`'s polling branch never runs, `lora_lastTxDoneUs()` was 0 forever, and `noteUplinkSent()`'s `max()` fell through to `g_dio0_rx_us` — which at that moment still held the **CAD-done edge from before the transmit**, making every window early by the frame's whole air time (42–95 ms) against a 29.44 ms window. `noteUplinkSent()` now runs in the **TX_DONE branch of the receive task**, off the ISR's own edge stamp, with the frame length carried from the send site (`LoraInterface::lastTxLen()`). *Fixed:* the mode gate — Class A activated on **every uplink from every node**, so on an unmodified Mode A node it was a straight reception regression; it now requires automatic mode AND no adopted grid. *Fixed:* the shared one-shot's identity — `grid_timer_running_` said only "the one-shot is in use", so every Class A window counted as a grid mark and fed WMR and the demotion counter; `arm_source_` now distinguishes them. **Hub, still open:** `send_into_rx1_()` reads `last_rx_t0_us()`, which is **tracker-global, not per-node**, 750 ms after the uplink that triggered the reply — with 32 nodes, another node's uplink overwriting the stamp inside that window is the common case, and the reply is a single copy with no burst to save it. | wake → ~3 s; no missed downlinks over a week — **node half now reachable; still gated on the hub stamp** |
+| **C2** | **NODE HALF FIXED; HUB HALF STILL BROKEN.** *Fixed:* the origin. `sendPacketBytes` transmits with `async = true`, so `lora_endPacket`'s polling branch never runs, `lora_lastTxDoneUs()` was 0 forever, and `noteUplinkSent()`'s `max()` fell through to `g_dio0_rx_us` — which at that moment still held the **CAD-done edge from before the transmit**, making every window early by the frame's whole air time (42–95 ms) against a 29.44 ms window. `noteUplinkSent()` now runs in the **TX_DONE branch of the receive task**, off the ISR's own edge stamp, with the frame length carried from the send site (`LoraInterface::lastTxLen()`). *Fixed:* the mode gate — Class A activated on **every uplink from every node**, so on an unmodified Mode A node it was a straight reception regression; it now requires automatic mode AND no adopted grid. *Fixed:* the shared one-shot's identity — `grid_timer_running_` said only "the one-shot is in use", so every Class A window counted as a grid mark and fed WMR and the demotion counter; `arm_source_` now distinguishes them. *Fixed:* the hub's origin — `send_into_rx1_()` read `last_rx_t0_us()`, which is **tracker-global, not per-node**, 750 ms after the uplink that triggered the reply; it now uses the per-node stamp captured when that node's frame was authenticated. *Fixed:* the hub had **no mode gate at all** — `send_timesync()` is armed after every login-confirm and every beacon, so every node in the fleet got its TimeSync as ONE copy aimed at T0+1 s, including interactive nodes that sweep a free-running window and hit it ~6 % of the time. It now mirrors the node's own predicate. *Fixed:* the aim was 3136 µs late (see B1a). *Fixed:* a stray Mode A window was completing the sequence, because `noteUplinkSent` runs on TX_DONE after the next window is already armed; `classa_window_open_` now discriminates. *Fixed:* `classa_` was read cross-core with a torn 64-bit origin. **Still open:** the hub has **no RX2 half** (`grep kRx2` in the hub returns nothing), so a sequence that reaches RX2 listens where nothing is sent. | wake → ~3 s; no missed downlinks over a week — **both halves now reachable; RX2 unimplemented on the hub** |
 
 **B3 is the deliverable.** B-1…B2 make it safe; B4–B5 make it cheap; Bx and C2
 are a separate, larger piece of work that only the automatic fleet benefits
@@ -1120,11 +1130,92 @@ against a node with a live session disabled MAC-1 and MAC-2.
   (`phaseTrustworthy()` requires every sample inside the guard, so poisoning it
   demotes the node rather than desynchronising it silently), and untested.
 - **A node that has never been provisioned accepts plaintext `ClientConfig`.**
-  Inherent to bootstrap: the gate's test is "do we hold a base nonce for this
-  sender", so a factory-fresh node is deliberately unaffected. The MAC check
-  inside the handler is the only gate there, and the MAC is broadcast in the
-  plaintext `ClientRegister`. Closing it needs a provisioning secret, which is
-  a protocol change, not a patch.
+  Inherent to bootstrap: the gate's test is "does this node hold a session", so
+  a factory-fresh node is deliberately unaffected. The MAC check inside the
+  handler is the only gate there, and the MAC is broadcast in the plaintext
+  `ClientRegister`. Closing it needs a provisioning secret, which is a protocol
+  change, not a patch.
+
+**Corrected after review — the gate asked the wrong question.** It tested
+"do I hold a base nonce for the **sender**", and `senderaddress` is a plaintext
+field the node never validates: naming an unknown sender made the lookup fail
+and the gate did not fire at all, so the frame reached `ScheduleConfig`,
+`BaseNonceExchange`, `GridSync`, `TimeSync` and `CoverConfig`, and four such
+frames evict the hub's real nonce from the four-entry peer table. The test that
+covered this sent from `kHubAddress` — the one sender for which the broken
+predicate worked. It now asks whether **this node** holds a session, of the
+node's own state and nothing on the wire.
+
+**And it broke two live hub paths, which is the other half of the same
+mistake.** A rule this strict is a constraint on the hub, and the hub had not
+been changed to meet it:
+
+- `send_base_nonce_exchange()` was the hub's recovery when it holds no nonce for
+  a peer, sent as plaintext `CMD_BASENONCE`. A node holding a session refuses it
+  — correctly; an unauthenticated frame offering a new key is the thing it must
+  not act on. This matters most after a **hub** reboot, because
+  `s_base_nonce_map` is in RAM: the hub returns holding nothing while every node
+  still holds its nonce in NVS. Recovery now goes through `send_login()`, which
+  carries the same nonce under the one exemption.
+- `send_remote_config()` packed raw and so always went out in the clear, on the
+  first REGISTER after every hub boot, and the hub set `config_synced_ = true`
+  regardless and never retried — losing config changes silently. It now encrypts
+  when a session exists, and a provisioned node's push is deferred to
+  `confirm_session_`.
+
+The lesson is the §11a one in a new place: a default-deny rule is only shipped
+when every legitimate sender has been changed to satisfy it. Deny-by-default
+plus an unchanged caller is not security, it is an outage.
+
+### Found by review and NOT fixed
+
+Recorded here rather than left to look maintained.
+
+- **The hub's grid anchor is never established correctly, so §4.6's evidence
+  chain measures a grid the node does not share.** `send_grid_sync()` declares
+  `txround = 0, txslot = grid_slot_` — the node solves its anchor from that
+  declared position — but sends via `parent_->send()`, unplaced and as a
+  17-copy burst, so the frame does not occupy the slot it claims and the copies
+  walk across slot boundaries (88000 mod 46875 = 41125). The node adopts from
+  whichever copy it decodes first, making the anchor error roughly uniform over
+  ±750 ms. `send_grid_sync`'s own comment asserts "the grid is published only
+  from an aligned client" as the safeguard; nothing enforces it. Routing that
+  one call through `send_aligned_` is the likely fix — `enable_timed_mode`
+  already sets `grid_aligned_` before calling it — and the round mismatch is
+  harmless because the mark set is invariant modulo `kRoundUs`.
+- **§4.6's in-slot predicate is therefore effectively unreachable.** It requires
+  `|T0 − mark − 60000| ≤ 14080`, but the node never reads `ul_offset_us` at all
+  (assigned in `CmdDispatcher.cpp`, read nowhere) and every node transmit is
+  preceded by an unconditional random delay of 29–290 ms in 29 ms steps. With a
+  wrong anchor on top, P(three consecutive in-slot) is on the order of 1e−5:
+  `txPolicyFor()` returns `Burst` in perpetuity and the hub logs a confidence
+  reset on essentially every uplink. The single-copy saving that §4.6 exists for
+  does not ship. The two tests cannot see this — `feed_in_slot_uplink`
+  synthesises the uplink as `mark + kUplinkOffsetUs`, asserting the hub's
+  arithmetic against the number the hub itself chose.
+- **One Home Assistant gesture can become two commands 1.5 s apart.** Placement
+  is monotone per node, but the tracked-op state is a singleton: a second
+  command re-points `op_frame_`/`op_last_msgid_` while the first is still queued
+  for its mark. The node executes the first and acks it; the hub rejects that ack
+  as below `op_first_msgid_` and keeps retrying the second. Under the old named
+  timeout the second REPLACED the first, which was also wrong. The queue has no
+  cancel/replace API, which is what this actually needs.
+- **`beacon_missed` is never written.** A `txPolicyFor` guard that contributes
+  nothing. `rebooted_since_confirm` was in the same state and is now set from
+  `handle_register_`; this one needs the hub to compare a predicted check-in
+  against an observed one, which is a feature rather than a fix.
+- **No test links the real hub and the real node.** `real_lora_client_test` and
+  `real_cmd_dispatcher_test` link one side each; the end-to-end scenarios drive
+  hand-written mirrors in `sim/hub_model.cpp` and `sim/node_model.cpp`. Every
+  seam defect above lives in that gap, and each was guarded by a test that
+  restated one side's own arithmetic. One target linking both static libraries
+  with `air_channel.h` between them — and a first test asserting that the node's
+  window is open when the hub's preamble arrives — is the cheapest structural
+  fix available.
+- **`LoraInterface.cpp` and `frtosTasks.cpp` are not compiled by the host suite
+  at all** (the CMake shims `LoraInterface.h`). The Class A task-ordering defect
+  and the cross-core `classa_` read were both fixed blind, and no test in either
+  repo can reach them.
 
 **What was sound all along:** the nonce design itself. `send_login()` mints a
 fresh base nonce *and* zeroes both counters together; `send_base_nonce_exchange()`
@@ -1158,7 +1249,12 @@ Ordered by what each one blocks.
 | ~~`CmdDispatcher::setTimedRxEnabled()`~~ | ~~node~~ | **FIXED** — adopting a grid enables timed RX | ~~Mode B on the node side~~ |
 | ~~`CmdDispatcher::setBenchNode()`~~ | ~~node~~ | **FIXED** — `CONFIG_BLINDS_BENCH_NODE`, a build-time flag. Deliberately not over the air: the obvious carrier, `ClientConfig`, is unauthenticated and gated only by a MAC broadcast in the clear | ~~HW-2~~ |
 | `ModeTest.mode` | node `CmdDispatcher.cpp:2364` | stored in `mt_mode_` and used only to echo back into the report. **It never changes the node's mode.** The "Mode Test B" HA button runs a **Mode A** measurement and labels the report `mode = 2`; the hub logs it as a Mode B result | every Mode B number the system can currently produce |
-| `node_fw_version_` | hub `lora_client.h:430` | written once, **never read** — the capability gate for version skew does not exist | migration safety |
+| ~~`node_fw_version_`~~ | ~~hub~~ | **REACHABLE** — `hubBeliefNow_()` reads it as `firmware_known`, which `txPolicyFor()` requires before allowing single-shot | ~~migration safety~~ |
+| ~~`loratiming::fireInstantUs()`~~ | ~~both repos — one caller, a unit test~~ | **FIXED** — the declared conversion from a wanted T0 to a fire instant had no production caller while BOTH placement producers passed a T0 straight into `TxPolicy::earliest_us`, so every placed frame arrived 3136 µs late. Now applied in `send_aligned_` and `send_into_rx1_`, and `earliest_us` is documented as a fire instant | ~~B1a/C2 placement accuracy~~ |
+| ~~`LoraInterface::classa_window_open_`~~ | ~~node — assigned at `LoraInterface.cpp:488`, read nowhere~~ | **FIXED** — added for exactly the discrimination it was not performing: without it, any window's outcome was attributed to the Class A sequence, and since `noteUplinkSent` runs on TX_DONE after the next window is already armed, a stray Mode A window completed RX1 and sent the node to RX2 where the hub transmits nothing | ~~C2~~ |
+| `LORAListener::hubBelief()` | hub `lora_client.h:320` | **zero production callers.** Whether the hub is in single-shot or burst for a node is visible only in a log line — there is no `text_sensor` for it in `loradevices.yml`. Given that §4.6's predicate is currently unreachable (§11b), a diagnostic here would have surfaced that on day one | §4.6 observability |
+| `LoraInterface::rxBusySkips()` | node `LoraInterface.h:282` | **zero callers.** Added for "the one failure the KPIs cannot see" and not carried in the beacon or `ModeTestReport`, so it closes no KPI gap. It also false-positives for the whole duration of a drift test (continuous RX holds the semaphore) and logs unthrottled | M2 |
+| `CmdDispatcher::noteClassASleepOk()` | node | **zero production callers**, and wiring one now would break the invariant that `active` means "a window is still to open" | Tier 1 sleepOk |
 
 Two of these have a second, independent reason to be treated as blocking:
 `setExpectedT0Us` and `noteMarkOutcome` mean the mode state machine cannot

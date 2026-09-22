@@ -139,6 +139,35 @@ From `tests/proto_sim/README.md`, all learned the hard way:
   — the F-30 login limiter, `AckCache`'s re-ack window — sees zero elapsed
   time regardless of the `rx_us` values. Seed the precondition directly
   (`setBaseNonceForTest`) rather than trying to walk the real clock.
+- **A test that computes the expected value the way production computes it
+  proves nothing.** This is the single recurring defect in this suite, and it
+  hid every placement bug found in the third design review at once.
+  `RX1IsAimedAtThisNodesOwnUplink...` asserted `earliest_us == t0 +
+  kRx1DelayUs`, which is character-for-character the expression
+  `send_into_rx1_()` evaluates — so it passed while the frame was arriving
+  3136 µs late, because the missing `fireInstantUs()` conversion was missing
+  from the assertion too. `WithAlignmentOnTheFrameIsDeferredToT0` re-evaluated
+  `nextClearT0ForSlotUs()` and compared. `feed_in_slot_uplink` *constructs* the
+  uplink as `mark + kUplinkOffsetUs`, exactly what `noteUplinkPlacement_`
+  subtracts, so §4.6's tests cannot see that no real node produces such a T0.
+  **Assert the counterpart's contract instead**: that the frame's T0 falls
+  inside `classa::rx1OpenUs/rx1CloseUs`, that a placed T0 is a fixed point of
+  `nextT0ForSlotUs` for that slot. Those fail when the arithmetic is wrong;
+  restatements cannot.
+- **Neither `LoraInterface.cpp` nor `frtosTasks.cpp` is compiled by the host
+  suite** — `proto_sim/CMakeLists.txt` shims `LoraInterface.h`. Everything about
+  task ordering, the DIO0 interrupt task, cross-core access and radio arming is
+  therefore untestable here, and two real defects (a Mode A window completing
+  the Class A sequence; a torn 64-bit read of `classa_.t0_uplink_us`) were fixed
+  without any test able to reach them. A dispatcher-level test that calls
+  `noteUplinkSent` then `noteClassAWindowResult` in order on one object is
+  asserting the sequence that does *not* occur in production.
+- **The shim tracker models no transmit queue.** `shims/.../lora_tracker.cpp`'s
+  `send()` records the policy and emits into the SimRadio immediately, and
+  `busy_until_us` is a field tests set that `send()` never updates. So a
+  `GridAligned` test can assert what `send_aligned_` *computed* and never that a
+  placed frame is popped or fired on its mark. Only `real_lora_tracker_test.cpp`
+  drives the real queue, and only with one entry.
 - **There is no `settimeofday` shim.** The node clock under host test is real
   wall time and cannot be stepped. Any test involving schedule timing builds its
   entries relative to *now*. **This bites Mode C**: RX1/RX2 offsets must be
