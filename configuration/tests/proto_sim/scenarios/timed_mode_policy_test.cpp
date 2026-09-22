@@ -145,7 +145,7 @@ TEST(TimedModePolicy, ZeroInitialisedStateIsModeA) {
 // ---------------------------------------------------------------------------
 
 TEST(TimedModePolicy, ConfidentHubMaySingleShot) {
-    EXPECT_EQ(txPolicyFor(confident(), kGuardUs), TxPolicy::SingleShot);
+    EXPECT_EQ(txPolicyFor(confident(), kGuardUs, kResyncMaxS), TxPolicy::SingleShot);
 }
 
 TEST(TimedModePolicy, AnyUncertaintyMeansBurst) {
@@ -156,7 +156,7 @@ TEST(TimedModePolicy, AnyUncertaintyMeansBurst) {
         {"beacon missed",  [] { auto b = confident(); b.beacon_missed = true; return b; }()},
         {"firmware unknown", [] { auto b = confident(); b.firmware_known = false; return b; }()},
         {"stale",          [] { auto b = confident();
-                                b.confirmation_age_s = kMaxConfirmationAgeS + 1; return b; }()},
+                                b.confirmation_age_s = kResyncMaxS + 1; return b; }()},
         {"prior miss",     [] { auto b = confident(); b.single_shot_unacked = true; return b; }()},
         // The phase report, and every way of not having a usable one.
         {"no phase report", [] { auto b = confident(); b.phase_reported = false; return b; }()},
@@ -170,17 +170,22 @@ TEST(TimedModePolicy, AnyUncertaintyMeansBurst) {
         // something innocent, and this is the case that exposes them.
         {"phase bimodal",   [] { auto b = confident(); b.phase_err_us = 0;
                                  b.phase_spread_us = (int32_t) kGuardUs + 1; return b; }()},
+        // The node's own trustworthiness test, not an approximation: a tight
+        // cluster offset by most of a guard band passes both the mean and the
+        // spread while every frame in it lands near the edge of the window.
+        {"samples outside guard", [] { auto b = confident();
+                                 b.phase_outside_guard = 1; return b; }()},
         {"internal RC",     [] { auto b = confident();
                                  b.rtc_src = RtcSlowSrc::InternalRc; return b; }()},
         {"unknown clock",   [] { auto b = confident();
                                  b.rtc_src = RtcSlowSrc::Unknown; return b; }()},
     };
     for (auto &c : cases)
-        EXPECT_EQ(txPolicyFor(c.b, kGuardUs), TxPolicy::Burst) << c.what;
+        EXPECT_EQ(txPolicyFor(c.b, kGuardUs, kResyncMaxS), TxPolicy::Burst) << c.what;
 }
 
 TEST(TimedModePolicy, ZeroInitialisedBeliefMeansBurst) {
-    EXPECT_EQ(txPolicyFor(HubBelief{}, kGuardUs), TxPolicy::Burst);
+    EXPECT_EQ(txPolicyFor(HubBelief{}, kGuardUs, kResyncMaxS), TxPolicy::Burst);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +218,7 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
     for (bool sess : {false, true})
     for (bool beacon : {false, true})
     for (bool fw : {false, true})
-    for (uint32_t cage : {0u, kMaxConfirmationAgeS + 1})
+    for (uint32_t cage : {0u, kResyncMaxS + 1})
     // The hub's PHASE evidence, swept independently of the node's actual state.
     // That independence is the point of this test: the hub holds an echo, and
     // an echo can be stale in either direction. A report that was true when it
@@ -221,6 +226,7 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
     for (bool h_reported : {false, true})
     for (uint32_t h_samples : {0u, kPromotionPhaseSamples})
     for (int32_t h_err : {0, (int32_t) kGuardUs + 1})
+    for (uint32_t h_out : {0u, 1u})
     {
         NodeState n;
         n.rtc_src = src; n.grid_enabled = grid; n.phase_valid = phase_valid;
@@ -235,18 +241,19 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
         h.single_shot_unacked = false;
         h.phase_reported = h_reported; h.phase_samples = h_samples;
         h.phase_err_us = h_err; h.phase_spread_us = 0;
+        h.phase_outside_guard = h_out;
         // The hub learns the clock source from the same beacon, so this one
         // tracks the node rather than being swept separately.
         h.rtc_src = src;
 
         ++total;
-        const bool bad = txPolicyFor(h, kGuardUs) == TxPolicy::SingleShot &&
+        const bool bad = txPolicyFor(h, kGuardUs, kResyncMaxS) == TxPolicy::SingleShot &&
                          modeFor(n, kResyncMaxS, kGuardUs) == Mode::A;
         if (bad) {
             ++dangerous;
             // Rule 4 is the whole mitigation: after ONE unacked single shot the
             // policy must be Burst, whatever else is true.
-            EXPECT_EQ(txPolicyFor(afterUnackedSingleShot(h), kGuardUs), TxPolicy::Burst);
+            EXPECT_EQ(txPolicyFor(afterUnackedSingleShot(h), kGuardUs, kResyncMaxS), TxPolicy::Burst);
         }
     }
 
@@ -259,6 +266,50 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
 
 TEST(TimedModePolicy, UnackedSingleShotAlwaysForcesBurst) {
     HubBelief b = confident();
-    ASSERT_EQ(txPolicyFor(b, kGuardUs), TxPolicy::SingleShot);
-    EXPECT_EQ(txPolicyFor(afterUnackedSingleShot(b), kGuardUs), TxPolicy::Burst);
+    ASSERT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::SingleShot);
+    EXPECT_EQ(txPolicyFor(afterUnackedSingleShot(b), kGuardUs, kResyncMaxS), TxPolicy::Burst);
+}
+
+// ---------------------------------------------------------------------------
+// The staleness bound is the interval the hub PUBLISHED
+// ---------------------------------------------------------------------------
+
+TEST(TimedModePolicy, StalenessIsJudgedAgainstThePublishedResyncInterval) {
+    // The node demotes itself after resyncMaxS without an addressed frame, so a
+    // hub that trusted a report older than that would be sending single copies
+    // to a node already back on a free-running window. Both ends use the same
+    // number, and the hub uses the one it actually sent.
+    HubBelief b = confident();
+    b.confirmation_age_s = kResyncMaxS;
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::SingleShot);
+
+    b.confirmation_age_s = kResyncMaxS + 1;
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::Burst);
+
+    // A shorter published interval binds harder — the hub is not free to keep
+    // trusting a report past what it told the node.
+    b.confirmation_age_s = 400;
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::SingleShot);
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, 350), TxPolicy::Burst);
+}
+
+TEST(TimedModePolicy, NoPublishedIntervalMeansNoPromotion) {
+    // Zero is what a hub that has published no grid holds. Refusing is the same
+    // direction as every other default here: the unset value is the safe one,
+    // and "unbounded trust" would be the one reading that is never right.
+    HubBelief b = confident();
+    b.confirmation_age_s = 0;
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, 0), TxPolicy::Burst);
+}
+
+TEST(TimedModePolicy, A60SecondBoundWouldHaveBeenInert) {
+    // Recorded because it shipped and did nothing. The phase report rides
+    // uplinks the node already sends, and at 3.5 commands/node/day the newest
+    // one is minutes to hours old — so a 60 s ceiling refused every promotion
+    // while looking like a working rule. The bound has to be the interval over
+    // which the measurement stays valid, not a number that feels cautious.
+    HubBelief b = confident();
+    b.confirmation_age_s = 300;                       // a very recent uplink
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, 60), TxPolicy::Burst);
+    EXPECT_EQ(txPolicyFor(b, kGuardUs, kResyncMaxS), TxPolicy::SingleShot);
 }

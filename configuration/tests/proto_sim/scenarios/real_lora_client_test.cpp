@@ -735,10 +735,12 @@ TEST(RealLoraClient, ADecryptedBeaconIsWhatCarriesThePhaseReport) {
     inner.header.msgId         = rol.frame_counter_.rx_message_id + 1;
     inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Beacon;
     inner.beacon.fwVersion     = 0x00010203;
-    inner.beacon.rtcSlowSrc    = 2;      // crystal
-    inner.beacon.phaseErrUs    = 120;
-    inner.beacon.phaseSpreadUs = 300;
-    inner.beacon.phaseSamples  = timedmode::kPromotionPhaseSamples;
+    inner.beacon.phasePresent      = true;
+    inner.beacon.phase.rtcSlowSrc   = 2;      // crystal
+    inner.beacon.phase.errUs        = 120;
+    inner.beacon.phase.spreadUs     = 300;
+    inner.beacon.phase.samples      = timedmode::kPromotionPhaseSamples;
+    inner.beacon.phase.outsideGuard = 0;
 
     auto plain = proto_sim::serialize_resp_payload(inner);
     uint8_t aad[proto_sim::kHeaderAadLen];
@@ -763,7 +765,7 @@ TEST(RealLoraClient, ADecryptedBeaconIsWhatCarriesThePhaseReport) {
     EXPECT_EQ(b.phase_spread_us, 300);
     EXPECT_EQ(b.phase_samples, timedmode::kPromotionPhaseSamples);
     EXPECT_EQ(b.rtc_src, timedmode::RtcSlowSrc::Crystal);
-    EXPECT_EQ(timedmode::txPolicyFor(b, timedgrid::kGuardUs),
+    EXPECT_EQ(rol.txPolicyNow(),
               timedmode::TxPolicy::SingleShot)
         << "a healthy report from a real encrypted beacon must earn single-shot";
 
@@ -821,7 +823,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrig
         rol.set_response(forged.data(), forged.size());
     }
 
-    EXPECT_EQ(timedmode::txPolicyFor(rol.hubBelief(), timedgrid::kGuardUs), timedmode::TxPolicy::Burst)
+    EXPECT_EQ(rol.txPolicyNow(), timedmode::TxPolicy::Burst)
         << "unauthenticated frames must not earn a node single-shot";
     EXPECT_EQ(rol.last_uplink_t0_us_, origin_before)
         << "and must not become this node's Class A window origin";
@@ -1108,17 +1110,17 @@ TEST(RealLoraClient, ARelogonMakesTheNodeEarnSingleShotFromScratch) {
     ASSERT_TRUE(h.tracker.gridStarted());
 
     give_phase_report(h);
-    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    ASSERT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::SingleShot);
 
     h.rol.send_login();
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs), timedmode::TxPolicy::Burst)
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst)
         << "a new session must not inherit the old session's confidence";
 
     // A report from the old session is not evidence about the new one, so the
     // node has to send a fresh beacon before single-shot returns.
     give_phase_report(h);
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    EXPECT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::SingleShot)
         << "a fresh report on the new session earns it back";
 }
@@ -1137,14 +1139,201 @@ TEST(RealLoraClient, ARegisterMeansTheNodeRebootedAndConfidenceIsGone) {
     h.rol.enable_timed_mode(true);
 
     give_phase_report(h);
-    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    ASSERT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::SingleShot);
 
     auto reg = serialize_register(kMacRol2);
     h.rol.set_response(reg.data(), reg.size());
 
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs), timedmode::TxPolicy::Burst)
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst)
         << "a node that just told us it rebooted has lost its grid phase";
+}
+
+TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
+    // The beacon is not the carrier that makes §4.6 work — the ACK is.
+    //
+    // A wake beacon reports what the node knew at wake, which is nothing:
+    // phase::Stats is a plain member, zeroed on every deep-sleep wake, and the
+    // beacon goes out before that wake has heard a grid-aligned frame. The ack
+    // answers the very command single-shot is decided for, and every addressed
+    // frame feeds the phase tracker, so a node acking a command has just taken
+    // a sample against the frame it is acking.
+    //
+    // The alternative was a periodic per-node uplink, which is what §4.4 prices
+    // and rejects: a unicast keepalive at 5.8 min is 3.4x worse than plain
+    // burst at 32 nodes.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+    rol.registered_ = true;
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    rol.enable_timed_mode(true);
+    ASSERT_FALSE(rol.hubBelief().phase_reported);
+
+    // First the wake beacon, exactly as a real one arrives: it carries the
+    // firmware version the hub gates on, and a phase report of ZERO SAMPLES,
+    // because phase::Stats is zeroed on every deep-sleep wake and the beacon
+    // goes out before this wake has heard a grid-aligned frame. This is the
+    // state §4.6 sat in: evidence that cannot arrive on the carrier that was
+    // asked for it.
+    {
+        proto_sim::LoraClientResponseMessage bmsg;
+        bmsg.header.destAddress   = esphome::lora_tracker::kHubAddress;
+        bmsg.header.destSubnet    = 2;
+        bmsg.header.senderAddress = 18;
+        bmsg.header.msgId         = rol.frame_counter_.rx_message_id + 1;
+        bmsg.proto                = proto_sim::LoraClientResponseMessage::Proto::Beacon;
+        bmsg.beacon.fwVersion       = 0x00010203;
+        bmsg.beacon.phasePresent    = true;
+        bmsg.beacon.phase.rtcSlowSrc = 2;
+        bmsg.beacon.phase.samples    = 0;      // nothing measured yet this wake
+
+        auto bplain = proto_sim::serialize_resp_payload(bmsg);
+        uint8_t baad[proto_sim::kHeaderAadLen];
+        proto_sim::build_header_aad(bmsg.header.destAddress, bmsg.header.destSubnet,
+                                    bmsg.header.senderAddress, bmsg.header.msgId, baad);
+        uint8_t biv[12];
+        proto_sim::derive_gcm_iv(base, bmsg.header.msgId, biv);
+        auto benc = proto_sim::aes_gcm_encrypt(biv, baad, sizeof(baad),
+                                               bplain.data(), bplain.size());
+        proto_sim::LoraClientResponseMessage bouter;
+        bouter.header               = bmsg.header;
+        bouter.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+        bouter.encrypted.tag        = benc.tag;
+        bouter.encrypted.ciphertext = benc.ciphertext;
+        auto bframe = proto_sim::serialize_resp(bouter);
+        rol.set_response(bframe.data(), bframe.size());
+    }
+    EXPECT_FALSE(rol.hubBelief().phase_reported)
+        << "zero samples is not a report, and must not read as a perfect one";
+    EXPECT_EQ(rol.txPolicyNow(), timedmode::TxPolicy::Burst)
+        << "the wake beacon alone cannot promote — this is what was broken";
+
+    // Then the ack, which is the carrier that can.
+    proto_sim::LoraClientResponseMessage inner;
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = 2;
+    inner.header.senderAddress = 18;
+    inner.header.msgId         = rol.frame_counter_.rx_message_id + 1;
+    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Ack;
+    inner.ack.ack_msg_id       = 7;
+    inner.ack.phasePresent      = true;
+    inner.ack.phase.rtcSlowSrc   = 2;      // crystal
+    inner.ack.phase.errUs        = 90;
+    inner.ack.phase.spreadUs     = 250;
+    inner.ack.phase.samples      = timedmode::kPromotionPhaseSamples;
+    inner.ack.phase.outsideGuard = 0;
+
+    auto plain = proto_sim::serialize_resp_payload(inner);
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
+                                inner.header.senderAddress, inner.header.msgId, aad);
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
+    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
+                                          plain.data(), plain.size());
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = inner.header;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.ciphertext = enc.ciphertext;
+    auto frame = proto_sim::serialize_resp(outer);
+    rol.set_response(frame.data(), frame.size());
+
+    const auto b = rol.hubBelief();
+    EXPECT_TRUE(b.phase_reported)
+        << "the ack's phase report must reach the belief, not just the beacon's";
+    EXPECT_EQ(b.phase_err_us, 90);
+    EXPECT_EQ(b.phase_spread_us, 250);
+    EXPECT_EQ(b.phase_samples, timedmode::kPromotionPhaseSamples);
+    EXPECT_EQ(b.rtc_src, timedmode::RtcSlowSrc::Crystal);
+    EXPECT_EQ(rol.txPolicyNow(), timedmode::TxPolicy::SingleShot)
+        << "a healthy report on a real encrypted ack must earn single-shot";
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(RealLoraClient, AnAckWithNoPhaseReportLeavesTheBeliefAlone) {
+    // ABSENT IS NOT EMPTY — the same rule the pending mask is built on. A node
+    // whose firmware predates the field sends an ack with no PhaseReport, and
+    // treating that as a report of zeros would silently demote a node the hub
+    // has good evidence for. Let confirmation_age_s expire it instead.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+    rol.registered_ = true;
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    rol.enable_timed_mode(true);
+
+    // Seed a good report, then send an ack that carries none.
+    rol.notePhaseReportForTest(2, 100, 200, timedmode::kPromotionPhaseSamples);
+    ASSERT_TRUE(rol.hubBelief().phase_reported);
+
+    proto_sim::LoraClientResponseMessage inner;
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = 2;
+    inner.header.senderAddress = 18;
+    inner.header.msgId         = rol.frame_counter_.rx_message_id + 1;
+    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Ack;
+    inner.ack.ack_msg_id       = 9;
+    inner.ack.phasePresent     = false;
+
+    auto plain = proto_sim::serialize_resp_payload(inner);
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
+                                inner.header.senderAddress, inner.header.msgId, aad);
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
+    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
+                                          plain.data(), plain.size());
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = inner.header;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.ciphertext = enc.ciphertext;
+    auto frame = proto_sim::serialize_resp(outer);
+    rol.set_response(frame.data(), frame.size());
+
+    const auto b = rol.hubBelief();
+    EXPECT_TRUE(b.phase_reported)   << "an absent report must not erase a good one";
+    EXPECT_EQ(b.phase_err_us, 100);
+    EXPECT_EQ(b.phase_samples, timedmode::kPromotionPhaseSamples);
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
 }
 
 TEST(RealLoraClient, APhaseReportEarnsASingleCopyDownlink) {
@@ -1170,11 +1359,11 @@ TEST(RealLoraClient, APhaseReportEarnsASingleCopyDownlink) {
     ASSERT_TRUE(h.tracker.gridStarted());
 
     // No report yet: a node that has told us nothing gets the burst.
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    EXPECT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::Burst);
 
     give_phase_report(h);
-    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    ASSERT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::SingleShot)
         << "phase inside the guard over enough samples, on the crystal, "
            "reported just now, firmware known";
@@ -1198,12 +1387,12 @@ TEST(RealLoraClient, APoorPhaseReportKeepsTheHubOnBursts) {
     h.rol.enable_timed_mode(true);
 
     give_phase_report(h);
-    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    ASSERT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::SingleShot);
 
     // Out of guard: the window is landing where the frame is not.
     give_phase_report(h, /*err_us=*/(int32_t) timedgrid::kGuardUs + 1000);
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    EXPECT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::Burst)
         << "a phase error outside the guard must cost the promotion outright";
 
@@ -1211,14 +1400,14 @@ TEST(RealLoraClient, APoorPhaseReportKeepsTheHubOnBursts) {
     // average to zero, and this is the case the mean cannot see.
     give_phase_report(h, /*err_us=*/0,
                       /*spread_us=*/(int32_t) timedgrid::kGuardUs + 1000);
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    EXPECT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::Burst)
         << "a mean of zero over a bimodal distribution is not a phase";
 
     // A node that has fallen back to the internal RC cannot hold phase between
     // beacons, whatever this report says.
     give_phase_report(h, 0, 0, timedmode::kPromotionPhaseSamples, /*rtc=*/1);
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+    EXPECT_EQ(h.rol.txPolicyNow(),
               timedmode::TxPolicy::Burst);
 
     h.tracker.last_copies = 1;

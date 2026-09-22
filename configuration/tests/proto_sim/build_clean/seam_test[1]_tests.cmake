@@ -1,0 +1,5 @@
+add_test([=[Seam.AGridAlignedDownlinkArrivesInsideTheNodesWindow]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/seam_test [==[--gtest_filter=Seam.AGridAlignedDownlinkArrivesInsideTheNodesWindow]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[Seam.AGridAlignedDownlinkArrivesInsideTheNodesWindow]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[Seam.AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/seam_test [==[--gtest_filter=Seam.AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[Seam.AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  seam_test_TESTS Seam.AGridAlignedDownlinkArrivesInsideTheNodesWindow Seam.AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm)

@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/session_manager_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/session_manager_test[1]_tests.cmake")
+else()
+  add_test(session_manager_test_NOT_BUILT session_manager_test_NOT_BUILT)
+endif()

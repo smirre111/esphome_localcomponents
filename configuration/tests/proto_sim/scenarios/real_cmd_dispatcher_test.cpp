@@ -3535,3 +3535,65 @@ TEST_F(RealNodeFixture, ModeTestCIsRefusedBecauseTheHandlerCannotApplyIt) {
     EXPECT_FALSE(disp.modeTestActive());
     EXPECT_EQ(disp.modeTestLastRefusal(), (uint32_t) modetest::ArmRefusal::ModeUnimplemented);
 }
+
+// ---------------------------------------------------------------------------
+// §4.6's promotion evidence, as the node actually fills it.
+//
+// The six flat phase fields on NodeWakeBeacon were declared on the wire,
+// decoded by the hub and fed into its promotion path — and the node's beacon
+// builder assigned none of them. Every one went out as a proto3 zero, the
+// hub's guard requires samples and a crystal, and single-shot therefore never
+// engaged for any node in any state. The rule failed closed, which is why it
+// cost airtime rather than commands.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, ThePhaseReportCarriesWhatTheTrackerMeasured) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/900);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // Nothing measured yet: samples is 0, and that is the field the hub reads
+    // as "this message says nothing".
+    PhaseReport empty = PHASE_REPORT__INIT;
+    disp.fillPhaseReport(empty);
+    EXPECT_EQ(empty.samples, 0u)
+        << "an unmeasured node must report no samples, not a phase of zero";
+
+    // Two addressed frames, which is what feeds the tracker.
+    auto p1 = build_mac_ping(1, false, 901);
+    disp.onReceiveNew(p1.data(), static_cast<int>(p1.size()), /*rx_us=*/1040000);
+    auto p2 = build_mac_ping(1, false, 902);
+    disp.onReceiveNew(p2.data(), static_cast<int>(p2.size()), /*rx_us=*/1090000);
+    ASSERT_GE(disp.phaseStats().n, 1u);
+
+    PhaseReport pr = PHASE_REPORT__INIT;
+    disp.fillPhaseReport(pr);
+    EXPECT_EQ(pr.samples, disp.phaseStats().n);
+    EXPECT_EQ(pr.errus, disp.phaseStats().mean_us());
+    EXPECT_EQ(pr.spreadus, disp.phaseStats().spread_us());
+    EXPECT_EQ(pr.outsideguard, disp.phaseStats().outside_guard);
+    EXPECT_EQ(pr.rtcslowsrc, (uint32_t) disp.rtcSlowSrc());
+
+    // ppm is the one field with no continuous source: it comes from a DriftTest
+    // fit, so until one has run ppmSamples is 0 — which is exactly what the
+    // field's own comment says it means.
+    EXPECT_EQ(pr.ppmsamples, 0u);
+}
+
+TEST_F(RealNodeFixture, ReAnchoringClearsWhatThePhaseReportWouldClaim) {
+    // The report must not outlive the anchor it describes. A node that adopted
+    // a new grid and kept reporting the old fit would hand the hub evidence for
+    // a window that has moved.
+    auto a = build_grid_sync(true, 4, 910);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    auto ping = build_mac_ping(1, false, 911);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()), /*rx_us=*/1040000);
+    ASSERT_GE(disp.phaseStats().n, 1u);
+
+    auto b = build_grid_sync(true, 9, 912);   // new slot, new anchor
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
+
+    PhaseReport pr = PHASE_REPORT__INIT;
+    disp.fillPhaseReport(pr);
+    EXPECT_EQ(pr.samples, 0u) << "old samples describe the old anchor";
+}

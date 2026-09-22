@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/real_lora_driver_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/real_lora_driver_test[1]_tests.cmake")
+else()
+  add_test(real_lora_driver_test_NOT_BUILT real_lora_driver_test_NOT_BUILT)
+endif()

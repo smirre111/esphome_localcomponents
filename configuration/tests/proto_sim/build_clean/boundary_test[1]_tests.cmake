@@ -1,0 +1,5 @@
+add_test([=[BoundaryMsgId.WraparoundIsRejectedAsReplay]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/boundary_test [==[--gtest_filter=BoundaryMsgId.WraparoundIsRejectedAsReplay]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[BoundaryMsgId.WraparoundIsRejectedAsReplay]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[Boundary.BurstOfIdenticalEncryptedMessagesProducesOneAcceptance]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/boundary_test [==[--gtest_filter=Boundary.BurstOfIdenticalEncryptedMessagesProducesOneAcceptance]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[Boundary.BurstOfIdenticalEncryptedMessagesProducesOneAcceptance]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  boundary_test_TESTS BoundaryMsgId.WraparoundIsRejectedAsReplay Boundary.BurstOfIdenticalEncryptedMessagesProducesOneAcceptance)

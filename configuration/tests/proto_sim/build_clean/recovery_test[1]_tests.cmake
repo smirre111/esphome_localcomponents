@@ -1,0 +1,5 @@
+add_test([=[Recovery.LostFirstAckRetriesAndEventuallyAcked]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/recovery_test [==[--gtest_filter=Recovery.LostFirstAckRetriesAndEventuallyAcked]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[Recovery.LostFirstAckRetriesAndEventuallyAcked]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[Recovery.BaseNonceExchangeReprovisionsAfterHubWipe]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/recovery_test [==[--gtest_filter=Recovery.BaseNonceExchangeReprovisionsAfterHubWipe]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[Recovery.BaseNonceExchangeReprovisionsAfterHubWipe]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  recovery_test_TESTS Recovery.LostFirstAckRetriesAndEventuallyAcked Recovery.BaseNonceExchangeReprovisionsAfterHubWipe)

@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/mixed_mode_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/mixed_mode_test[1]_tests.cmake")
+else()
+  add_test(mixed_mode_test_NOT_BUILT mixed_mode_test_NOT_BUILT)
+endif()

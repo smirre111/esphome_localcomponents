@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/mac_funnel_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/mac_funnel_test[1]_tests.cmake")
+else()
+  add_test(mac_funnel_test_NOT_BUILT mac_funnel_test_NOT_BUILT)
+endif()

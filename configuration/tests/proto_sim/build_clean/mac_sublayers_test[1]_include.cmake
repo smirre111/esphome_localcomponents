@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/mac_sublayers_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/mac_sublayers_test[1]_tests.cmake")
+else()
+  add_test(mac_sublayers_test_NOT_BUILT mac_sublayers_test_NOT_BUILT)
+endif()

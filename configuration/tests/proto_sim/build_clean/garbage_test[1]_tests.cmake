@@ -1,0 +1,7 @@
+add_test([=[Garbage.LargeClientConfigRoundTrips]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/garbage_test [==[--gtest_filter=Garbage.LargeClientConfigRoundTrips]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[Garbage.LargeClientConfigRoundTrips]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[Garbage.TruncatedPacketRejected]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/garbage_test [==[--gtest_filter=Garbage.TruncatedPacketRejected]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[Garbage.TruncatedPacketRejected]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[Garbage.RandomBytesRejected]=]  /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/garbage_test [==[--gtest_filter=Garbage.RandomBytesRejected]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[Garbage.RandomBytesRejected]=]  PROPERTIES WORKING_DIRECTORY /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  garbage_test_TESTS Garbage.LargeClientConfigRoundTrips Garbage.TruncatedPacketRejected Garbage.RandomBytesRejected)

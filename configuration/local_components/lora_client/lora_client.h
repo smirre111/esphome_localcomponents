@@ -2,6 +2,8 @@
 
 #include <esp_timer.h>
 #include "esphome/components/lora_client/TimedModePolicy.h"
+// The grid geometry the policy is judged against — kGuardUs, in particular.
+#include "esphome/components/lora_client/TimedGrid.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -27,6 +29,7 @@
 struct NodeWakeBeacon;
 struct MacControl;                  // MAC-0 ping / echo, taken by pointer
 struct ModeTestReport;              // ModeTest results, taken by pointer
+struct PhaseReport;                 // §4.6's promotion evidence, by pointer
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
 
 namespace esphome
@@ -291,19 +294,20 @@ namespace esphome
       // only for a frame that has earned the replay counter — see
       // commit_rx_msgid_.
       void noteAuthenticatedUplink_();
-      // §4.6's promotion evidence, taken from a DECRYPTED beacon.
-      void notePhaseReport_(uint32_t rtc_slow_src, int32_t err_us,
-                            int32_t spread_us, uint32_t samples);
+      // §4.6's promotion evidence, taken from a DECRYPTED uplink — the wake
+      // beacon or, far more usefully, a CommandAck.
+      void notePhaseReport_(const ::PhaseReport *pr);
 
      public:
-      // For tests: the same entry point handle_beacon_ uses, so a test of the
-      // POLICY transitions does not have to mint an encrypted beacon each time.
-      // One test drives the real encrypted path end to end, which is what pins
-      // that handle_beacon_ actually calls this.
+      // For tests: the same entry point both carriers use, so a test of the
+      // POLICY transitions does not have to mint an encrypted frame each time.
+      // Two tests drive the real encrypted paths end to end, which is what pins
+      // that handle_beacon_ and handle_command_ack_ actually call this.
+      // Defined in the .cpp: building a ::PhaseReport needs the generated
+      // struct, and this header only forward-declares it.
       void notePhaseReportForTest(uint32_t rtc_slow_src, int32_t err_us,
-                                  int32_t spread_us, uint32_t samples) {
-        this->notePhaseReport_(rtc_slow_src, err_us, spread_us, samples);
-      }
+                                  int32_t spread_us, uint32_t samples,
+                                  uint32_t outside_guard = 0);
 
       // §4.6: did this uplink land where the grid says this node transmits?
       // Called with the node's own T0, from admit_frame_.
@@ -336,6 +340,13 @@ namespace esphome
       // maintained from an observed event, and a setter would be the "claim"
       // the whole section exists to reject.
       timedmode::HubBelief hubBelief() const { return this->hubBeliefNow_(); }
+      // What this listener would do RIGHT NOW — the production decision itself,
+      // not a re-derivation of it. send_aligned_ asks this, and so do the
+      // tests, so a test cannot pass a staleness bound the hub never published.
+      timedmode::TxPolicy txPolicyNow() const {
+        return timedmode::txPolicyFor(this->hubBeliefNow_(), timedgrid::kGuardUs,
+                                      this->published_resync_max_s_);
+      }
       // The node replies at its mark + this rather than "immediately"; must be
       // >= the measured DRAIN + build time, which is HW-7's number. Published
       // to the node in GridSync.ulOffsetUs and used by the hub to decide
@@ -439,6 +450,14 @@ namespace esphome
       // Every field is maintained from a real event; nothing here is a claim
       // the node makes about itself, which is the distinction §4.6 turns on.
       timedmode::HubBelief belief_{};
+      // The resyncMaxS this hub actually published, and the bound on how stale
+      // a phase report may be before single-shot is withdrawn. Held rather than
+      // recomputed so the two can never disagree: the node demotes itself on
+      // the value it was SENT, and a hub trusting a report older than that
+      // would keep sending single copies to a node already back on a
+      // free-running window. Zero until a grid is published, which refuses
+      // promotion — the safe direction.
+      uint32_t published_resync_max_s_{0};
       // When this node's uplink was last OBSERVED in its slot. Feeds
       // confirmation_age_s, which is what expires the confidence.
       //

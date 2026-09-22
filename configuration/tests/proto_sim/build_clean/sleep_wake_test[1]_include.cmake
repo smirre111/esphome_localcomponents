@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/sleep_wake_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/sleep_wake_test[1]_tests.cmake")
+else()
+  add_test(sleep_wake_test_NOT_BUILT sleep_wake_test_NOT_BUILT)
+endif()

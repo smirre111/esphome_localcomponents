@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/sysop_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/sysop_test[1]_tests.cmake")
+else()
+  add_test(sysop_test_NOT_BUILT sysop_test_NOT_BUILT)
+endif()

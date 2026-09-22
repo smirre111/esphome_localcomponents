@@ -16,6 +16,36 @@ extern "C" {
 
 #include <cstring>
 
+
+namespace {
+
+// PhaseReport crosses the wire on more than one carrier, so the conversion
+// lives in one place rather than once per message.
+void fill_phase(::PhaseReport &pb, const proto_sim::PhaseReport &m)
+{
+    phase_report__init(&pb);
+    pb.samples      = m.samples;
+    pb.errus        = m.errUs;
+    pb.spreadus     = m.spreadUs;
+    pb.outsideguard = m.outsideGuard;
+    pb.rtcslowsrc   = m.rtcSlowSrc;
+    pb.ppmestimate  = m.ppmEstimate;
+    pb.ppmsamples   = m.ppmSamples;
+}
+
+void read_phase(proto_sim::PhaseReport &m, const ::PhaseReport *pb)
+{
+    m.samples      = pb->samples;
+    m.errUs        = pb->errus;
+    m.spreadUs     = pb->spreadus;
+    m.outsideGuard = pb->outsideguard;
+    m.rtcSlowSrc   = pb->rtcslowsrc;
+    m.ppmEstimate  = pb->ppmestimate;
+    m.ppmSamples   = pb->ppmsamples;
+}
+
+}  // namespace
+
 namespace proto_sim {
 
 // ---------------------------------------------------------------------------
@@ -217,6 +247,9 @@ static std::vector<uint8_t> serialize_resp_impl(const LoraClientResponseMessage&
     ::LoginMsg        pb_login;
     ::EncryptedPayload pb_enc;
     ::CommandAck      pb_ack;
+    // One staging PhaseReport: a response carries at most one carrier, and it
+    // must outlive the pack call below.
+    ::PhaseReport     pb_phase;
     ::NodeWakeBeacon  pb_beacon;
 
     using Proto = LoraClientResponseMessage::Proto;
@@ -259,6 +292,11 @@ static std::vector<uint8_t> serialize_resp_impl(const LoraClientResponseMessage&
         command_ack__init(&pb_ack);
         pb_ack.ack_msg_id = m.ack.ack_msg_id;
         pb_ack.status     = static_cast<::AckStatus>(m.ack.status);
+        if (m.ack.phasePresent)
+        {
+            fill_phase(pb_phase, m.ack.phase);
+            pb_ack.phase = &pb_phase;
+        }
         pb.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK;
         pb.ack        = &pb_ack;
         break;
@@ -275,10 +313,11 @@ static std::vector<uint8_t> serialize_resp_impl(const LoraClientResponseMessage&
         pb_beacon.sessionresume  = m.beacon.sessionResume;
         pb_beacon.clockvalid     = m.beacon.clockValid;
         pb_beacon.fwversion      = m.beacon.fwVersion;
-        pb_beacon.rtcslowsrc     = m.beacon.rtcSlowSrc;
-        pb_beacon.phaseerrus     = m.beacon.phaseErrUs;
-        pb_beacon.phasespreadus  = m.beacon.phaseSpreadUs;
-        pb_beacon.phasesamples   = m.beacon.phaseSamples;
+        if (m.beacon.phasePresent)
+        {
+            fill_phase(pb_phase, m.beacon.phase);
+            pb_beacon.phase = &pb_phase;
+        }
         pb.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON;
         pb.beacon     = &pb_beacon;
         break;
@@ -485,10 +524,8 @@ std::optional<LoraClientResponseMessage> deserialize_resp(const uint8_t* data, s
             out.beacon.sessionResume  = pb->beacon->sessionresume;
             out.beacon.clockValid     = pb->beacon->clockvalid;
             out.beacon.fwVersion      = pb->beacon->fwversion;
-            out.beacon.rtcSlowSrc     = pb->beacon->rtcslowsrc;
-            out.beacon.phaseErrUs     = pb->beacon->phaseerrus;
-            out.beacon.phaseSpreadUs  = pb->beacon->phasespreadus;
-            out.beacon.phaseSamples   = pb->beacon->phasesamples;
+            out.beacon.phasePresent   = (pb->beacon->phase != nullptr);
+            if (pb->beacon->phase) read_phase(out.beacon.phase, pb->beacon->phase);
         }
         break;
     case LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED:

@@ -1423,7 +1423,14 @@ namespace esphome
     void LORAListener::dispatch_payload_(LoraClientResponseMessage *msg)
     {
       if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && msg->ack)
+      {
+        // §4.6's evidence, on the carrier that makes it useful. The ack answers
+        // the very command single-shot is decided for, so the belief is
+        // refreshed at the one moment it is about to be read — without the
+        // periodic per-node uplink §4.4 prices and rejects at 32 nodes.
+        this->notePhaseReport_(msg->ack->phase);
         this->handle_command_ack_(msg->ack->ack_msg_id);
+      }
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
                this->op_awaiting_ack_)
         this->handle_command_ack_(this->op_last_msgid_); // position confirms delivery
@@ -1671,6 +1678,9 @@ namespace esphome
         gs.resyncmaxs       = timedgrid::maxResyncIntervalS(20) / 2;   // half the
                                                                        // +/-20 ppm
                                                                        // ceiling
+        // Remember what we published: it is the bound txPolicyFor judges the
+        // age of the node's phase report against.
+        this->published_resync_max_s_ = gs.resyncmaxs;
         gs.uloffsetus       = LORAListener::kUplinkOffsetUs;
 
         // This frame's own position. It is what the node anchors on, so it must
@@ -1705,6 +1715,12 @@ namespace esphome
                                                 this->grid_slot_,
                                                 this->has_pending_downlink_());
         gs.pendingmaskvalid = true;
+      }
+      else
+      {
+        // A withdrawal takes the bound with it: no published interval means no
+        // promotion, which is where a node that has just lost its grid belongs.
+        this->published_resync_max_s_ = 0;
       }
 
       op_message.header   = &header;
@@ -1829,8 +1845,7 @@ namespace esphome
       const timedmode::HubBelief belief = this->hubBeliefNow_();
       const bool single_shot =
           (policy.copies == 0) &&    // the caller has not asked for a shape
-          (timedmode::txPolicyFor(belief, timedgrid::kGuardUs) ==
-           timedmode::TxPolicy::SingleShot);
+          (this->txPolicyNow() == timedmode::TxPolicy::SingleShot);
       if (single_shot)
       {
         policy.copies = 1;
@@ -3134,8 +3149,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
 
       // §4.6's promotion evidence. handle_beacon_ runs only for a DECRYPTED
       // beacon, which is what makes this an authenticated observation.
-      this->notePhaseReport_(b->rtcslowsrc, b->phaseerrus, b->phasespreadus,
-                             b->phasesamples);
+      this->notePhaseReport_(b->phase);
 
       // Reference point for predicting the next check-in — see
       // last_beacon_epoch_. The node beacons on every wake, so this is the
@@ -3317,17 +3331,38 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // because it is produced by the node's TRANSMIT path (CAD, a burst-end
     // deferral, a random pre-transmit backoff), none of which has anything to
     // do with when the node ARMS. See TimedModePolicy.h.
-    void LORAListener::notePhaseReport_(uint32_t rtc_slow_src, int32_t err_us,
-                                        int32_t spread_us, uint32_t samples)
+    void LORAListener::notePhaseReportForTest(uint32_t rtc_slow_src, int32_t err_us,
+                                              int32_t spread_us, uint32_t samples,
+                                              uint32_t outside_guard)
     {
-      this->belief_.phase_reported  = (samples > 0);
-      this->belief_.phase_err_us    = err_us;
-      this->belief_.phase_spread_us = spread_us;
-      this->belief_.phase_samples   = samples;
+      ::PhaseReport pr = PHASE_REPORT__INIT;
+      pr.rtcslowsrc   = rtc_slow_src;
+      pr.errus        = err_us;
+      pr.spreadus     = spread_us;
+      pr.samples      = samples;
+      pr.outsideguard = outside_guard;
+      this->notePhaseReport_(&pr);
+    }
+
+    void LORAListener::notePhaseReport_(const ::PhaseReport *pr)
+    {
+      // ABSENT IS NOT EMPTY, the same rule the pending mask is built on. A node
+      // whose firmware predates the field sends no PhaseReport at all, and
+      // overwriting a good report with zeros on its account would be a silent
+      // demotion; leaving the belief untouched lets confirmation_age_s expire
+      // it on its own, which is the honest outcome.
+      if (pr == nullptr)
+        return;
+
+      this->belief_.phase_reported      = (pr->samples > 0);
+      this->belief_.phase_err_us        = pr->errus;
+      this->belief_.phase_spread_us     = pr->spreadus;
+      this->belief_.phase_samples       = pr->samples;
+      this->belief_.phase_outside_guard = pr->outsideguard;
       this->belief_.rtc_src =
-          (rtc_slow_src == 2u) ? timedmode::RtcSlowSrc::Crystal
-        : (rtc_slow_src == 1u) ? timedmode::RtcSlowSrc::InternalRc
-                               : timedmode::RtcSlowSrc::Unknown;
+          (pr->rtcslowsrc == 2u) ? timedmode::RtcSlowSrc::Crystal
+        : (pr->rtcslowsrc == 1u) ? timedmode::RtcSlowSrc::InternalRc
+                                 : timedmode::RtcSlowSrc::Unknown;
       this->last_phase_report_us_ = esp_timer_get_time();
       this->have_phase_report_    = true;
 

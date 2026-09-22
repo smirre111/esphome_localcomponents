@@ -110,10 +110,23 @@ static constexpr uint32_t kPromotionPhaseSamples = 8;
 // beacon_interval_s = 0 flaps several times a day.
 static constexpr uint32_t kRepromotionHoldS = 600;
 
-// How stale the hub's confirmation may be before single-shot is withdrawn.
-// The confirmation is now the node's phase report, so this is the age of the
-// beacon that carried it.
-static constexpr uint32_t kMaxConfirmationAgeS = 60;
+// How stale the hub's confirmation may be before single-shot is withdrawn is
+// NOT a constant here: it is the resyncMaxS the hub itself published, passed
+// into txPolicyFor.
+//
+// That is the same interval the NODE uses to decide its phase has gone stale —
+// derived from the guard band and the crystal spec (maxResyncIntervalS), and
+// the interval after which the node demotes itself for want of an addressed
+// frame. Using anything else would have the two ends disagree about when the
+// node is still in Mode B, and the hub is the one that would be wrong: it
+// would keep sending single copies to a node that had already gone back to
+// sweeping a free-running window.
+//
+// A 60-second constant stood here briefly and was worse than wrong, it was
+// inert: the report rides uplinks the node already sends, so on a fleet at 3.5
+// commands/day nothing is ever 60 seconds old and single-shot could not engage
+// at all. Passing 0 keeps the fail-closed direction — an unpublished interval
+// means no promotion, not unlimited trust.
 
 // --- Node side ------------------------------------------------------------
 
@@ -176,6 +189,14 @@ struct HubBelief
     int32_t    phase_err_us    = 0;
     int32_t    phase_spread_us = 0;
     uint32_t   phase_samples   = 0;
+    // Samples the node itself scored as outside the guard band. Mean and spread
+    // can both pass while individual samples miss: a tight cluster offset by
+    // most of a guard band has a small spread and a mean that is still inside,
+    // and every frame in it lands near the edge of the window. The node already
+    // counts these (phase::Stats::outside_guard) and its own phaseTrustworthy()
+    // requires zero, so requiring zero here makes the two ends agree about what
+    // "in phase" means instead of approximating it.
+    uint32_t   phase_outside_guard = 0;
     // Mode B is gated on the external crystal at both ends: a node on the
     // internal RC (~5 %) cannot hold phase between beacons, whatever its last
     // report said.
@@ -191,7 +212,11 @@ struct HubBelief
 
 // guard_us is passed in for the same reason demotionReason takes it: this
 // header stays independent of the grid geometry.
-constexpr TxPolicy txPolicyFor(const HubBelief &b, uint32_t guard_us)
+// max_age_s is the hub's published resyncMaxS — see the banner above where the
+// constant used to be. Zero refuses everything, which is the safe direction for
+// a caller that has published no interval.
+constexpr TxPolicy txPolicyFor(const HubBelief &b, uint32_t guard_us,
+                               uint32_t max_age_s)
 {
     if (!b.grid_enabled)                            return TxPolicy::Burst;
     if (b.rebooted_since_confirm)                   return TxPolicy::Burst;
@@ -210,8 +235,11 @@ constexpr TxPolicy txPolicyFor(const HubBelief &b, uint32_t guard_us)
     // something innocent, and a node whose window is sometimes right and
     // sometimes a pitch out will drop the single copy on the wrong half.
     if (b.phase_spread_us > (int32_t) guard_us)     return TxPolicy::Burst;
+    // The node's own test, not an approximation of it.
+    if (b.phase_outside_guard != 0)                 return TxPolicy::Burst;
 
-    if (b.confirmation_age_s > kMaxConfirmationAgeS) return TxPolicy::Burst;
+    if (max_age_s == 0)                             return TxPolicy::Burst;
+    if (b.confirmation_age_s > max_age_s)           return TxPolicy::Burst;
     return TxPolicy::SingleShot;
 }
 

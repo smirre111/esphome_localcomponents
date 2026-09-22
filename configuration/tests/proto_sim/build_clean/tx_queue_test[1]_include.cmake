@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/tx_queue_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/tx_queue_test[1]_tests.cmake")
+else()
+  add_test(tx_queue_test_NOT_BUILT tx_queue_test_NOT_BUILT)
+endif()

@@ -91,6 +91,18 @@ struct ScheduleConfig {
     std::vector<ScheduleEntry> entries;
 };
 
+// The node's measurement of this link's timing, as carried on the uplinks it
+// already sends. Mirrors PhaseReport on the wire.
+struct PhaseReport {
+    uint32_t samples{0};        // 0 => nothing else here carries information
+    int32_t  errUs{0};
+    int32_t  spreadUs{0};
+    uint32_t outsideGuard{0};
+    uint32_t rtcSlowSrc{0};     // 0 unknown, 1 internal RC, 2 crystal
+    int32_t  ppmEstimate{0};
+    uint32_t ppmSamples{0};
+};
+
 struct NodeWakeBeacon {
     WakeReason reason{WakeReason::WAKE_BOOT};
     uint32_t   schedVersion{0};
@@ -103,13 +115,12 @@ struct NodeWakeBeacon {
     bool       sessionResume{false};
     bool       clockValid{false};
     uint32_t   fwVersion{0};
-    // §4.6's promotion evidence: the node's own measurement of where the HUB's
-    // frames landed against the marks it armed for. rtcSlowSrc: 0 unknown,
-    // 1 internal RC, 2 crystal.
-    uint32_t   rtcSlowSrc{0};
-    int32_t    phaseErrUs{0};
-    int32_t    phaseSpreadUs{0};
-    uint32_t   phaseSamples{0};
+    // §4.6's promotion evidence — see PhaseReport. `present` models the
+    // proto's optional-message semantics: absent is not the same as zeroed,
+    // and the hub must not overwrite a good report with the zeros of a node
+    // whose firmware predates the field.
+    bool        phasePresent{false};
+    PhaseReport phase{};
 };
 
 // ---- existing messages ----
@@ -175,7 +186,14 @@ struct ClientRegister  { uint64_t mac_addr{0}; bool needs_config{false}; };
 struct ClientAvailable { bool available{false}; };
 struct ClientBattery   { float voltage{0.0f}; };
 struct CoverPosition   { float position{0.0f}; float voltage{0.0f}; float current{0.0f}; };
-struct CommandAck      { uint32_t ack_msg_id{0}; AckStatus status{AckStatus::ACK_OK}; };
+struct CommandAck      {
+    uint32_t ack_msg_id{0};
+    AckStatus status{AckStatus::ACK_OK};
+    // The carrier that makes §4.6's evidence useful: it answers the very
+    // command single-shot is decided for.
+    bool        phasePresent{false};
+    PhaseReport phase{};
+};
 
 // Hub -> Node
 struct LoraClientOperationMessage {

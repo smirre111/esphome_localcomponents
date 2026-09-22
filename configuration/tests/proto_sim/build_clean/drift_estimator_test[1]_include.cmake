@@ -1,0 +1,5 @@
+if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/drift_estimator_test[1]_tests.cmake")
+  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/drift_estimator_test[1]_tests.cmake")
+else()
+  add_test(drift_estimator_test_NOT_BUILT drift_estimator_test_NOT_BUILT)
+endif()
