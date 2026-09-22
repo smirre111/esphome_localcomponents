@@ -202,12 +202,15 @@ namespace esphome
       bool send(uint8_t *data, size_t len, const TxPolicy &policy);
       void sendPacketOnce(uint8_t *data, size_t len);
       // How early the scheduler releases a PLACED frame so the caller has time
-      // to prepare before firing. It has to cover one FreeRTOS tick of wake
-      // jitter (1 ms at the hub's CONFIG_FREERTOS_HZ = 1000) plus the SPI
-      // prepare, and it is what firePacket then busy-waits out. Well inside
-      // kMaxFireBusyWaitUs, which is the ceiling for a MISCOMPUTED instant, not
-      // a budget to spend.
-      static constexpr int64_t kPrepareLeadUs = 5000;
+      // to prepare before firing, and what firePacket then busy-waits out. Well
+      // inside kMaxFireBusyWaitUs, which is the ceiling for a MISCOMPUTED
+      // instant, not a budget to spend.
+      //
+      // Defined in TxQueue.h, next to the popDue() that takes it: it binds the
+      // PRODUCER of a placed frame as much as this consumer, since an instant
+      // closer than this cannot be fired on. A second copy here is how the two
+      // would come to disagree.
+      static constexpr int64_t kPrepareLeadUs = txqueue::kPrepareLeadUs;
 
       // Ceiling on firePacket's busy wait. A caller asking for more than this
       // has computed its instant wrongly — most likely against the wrong clock

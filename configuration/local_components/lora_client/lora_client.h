@@ -4,6 +4,10 @@
 #include "esphome/components/lora_client/TimedModePolicy.h"
 // The grid geometry the policy is judged against — kGuardUs, in particular.
 #include "esphome/components/lora_client/TimedGrid.h"
+// The placement contract: kPrepareLeadUs bounds how close to its instant a
+// placed frame may be handed over, which is what makes a Class A window
+// reachable or not.
+#include "esphome/components/lora_client/TxQueue.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -289,7 +293,11 @@ namespace esphome
       // C2: send a single copy timed to land in the node's RX1 window, using
       // the hub's own receive stamp as the shared origin. False when there is
       // no usable stamp, so the caller falls back to today's burst.
-      bool send_into_rx1_(const uint8_t *buf, size_t len);
+      // Place one copy in this node's next OPEN Class A window — RX1 if the
+      // queue can still fire on it, otherwise RX2, which the node arms exactly
+      // when RX1 passed with no data. False means neither is reachable and the
+      // caller should fall back to the burst.
+      bool send_into_class_a_window_(const uint8_t *buf, size_t len);
       // Capture this node's own uplink T0 and score it against the grid. Called
       // only for a frame that has earned the replay counter — see
       // commit_rx_msgid_.
@@ -670,7 +678,7 @@ namespace esphome
       // SFD end), and how uncertain that stamp is. Captured in admit_frame_,
       // because that is the only moment the tracker's single global receive
       // stamp is known to belong to this node. 0 = no usable origin, in which
-      // case send_into_rx1_() declines and the caller falls back to the burst.
+      // case send_into_class_a_window_() declines and the caller falls back to the burst.
       int64_t  last_uplink_t0_us_{0};
       uint32_t last_uplink_unc_us_{0};
 

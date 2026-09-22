@@ -42,6 +42,17 @@
 namespace txqueue
 {
 
+// How early the scheduler releases a PLACED frame so the caller has time to
+// prepare before firing — the `lead_us` popDue takes.
+//
+// It lives here rather than with the scheduler because it constrains BOTH
+// ends of the placement contract. The consumer needs the slack to prepare in;
+// the PRODUCER needs it too, because a frame handed over closer to its instant
+// than this cannot be fired ON it, and asking for such an instant puts the copy
+// late by whatever the shortfall is. It has to cover one FreeRTOS tick of wake
+// jitter (1 ms at the hub's CONFIG_FREERTOS_HZ = 1000) plus the SPI prepare.
+static constexpr int64_t kPrepareLeadUs = 5000;
+
 // Lower goes first. Named rather than numbered at call sites so the intent
 // survives: "behind nothing else" is a priority, not a magic 0.
 enum class Priority : uint8_t {
@@ -104,7 +115,8 @@ class Queue
     }
 
     // pop(), but willing to release a frame `lead_us` BEFORE its instant, and
-    // reporting the instant it was scheduled for.
+    // reporting the instant it was scheduled for. See kPrepareLeadUs below for
+    // what a caller passes and why a producer has to respect it too.
     //
     // Both halves are needed to place a frame precisely. A queue that releases
     // a frame only once its instant has passed can never fire ON it — the

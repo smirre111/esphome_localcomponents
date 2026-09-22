@@ -967,7 +967,7 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     // C2's hub half. The node's Class A windows hang off ITS OWN uplink, so the
     // hub's reply has to be placed from the stamp of that node's uplink — and
     // the tracker's stamp is global: one radio, one variable, overwritten by
-    // every frame from every node. send_into_rx1_() read it 750 ms after the
+    // every frame from every node. send_into_class_a_window_() read it 750 ms after the
     // uplink that triggered the reply, so on a 32-node fleet the common case was
     // aiming one copy — no burst to save it — at a window derived from someone
     // else's transmit.
@@ -1018,13 +1018,13 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     std::vector<uint8_t> payload{1, 2, 3, 4};
     EXPECT_EQ(rol_1.node_mode_, (uint32_t) NODE_MODE__MODE_INTERACTIVE)
         << "the safe default: a node that has not said otherwise is not Class A";
-    EXPECT_FALSE(rol_1.send_into_rx1_(payload.data(), payload.size()))
+    EXPECT_FALSE(rol_1.send_into_class_a_window_(payload.data(), payload.size()))
         << "an interactive node has no RX1 to aim at; the caller must burst";
 
     // Now the node tells us, in a beacon, that it is in AUTO. It is on no grid,
     // so Class A is exactly the mode it is in.
     rol_1.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
-    ASSERT_TRUE(rol_1.send_into_rx1_(payload.data(), payload.size()));
+    ASSERT_TRUE(rol_1.send_into_class_a_window_(payload.data(), payload.size()));
     EXPECT_EQ(tracker.last_copies, 1)
         << "a burst is the opposite construction to a single placed copy";
 
@@ -1147,6 +1147,131 @@ TEST(RealLoraClient, ARegisterMeansTheNodeRebootedAndConfidenceIsGone) {
 
     EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst)
         << "a node that just told us it rebooted has lost its grid phase";
+}
+
+// ---------------------------------------------------------------------------
+// RX2 — the second window, which the hub never used.
+//
+// The node opens BOTH windows: classa::nextAction returns OpenRx2 whenever RX1
+// passed with NO DATA, and that is exactly the state the hub leaves it in when
+// its reply is not ready in time. The hub logged "RX1 already past" and fell
+// back to a 17-copy burst — 1408 ms of air aimed at a node whose 29.44 ms
+// window it could place exactly. `grep kRx2` in the hub returned nothing.
+// ---------------------------------------------------------------------------
+namespace {
+
+// A registered listener whose Class A predicate passes, with the harness clock
+// and radio wired up. Returns the tracker by reference so a test can read what
+// was actually placed.
+struct ClassANode {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    LORATracker tracker;
+    LORAClient  rol;
+
+    ClassANode() {
+        esphome::shim_hooks::set_active_clock(&clock);
+        esphome::shim_hooks::reset_nvs();
+        esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+        proto_sim_timer_reset();
+        rol.set_name("rol");
+        rol.set_short_address(17);
+        rol.set_subnet_address(2);
+        tracker.register_client(&rol);
+        rol.registered_ = true;
+        // What send_into_class_a_window_ requires: the node said AUTO in a
+        // beacon we decrypted, and it is on no grid.
+        rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
+    }
+    ~ClassANode() {
+        esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+        esphome::shim_hooks::set_active_clock(nullptr);
+    }
+};
+
+}  // namespace
+
+TEST(RealLoraClient, AReplyTooLateForRx1GoesToRx2RatherThanToABurst) {
+    ClassANode n;
+    std::vector<uint8_t> payload{1, 2, 3, 4};
+
+    constexpr int64_t kT0Uplink = 1'000'000;
+    n.rol.last_uplink_t0_us_ = kT0Uplink;
+
+    // Now is past RX1's fire instant and well before RX2's. Before this change
+    // that was the "falling back" branch.
+    proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx1DelayUs + 50'000);
+
+    ASSERT_TRUE(n.rol.send_into_class_a_window_(payload.data(), payload.size()))
+        << "RX1 is gone, but RX2 is still ahead — that is a placeable window";
+    EXPECT_EQ(n.tracker.last_copies, 1)
+        << "a burst is the opposite construction to a single placed copy";
+
+    // Same contract as the RX1 test: not "earliest_us equals the expression the
+    // code computes", but "the T0 the NODE sees lands inside the window the
+    // node opens", built from classa::rx2OpenUs/rx2CloseUs off its own uplink.
+    const int64_t fire      = n.tracker.last_earliest_us;
+    const int64_t seen_t0   = fire + (int64_t) loratiming::kPreambleToT0Us;
+    const int64_t win_open  = classa::rx2OpenUs(kT0Uplink);
+    const int64_t win_close = classa::rx2CloseUs(kT0Uplink);
+    EXPECT_GE(seen_t0, win_open)  << "frame arrives before RX2 opens";
+    EXPECT_LT(seen_t0, win_close) << "frame arrives after RX2 has closed";
+    EXPECT_EQ(seen_t0, kT0Uplink + (int64_t) classa::kRx2DelayUs)
+        << "and on the design point, one RX2 delay after the node's own uplink";
+    EXPECT_EQ(fire - win_open, (int64_t) timedgrid::kGuardUs)
+        << "the first chirp must sit a full guard inside the window";
+}
+
+TEST(RealLoraClient, AWindowTooCloseToFireOnIsNotAWindow) {
+    // popDue releases a placed frame kPrepareLeadUs early, so a target nearer
+    // than that cannot be fired ON — asking for it puts the copy late by the
+    // shortfall. RX1 half a millisecond away is unreachable, and the answer is
+    // RX2 rather than the burst that used to be the only alternative.
+    ClassANode n;
+    std::vector<uint8_t> payload{1, 2, 3, 4};
+
+    constexpr int64_t kT0Uplink = 1'000'000;
+    n.rol.last_uplink_t0_us_ = kT0Uplink;
+
+    const int64_t rx1_fire =
+        loratiming::fireInstantUs(kT0Uplink + (int64_t) classa::kRx1DelayUs, 0);
+    proto_sim_timer_set_now_us(rx1_fire - txqueue::kPrepareLeadUs / 10);
+
+    ASSERT_TRUE(n.rol.send_into_class_a_window_(payload.data(), payload.size()));
+    const int64_t seen_t0 =
+        n.tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us;
+    EXPECT_EQ(seen_t0, kT0Uplink + (int64_t) classa::kRx2DelayUs)
+        << "an RX1 the queue cannot fire on must not be claimed as placed";
+}
+
+TEST(RealLoraClient, OnceBothWindowsArePastTheHubDeclines) {
+    // Declining is not a failure: the caller falls back to the burst, which is
+    // what this path did before C2 existed. What must not happen is a placed
+    // copy aimed at a window that has already closed.
+    ClassANode n;
+    std::vector<uint8_t> payload{1, 2, 3, 4};
+
+    constexpr int64_t kT0Uplink = 1'000'000;
+    n.rol.last_uplink_t0_us_ = kT0Uplink;
+    proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx2DelayUs + 1);
+
+    EXPECT_FALSE(n.rol.send_into_class_a_window_(payload.data(), payload.size()));
+}
+
+TEST(RealLoraClient, AnInteractiveNodeGetsNeitherWindow) {
+    // The mode gate is checked before either window: an interactive node sweeps
+    // a free-running window, so a single copy at a fixed offset hits it about
+    // 6 % of the time while the 17-copy burst hits it every time. RX2 must not
+    // become a second way to aim into silence.
+    ClassANode n;
+    n.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_INTERACTIVE;
+    std::vector<uint8_t> payload{1, 2, 3, 4};
+
+    constexpr int64_t kT0Uplink = 1'000'000;
+    n.rol.last_uplink_t0_us_ = kT0Uplink;
+    proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx1DelayUs + 50'000);
+
+    EXPECT_FALSE(n.rol.send_into_class_a_window_(payload.data(), payload.size()));
 }
 
 TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {

@@ -969,7 +969,7 @@ namespace esphome
     // to a particular node is while the frame that produced it is the one being
     // processed, so it is captured here rather than read later.
     //
-    // send_into_rx1_() used to read parent_->last_rx_t0_us() directly, 750 ms
+    // send_into_class_a_window_() used to read parent_->last_rx_t0_us() directly, 750 ms
     // after the uplink that triggered the reply. That stamp is TRACKER-GLOBAL:
     // one radio, one variable, overwritten by every frame from every node. On a
     // 32-node fleet another node transmitting inside that 750 ms window is the
@@ -1890,7 +1890,7 @@ namespace esphome
       // reference to land. They differ by kPreambleToT0Us, and the node's
       // window is built around the T0, so the conversion belongs here. See
       // TxPolicy::earliest_us; d_tx_ramp is 0 for the reason given in
-      // send_into_rx1_.
+      // send_into_class_a_window_.
       policy.earliest_us = loratiming::fireInstantUs(t0, 0);
       ESP_LOGD(TAG, "[%s] placing %u B at slot %u T0, %lld ms out",
                this->get_name().c_str(), (unsigned) len,
@@ -3417,7 +3417,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // Returns false when the hub has no usable stamp for this node's uplink, in
     // which case the caller must fall back to today's behaviour rather than
     // guess an origin.
-    bool LORAListener::send_into_rx1_(const uint8_t *buf, size_t len)
+    bool LORAListener::send_into_class_a_window_(const uint8_t *buf, size_t len)
     {
       if (this->parent_ == nullptr || buf == nullptr || len == 0)
         return false;
@@ -3460,13 +3460,25 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         return false;
 
       const int64_t now = esp_timer_get_time();
-      // The T0 we want the node to see: one RX1 delay after its own uplink's
-      // T0. This is a RECEIVER-side instant, and the two ends have no shared
-      // anchor here to absorb a constant offset the way the grid does — RX1
-      // hangs off an absolute delay from the node's own transmit — so the
-      // conversion below is not cosmetic.
-      const int64_t wanted_t0 = t0_uplink + (int64_t) classa::kRx1DelayUs;
 
+      // RX1, then RX2 — the node opens BOTH, and until now the hub only ever
+      // aimed at the first.
+      //
+      // The node's own sequence (classa::nextAction) opens RX2 whenever RX1
+      // passed WITHOUT DATA, which is exactly the case the hub lands in when
+      // its reply is not ready in time: nothing was sent into RX1, so the node
+      // is listening at +2 s. The old code logged "RX1 already past" and fell
+      // back to a 17-copy burst — 1408 ms of air aimed at a node whose window
+      // is 29.44 ms wide and whose position the hub knows exactly. RX2 is the
+      // second chance the protocol already specifies, and the node was already
+      // arming it.
+      //
+      // The T0 we want the node to see is one window delay after its own
+      // uplink's T0. This is a RECEIVER-side instant, and the two ends have no
+      // shared anchor here to absorb a constant offset the way the grid does —
+      // both windows hang off an absolute delay from the node's own transmit —
+      // so the conversion below is not cosmetic.
+      //
       // T0 is 3136 us AFTER the first chirp leaves the antenna, and earliest_us
       // is the instant lora_tx() is called. Handing the wanted T0 over as-is
       // puts the frame 3136 us late at the node — 22 % of the 14080 us guard,
@@ -3478,11 +3490,46 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // placeholder cannot be mistaken for a measurement. Correcting the known
       // 3136 and leaving the unknown ~220 as residual is strictly better than
       // correcting neither.
-      const int64_t target = loratiming::fireInstantUs(wanted_t0, 0);
-      if (target <= now)
+      //
+      // A window is only reachable if the queue can still fire ON it: popDue
+      // releases a placed frame kPrepareLeadUs early, so a target closer than
+      // that cannot be hit and asking for it would put the copy late by
+      // whatever the shortfall is. Tightening that test costs nothing now that
+      // declining RX1 means trying RX2 rather than giving up on placement.
+      const int64_t rx1_target =
+          loratiming::fireInstantUs(t0_uplink + (int64_t) classa::kRx1DelayUs, 0);
+      const int64_t rx2_target =
+          loratiming::fireInstantUs(t0_uplink + (int64_t) classa::kRx2DelayUs, 0);
+      const int64_t earliest_usable = now + txqueue::kPrepareLeadUs;
+
+      int64_t     target    = 0;
+      int64_t     wanted_t0 = 0;
+      const char *window    = nullptr;
+      if (rx1_target >= earliest_usable)
       {
-        ESP_LOGW(TAG, "[%s] RX1 already past by %lld us — falling back",
-                 this->get_name().c_str(), (long long) (now - target));
+        target    = rx1_target;
+        wanted_t0 = t0_uplink + (int64_t) classa::kRx1DelayUs;
+        window    = "RX1";
+      }
+      else if (rx2_target >= earliest_usable)
+      {
+        target    = rx2_target;
+        wanted_t0 = t0_uplink + (int64_t) classa::kRx2DelayUs;
+        window    = "RX2";
+        ESP_LOGD(TAG, "[%s] RX1 unreachable by %lld us — aiming at RX2",
+                 this->get_name().c_str(),
+                 (long long) (earliest_usable - rx1_target));
+      }
+      else
+      {
+        // Both gone. The node is asleep or about to be, and a burst now would
+        // be 1408 ms of air with nothing listening for it — but declining is
+        // still the caller's decision to make, and its fallback is what this
+        // path did before C2 existed.
+        ESP_LOGW(TAG, "[%s] both Class A windows past (RX2 by %lld us) — "
+                      "falling back",
+                 this->get_name().c_str(),
+                 (long long) (earliest_usable - rx2_target));
         return false;
       }
 
@@ -3494,9 +3541,9 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                                       // reply, and the next one is a wake away
       this->parent_->send(const_cast<uint8_t *>(buf), len, p);
 
-      ESP_LOGI(TAG, "[%s] reply aimed at RX1: T0_uplink %lld, wanted T0 %lld, "
+      ESP_LOGI(TAG, "[%s] reply aimed at %s: T0_uplink %lld, wanted T0 %lld, "
                     "fire %lld (hub stamp +/-%u us)",
-               this->get_name().c_str(), (long long) t0_uplink,
+               this->get_name().c_str(), window, (long long) t0_uplink,
                (long long) wanted_t0, (long long) target,
                (unsigned) this->last_uplink_unc_us_);
       return true;
@@ -3559,7 +3606,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         // burst otherwise. Not a switch: the fallback IS the old behaviour, so
         // a node the hub cannot place still gets its TimeSync the way it always
         // did.
-        if (!this->send_into_rx1_(buf, len))
+        if (!this->send_into_class_a_window_(buf, len))
           this->parent_->send(buf, len);
         free(buf);
         ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
