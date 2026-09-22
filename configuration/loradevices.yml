@@ -178,13 +178,23 @@ lora_client:
     # switch off). Interval and mode are independent: an interactive node is
     # awake and reachable, which is what the remaining bench work needs — this
     # change only slows the check-in cadence, it does not let the node sleep.
-    # RESTORED to 1h on 2026-09-21 after the MAC-0 final campaign concluded.
-    # It was temporarily 15min for that campaign's Mode C step (each check-in is
-    # one wake-clock sample and one Class A funnel report, and a rate needs at
-    # least two paired samples). The reasoning for 1h is directly above and is
-    # unchanged: 15 min costs ~290 s awake per day against hourly's 185 s, and
-    # buys nothing now that MAC-0 is measured.
-    checkin_interval: 1h
+    # BACK TO 15min, 2026-09-22 — and yes, this is the second time it has moved.
+    # Restored to 1h when the campaign "concluded", then straight back, because
+    # that conclusion was wrong: only Modes A and B were re-run on fw 1.1.4.
+    # Mode C's FUNCTION was never established on the shipped build, and its ppm
+    # being low priority is not the same thing as Mode C being low priority.
+    #
+    # Each check-in is one Mode C sample: a wake, a session resume, an applied
+    # sleep to compare against the request, and a Class A funnel. At 1h, four
+    # samples cost four hours; at 15min, about seventy minutes. Interval length
+    # barely affects the four things being established (wakes heard, resume=1,
+    # applied ~= requested, true FER) — the one thing that scales with sleep
+    # duration is clock drift, which is the deprioritised ppm.
+    #
+    # RESTORE TO 1h once Mode C is established. The reasoning for 1h is directly
+    # above and unchanged: 15 min costs ~290 s awake per day against hourly's
+    # 185 s.
+    checkin_interval: 15min
     catchup_window: 0min
     # Two events eight minutes apart so one run observes both a first entry
     # into auto mode AND a wake out of deep sleep with the RTC markers already
