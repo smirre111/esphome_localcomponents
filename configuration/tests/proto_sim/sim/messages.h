@@ -103,6 +103,13 @@ struct NodeWakeBeacon {
     bool       sessionResume{false};
     bool       clockValid{false};
     uint32_t   fwVersion{0};
+    // §4.6's promotion evidence: the node's own measurement of where the HUB's
+    // frames landed against the marks it armed for. rtcSlowSrc: 0 unknown,
+    // 1 internal RC, 2 crystal.
+    uint32_t   rtcSlowSrc{0};
+    int32_t    phaseErrUs{0};
+    int32_t    phaseSpreadUs{0};
+    uint32_t   phaseSamples{0};
 };
 
 // ---- existing messages ----

@@ -67,13 +67,52 @@ static constexpr uint32_t kMaxMissedMarks = 3;
 // In-slot uplinks the hub must have OBSERVED before the node is considered
 // promoted. A node claiming readiness is not evidence: a beacon saying "I am
 // ready" says nothing about where its window actually landed.
+//
+// STILL TRUE, AND NO LONGER THE HUB'S PROMOTION CRITERION. See
+// kPromotionPhaseSamples for what replaced it and why. This constant still
+// governs the NODE's own view (NodeState::in_slot_uplinks) and the hub still
+// counts placement as a diagnostic; it simply no longer gates single-shot.
 static constexpr uint32_t kPromotionUplinks = 3;
+
+// --- What the hub promotes on -------------------------------------------
+//
+// The question single-shot actually turns on is: WILL THIS NODE'S RECEIVE
+// WINDOW BE OPEN WHEN MY ONE COPY ARRIVES? In-slot uplink placement was a
+// proxy for that, and a poor one — it is produced by the node's TRANSMIT path,
+// which is governed by CAD, a burst-end deferral and a random pre-transmit
+// backoff, none of which has anything to do with when the node ARMS. Measured
+// against a 29 ms transmit quantum and a 14 ms tolerance, the proxy was not
+// merely noisy, it was unsatisfiable: single-shot could never engage at all.
+//
+// The node's own phase statistics answer the real question directly. phaseErr
+// is the node measuring where the HUB's frames landed relative to the marks it
+// armed for — an observation of this link, by the end that has to hear it, and
+// it rides an ENCRYPTED beacon, so it is authenticated evidence rather than an
+// unauthenticated claim.
+//
+// This is a deliberate departure from "a node claiming readiness is not
+// evidence", and the distinction it rests on is worth stating: the node is not
+// asserting that it is ready. It is reporting a MEASUREMENT of the hub's own
+// transmissions. The failure mode that rule guarded against — a node that says
+// it is fine and then hears nothing — shows up here as phase error or spread
+// outside the guard, which is exactly the thing being tested.
+//
+// Rule 4 is unchanged and is still what bounds the damage: a single shot that
+// goes unacked reverts to burst immediately, so being wrong costs one frame.
+//
+// Samples required before the report means anything. A phase fit over one or
+// two frames says nothing about spread, which is the half that catches a
+// bimodal distribution (two clusters a slot pitch apart average to something
+// innocent).
+static constexpr uint32_t kPromotionPhaseSamples = 8;
 
 // No promotion within 10 minutes of a demotion. Without this a node at
 // beacon_interval_s = 0 flaps several times a day.
 static constexpr uint32_t kRepromotionHoldS = 600;
 
 // How stale the hub's confirmation may be before single-shot is withdrawn.
+// The confirmation is now the node's phase report, so this is the age of the
+// beacon that carried it.
 static constexpr uint32_t kMaxConfirmationAgeS = 60;
 
 // --- Node side ------------------------------------------------------------
@@ -124,8 +163,23 @@ enum class TxPolicy : uint8_t { Burst = 0, SingleShot = 1 };
 struct HubBelief
 {
     bool     grid_enabled          = false;
+    // Kept and still maintained, as a diagnostic and because it is the honest
+    // record of what the hub OBSERVED. It no longer gates single-shot — see
+    // kPromotionPhaseSamples.
     uint32_t in_slot_acks          = 0;  // consecutive acks observed in slot
+    // Age of the beacon carrying the phase report below.
     uint32_t confirmation_age_s    = 0xFFFFFFFF;
+
+    // The node's own phase measurement, from its last DECRYPTED beacon. This
+    // is what single-shot is promoted on.
+    bool       phase_reported  = false;
+    int32_t    phase_err_us    = 0;
+    int32_t    phase_spread_us = 0;
+    uint32_t   phase_samples   = 0;
+    // Mode B is gated on the external crystal at both ends: a node on the
+    // internal RC (~5 %) cannot hold phase between beacons, whatever its last
+    // report said.
+    RtcSlowSrc rtc_src         = RtcSlowSrc::Unknown;
     bool     rebooted_since_confirm = true;
     bool     session_changed        = false;
     bool     beacon_missed          = false;
@@ -135,7 +189,9 @@ struct HubBelief
     bool     single_shot_unacked    = false;
 };
 
-constexpr TxPolicy txPolicyFor(const HubBelief &b)
+// guard_us is passed in for the same reason demotionReason takes it: this
+// header stays independent of the grid geometry.
+constexpr TxPolicy txPolicyFor(const HubBelief &b, uint32_t guard_us)
 {
     if (!b.grid_enabled)                            return TxPolicy::Burst;
     if (b.rebooted_since_confirm)                   return TxPolicy::Burst;
@@ -143,7 +199,18 @@ constexpr TxPolicy txPolicyFor(const HubBelief &b)
     if (b.beacon_missed)                            return TxPolicy::Burst;
     if (!b.firmware_known)                          return TxPolicy::Burst;
     if (b.single_shot_unacked)                      return TxPolicy::Burst;
-    if (b.in_slot_acks < kPromotionUplinks)         return TxPolicy::Burst;
+
+    // The node's phase report, and every way of not having one.
+    if (!b.phase_reported)                          return TxPolicy::Burst;
+    if (b.rtc_src != RtcSlowSrc::Crystal)           return TxPolicy::Burst;
+    if (b.phase_samples < kPromotionPhaseSamples)   return TxPolicy::Burst;
+    if (b.phase_err_us > (int32_t) guard_us ||
+        b.phase_err_us < -(int32_t) guard_us)       return TxPolicy::Burst;
+    // Spread, not just the mean: two clusters one slot pitch apart average to
+    // something innocent, and a node whose window is sometimes right and
+    // sometimes a pitch out will drop the single copy on the wrong half.
+    if (b.phase_spread_us > (int32_t) guard_us)     return TxPolicy::Burst;
+
     if (b.confirmation_age_s > kMaxConfirmationAgeS) return TxPolicy::Burst;
     return TxPolicy::SingleShot;
 }

@@ -291,6 +291,20 @@ namespace esphome
       // only for a frame that has earned the replay counter — see
       // commit_rx_msgid_.
       void noteAuthenticatedUplink_();
+      // §4.6's promotion evidence, taken from a DECRYPTED beacon.
+      void notePhaseReport_(uint32_t rtc_slow_src, int32_t err_us,
+                            int32_t spread_us, uint32_t samples);
+
+     public:
+      // For tests: the same entry point handle_beacon_ uses, so a test of the
+      // POLICY transitions does not have to mint an encrypted beacon each time.
+      // One test drives the real encrypted path end to end, which is what pins
+      // that handle_beacon_ actually calls this.
+      void notePhaseReportForTest(uint32_t rtc_slow_src, int32_t err_us,
+                                  int32_t spread_us, uint32_t samples) {
+        this->notePhaseReport_(rtc_slow_src, err_us, spread_us, samples);
+      }
+
       // §4.6: did this uplink land where the grid says this node transmits?
       // Called with the node's own T0, from admit_frame_.
       void noteUplinkPlacement_(int64_t t0_uplink_us);
@@ -508,6 +522,11 @@ namespace esphome
       // confirm_session_, which is the first moment it can be encrypted. The
       // REGISTER frame is kept so the child components still get their
       // dispatch (CoverConfig and friends) at the same time.
+      // When the node's last phase report arrived. §4.6's confirmation freshness
+      // is the age of that beacon; the explicit flag distinguishes "never" from
+      // "at boot", which a zero timestamp cannot.
+      int64_t              last_phase_report_us_{0};
+      bool                 have_phase_report_{false};
       bool                 config_push_pending_{false};
       std::vector<uint8_t> pending_register_frame_;
       uint32_t plaintext_hwm_{0};

@@ -34,13 +34,20 @@ NodeState healthy() {
 HubBelief confident() {
     HubBelief b;
     b.grid_enabled = true;
-    b.in_slot_acks = kPromotionUplinks;
+    b.in_slot_acks = kPromotionUplinks;   // maintained, no longer the criterion
     b.confirmation_age_s = 0;
     b.rebooted_since_confirm = false;
     b.session_changed = false;
     b.beacon_missed = false;
     b.firmware_known = true;
     b.single_shot_unacked = false;
+    // The evidence single-shot is actually promoted on: the node's own phase
+    // measurement, from a decrypted beacon.
+    b.phase_reported  = true;
+    b.phase_err_us    = 0;
+    b.phase_spread_us = 0;
+    b.phase_samples   = kPromotionPhaseSamples;
+    b.rtc_src         = RtcSlowSrc::Crystal;
     return b;
 }
 }  // namespace
@@ -138,7 +145,7 @@ TEST(TimedModePolicy, ZeroInitialisedStateIsModeA) {
 // ---------------------------------------------------------------------------
 
 TEST(TimedModePolicy, ConfidentHubMaySingleShot) {
-    EXPECT_EQ(txPolicyFor(confident()), TxPolicy::SingleShot);
+    EXPECT_EQ(txPolicyFor(confident(), kGuardUs), TxPolicy::SingleShot);
 }
 
 TEST(TimedModePolicy, AnyUncertaintyMeansBurst) {
@@ -150,15 +157,30 @@ TEST(TimedModePolicy, AnyUncertaintyMeansBurst) {
         {"firmware unknown", [] { auto b = confident(); b.firmware_known = false; return b; }()},
         {"stale",          [] { auto b = confident();
                                 b.confirmation_age_s = kMaxConfirmationAgeS + 1; return b; }()},
-        {"too few acks",   [] { auto b = confident(); b.in_slot_acks = 1; return b; }()},
         {"prior miss",     [] { auto b = confident(); b.single_shot_unacked = true; return b; }()},
+        // The phase report, and every way of not having a usable one.
+        {"no phase report", [] { auto b = confident(); b.phase_reported = false; return b; }()},
+        {"too few samples", [] { auto b = confident();
+                                 b.phase_samples = kPromotionPhaseSamples - 1; return b; }()},
+        {"phase late",      [] { auto b = confident();
+                                 b.phase_err_us = (int32_t) kGuardUs + 1; return b; }()},
+        {"phase early",     [] { auto b = confident();
+                                 b.phase_err_us = -(int32_t) kGuardUs - 1; return b; }()},
+        // Spread, not just the mean: two clusters one pitch apart average to
+        // something innocent, and this is the case that exposes them.
+        {"phase bimodal",   [] { auto b = confident(); b.phase_err_us = 0;
+                                 b.phase_spread_us = (int32_t) kGuardUs + 1; return b; }()},
+        {"internal RC",     [] { auto b = confident();
+                                 b.rtc_src = RtcSlowSrc::InternalRc; return b; }()},
+        {"unknown clock",   [] { auto b = confident();
+                                 b.rtc_src = RtcSlowSrc::Unknown; return b; }()},
     };
     for (auto &c : cases)
-        EXPECT_EQ(txPolicyFor(c.b), TxPolicy::Burst) << c.what;
+        EXPECT_EQ(txPolicyFor(c.b, kGuardUs), TxPolicy::Burst) << c.what;
 }
 
 TEST(TimedModePolicy, ZeroInitialisedBeliefMeansBurst) {
-    EXPECT_EQ(txPolicyFor(HubBelief{}), TxPolicy::Burst);
+    EXPECT_EQ(txPolicyFor(HubBelief{}, kGuardUs), TxPolicy::Burst);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +214,13 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
     for (bool beacon : {false, true})
     for (bool fw : {false, true})
     for (uint32_t cage : {0u, kMaxConfirmationAgeS + 1})
+    // The hub's PHASE evidence, swept independently of the node's actual state.
+    // That independence is the point of this test: the hub holds an echo, and
+    // an echo can be stale in either direction. A report that was true when it
+    // was made is exactly how the dangerous combination arises.
+    for (bool h_reported : {false, true})
+    for (uint32_t h_samples : {0u, kPromotionPhaseSamples})
+    for (int32_t h_err : {0, (int32_t) kGuardUs + 1})
     {
         NodeState n;
         n.rtc_src = src; n.grid_enabled = grid; n.phase_valid = phase_valid;
@@ -204,15 +233,20 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
         h.rebooted_since_confirm = reboot; h.session_changed = sess;
         h.beacon_missed = beacon; h.firmware_known = fw;
         h.single_shot_unacked = false;
+        h.phase_reported = h_reported; h.phase_samples = h_samples;
+        h.phase_err_us = h_err; h.phase_spread_us = 0;
+        // The hub learns the clock source from the same beacon, so this one
+        // tracks the node rather than being swept separately.
+        h.rtc_src = src;
 
         ++total;
-        const bool bad = txPolicyFor(h) == TxPolicy::SingleShot &&
+        const bool bad = txPolicyFor(h, kGuardUs) == TxPolicy::SingleShot &&
                          modeFor(n, kResyncMaxS, kGuardUs) == Mode::A;
         if (bad) {
             ++dangerous;
             // Rule 4 is the whole mitigation: after ONE unacked single shot the
             // policy must be Burst, whatever else is true.
-            EXPECT_EQ(txPolicyFor(afterUnackedSingleShot(h)), TxPolicy::Burst);
+            EXPECT_EQ(txPolicyFor(afterUnackedSingleShot(h), kGuardUs), TxPolicy::Burst);
         }
     }
 
@@ -225,6 +259,6 @@ TEST(TimedModePolicy, ExposureToADemotedNodeIsBoundedToOneFrame) {
 
 TEST(TimedModePolicy, UnackedSingleShotAlwaysForcesBurst) {
     HubBelief b = confident();
-    ASSERT_EQ(txPolicyFor(b), TxPolicy::SingleShot);
-    EXPECT_EQ(txPolicyFor(afterUnackedSingleShot(b)), TxPolicy::Burst);
+    ASSERT_EQ(txPolicyFor(b, kGuardUs), TxPolicy::SingleShot);
+    EXPECT_EQ(txPolicyFor(afterUnackedSingleShot(b), kGuardUs), TxPolicy::Burst);
 }

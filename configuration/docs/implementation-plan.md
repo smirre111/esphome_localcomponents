@@ -1194,14 +1194,39 @@ Recorded here rather than left to look maintained.
   the solved anchor by n·`kRoundUs`, and the mark set is invariant modulo
   `kRoundUs` — but not for the round COUNTER, which `beacon_every_rounds` phases
   off, so hub and node can disagree about which round is a beacon round.
-- **§4.6's in-slot predicate is still unreachable**, now for one reason rather
-  than two. The anchor is correct as of the fix above, but the node never reads
-  `ul_offset_us` at all (assigned in `CmdDispatcher.cpp`, read nowhere) and
-  every node transmit is preceded by an unconditional random delay of 29–290 ms
-  in 29 ms steps — a collision-avoidance backoff, so slotting uplinks against
-  the grid is a change to the collision model and not a patch. It requires
-  `|T0 − mark − 60000| ≤ 14080` against that 29 ms quantum, so at most one of
-  the ten delays can qualify:
+- ~~**§4.6's in-slot predicate is unreachable.**~~ **RESOLVED, by changing the
+  evidence rather than the transmit path.** The predicate needed
+  `|T0 − mark − 60000| ≤ 14080` from a node whose every uplink is preceded by
+  CAD, a burst-end deferral and an unconditional random 29–290 ms backoff, and
+  which never reads `ul_offset_us` at all. Against a 29 ms quantum and a 28 ms
+  band, at most one of ten delays could qualify; three consecutively was
+  ~1e−5. Single-shot could not engage, so the whole airtime saving of Mode B
+  did not ship.
+  Making the uplink land in its slot was the faithful fix and the expensive
+  one: it needs a node-side transmit-at-instant mechanism (the hub's
+  prepare/fire split mirrored) with CAD's variable duration in front of it,
+  and the random backoff is a collision-avoidance measure, so removing it is a
+  change to the collision model.
+  **What shipped instead:** the hub promotes on the node's own PHASE REPORT,
+  carried in its encrypted beacon — `phaseErrUs`, `phaseSpreadUs`,
+  `phaseSamples`, `rtcSlowSrc`, all already on the wire and previously unread
+  by the promotion path. The justification is that this answers the question
+  single-shot actually turns on — *will this node's window be open when my one
+  copy arrives?* — while in-slot placement was a proxy produced by the node's
+  TRANSMIT path, which has nothing to do with when it ARMS.
+  This is a deliberate departure from §4.6's "a node claiming readiness is not
+  evidence", and the distinction it rests on is that the node is not claiming
+  readiness: it is reporting a measurement of the hub's own transmissions,
+  authenticated by the beacon's GCM tag. Rule 4 is unchanged, so being wrong
+  still costs one frame. `in_slot_acks` is still maintained as a diagnostic and
+  no longer gates anything.
+  **Still open:** `ul_offset_us` remains unread and the pre-transmit backoff
+  remains unconditional — uplinks are still unslotted, which now costs nothing
+  but is still a published field nothing honours. The exhaustive safety sweep
+  was extended with the hub's phase dimensions and the bounded-exposure
+  property still holds.
+
+  For the record, the arithmetic that made the old predicate unreachable:
   `txPolicyFor()` returns `Burst` in perpetuity and the hub logs a confidence
   reset on essentially every uplink. The single-copy saving that §4.6 exists for
   does not ship. The two tests cannot see this — `feed_in_slot_uplink`
@@ -1266,7 +1291,7 @@ Ordered by what each one blocks.
 | ~~`node_fw_version_`~~ | ~~hub~~ | **REACHABLE** — `hubBeliefNow_()` reads it as `firmware_known`, which `txPolicyFor()` requires before allowing single-shot | ~~migration safety~~ |
 | ~~`loratiming::fireInstantUs()`~~ | ~~both repos — one caller, a unit test~~ | **FIXED** — the declared conversion from a wanted T0 to a fire instant had no production caller while BOTH placement producers passed a T0 straight into `TxPolicy::earliest_us`, so every placed frame arrived 3136 µs late. Now applied in `send_aligned_` and `send_into_rx1_`, and `earliest_us` is documented as a fire instant | ~~B1a/C2 placement accuracy~~ |
 | ~~`LoraInterface::classa_window_open_`~~ | ~~node — assigned at `LoraInterface.cpp:488`, read nowhere~~ | **FIXED** — added for exactly the discrimination it was not performing: without it, any window's outcome was attributed to the Class A sequence, and since `noteUplinkSent` runs on TX_DONE after the next window is already armed, a stray Mode A window completed RX1 and sent the node to RX2 where the hub transmits nothing | ~~C2~~ |
-| `LORAListener::hubBelief()` | hub `lora_client.h:320` | **zero production callers.** Whether the hub is in single-shot or burst for a node is visible only in a log line — there is no `text_sensor` for it in `loradevices.yml`. Given that §4.6's predicate is currently unreachable (§11b), a diagnostic here would have surfaced that on day one | §4.6 observability |
+| `LORAListener::hubBelief()` | hub | **zero production callers**, still. `hubBeliefNow_()` reaches the radio through `send_aligned_`, but nothing surfaces the belief to HA, so whether a node is on single-shot or burst is visible only in a log line. |
 | `LoraInterface::rxBusySkips()` | node `LoraInterface.h:282` | **zero callers.** Added for "the one failure the KPIs cannot see" and not carried in the beacon or `ModeTestReport`, so it closes no KPI gap. It also false-positives for the whole duration of a drift test (continuous RX holds the semaphore) and logs unthrottled | M2 |
 | `CmdDispatcher::noteClassASleepOk()` | node | **zero production callers**, and wiring one now would break the invariant that `active` means "a window is still to open" | Tier 1 sleepOk |
 

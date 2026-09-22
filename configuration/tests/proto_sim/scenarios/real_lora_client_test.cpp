@@ -687,6 +687,90 @@ TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
     esphome::shim_hooks::set_active_clock(nullptr);
 }
 
+TEST(RealLoraClient, ADecryptedBeaconIsWhatCarriesThePhaseReport) {
+    // The wiring, end to end, with no test hook anywhere in it.
+    //
+    // Every other §4.6 test seeds the report through notePhaseReportForTest so
+    // it can exercise the POLICY transitions concisely. That is only legitimate
+    // if something pins that handle_beacon_ really calls the same entry point —
+    // otherwise the policy is reachable from tests and from nothing else, which
+    // is the exact failure this whole exercise has been about.
+    //
+    // It also pins the property that makes this evidence worth trusting: the
+    // report arrives ENCRYPTED. handle_beacon_ runs only for a frame that
+    // passed its GCM tag, so an attacker in radio range cannot hand the hub a
+    // flattering phase report and talk it into single-shot.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+    rol.registered_ = true;
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(rol.session_confirmed_);
+
+    rol.enable_timed_mode(true);
+    EXPECT_FALSE(rol.hubBelief().phase_reported)
+        << "nothing has reported a phase yet";
+
+    // A real beacon, encrypted the way the node sends one.
+    proto_sim::LoraClientResponseMessage inner;
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = 2;
+    inner.header.senderAddress = 18;
+    inner.header.msgId         = rol.frame_counter_.rx_message_id + 1;
+    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Beacon;
+    inner.beacon.fwVersion     = 0x00010203;
+    inner.beacon.rtcSlowSrc    = 2;      // crystal
+    inner.beacon.phaseErrUs    = 120;
+    inner.beacon.phaseSpreadUs = 300;
+    inner.beacon.phaseSamples  = timedmode::kPromotionPhaseSamples;
+
+    auto plain = proto_sim::serialize_resp_payload(inner);
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
+                                inner.header.senderAddress, inner.header.msgId, aad);
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
+    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
+                                          plain.data(), plain.size());
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = inner.header;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.ciphertext = enc.ciphertext;
+    auto frame = proto_sim::serialize_resp(outer);
+    rol.set_response(frame.data(), frame.size());
+
+    const auto b = rol.hubBelief();
+    EXPECT_TRUE(b.phase_reported)
+        << "handle_beacon_ must feed the phase report into the belief";
+    EXPECT_EQ(b.phase_err_us, 120);
+    EXPECT_EQ(b.phase_spread_us, 300);
+    EXPECT_EQ(b.phase_samples, timedmode::kPromotionPhaseSamples);
+    EXPECT_EQ(b.rtc_src, timedmode::RtcSlowSrc::Crystal);
+    EXPECT_EQ(timedmode::txPolicyFor(b, timedgrid::kGuardUs),
+              timedmode::TxPolicy::SingleShot)
+        << "a healthy report from a real encrypted beacon must earn single-shot";
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
 TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrigin) {
     // admit_frame_ checks the address and the replay window. Neither is
     // authentication, and both of C2's and section 4.6's inputs were taken
@@ -737,7 +821,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrig
         rol.set_response(forged.data(), forged.size());
     }
 
-    EXPECT_EQ(timedmode::txPolicyFor(rol.hubBelief()), timedmode::TxPolicy::Burst)
+    EXPECT_EQ(timedmode::txPolicyFor(rol.hubBelief(), timedgrid::kGuardUs), timedmode::TxPolicy::Burst)
         << "unauthenticated frames must not earn a node single-shot";
     EXPECT_EQ(rol.last_uplink_t0_us_, origin_before)
         << "and must not become this node's Class A window origin";
@@ -988,6 +1072,15 @@ namespace real_helpers {
 
 // Feed the listener one uplink whose T0 lands exactly where the grid says this
 // node transmits: its mark plus the uplink offset the hub itself publishes.
+// The evidence §4.6 now promotes on: the node's own phase measurement, as it
+// arrives from a decrypted beacon. Defaults are a healthy node.
+void give_phase_report(RealHubHarness& h, int32_t err_us = 0,
+                       int32_t spread_us = 0,
+                       uint32_t samples = timedmode::kPromotionPhaseSamples,
+                       uint32_t rtc = 2 /*crystal*/) {
+    h.rol.notePhaseReportForTest(rtc, err_us, spread_us, samples);
+}
+
 void feed_in_slot_uplink(RealHubHarness& h, uint32_t msgid, int64_t err_us = 0) {
     const int64_t mark = h.tracker.nextT0ForSlotUs(h.rol.grid_slot(),
                                                    h.tracker.gridAnchorUs());
@@ -1014,25 +1107,20 @@ TEST(RealLoraClient, ARelogonMakesTheNodeEarnSingleShotFromScratch) {
     h.rol.enable_timed_mode(true);
     ASSERT_TRUE(h.tracker.gridStarted());
 
-    feed_in_slot_uplink(h, 1);
-    feed_in_slot_uplink(h, 2);
-    feed_in_slot_uplink(h, 3);
-    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+    give_phase_report(h);
+    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
               timedmode::TxPolicy::SingleShot);
 
     h.rol.send_login();
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst)
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs), timedmode::TxPolicy::Burst)
         << "a new session must not inherit the old session's confidence";
 
-    // And one observation must not be enough to get it back.
-    feed_in_slot_uplink(h, 4);
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst)
-        << "one in-slot uplink is not kPromotionUplinks";
-    feed_in_slot_uplink(h, 5);
-    feed_in_slot_uplink(h, 6);
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+    // A report from the old session is not evidence about the new one, so the
+    // node has to send a fresh beacon before single-shot returns.
+    give_phase_report(h);
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
               timedmode::TxPolicy::SingleShot)
-        << "three fresh observations earn it back";
+        << "a fresh report on the new session earns it back";
 }
 
 TEST(RealLoraClient, ARegisterMeansTheNodeRebootedAndConfidenceIsGone) {
@@ -1048,24 +1136,29 @@ TEST(RealLoraClient, ARegisterMeansTheNodeRebootedAndConfidenceIsGone) {
     h.rol.node_fw_version_ = 0x00010203;
     h.rol.enable_timed_mode(true);
 
-    feed_in_slot_uplink(h, 1);
-    feed_in_slot_uplink(h, 2);
-    feed_in_slot_uplink(h, 3);
-    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+    give_phase_report(h);
+    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
               timedmode::TxPolicy::SingleShot);
 
     auto reg = serialize_register(kMacRol2);
     h.rol.set_response(reg.data(), reg.size());
 
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst)
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs), timedmode::TxPolicy::Burst)
         << "a node that just told us it rebooted has lost its grid phase";
 }
 
-TEST(RealLoraClient, ThreeInSlotUplinksEarnASingleCopyDownlink) {
+TEST(RealLoraClient, APhaseReportEarnsASingleCopyDownlink) {
     // TimedModePolicy.h's txPolicyFor() and HubBelief had NO production caller.
     // The entire airtime saving of Mode B is in that function — 17 copies down
     // to 1 — so a hub that never asked it paid Mode A's cost for Mode B's
     // narrower window, which is the worst of both.
+    //
+    // It then had a caller and still could not fire: promotion required three
+    // consecutive uplinks observed in slot, and the node's transmit path cannot
+    // produce them (CAD, a burst-end deferral and a 29-290 ms random backoff
+    // stand in front of every uplink). The evidence is now the node's own phase
+    // report — see TimedModePolicy.h for why that answers the question better,
+    // not merely more conveniently.
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
@@ -1076,51 +1169,61 @@ TEST(RealLoraClient, ThreeInSlotUplinksEarnASingleCopyDownlink) {
     h.rol.enable_timed_mode(true);
     ASSERT_TRUE(h.tracker.gridStarted());
 
-    // Two uplinks is not enough — kPromotionUplinks is three, and the point of
-    // the count is that one lucky arrival proves nothing.
-    feed_in_slot_uplink(h, 1);
-    feed_in_slot_uplink(h, 2);
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst);
+    // No report yet: a node that has told us nothing gets the burst.
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+              timedmode::TxPolicy::Burst);
 
-    feed_in_slot_uplink(h, 3);
-    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+    give_phase_report(h);
+    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
               timedmode::TxPolicy::SingleShot)
-        << "three in-slot uplinks, confirmed just now, firmware known";
+        << "phase inside the guard over enough samples, on the crystal, "
+           "reported just now, firmware known";
 
     // And the belief has to reach the radio, which is the half that was missing.
     h.tracker.last_copies = 0;
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
                                COV_OPERATION__CMD_OPEN, 0.0f);
-    h.clock.tick(2000);   // let send_aligned_'s grid deferral fire
     EXPECT_EQ(h.tracker.last_copies, 1)
         << "the downlink must go out as ONE placed copy, not a 17-copy burst";
 }
 
-TEST(RealLoraClient, AnUplinkOutsideTheSlotResetsTheHubsConfidence) {
-    // The count is CONSECUTIVE for a reason: a node whose clock has drifted out
-    // of its slot is exactly the node a single shot would miss, and it is also
-    // the node most likely to have hit its slot three times before that.
+TEST(RealLoraClient, APoorPhaseReportKeepsTheHubOnBursts) {
+    // The three ways a report can be present and still not be evidence. Each
+    // is a node a single copy would miss, and each is exactly the node most
+    // likely to have looked healthy on the report before it.
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     h.rol.node_fw_version_ = 0x00010203;
     h.rol.enable_timed_mode(true);
 
-    feed_in_slot_uplink(h, 1);
-    feed_in_slot_uplink(h, 2);
-    feed_in_slot_uplink(h, 3);
-    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()),
+    give_phase_report(h);
+    ASSERT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
               timedmode::TxPolicy::SingleShot);
 
-    // One arrival a guard-and-a-half out of place.
-    feed_in_slot_uplink(h, 4, /*err_us=*/(int64_t) timedgrid::kGuardUs + 1000);
-    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief()), timedmode::TxPolicy::Burst)
-        << "one out-of-slot uplink must cost the whole count, not one from it";
+    // Out of guard: the window is landing where the frame is not.
+    give_phase_report(h, /*err_us=*/(int32_t) timedgrid::kGuardUs + 1000);
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+              timedmode::TxPolicy::Burst)
+        << "a phase error outside the guard must cost the promotion outright";
+
+    // Spread, with a mean that looks perfect. Two clusters a pitch apart
+    // average to zero, and this is the case the mean cannot see.
+    give_phase_report(h, /*err_us=*/0,
+                      /*spread_us=*/(int32_t) timedgrid::kGuardUs + 1000);
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+              timedmode::TxPolicy::Burst)
+        << "a mean of zero over a bimodal distribution is not a phase";
+
+    // A node that has fallen back to the internal RC cannot hold phase between
+    // beacons, whatever this report says.
+    give_phase_report(h, 0, 0, timedmode::kPromotionPhaseSamples, /*rtc=*/1);
+    EXPECT_EQ(timedmode::txPolicyFor(h.rol.hubBelief(), timedgrid::kGuardUs),
+              timedmode::TxPolicy::Burst);
 
     h.tracker.last_copies = 1;
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
                                COV_OPERATION__CMD_OPEN, 0.0f);
-    h.clock.tick(2000);
     EXPECT_NE(h.tracker.last_copies, 1)
         << "and the radio must be back on bursts, not merely the belief";
 }

@@ -818,6 +818,11 @@ namespace esphome
         this->belief_.rebooted_since_confirm = true;
         this->belief_.in_slot_acks           = 0;
         this->have_in_slot_confirm_          = false;
+        // The node's last phase report described a grid it held before it
+        // restarted. It is not evidence about the node in front of us now.
+        this->belief_.phase_reported = false;
+        this->belief_.phase_samples  = 0;
+        this->have_phase_report_     = false;
 
         // Only (re)push configuration when the node reports it is unprovisioned
         // (needs_config), or when this hub boot has not yet pushed to the node
@@ -1804,24 +1809,27 @@ namespace esphome
         return;
 
       // §4.6, rules 1-4. ONE copy instead of seventeen, but only while the hub
-      // has independent evidence that this node is where the grid says it is:
-      // three consecutive uplinks observed in slot, confirmed within the last
-      // minute, no reboot or session change since, firmware known, and no
-      // single shot currently unacked. Any of those missing and this is the
+      // has recent, authenticated evidence that this node's window will be open
+      // when the copy arrives: a phase report from its last decrypted beacon,
+      // inside the guard on both error and spread, over enough samples to mean
+      // something, on the crystal, with no reboot or session change since and
+      // no single shot currently unacked. Any of those missing and this is the
       // burst it always was — the policy is written as a list of reasons to
       // fall BACK, so a state nobody thought about costs airtime, not a command.
       TxPolicy policy = in_policy;
+      const timedmode::HubBelief belief = this->hubBeliefNow_();
       const bool single_shot =
           (policy.copies == 0) &&    // the caller has not asked for a shape
-          (timedmode::txPolicyFor(this->hubBeliefNow_()) ==
+          (timedmode::txPolicyFor(belief, timedgrid::kGuardUs) ==
            timedmode::TxPolicy::SingleShot);
       if (single_shot)
       {
         policy.copies = 1;
-        ESP_LOGI(TAG, "[%s] single shot: %u in-slot uplinks, confirmed %us ago",
-                 this->get_name().c_str(),
-                 (unsigned) this->belief_.in_slot_acks,
-                 (unsigned) this->hubBeliefNow_().confirmation_age_s);
+        ESP_LOGI(TAG, "[%s] single shot: phase %+d +/-%d us over %u samples, "
+                      "reported %us ago",
+                 this->get_name().c_str(), (int) belief.phase_err_us,
+                 (int) belief.phase_spread_us, (unsigned) belief.phase_samples,
+                 (unsigned) belief.confirmation_age_s);
       }
       this->op_sent_single_shot_ = single_shot;
 
@@ -2288,6 +2296,11 @@ namespace esphome
       this->belief_.session_changed = true;
       this->belief_.in_slot_acks    = 0;
       this->have_in_slot_confirm_   = false;
+      // Same reasoning as the reboot path: a measurement from the previous
+      // session is not evidence about this one.
+      this->belief_.phase_reported  = false;
+      this->belief_.phase_samples   = 0;
+      this->have_phase_report_      = false;
 
       // A new session is also a new sequencing space for unauthenticated
       // frames; a high-water mark from the old one means nothing here.
@@ -3110,6 +3123,11 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       this->node_fw_version_     = b->fwversion;
       this->node_session_resume_ = b->sessionresume;
 
+      // §4.6's promotion evidence. handle_beacon_ runs only for a DECRYPTED
+      // beacon, which is what makes this an authenticated observation.
+      this->notePhaseReport_(b->rtcslowsrc, b->phaseerrus, b->phasespreadus,
+                             b->phasesamples);
+
       // Reference point for predicting the next check-in — see
       // last_beacon_epoch_. The node beacons on every wake, so this is the
       // most recent moment it was provably awake.
@@ -3280,16 +3298,58 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                (long long) err, (unsigned) this->belief_.in_slot_acks);
     }
 
+    // §4.6's promotion evidence, from the node's own phase statistics.
+    //
+    // The node measured where the HUB's frames landed relative to the marks it
+    // armed for. That is an observation of this link by the end that has to
+    // hear it — not a claim of readiness — and it answers the question
+    // single-shot actually turns on: will the window be open when the one copy
+    // arrives? In-slot uplink placement was a proxy for that and a poor one,
+    // because it is produced by the node's TRANSMIT path (CAD, a burst-end
+    // deferral, a random pre-transmit backoff), none of which has anything to
+    // do with when the node ARMS. See TimedModePolicy.h.
+    void LORAListener::notePhaseReport_(uint32_t rtc_slow_src, int32_t err_us,
+                                        int32_t spread_us, uint32_t samples)
+    {
+      this->belief_.phase_reported  = (samples > 0);
+      this->belief_.phase_err_us    = err_us;
+      this->belief_.phase_spread_us = spread_us;
+      this->belief_.phase_samples   = samples;
+      this->belief_.rtc_src =
+          (rtc_slow_src == 2u) ? timedmode::RtcSlowSrc::Crystal
+        : (rtc_slow_src == 1u) ? timedmode::RtcSlowSrc::InternalRc
+                               : timedmode::RtcSlowSrc::Unknown;
+      this->last_phase_report_us_ = esp_timer_get_time();
+      this->have_phase_report_    = true;
+
+      // This report IS the fresh confirmation the three guards were waiting
+      // for. They used to be cleared by an observed in-slot uplink, and that
+      // has to move with the evidence: leaving them keyed on placement would
+      // hold every node at Burst forever now that placement no longer gates
+      // promotion. txPolicyFor still judges the report on its merits, so a
+      // beacon carrying a bad phase clears these and is refused anyway.
+      this->belief_.rebooted_since_confirm = false;
+      this->belief_.session_changed        = false;
+      this->belief_.single_shot_unacked    = false;
+    }
+
     timedmode::HubBelief LORAListener::hubBeliefNow_() const
     {
       timedmode::HubBelief b = this->belief_;
       b.grid_enabled   = this->timed_mode_enabled_ && this->grid_aligned_;
       // Known only once the node has told us, in a beacon we decrypted.
       b.firmware_known = (this->node_fw_version_ != 0);
+
+      // The confirmation is the node's PHASE REPORT, not an observed uplink
+      // placement — see TimedModePolicy.h's kPromotionPhaseSamples for why the
+      // evidence changed. So freshness is the age of the beacon that carried
+      // it. have_phase_report_ is an explicit flag rather than a zero check on
+      // the timestamp: the harness clock starts at zero, and "never" and "at
+      // boot" are different answers.
       b.confirmation_age_s =
-          !this->have_in_slot_confirm_
+          !this->have_phase_report_
               ? 0xFFFFFFFFu
-              : (uint32_t) ((esp_timer_get_time() - this->last_in_slot_us_) / 1000000);
+              : (uint32_t) ((esp_timer_get_time() - this->last_phase_report_us_) / 1000000);
       return b;
     }
 

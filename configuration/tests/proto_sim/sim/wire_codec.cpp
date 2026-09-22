@@ -275,6 +275,10 @@ static std::vector<uint8_t> serialize_resp_impl(const LoraClientResponseMessage&
         pb_beacon.sessionresume  = m.beacon.sessionResume;
         pb_beacon.clockvalid     = m.beacon.clockValid;
         pb_beacon.fwversion      = m.beacon.fwVersion;
+        pb_beacon.rtcslowsrc     = m.beacon.rtcSlowSrc;
+        pb_beacon.phaseerrus     = m.beacon.phaseErrUs;
+        pb_beacon.phasespreadus  = m.beacon.phaseSpreadUs;
+        pb_beacon.phasesamples   = m.beacon.phaseSamples;
         pb.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON;
         pb.beacon     = &pb_beacon;
         break;
@@ -481,6 +485,10 @@ std::optional<LoraClientResponseMessage> deserialize_resp(const uint8_t* data, s
             out.beacon.sessionResume  = pb->beacon->sessionresume;
             out.beacon.clockValid     = pb->beacon->clockvalid;
             out.beacon.fwVersion      = pb->beacon->fwversion;
+            out.beacon.rtcSlowSrc     = pb->beacon->rtcslowsrc;
+            out.beacon.phaseErrUs     = pb->beacon->phaseerrus;
+            out.beacon.phaseSpreadUs  = pb->beacon->phasespreadus;
+            out.beacon.phaseSamples   = pb->beacon->phasesamples;
         }
         break;
     case LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED:
