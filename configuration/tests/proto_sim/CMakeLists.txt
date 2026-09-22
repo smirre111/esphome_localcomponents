@@ -631,6 +631,60 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     target_link_libraries(real_cmd_dispatcher_test
         PRIVATE real_cmd_dispatcher proto_sim GTest::gtest GTest::gtest_main)
     gtest_discover_tests(real_cmd_dispatcher_test)
+    # ------------------------------------------------------------------
+    # THE SEAM: the real hub and the real node in one process.
+    #
+    # Nothing linked both before. real_lora_client_test links one side,
+    # real_cmd_dispatcher_test the other, and the end-to-end scenarios drive
+    # hand-written mirrors in sim/hub_model.cpp and sim/node_model.cpp. Every
+    # defect found by the third design review lived in that gap, and each was
+    # guarded by a test that restated ONE side's own arithmetic: the hub's RX1
+    # aim asserted against the expression send_into_rx1_ evaluates, a placed
+    # frame asserted against nextClearT0ForSlotUs. Those pass while the frame
+    # lands in the wrong millisecond, because the missing conversion is missing
+    # from the assertion too.
+    #
+    # A second compilation of the node rather than a link against
+    # real_cmd_dispatcher: that archive owns its own esp_timer and esp_random,
+    # and so does the hub's. The strong duplicates are exactly esp_random,
+    # esp_timer_* and proto_sim_timer_reset, plus sched::* (Scheduler.cpp is
+    # vendored both sides and differs only by its banner — scheduler_drift_hub_vs_node
+    # gates that, so taking the hub's copy here is safe). The node's copy is
+    # compiled with PROTO_SIM_EXTERNAL_ESP_TIMER so the HUB's settable clock
+    # serves both halves; a seam test where each side reads its own clock could
+    # not assert anything about arrival versus window, which is its whole point.
+    add_library(real_cmd_dispatcher_seam STATIC
+        ${NODE_STAGE}/CmdDispatcher.cpp
+        ${NODE_STAGE}/SessionManager.cpp
+        ${NODE_STAGE}/comm_utils.c
+        ${NODE_SHIM_DIR}/esp_idf_stubs.c
+        ${NODE_SHIM_DIR}/extern_stubs.cpp
+    )
+    target_compile_definitions(real_cmd_dispatcher_seam PRIVATE PROTO_SIM_EXTERNAL_ESP_TIMER)
+    target_include_directories(real_cmd_dispatcher_seam
+        BEFORE PUBLIC
+            ${NODE_STAGE}
+            ${NODE_SHIM_DIR}
+            ${BLINDS_ESP_MAIN}/include
+            ${BLINDSPROTO_DIR}
+            ${PROTOBUF_C_INCLUDE_DIRS}
+    )
+    target_link_libraries(real_cmd_dispatcher_seam PUBLIC ${PROTOBUF_C_LIBRARIES} mbedcrypto)
+    target_compile_options(real_cmd_dispatcher_seam PRIVATE
+        -Wno-sign-compare -Wno-format -Wno-unused-function -Wno-unused-variable
+        -Wno-unused-but-set-variable -Wno-format-extra-args -Wno-unused-parameter)
+
+    # host_clock.c on the EXECUTABLE for the interposition reason above.
+    add_executable(seam_test
+        scenarios/seam_test.cpp
+        ${NODE_SHIM_DIR}/host_clock.c)
+    # Node includes come FIRST so the node's sources see their own shims; the
+    # hub side is already compiled into its archive.
+    target_include_directories(seam_test BEFORE PRIVATE ${NODE_STAGE} ${NODE_SHIM_DIR})
+    target_link_libraries(seam_test
+        PRIVATE real_cmd_dispatcher_seam real_lora_client proto_sim
+                GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(seam_test)
 else()
     message(STATUS "BlindsESP node source not found at ${BLINDS_ESP_MAIN} — "
                    "skipping real_cmd_dispatcher target")

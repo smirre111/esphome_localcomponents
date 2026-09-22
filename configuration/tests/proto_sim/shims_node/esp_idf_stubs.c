@@ -21,6 +21,15 @@ esp_err_t esp_read_mac(uint8_t* mac, esp_mac_type_t type) {
     return ESP_OK;
 }
 
+// PROTO_SIM_EXTERNAL_ESP_TIMER: the seam target links the HUB's esp_timer and
+// esp_random stubs instead of these, so both halves of a hub<->node test read
+// ONE clock. Two production classes in one process cannot each own the time:
+// the node's clock here is CLOCK_MONOTONIC and unsettable, so a seam test that
+// let it stand could assert nothing about when a frame arrives relative to when
+// a window opens — which is the only thing such a test is for. The hub's
+// esp_timer.h is byte-identical to this one apart from adding the two setters,
+// so its implementation serves these declarations exactly.
+#ifndef PROTO_SIM_EXTERNAL_ESP_TIMER
 uint32_t esp_random(void) {
     return (uint32_t)rand() | ((uint32_t)rand() << 16);
 }
@@ -30,6 +39,7 @@ int64_t esp_timer_get_time(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
+#endif
 
 void esp_restart(void) {
     // No-op in the host harness; tests inspect post-conditions instead.
@@ -171,6 +181,7 @@ void proto_sim_set_reset_reason(esp_reset_reason_t reason) { g_reset_reason = re
 // esp_timer one-shots. Nothing fires on its own; proto_sim_timer_fire_all()
 // is how a test advances time.
 // ---------------------------------------------------------------------------
+#ifndef PROTO_SIM_EXTERNAL_ESP_TIMER
 #define TIMER_MAX 8
 
 struct esp_timer {
@@ -249,6 +260,7 @@ int proto_sim_timer_armed_count(void) {
 void proto_sim_timer_reset(void) {
     memset(g_timers, 0, sizeof(g_timers));
 }
+#endif  /* PROTO_SIM_EXTERNAL_ESP_TIMER */
 
 // ---- esp_app_desc ----
 // The node reads the running image's version string to fill the beacon's
