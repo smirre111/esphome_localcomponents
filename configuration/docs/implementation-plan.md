@@ -1171,23 +1171,37 @@ plus an unchanged caller is not security, it is an outage.
 
 Recorded here rather than left to look maintained.
 
-- **The hub's grid anchor is never established correctly, so §4.6's evidence
-  chain measures a grid the node does not share.** `send_grid_sync()` declares
-  `txround = 0, txslot = grid_slot_` — the node solves its anchor from that
-  declared position — but sends via `parent_->send()`, unplaced and as a
-  17-copy burst, so the frame does not occupy the slot it claims and the copies
-  walk across slot boundaries (88000 mod 46875 = 41125). The node adopts from
-  whichever copy it decodes first, making the anchor error roughly uniform over
-  ±750 ms. `send_grid_sync`'s own comment asserts "the grid is published only
-  from an aligned client" as the safeguard; nothing enforces it. Routing that
-  one call through `send_aligned_` is the likely fix — `enable_timed_mode`
-  already sets `grid_aligned_` before calling it — and the round mismatch is
-  harmless because the mark set is invariant modulo `kRoundUs`.
-- **§4.6's in-slot predicate is therefore effectively unreachable.** It requires
-  `|T0 − mark − 60000| ≤ 14080`, but the node never reads `ul_offset_us` at all
-  (assigned in `CmdDispatcher.cpp`, read nowhere) and every node transmit is
-  preceded by an unconditional random delay of 29–290 ms in 29 ms steps. With a
-  wrong anchor on top, P(three consecutive in-slot) is on the order of 1e−5:
+- ~~**The hub's grid anchor is never established correctly.**~~ **FIXED.** It
+  had two independent halves, and either alone was enough to put every mark
+  wrong. `send_grid_sync()` declared `txround = 0, txslot = grid_slot_` and then
+  sent via `parent_->send()` — unplaced — so the frame did not occupy the slot
+  it claimed; its own comment asserted "the grid is published only from an
+  aligned client" as the safeguard and nothing enforced it. A publish now goes
+  through `send_aligned_`, asking for the burst EXPLICITLY so §4.6 cannot reduce
+  a frame to one copy for a node that is by definition not yet on the grid. A
+  withdrawal stays an unplaced burst: it is broadcast, and addressed to nodes
+  whose anchor may already be wrong.
+  Second half, on the node: the declaration describes COPY 0, and the copies are
+  one 88000 us stride apart against a 46875 us pitch, so adopting from whichever
+  copy arrived first displaced the anchor by a non-integral number of slots.
+  `handleGridSync` now backs out `burstIndex` first, as `noteDriftSample`
+  already did. That could not have worked in any case, which was the real find:
+  `onReceiveNew`'s `saved_header` copied four fields and dropped `burstIndex`
+  and `burstCount`, so every handler downstream read the burst position as 0
+  regardless of which copy arrived.
+  **Still open here:** `txround` stays 0 while the frame goes out in some later
+  round. That is sound for the ANCHOR — shifting the declared round by n shifts
+  the solved anchor by n·`kRoundUs`, and the mark set is invariant modulo
+  `kRoundUs` — but not for the round COUNTER, which `beacon_every_rounds` phases
+  off, so hub and node can disagree about which round is a beacon round.
+- **§4.6's in-slot predicate is still unreachable**, now for one reason rather
+  than two. The anchor is correct as of the fix above, but the node never reads
+  `ul_offset_us` at all (assigned in `CmdDispatcher.cpp`, read nowhere) and
+  every node transmit is preceded by an unconditional random delay of 29–290 ms
+  in 29 ms steps — a collision-avoidance backoff, so slotting uplinks against
+  the grid is a change to the collision model and not a patch. It requires
+  `|T0 − mark − 60000| ≤ 14080` against that 29 ms quantum, so at most one of
+  the ten delays can qualify:
   `txPolicyFor()` returns `Burst` in perpetuity and the hub logs a confidence
   reset on essentially every uplink. The single-copy saving that §4.6 exists for
   does not ship. The two tests cannot see this — `feed_in_slot_uplink`

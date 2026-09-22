@@ -139,15 +139,27 @@ TEST_F(Seam, AGridAlignedDownlinkArrivesInsideTheNodesWindow) {
     rol.enable_timed_mode(true);
     ASSERT_TRUE(tracker.gridStarted());
 
-    // The GridSync the hub really packed, delivered at the mark it really
-    // declares. send_grid_sync says txround = 0, txslot = grid_slot_, so this
-    // is the frame occupying the position it claims — see the next test for
-    // what happens when it does not.
+    // The GridSync the hub really packed, delivered where the hub really put
+    // it. Nothing here chooses the instant: send_grid_sync declares
+    // txround = 0, txslot = grid_slot_, and the frame must OCCUPY that slot for
+    // the declaration to be true.
     const auto gridsync = lastDownlink();
     ASSERT_FALSE(gridsync.empty()) << "enable_timed_mode must publish a GridSync";
-    const int64_t declared_mark =
-        tracker.nextT0ForSlotUs(rol.grid_slot(), tracker.gridAnchorUs());
-    deliverAtT0(gridsync, declared_mark);
+
+    const int64_t gs_fire = tracker.last_earliest_us;
+    ASSERT_GT(gs_fire, 0)
+        << "the GridSync must be PLACED. Sent bare, it leaves whenever the "
+           "queue drains and declares a slot it does not occupy";
+    const int64_t gs_t0 = gs_fire + (int64_t) loratiming::kPreambleToT0Us;
+    EXPECT_EQ(tracker.nextT0ForSlotUs(rol.grid_slot(), gs_t0 - 1), gs_t0)
+        << "copy 0 of the GridSync must land ON this node's mark, since that is "
+           "what the frame claims and what the node will anchor to";
+    EXPECT_NE(tracker.last_copies, 1)
+        << "and it must still be a burst: a node being told about the grid is "
+           "by definition not yet on it, so it is sweeping a free-running "
+           "window and would miss a single copy most of the time";
+
+    deliverAtT0(gridsync, gs_t0);
     // Adoption, not promotion. timedRxActive() additionally requires a
     // trustworthy phase built from a long baseline of addressed frames — that
     // is the policy question of whether the node should USE the grid. What is
@@ -160,7 +172,7 @@ TEST_F(Seam, AGridAlignedDownlinkArrivesInsideTheNodesWindow) {
     // operation rather than raw bytes: the node commits a phase sample only for
     // a frame that parses and is addressed to it, and that sample is the
     // measuring instrument below.
-    proto_sim_timer_set_now_us(declared_mark + 1000);
+    proto_sim_timer_set_now_us(gs_t0 + 1000);
     const size_t before = radio.hub_to_node_frames().size();
     rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
                              COV_OPERATION__CMD_OPEN, 0.0f);

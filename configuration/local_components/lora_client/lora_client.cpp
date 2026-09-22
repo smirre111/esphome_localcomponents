@@ -1617,8 +1617,9 @@ namespace esphome
     // B3: publish the grid to this node, or withdraw it.
     //
     // The frame declares its OWN grid position so the node can solve for a
-    // local anchor — see GridState.h. Sent as a normal burst: a node being told
-    // about the grid is by definition not yet on it.
+    // local anchor — see GridState.h. A publish is PLACED so that declaration is
+    // true, and still a full burst, because a node being told about the grid is
+    // by definition not yet on it. A withdrawal is an unplaced burst.
     // -----------------------------------------------------------------------
     // Does this listener have a downlink waiting for its node?
     //
@@ -1659,10 +1660,19 @@ namespace esphome
         gs.uloffsetus       = LORAListener::kUplinkOffsetUs;
 
         // This frame's own position. It is what the node anchors on, so it must
-        // describe where the frame will ACTUALLY be transmitted — which, while
-        // alignment is off (B1), is "as soon as the queue drains". Declaring a
-        // position the frame does not occupy would anchor every node wrong, so
-        // the grid is published only from an aligned client.
+        // describe where the frame will ACTUALLY be transmitted. That was an
+        // assertion nothing enforced: send_grid_sync called parent_->send()
+        // directly, so the frame left whenever the queue drained and declared a
+        // slot it did not occupy. It is now PLACED (below), so copy 0 really is
+        // at this slot's mark.
+        //
+        // txround stays 0 while the frame goes out in some later round. That is
+        // sound for the ANCHOR, which is the thing the node solves: shifting the
+        // declared round by n shifts the solved anchor by n*kRoundUs, and the
+        // mark set is invariant modulo kRoundUs, so every mark lands in the same
+        // place. It is NOT sound for the round COUNTER, which beacon_every_rounds
+        // phases off — hub and node can disagree about which round is a beacon
+        // round. Pre-existing, unchanged here, and recorded in the plan.
         gs.txround = 0;
         gs.txslot  = this->grid_slot_;
 
@@ -1694,7 +1704,34 @@ namespace esphome
         ESP_LOGE(TAG, "[%s] failed to pack GridSync", this->get_name().c_str());
         return;
       }
-      this->parent_->send(buf, len);
+      if (enable)
+      {
+        // PLACED, so the declaration above is true. Not through the bare send():
+        // the node solves its anchor from where this frame ARRIVES, so an
+        // unplaced GridSync displaces every mark the node will ever arm — by an
+        // arbitrary amount, since "whenever the queue drains" is unbounded, and
+        // past the guard band that is a missed window every round rather than a
+        // late one.
+        //
+        // The copy count is asked for EXPLICITLY. send_aligned_ reads
+        // copies == 0 as "no shape requested" and may then reduce the frame to a
+        // single copy under §4.6 — which would be exactly wrong here: a node
+        // being told about the grid is by definition not yet on it, so it is
+        // sweeping a free-running window and would miss a single copy most of
+        // the time. Copy 0 lands on the mark and the rest follow at the burst
+        // stride; the node backs out its own copy's offset with burstIndex.
+        TxPolicy p;
+        p.copies = this->parent_->defaultBurstCopies();
+        this->send_aligned_(buf, len, p);
+      }
+      else
+      {
+        // The withdrawal stays a plain burst. It is broadcast on the demote
+        // path, and it is addressed to nodes whose anchor may already be wrong
+        // — placing it on a mark they may not agree about is the one thing it
+        // must not depend on.
+        this->parent_->send(buf, len);
+      }
       free(buf);
 
       ESP_LOGI(TAG, "[%s] GridSync %s (slot %u)", this->get_name().c_str(),

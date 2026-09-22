@@ -217,6 +217,12 @@ namespace esphome
       // restate the number, which is how two constants drift apart.
       static constexpr int64_t kMaxFireBusyWaitUs = 46875;
 
+      // The copy count a TxPolicy of 0 resolves to. Public so a caller that
+      // must NOT be reduced to a single copy can ask for the burst explicitly:
+      // TxPolicy::copies == 0 means "no shape requested", which is exactly the
+      // condition §4.6 uses to decide it may send one copy instead.
+      int defaultBurstCopies() const { return this->txSlotsPerRound; }
+
       void sendPacketBurst(uint8_t *data, size_t len, int copies = 0,
                            uint32_t stride_ms = 0, int64_t not_before_us = 0);
 

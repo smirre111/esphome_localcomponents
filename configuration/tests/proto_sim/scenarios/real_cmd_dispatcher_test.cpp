@@ -2652,12 +2652,15 @@ namespace {
 
 std::vector<uint8_t> build_grid_sync(bool enable, uint32_t slot, uint32_t msgid,
                                      uint32_t slot_count = timedgrid::kSlotCount,
-                                     uint32_t pitch_us = timedgrid::kSlotPitchUs) {
+                                     uint32_t pitch_us = timedgrid::kSlotPitchUs,
+                                     uint32_t burst_index = 0) {
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
     hdr.msgid         = msgid;
+    hdr.burstindex    = burst_index;
+    hdr.burstcount    = 17;
 
     GridSync gs = GRID_SYNC__INIT;
     gs.enable            = enable;
@@ -2781,6 +2784,51 @@ TEST_F(RealNodeFixture, TimedRxNeedsTheCrystal) {
 
     disp.setRtcSlowSrc(phase::RtcSlowSrc::InternalRc);
     EXPECT_FALSE(disp.timedRxActive()) << "~5 % is not a clock";
+}
+
+TEST_F(RealNodeFixture, ALaterBurstCopyAnchorsWhereCopyZeroWas) {
+    // A GridSync declares the position of COPY 0, and it is sent as a 17-copy
+    // burst one stride apart. The node adopts from whichever copy it decodes
+    // first — and it is in Mode A when it is told about the grid, sweeping a
+    // free-running window, so that is rarely copy 0. Solving the anchor from a
+    // later copy's T0 displaced every mark the node would ever arm, by an
+    // amount that is not even a whole number of slots: the stride is 88000 us
+    // against a 46875 us pitch.
+    //
+    // burstIndex is re-stamped per copy by the hub and the node already backs
+    // it out for the drift estimate, so the correction costs nothing new on the
+    // wire.
+    constexpr int64_t kT0Copy0 = 5'000'000;
+
+    // RxDone is derived from each copy's OWN length. T0 is preamble-relative,
+    // so the copies are exactly one stride apart at T0 however long each frame
+    // is — but proto3 omits burstIndex when it is 0, so copy 0 really is a
+    // couple of bytes shorter than copy 5 and its RxDone sits correspondingly
+    // earlier. Handing both the same offset would compare two different T0s.
+    auto deliver = [&](const std::vector<uint8_t>& f, int64_t t0) {
+        const int64_t rxdone =
+            t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
+        disp.onReceiveNew(const_cast<uint8_t*>(f.data()),
+                          static_cast<int>(f.size()), rxdone);
+    };
+
+    auto copy0 = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/780);
+    deliver(copy0, kT0Copy0);
+    ASSERT_TRUE(disp.gridState().active);
+    const int64_t anchor_from_copy0 = disp.gridState().anchor_us;
+
+    // The same frame, five copies later — so its T0 is five strides after
+    // copy 0's, which is what the radio would hand the node.
+    constexpr uint32_t kIdx = 5;
+    auto copy5 = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/781,
+                                 timedgrid::kSlotCount, timedgrid::kSlotPitchUs,
+                                 /*burst_index=*/kIdx);
+    deliver(copy5, kT0Copy0 + (int64_t) kIdx * drift::kCopySpacingUs);
+    ASSERT_TRUE(disp.gridState().active);
+
+    EXPECT_EQ(disp.gridState().anchor_us, anchor_from_copy0)
+        << "which copy of the burst the node happens to decode must not move "
+           "its anchor — the declaration describes copy 0";
 }
 
 TEST_F(RealNodeFixture, TimedRxNeedsATrustworthyPhase) {

@@ -101,6 +101,10 @@ public:
     bool send(uint8_t* data, size_t len) { return send(data, len, TxPolicy{}); }
     bool send(uint8_t* data, size_t len, const TxPolicy& policy);
 
+    // Mirrors production: the copy count a TxPolicy of 0 resolves to, so a
+    // caller that must not be reduced to a single copy can ask for the burst.
+    int defaultBurstCopies() const { return default_copies; }
+
     // Test hook: make the next `drop_next_sends` calls to send() report a drop,
     // the way production does when the buffer pool is exhausted or the handoff
     // queue is full. Production has no return-value-free way to signal this, so
