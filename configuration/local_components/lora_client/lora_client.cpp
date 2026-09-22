@@ -1483,6 +1483,7 @@ namespace esphome
       std::snprintf(buf, sizeof(buf),
           "mode=%u prod=%d counter=%d crypto=%d | seq %u..%u exp %u gaps %u | "
           "detected %u crcValid %u addressed %u counterAcc %u micValid %u | "
+          "windows %u/%u | "
           "FER_link %u ppm WMR %u ppm DUP %u ppm MIC_FAIL %u ppm | "
           "phaseErr p50 %d p99 %d max %d n %u | turnaround p50 %d p99 %d n %u | "
           "armResidual p99 %d | oneShot p99 %d | tick %u Hz cpu %u MHz "
@@ -1494,6 +1495,14 @@ namespace esphome
           (unsigned) rep->detected, (unsigned) rep->crcvalid,
           (unsigned) rep->addressed, (unsigned) rep->counteraccepted,
           (unsigned) rep->micvalid,
+          // Printed raw, because WMR cannot speak for them: lossPpm returns 0
+          // for a zero denominator, so a run that armed NO windows reports a
+          // window miss rate of 0 ppm — the same number a flawless run gives.
+          // With mode now derived from the node's applied state, `mode=2
+          // windows 0/0` is the signature of timed RX enabled but never active
+          // (phase never became trustworthy), which is a real Mode B outcome
+          // and has to be legible as one rather than as a perfect score.
+          (unsigned) rep->windowsarmed, (unsigned) rep->windowshit,
           (unsigned) macfunnel::ferLinkPpm(c, expected),
           (unsigned) macfunnel::wmrPpm(c),
           (unsigned) macfunnel::dupPpm(c), (unsigned) macfunnel::micFailPpm(c),

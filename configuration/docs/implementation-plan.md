@@ -1209,8 +1209,15 @@ Recorded here rather than left to look maintained.
   change to the collision model.
   **What shipped instead:** the hub promotes on the node's own PHASE REPORT,
   carried in its encrypted beacon — `phaseErrUs`, `phaseSpreadUs`,
-  `phaseSamples`, `rtcSlowSrc`, all already on the wire and previously unread
-  by the promotion path. The justification is that this answers the question
+  `phaseSamples`, `rtcSlowSrc`.
+  **Corrected: those fields were NOT already on the wire.** They are declared in
+  `blinds.proto` (fields 20-25) and the hub decodes them, but the node's beacon
+  builder never assigned any of them — `grep 'beacon\.\(phase\|ppm\|rtcslow\)'`
+  in the node returned nothing, and the only place phase data was ever populated
+  was the on-demand `ModeTestReport`. The promotion guard requires
+  `phase_samples >= kPromotionPhaseSamples` and `rtc_src == Crystal`, so proto3
+  zeros meant Burst: the rule failed CLOSED, but the airtime saving still did
+  not ship. See §4.6b for the beacon work that closes it. The justification is that this answers the question
   single-shot actually turns on — *will this node's window be open when my one
   copy arrives?* — while in-slot placement was a proxy produced by the node's
   TRANSMIT path, which has nothing to do with when it ARMS.
@@ -1287,7 +1294,7 @@ Ordered by what each one blocks.
 | ~~`pending::Mask` on the wire~~ | ~~hub~~ | **REACHABLE** — `send_grid_sync(true)` is now called | ~~§4.4~~ |
 | ~~`CmdDispatcher::setTimedRxEnabled()`~~ | ~~node~~ | **FIXED** — adopting a grid enables timed RX | ~~Mode B on the node side~~ |
 | ~~`CmdDispatcher::setBenchNode()`~~ | ~~node~~ | **FIXED** — `CONFIG_BLINDS_BENCH_NODE`, a build-time flag. Deliberately not over the air: the obvious carrier, `ClientConfig`, is unauthenticated and gated only by a MAC broadcast in the clear | ~~HW-2~~ |
-| `ModeTest.mode` | node `CmdDispatcher.cpp:2364` | stored in `mt_mode_` and used only to echo back into the report. **It never changes the node's mode.** The "Mode Test B" HA button runs a **Mode A** measurement and labels the report `mode = 2`; the hub logs it as a Mode B result | every Mode B number the system can currently produce |
+| ~~`ModeTest.mode`~~ | ~~node `CmdDispatcher.cpp:2364`~~ | **FIXED.** It was stored in `mt_mode_` and echoed into the report and nothing else, so the "Mode Test B" button ran a **Mode A** measurement labelled `mode = 2` and the hub logged it as a Mode B result. `handleModeTest` now applies the mode to `timed_rx_enabled_`, and the report's label is DERIVED from that state (`modeApplied`) rather than copied from the request, so a mode that fails to apply cannot be reported as if it had. Two modes are now refused instead of silently not applied: **MODE_C**, because Class A is a sleep discipline rather than a flag this handler can flip, and **MODE_B/MODE_SWEEP on a node with no adopted grid**, where there is no anchor to arm a window against. The save/restore either side of the test was already written for a mode that changes; only the change was missing. | ~~every Mode B number the system can currently produce~~ |
 | ~~`node_fw_version_`~~ | ~~hub~~ | **REACHABLE** — `hubBeliefNow_()` reads it as `firmware_known`, which `txPolicyFor()` requires before allowing single-shot | ~~migration safety~~ |
 | ~~`loratiming::fireInstantUs()`~~ | ~~both repos — one caller, a unit test~~ | **FIXED** — the declared conversion from a wanted T0 to a fire instant had no production caller while BOTH placement producers passed a T0 straight into `TxPolicy::earliest_us`, so every placed frame arrived 3136 µs late. Now applied in `send_aligned_` and `send_into_rx1_`, and `earliest_us` is documented as a fire instant | ~~B1a/C2 placement accuracy~~ |
 | ~~`LoraInterface::classa_window_open_`~~ | ~~node — assigned at `LoraInterface.cpp:488`, read nowhere~~ | **FIXED** — added for exactly the discrimination it was not performing: without it, any window's outcome was attributed to the Class A sequence, and since `noteUplinkSent` runs on TX_DONE after the next window is already armed, a stray Mode A window completed RX1 and sent the node to RX2 where the hub transmits nothing | ~~C2~~ |

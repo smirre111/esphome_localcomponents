@@ -90,6 +90,52 @@ constexpr bool periodMattersFor(Mode m)
     return m == Mode::A || m == Mode::Sweep || m == Mode::Unspec;
 }
 
+// --- Which modes the node must actually be able to enter -------------------
+//
+// A timed window is armed against a grid, so MODE_B and MODE_SWEEP are only
+// meaningful on a node that has adopted one. Refusing is the whole point:
+// arming timed RX with no anchor does not measure Mode B badly, it measures
+// nothing at all while the node stops hearing the hub for the duration.
+constexpr bool modeNeedsGrid(Mode m)
+{
+    return m == Mode::B || m == Mode::Sweep;
+}
+
+// MODE_C is not a flag this handler can flip. Class A is a sleep discipline —
+// the node wakes, transmits, opens RX1/RX2 and sleeps again — so a Class A
+// measurement is a different test shape, not this one with a different mode
+// byte. Refusing it is what stops the report from carrying `mode = 3` over a
+// run that was nothing of the kind.
+constexpr bool modeIsImplemented(Mode m)
+{
+    return m != Mode::C;
+}
+
+// What the report's `mode` field must say: what the node APPLIED, derived from
+// its own state, never the byte the hub asked for.
+//
+// This is the fix for the defect the field was introduced with. `mt_mode_` was
+// assigned straight from the request and nothing else in the handler touched
+// the node's mode, so the "Mode Test B" button ran a Mode A measurement and
+// labelled it `mode = 2` — and the hub logged it as a Mode B result. Deriving
+// it from state means a mode that fails to apply cannot be reported as if it
+// had.
+//
+// Sweep survives as itself: it IS a timed-window run, distinguished by the
+// deliberate arm offset rather than by the RX discipline.
+//
+// What this still cannot say is whether timed RX was ACTIVE. Enabling it makes
+// Mode B reachable; timedRxActive() re-runs the full promotion test at every
+// mark, so a node whose phase never becomes trustworthy reports `mode = 2` over
+// marks it never armed. The witness for that is windowsArmed in the same
+// report, which comes from raw radio events (I1) and reads zero when it did
+// not happen.
+constexpr Mode modeApplied(Mode requested, bool timed_rx_on)
+{
+    if (requested == Mode::Sweep) return Mode::Sweep;
+    return timed_rx_on ? Mode::B : Mode::A;
+}
+
 // --- Arming ----------------------------------------------------------------
 
 enum class ArmRefusal : uint8_t {
@@ -101,6 +147,8 @@ enum class ArmRefusal : uint8_t {
     BatteryTooLow,      // a test that flattens the node teaches nothing
     BadCopies,          // outside 1..17, so not a burst this fleet ever sends
     NoGridPeriod,       // a mode that needs a ruler was given none
+    NoGrid,             // MODE_B/MODE_SWEEP on a node that has adopted none
+    ModeUnimplemented,  // MODE_C — see modeIsImplemented
 };
 
 // What the node knows about itself when the arm request lands.
@@ -122,6 +170,9 @@ struct NodeContext {
     bool     frame_authenticated{false};
     bool     has_session{false};
     bool     is_bench_node{false};
+    // Has the node adopted a grid? Gates MODE_B and MODE_SWEEP; see
+    // modeNeedsGrid. Defaults false, so a context that forgets it refuses.
+    bool     has_adopted_grid{false};
     uint32_t battery_mv{4000};
     uint32_t rx_interval_ms{500};
 };
@@ -156,6 +207,12 @@ constexpr ArmRefusal armRefusal(const Request &r, const NodeContext &ctx)
     if (!ctx.has_session)                       return ArmRefusal::NoSession;
     if (r.mode == Mode::Sweep && !ctx.is_bench_node)
                                                 return ArmRefusal::SweepOffBench;
+    // Then whether the node can enter the mode at all, before anything about
+    // the request's parameters: a refusal naming the battery or the grid period
+    // would send an operator off measuring the wrong thing.
+    if (!modeIsImplemented(r.mode))             return ArmRefusal::ModeUnimplemented;
+    if (modeNeedsGrid(r.mode) && !ctx.has_adopted_grid)
+                                                return ArmRefusal::NoGrid;
     if (ctx.battery_mv < kMinBatteryMv)         return ArmRefusal::BatteryTooLow;
     if (r.copies < kMinCopies || r.copies > kMaxCopies)
                                                 return ArmRefusal::BadCopies;

@@ -3353,3 +3353,185 @@ TEST_F(RealNodeFixture, TheClassASequenceStopsBeingActiveWhenItIsOver) {
     disp.noteClassAWindowResult(/*had_data=*/false);
     EXPECT_FALSE(disp.classAActive()) << "and after RX2 there is nothing left";
 }
+
+// ---------------------------------------------------------------------------
+// ModeTest — the mode the node ends up in, not the mode that was asked for.
+//
+// The policy header has always decided this correctly and been tested for it.
+// What went untested was the CALLER: handleModeTest stored `mode` in mt_mode_,
+// echoed it into the report, and never touched the node's RX discipline. So the
+// "Mode Test B" button produced a Mode A measurement labelled `mode = 2`, and
+// the hub logged it as a Mode B result — every Mode B number the fleet could
+// produce described the wrong mode.
+//
+// These drive the real dispatcher through a real encrypted frame, because that
+// is the only way to reach the arm path at all: ModeTest requires an
+// authenticated frame AND a proven session (mac-layer.md section 4).
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr uint32_t kMtNonce = 0x5EED1234;
+
+// Wrap an operation message as an encrypted downlink from the hub. Same
+// construction as DecryptedDownlinkProvesSessionEndToEnd, hoisted so more than
+// one test can reach the authenticated handlers.
+std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgid,
+                                uint32_t nonce = kMtNonce) {
+    size_t plain_len = lora_client_operation_message__get_packed_size(&inner);
+    std::vector<uint8_t> plain(plain_len);
+    lora_client_operation_message__pack(&inner, plain.data());
+
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(kNodeAddr, kSubnet, kHubAddr, msgid, aad);
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv_downlink(nonce, msgid, iv);
+    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad), plain.data(), plain.size());
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = msgid;
+
+    EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
+    ep.tag.data        = enc.tag.data();
+    ep.tag.len         = enc.tag.size();
+    ep.ciphertext.data = enc.ciphertext.data();
+    ep.ciphertext.len  = enc.ciphertext.size();
+
+    LoraClientOperationMessage outer = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    outer.header    = &hdr;
+    outer.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
+    outer.encrypted = &ep;
+
+    size_t frame_len = lora_client_operation_message__get_packed_size(&outer);
+    std::vector<uint8_t> frame(frame_len);
+    lora_client_operation_message__pack(&outer, frame.data());
+    return frame;
+}
+
+std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
+                                         uint32_t grid_period_ms = 1100) {
+    ModeTest mt = MODE_TEST__INIT;
+    mt.enable           = true;
+    mt.durations        = 60;
+    mt.mode             = mode;
+    mt.gridperiodms     = grid_period_ms;
+    mt.copies           = 1;
+    mt.keeppowerprofile = true;
+    mt.enablecounter    = true;
+    mt.enablecrypto     = true;
+
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+    inner.modetest = &mt;
+    return encrypt_op(inner, msgid);
+}
+
+// The hub's real "ModeTest OFF" frame — the path that restores the node's mode.
+std::vector<uint8_t> encrypted_mode_test_off(uint32_t msgid) {
+    ModeTest mt = MODE_TEST__INIT;
+    mt.enable = false;
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+    inner.modetest = &mt;
+    return encrypt_op(inner, msgid);
+}
+
+std::vector<uint8_t> encrypted_grid_sync(uint32_t slot, uint32_t msgid) {
+    GridSync gs = GRID_SYNC__INIT;
+    gs.enable            = true;
+    gs.slotindex         = slot;
+    gs.slotcount         = timedgrid::kSlotCount;
+    gs.roundus           = timedgrid::kRoundUs;
+    gs.pitchus           = timedgrid::kSlotPitchUs;
+    gs.txround           = 0;
+    gs.txslot            = slot;
+    gs.beaconslotindex   = timedgrid::kSlotCount - 1;
+    gs.beaconeveryrounds = 233;
+    gs.symtimeout        = timedgrid::kSymbolTimeoutSymbols;
+    gs.resyncmaxs        = 350;
+    gs.uloffsetus        = 60000;
+
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+    inner.gridsync = &gs;
+    return encrypt_op(inner, msgid);
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, ModeTestBActuallyPutsTheNodeInTimedRx) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active) << "the grid must adopt before B is armable";
+    ASSERT_TRUE(disp.isSessionProven());
+
+    // Adopting the grid already enables timed RX, so prove the handler is what
+    // sets it rather than inheriting a true it never wrote: put the node back
+    // in Mode A first, through the same handler.
+    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/3);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    ASSERT_TRUE(disp.modeTestActive());
+    EXPECT_FALSE(disp.timedRxEnabledForTest())
+        << "MODE_A must turn timed RX OFF, or a node with a grid measures B";
+    EXPECT_EQ(disp.modeTestReportedMode(), (uint8_t) modetest::Mode::A);
+
+    // Stopped through the hub's own OFF frame, not a test hook: the restore is
+    // the half that was already written, and it is what puts Mode A back.
+    auto off = encrypted_mode_test_off(/*msgid=*/4);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    ASSERT_FALSE(disp.modeTestActive());
+    ASSERT_TRUE(disp.timedRxEnabledForTest()) << "the restore puts the grid's mode back";
+
+    auto b = encrypted_mode_test(MODE_TEST__MODE__MODE_B, /*msgid=*/5);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
+    ASSERT_TRUE(disp.modeTestActive());
+    EXPECT_TRUE(disp.timedRxEnabledForTest());
+    EXPECT_EQ(disp.modeTestReportedMode(), (uint8_t) modetest::Mode::B);
+}
+
+TEST_F(RealNodeFixture, ModeTestBIsRefusedWithNoGridRatherThanMislabelled) {
+    // No GridSync: there is no anchor to arm a window against. Before the fix
+    // this armed happily, ran a Mode A measurement and reported mode = 2.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    // Prove the session with something harmless first.
+    TimeSync ts  = TIME_SYNC__INIT;
+    ts.epoch     = 1787000000ULL;
+    ts.utcoffset = 0;
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+    inner.timesync = &ts;
+    auto tsf = encrypt_op(inner, /*msgid=*/2);
+    disp.onReceiveNew(tsf.data(), static_cast<int>(tsf.size()));
+    ASSERT_TRUE(disp.isSessionProven());
+    ASSERT_FALSE(disp.gridState().active);
+
+    auto b = encrypted_mode_test(MODE_TEST__MODE__MODE_B, /*msgid=*/3);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
+
+    EXPECT_FALSE(disp.modeTestActive()) << "no grid, no Mode B measurement";
+    EXPECT_EQ(disp.modeTestLastRefusal(), (uint32_t) modetest::ArmRefusal::NoGrid);
+    EXPECT_FALSE(disp.timedRxEnabledForTest());
+}
+
+TEST_F(RealNodeFixture, ModeTestCIsRefusedBecauseTheHandlerCannotApplyIt) {
+    // Class A is a sleep discipline, not a flag. Arming it here would have
+    // produced a report labelled mode = 3 over a run that never left Mode A.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.isSessionProven());
+
+    auto c = encrypted_mode_test(MODE_TEST__MODE__MODE_C, /*msgid=*/3);
+    disp.onReceiveNew(c.data(), static_cast<int>(c.size()));
+
+    EXPECT_FALSE(disp.modeTestActive());
+    EXPECT_EQ(disp.modeTestLastRefusal(), (uint32_t) modetest::ArmRefusal::ModeUnimplemented);
+}

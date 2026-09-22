@@ -20,6 +20,10 @@ NodeContext armable() {
     c.frame_authenticated = true;
     c.has_session    = true;
     c.is_bench_node  = false;
+    // A node that has everything it needs to arm, which for MODE_B and
+    // MODE_SWEEP includes an adopted grid — there is no window to arm without
+    // one. The tests that are ABOUT that requirement clear it explicitly.
+    c.has_adopted_grid = true;
     c.battery_mv     = 4000;
     c.rx_interval_ms = 500;
     return c;
@@ -353,4 +357,100 @@ TEST(ModeTestPolicy, TheDefaultContextRefusesRatherThanArms) {
     NodeContext fresh;
     EXPECT_FALSE(fresh.frame_authenticated);
     EXPECT_EQ(armRefusal(modeA(), fresh), ArmRefusal::NotAuthenticated);
+}
+
+// ---------------------------------------------------------------------------
+// Which mode the test actually runs
+//
+// The defect these pin: `mode` travelled the wire, was stored, was echoed into
+// the report, and never changed the node's RX discipline. A "Mode Test B" run
+// measured Mode A and the hub logged it as a Mode B result — so every Mode B
+// number the fleet could produce described the wrong mode.
+// ---------------------------------------------------------------------------
+
+TEST(ModeTestPolicy, ModeBWithoutAnAdoptedGridIsRefused) {
+    // Timed windows are armed against a grid. With no anchor there is nothing
+    // to arm against, and enabling timed RX anyway does not measure Mode B
+    // badly — it stops the node hearing the hub for the length of the test.
+    NodeContext c = armable();
+    c.has_adopted_grid = false;
+    Request r;
+    r.mode   = Mode::B;
+    r.copies = 1;
+    EXPECT_EQ(armRefusal(r, c), ArmRefusal::NoGrid);
+
+    c.has_adopted_grid = true;
+    EXPECT_EQ(armRefusal(r, c), ArmRefusal::None)
+        << "MODE_B needs no grid PERIOD — the round is the period";
+}
+
+TEST(ModeTestPolicy, SweepNeedsBothTheBenchAndAGrid) {
+    NodeContext c = armable();
+    c.is_bench_node    = true;
+    c.has_adopted_grid = false;
+    Request r;
+    r.mode           = Mode::Sweep;
+    r.grid_period_ms = 1100;
+    r.copies         = 1;
+    EXPECT_EQ(armRefusal(r, c), ArmRefusal::NoGrid);
+
+    // And the bench check still comes first: a field node is refused for being
+    // a field node, whatever its grid state.
+    c.is_bench_node    = false;
+    c.has_adopted_grid = true;
+    EXPECT_EQ(armRefusal(r, c), ArmRefusal::SweepOffBench);
+}
+
+TEST(ModeTestPolicy, ModeCIsRefusedRatherThanSilentlyNotApplied) {
+    // Class A is a sleep discipline, not a flag: the node wakes, transmits,
+    // opens RX1/RX2 and sleeps. Refusing is what stops a report carrying
+    // `mode = 3` over a run that never left Mode A.
+    NodeContext c = armable();
+    c.has_adopted_grid = true;
+    Request r;
+    r.mode   = Mode::C;
+    r.copies = 1;
+    EXPECT_EQ(armRefusal(r, c), ArmRefusal::ModeUnimplemented);
+    EXPECT_FALSE(modeIsImplemented(Mode::C));
+    EXPECT_TRUE(modeIsImplemented(Mode::A));
+    EXPECT_TRUE(modeIsImplemented(Mode::B));
+    EXPECT_TRUE(modeIsImplemented(Mode::Sweep));
+}
+
+TEST(ModeTestPolicy, ACapabilityRefusalOutranksTheRequestsParameters) {
+    // A node refused for MODE_C or for having no grid must say so, not send an
+    // operator off to charge a battery or pick a different period.
+    NodeContext c = armable();
+    c.has_adopted_grid = false;
+    c.battery_mv       = 3000;            // also too low
+    Request r;
+    r.mode   = Mode::B;
+    r.copies = 99;                        // also out of range
+    EXPECT_EQ(armRefusal(r, c), ArmRefusal::NoGrid);
+
+    r.mode = Mode::C;
+    EXPECT_EQ(armRefusal(r, c), ArmRefusal::ModeUnimplemented);
+}
+
+TEST(ModeTestPolicy, TheReportsModeComesFromStateNotFromTheRequest) {
+    // The whole defect in one assertion: asking for B and not applying it must
+    // report A.
+    EXPECT_EQ(modeApplied(Mode::B, false), Mode::A);
+    EXPECT_EQ(modeApplied(Mode::B, true),  Mode::B);
+    EXPECT_EQ(modeApplied(Mode::A, false), Mode::A);
+
+    // UNSPEC leaves the mode alone, so it reports whatever the node was in.
+    EXPECT_EQ(modeApplied(Mode::Unspec, true),  Mode::B);
+    EXPECT_EQ(modeApplied(Mode::Unspec, false), Mode::A);
+
+    // Sweep is a timed-window run distinguished by its arm offset, so it keeps
+    // its own identity rather than collapsing into B.
+    EXPECT_EQ(modeApplied(Mode::Sweep, true), Mode::Sweep);
+}
+
+TEST(ModeTestPolicy, OnlyTimedModesNeedAGrid) {
+    EXPECT_TRUE(modeNeedsGrid(Mode::B));
+    EXPECT_TRUE(modeNeedsGrid(Mode::Sweep));
+    EXPECT_FALSE(modeNeedsGrid(Mode::A));
+    EXPECT_FALSE(modeNeedsGrid(Mode::Unspec));
 }
