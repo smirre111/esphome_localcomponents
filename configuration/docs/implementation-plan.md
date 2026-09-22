@@ -2699,6 +2699,66 @@ and is **not a blocker for anything**. Re-open it only if the hub's check-in
 prediction is ever observed to be wrong in practice.
   above predicts.
 
+**MODE C PASSES ON 1.1.4 (2026-09-22, 06:07:06–07:27:06) — MAC-0 IS NOW
+CONCLUDED FOR ALL THREE MODES ON ONE BUILD.** Node 2 fw 1.1.4 (`fw=10104`), hub
+`0xa65c606f`, check-in 15 min, Auto Mode ON, Timed Mode OFF, RSSI −44 dBm,
+13.38–13.39 V. 80 min, 29 530 lines. **Serial shut for the whole run** — opening
+it resets a sleeping node, and the sleep is the thing under test — so every
+number below is hub-side or carried in a beacon field.
+
+| criterion | result | verdict |
+|---|---|---|
+| every expected check-in heard | **5 of 5 due**, each `reason=TIMER_CHECKIN reset=DEEPSLEEP` | **PASS** |
+| session survives every wake | `resume=1` ×5, `resume=0` ×**0** — no re-login, no REGISTER | **PASS** |
+| applied ≈ requested sleep | requested 900 000 000 us, applied 899 874 017 us (×3) / 899 874 298 us (×1) | **PASS** |
+| true FER over the auto wakes | **0 of 5** (detected 5, crcValid 5) | **PASS**, n small |
+| wake-clock ppm | counter −130 ppm, crystal period 16 002 240 Q19 → −139 ppm, residual **10 ppm** | recorded, NOT a gate |
+
+**The Class A funnel, per wake** — `windows 1 hits 1` on every one:
+
+| wake | windows | hits | detected | crcValid |
+|---|---|---|---|---|
+| n 2 | 1 | 1 | 2 | 2 |
+| n 3 | 1 | 1 | 1 | 1 |
+| n 4 | 1 | 1 | 1 | 1 |
+| n 5 | 1 | 1 | 1 | 1 |
+| **total** | **4** | **4** | **5** | **5** |
+
+* **The KNOWN LIMITATION recorded above did not bite, and the reason matters.**
+  That note says an empty Class A window cannot be separated from "armed and
+  missed". **No window was empty** — `hits == windows` on every wake — so the
+  ambiguity never arose and the node's own `detected`/`crcValid` give a true FER
+  directly. What remains unknowable from this run alone is whether the hub ever
+  aimed at a window the node did not open; that is the `offered` counter, which
+  this hub build does not have. The honest weakness here is **n = 5**, not
+  ambiguity.
+* **This supersedes the `windows 4 hits 1` / `windows 2 hits 1` readings** of
+  2026-09-21. Those were the double-uplink era: two uplinks per wake opened two
+  windows, and one reply could only ever hit one of them. The ratio was an
+  artefact of the defect, not a loss rate.
+* **One uplink per wake, confirmed in Mode C:** `MODE_CHANGED=0
+  TIMER_CHECKIN=5`. The 1.1.4 single-uplink fix and this campaign are therefore
+  verified on the same firmware, not on two.
+* **The crystal correction is doing real work:** the node shortens a 900 s sleep
+  by ~126 ms to answer a −130 ppm counter, landing within 10 ppm. `clock_offset`
+  held at −1 to −2 s across all five wakes.
+
+**VERDICT — all three modes on 1.1.4.** This replaces the "two of three" verdict
+recorded above, which was taken on 1.1.2 before Mode A and Mode B were re-run.
+
+| mode | result on 1.1.4 |
+|---|---|
+| Mode A | **PASS** — true FER 0 of 52, +9 ppm, n 52 over 899 s |
+| Mode B | **PASS** — residual 0 ppm, 593/591 windows, HW-8 0 missed, FER 0 of 599, phase p99 864 us |
+| Mode C | **PASS** — 5 of 5 check-ins, resume 5/5, applied−requested 10 ppm, true FER 0 of 5 |
+
+**What this does NOT close**, restated so the sweep is not over-read: n = 5 is a
+small sample for an FER claim, which is why the check-in interval goes to 5 min
+temporarily (`bfbd04e`) behind the new hub-side Class A ledger (`284425f`) — the
+ledger adds the `offered` denominator this run lacked. The hub still cannot see
+a promoted QUIET node; HW-1/2/3/4 remain untouched; and Mode C's counter-fit
+discrepancy is deprioritised, not explained.
+
 **MEASURED 2026-09-21 — fw 1.1.2: the mode announcement reaches the hub, and the
 defect that had stopped it.** Node 2 fw 1.1.2 (`6030a2c`), hub `6c77067`.
 
