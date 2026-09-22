@@ -599,6 +599,14 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     configure_file(${BLINDS_ESP_MAIN}/include/CmdDispatcher.h ${NODE_STAGE}/CmdDispatcher.h COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/include/common.h         ${NODE_STAGE}/common.h         COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/include/Packet.h         ${NODE_STAGE}/Packet.h         COPYONLY)
+    # MotorPolicy.h MUST be staged, not reached in place. CmdDispatcher.cpp
+    # includes it for keptTravelDurationS (the CoverConfig zero-duration guard),
+    # and MotorPolicy.h in turn includes "common.h" — quoted, so it resolves
+    # relative to ITS OWN directory. Left unstaged it drags in the real
+    # main/include/common.h while the staged CmdDispatcher.cpp has already
+    # included node_stage/common.h. Two distinct files, so `#pragma once` cannot
+    # fire, and every enum/struct/constant in common.h redefines.
+    configure_file(${BLINDS_ESP_MAIN}/include/MotorPolicy.h    ${NODE_STAGE}/MotorPolicy.h    COPYONLY)
     # Drop the sibling shims into the same staging directory.
     foreach(shim MotorCtrl.h SystemCtrl.h LoraInterface.h myinterrupts.h)
         configure_file(${NODE_SHIM_DIR}/${shim} ${NODE_STAGE}/${shim} COPYONLY)
@@ -763,7 +771,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         configure_file(${BLINDS_ESP_MAIN}/${f} ${IFACE_STAGE}/${f} COPYONLY)
     endforeach()
     foreach(h CmdDispatcher.h SessionManager.h comm_utils.h common.h Packet.h
-              LoraInterface.h myinterrupts.h frtosTasks.h)
+              LoraInterface.h myinterrupts.h frtosTasks.h MotorPolicy.h)
         configure_file(${BLINDS_ESP_MAIN}/include/${h} ${IFACE_STAGE}/${h} COPYONLY)
     endforeach()
     # Only the siblings that are genuinely not under test here.

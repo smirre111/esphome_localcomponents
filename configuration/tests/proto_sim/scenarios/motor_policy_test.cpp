@@ -574,3 +574,43 @@ TEST(TargetSnap, ASuppressedSnapLeavesTheFinalPositionToBeComputed) {
     const bool snapping = maySnapPosition(true, /*target=*/true);
     EXPECT_TRUE(needsFinalPosition(/*was_moving=*/true, /*now_idle=*/true, snapping));
 }
+
+// ---------------------------------------------------------------------------
+// keptTravelDurationS — which duration survives a CoverConfig.
+//
+// NOTE what AZeroDurationDoesNotDivideByZero above already covers, and what it
+// does not. That test defends the ARITHMETIC one rung below this: given a zero
+// duration, radiusAfter must not produce NaN. It passed for months — while the
+// node was still happily ACCEPTING zeros off the wire and storing them. A
+// defended calculation on a value that should never have been admitted is not
+// coverage of the admission.
+//
+// MEASURED 2026-09-22, node 2 (fw 1.1.4): config.txt held
+// "motorOpenDuration":0,"motorCloseDuration":0, and MOTCMD_FULL_DOWN took the
+// reported position 1.000000 -> 0.000000 after ~1 s of actual motion.
+// ---------------------------------------------------------------------------
+
+TEST(TravelDuration, AZeroProposalKeepsTheStoredDuration) {
+    // proto3 cannot distinguish an absent uint32 from a zero one, so an
+    // unset openTime/closeTime arrives as 0 — and 0 is not a slow blind, it is
+    // the absence of a duration.
+    EXPECT_EQ(keptTravelDurationS(0u, 38u), 38u);
+    EXPECT_EQ(keptTravelDurationS(0u, 42u), 42u);
+}
+
+TEST(TravelDuration, ARealProposalIsStillApplied) {
+    // The other half, and the one a "always keep current" mutant breaks: the
+    // node must remain reconfigurable, or the guard trades one silent failure
+    // for another and a stopwatch recalibration could never reach the node.
+    EXPECT_EQ(keptTravelDurationS(42u, 38u), 42u);
+    EXPECT_EQ(keptTravelDurationS(36u, 0u),  36u)
+        << "a node with no stored duration must be able to receive its first";
+}
+
+TEST(TravelDuration, NothingStoredAndNothingOfferedStaysZero) {
+    // Stated so the guard is not mistaken for a full repair. A node that has
+    // never been configured still has no duration, and the caller must not
+    // drive on it — the guard prevents a zero ARRIVING, it cannot invent a
+    // travel time.
+    EXPECT_EQ(keptTravelDurationS(0u, 0u), 0u);
+}

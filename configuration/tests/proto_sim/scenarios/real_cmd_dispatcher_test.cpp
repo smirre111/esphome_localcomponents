@@ -373,12 +373,123 @@ TEST_F(RealNodeFixture, CmdCoverConfigRejectsPartialGeometry) {
 
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
-    EXPECT_EQ(sys.open_time_s(),  60u)  << "open/close are unconditional";
+    EXPECT_EQ(sys.open_time_s(),  60u)
+        << "a real duration is applied — the zero guard added 2026-09-22 only "
+           "refuses zeros, it must not make the node unconfigurable";
     EXPECT_EQ(sys.close_time_s(), 65u);
     EXPECT_FALSE(sys.geometry_set())
         << "Partial geometry must be all-or-nothing — applying height+axle "
            "but leaving thickness at the firmware default would silently "
            "produce a position calculation error.";
+}
+
+// ---------------------------------------------------------------------------
+// The travel-duration zero guard, against the REAL handler.
+//
+// MEASURED 2026-09-22. Node 2 (fw 1.1.4) held
+// "motorOpenDuration":0,"motorCloseDuration":0 in config.txt and every move was
+// instant:  MOTCMD_FULL_DOWN -> position 1.000000 -> 0.000000 after ~1 s of
+// actual motion. runMsForMove() returns the configured duration for a full
+// move, so a zero fires the move timer at once and the FULLY_* TIMER
+// transition SNAPS the position to an extreme. The other node reported
+// "closed" from a blind stopped at 80 %.
+//
+// openTime/closeTime were the ONLY fields in CoverConfig applied
+// unconditionally; batteryInterval and the roll geometry already treated 0 as
+// the proto3 "unset" encoding.
+// ---------------------------------------------------------------------------
+TEST_F(RealNodeFixture, CmdCoverConfigRefusesZeroTravelDurations) {
+    auto send = [&](uint32_t open_s, uint32_t close_s, uint32_t msgid) {
+        LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+        LoraHeader hdr               = LORA_HEADER__INIT;
+        hdr.destaddress   = kNodeAddr;
+        hdr.destsubnet    = kSubnet;
+        hdr.senderaddress = kHubAddr;
+        hdr.msgid         = msgid;
+        op.header         = &hdr;
+
+        CoverConfig cc = COVER_CONFIG__INIT;
+        cc.opentime         = open_s;
+        cc.closetime        = close_s;
+        cc.blindheightmm    = 2000.0f;
+        cc.axlediametermm   = 60.0f;
+        cc.blindthicknessmm = 8.0f;
+        op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+        op.coverconfig = &cc;
+
+        size_t len = lora_client_operation_message__get_packed_size(&op);
+        std::vector<uint8_t> bytes(len);
+        lora_client_operation_message__pack(&op, bytes.data());
+        disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    };
+
+    // The node must first HOLD real durations: "a zero is refused" says nothing
+    // about a node that never had any.
+    send(60, 65, /*msgid=*/1);
+    ASSERT_EQ(sys.open_time_s(),  60u) << "precondition: durations installed";
+    ASSERT_EQ(mot.open_time_s(),  60u) << "precondition: motor got them too";
+
+    // Now a CoverConfig that leaves openTime/closeTime unset. On the wire that
+    // is indistinguishable from an explicit zero.
+    send(0, 0, /*msgid=*/2);
+
+    EXPECT_EQ(sys.open_time_s(),  60u)
+        << "a zero openTime is proto3 'unset', not a duration";
+    EXPECT_EQ(sys.close_time_s(), 65u)
+        << "this is the one that reported 'closed' from a blind that had "
+           "barely moved";
+
+    // BOTH sinks, deliberately. handleCoverConfig calls setTimes() AND
+    // setRuntime(); a guard applied to only one would leave the stored config
+    // correct while the live motor still ran on zero for the rest of the
+    // session — which is exactly the state node 2 was in.
+    EXPECT_EQ(mot.open_time_s(),  60u)
+        << "the LIVE motor duration must be guarded too, not just the "
+           "persisted config";
+    EXPECT_EQ(mot.close_time_s(), 65u);
+}
+
+TEST_F(RealNodeFixture, CmdCoverConfigStillAppliesRealTravelDurations) {
+    // The half a "always keep what we have" mutant breaks: a stopwatch
+    // recalibration must still reach the node, and one zero must not drag its
+    // non-zero partner down with it.
+    auto send = [&](uint32_t open_s, uint32_t close_s, uint32_t msgid) {
+        LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+        LoraHeader hdr               = LORA_HEADER__INIT;
+        hdr.destaddress   = kNodeAddr;
+        hdr.destsubnet    = kSubnet;
+        hdr.senderaddress = kHubAddr;
+        hdr.msgid         = msgid;
+        op.header         = &hdr;
+
+        CoverConfig cc = COVER_CONFIG__INIT;
+        cc.opentime         = open_s;
+        cc.closetime        = close_s;
+        cc.blindheightmm    = 2000.0f;
+        cc.axlediametermm   = 60.0f;
+        cc.blindthicknessmm = 8.0f;
+        op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+        op.coverconfig = &cc;
+
+        size_t len = lora_client_operation_message__get_packed_size(&op);
+        std::vector<uint8_t> bytes(len);
+        lora_client_operation_message__pack(&op, bytes.data());
+        disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    };
+
+    send(60, 65, /*msgid=*/1);
+    ASSERT_EQ(sys.open_time_s(), 60u);
+
+    send(38, 36, /*msgid=*/2);
+    EXPECT_EQ(sys.open_time_s(),  38u) << "recalibration must reach the node";
+    EXPECT_EQ(sys.close_time_s(), 36u);
+    EXPECT_EQ(mot.open_time_s(),  38u) << "and reach the motor this session";
+
+    // One zero must not clobber its non-zero partner. Unlike geometry, which is
+    // all-or-nothing, the two durations are independent.
+    send(42, 0, /*msgid=*/3);
+    EXPECT_EQ(sys.open_time_s(),  42u) << "the real openTime is applied";
+    EXPECT_EQ(sys.close_time_s(), 36u) << "the zero closeTime keeps its stored value";
 }
 
 namespace {

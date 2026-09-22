@@ -174,8 +174,15 @@ void NodeModel::on_frame(const AirFrame& f) {
         break;
     }
     case Cmd::CoverConfig:
-        open_time_s_  = m.coverconfig.openTime;
-        close_time_s_ = m.coverconfig.closeTime;
+        // Production guard (handleCoverConfig, via
+        // motorpolicy::keptTravelDurationS): a zero openTime/closeTime is the
+        // proto3 "unset" encoding, not a duration, and must keep whatever the
+        // node already holds. Mirrored here because this model exists to match
+        // the firmware — it applied zeros unconditionally, exactly as
+        // production did, until 2026-09-22 when two nodes lost their travel
+        // times and every move snapped to an extreme after ~1 s.
+        if (m.coverconfig.openTime  > 0u) open_time_s_  = m.coverconfig.openTime;
+        if (m.coverconfig.closeTime > 0u) close_time_s_ = m.coverconfig.closeTime;
         // Production guard (CmdDispatcher.cpp:1291): only apply geometry when
         // ALL three values are non-zero. proto3 unset == 0, so partial
         // populations must NOT clobber the firmware defaults.

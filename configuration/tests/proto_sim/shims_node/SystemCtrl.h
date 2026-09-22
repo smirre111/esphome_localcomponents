@@ -25,6 +25,14 @@ public:
     void setHostname(const char* name, size_t len) { hostname_.assign(name, len); }
     void setSleepDuration(uint64_t s)              { sleep_s_ = s; }
     void setTimes(uint32_t open_s, uint32_t close_s) { open_s_ = open_s; close_s_ = close_s; }
+    // The stored travel durations, as the production SystemCtrl exposes them
+    // (SystemCtrl.cpp:649/651 -> g_config.motorOpenDuration_s / _close_).
+    // handleCoverConfig reads these to decide what a CoverConfig zero should
+    // fall back to: proto3 cannot tell "unset" from 0, so a zero must keep
+    // what the node already has. Without these the real dispatcher does not
+    // compile against this shim at all.
+    uint32_t getConfigMotorOpenDuration()  const { return open_s_; }
+    uint32_t getConfigMotorCloseDuration() const { return close_s_; }
     void setGeometry(float h, float a, float t)    { h_ = h; a_ = a; t_ = t; geom_ = true; }
     // Slat-slack head/tail times (v1.0.10) and the configurable battery
     // force-send interval (v1.0.12).  interval_s == 0 means "unset" and is
