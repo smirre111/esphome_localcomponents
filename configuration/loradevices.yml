@@ -195,23 +195,20 @@ lora_client:
     # above and unchanged: 15 min costs ~290 s awake per day against hourly's
     # 185 s.
     #
-    # *** 5min IS TEMPORARY — FOR THE MODE C CAMPAIGN ONLY. RESTORE TO 1h. ***
+    # RESTORED TO 1h (2026-09-22 09:27). The 5 min setting was temporary, the
+    # campaign it was for is CONCLUDED, and it has been removed as promised —
+    # 5 min was the highest awake-time setting used on this bench.
     #
-    # The Class A ledger now makes each check-in a COMPLETE sample: the hub
-    # counts the reply it placed (offered) and the node reports that wake's
-    # funnel (windows/hits/detected/crcValid) in its next beacon. Before the
-    # ledger an empty window was ambiguous, so more samples bought nothing;
-    # now n scales directly with check-in rate, and a true FER needs n.
+    # What it bought, running 07:31–09:27 behind the Class A ledger:
     #
-    # 5 min gives ~12 samples/hour against 15 min's 4. The cost is battery and
-    # nothing else: the four things being established (wakes heard, resume=1,
-    # applied ~= requested, true FER) do not depend on interval length. The one
-    # thing that DOES scale with sleep duration is clock drift — the ppm — and
-    # that is the deprioritised metric, not Mode C itself.
+    #   offered 20 | windows 29 | hits 19 | detected 21 | crcValid 21
+    #   true FER 0 of 21, against n 5 from the entire 80 min 15 min run
     #
-    # This is the highest awake-time setting used on this bench. It must not
-    # outlive the campaign.
-    checkin_interval: 5min
+    # Steady state was +1 offered / +1 window / +1 hit / +1 detected /
+    # +1 crcValid per check-in, without exception, for the 16 samples from
+    # 08:02 to 09:27. The single miss (19 hits against 20 offers) and 8 barren
+    # windows both belong to the ONE interval-transition wake at 07:56.
+    checkin_interval: 1h
     catchup_window: 0min
     # Two events eight minutes apart so one run observes both a first entry
     # into auto mode AND a wake out of deep sleep with the RTC markers already
