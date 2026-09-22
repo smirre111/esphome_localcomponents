@@ -860,6 +860,63 @@ sensor:
     update_interval: 30s
     accuracy_decimals: 0
     lambda: 'return (float) id(rol_2)->mac_stats().echoes_rx;'
+  # --- Mode C's Class A ledger ---------------------------------------------
+  #
+  # Both halves of this measurement existed and were never added up. The hub
+  # places one reply into RX1 on every check-in (send_timesync ->
+  # send_into_class_a_window_); the node reports that wake's funnel in its NEXT
+  # beacon (prevwakewindows/hits/detected/crcvalid — "Mode C's FER" in the
+  # node's own comment). One lived in a log line, the other in a beacon field.
+  #
+  # Without the pair an empty Class A window is AMBIGUOUS between "nothing was
+  # aimed at it" and "aimed and missed", which is why the 2026-09-21 Mode C run
+  # (`windows 4 hits 1`, `windows 2 hits 1`) could not yield a Class A FER.
+  #
+  # RAW COUNTERS, as with the MAC ping above and the ModeTest report: the node
+  # never grades itself, the hub adds up what each end observed, the operator
+  # divides.
+  #
+  #   hit rate = hits / offered        true FER = 1 - crcValid / detected
+  - platform: template
+    name: "Class A — replies offered (node 2)"
+    id: rol_2_classa_offered
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    # Counted at the PLACEMENT, so it means "the hub aimed a frame at a window
+    # it believed open" — the question an empty window cannot answer alone.
+    lambda: 'return (float) id(rol_2)->class_a_stats().offered;'
+  - platform: template
+    name: "Class A — windows opened (node 2)"
+    id: rol_2_classa_windows
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->class_a_stats().windows;'
+  - platform: template
+    name: "Class A — windows hit (node 2)"
+    id: rol_2_classa_hits
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->class_a_stats().hits;'
+  - platform: template
+    name: "Class A — frames detected (node 2)"
+    id: rol_2_classa_detected
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->class_a_stats().detected;'
+  - platform: template
+    name: "Class A — frames CRC-valid (node 2)"
+    id: rol_2_classa_crcvalid
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    # Stage 2->3 of the funnel. true FER = 1 - this/detected, the figure
+    # mac-layer.md 6.1 calls the only one comparable across modes.
+    lambda: 'return (float) id(rol_2)->class_a_stats().crc_valid;'
+
   - platform: template
     name: "MAC Ping — echo gaps (node 2)"
     id: rol_2_macping_gaps

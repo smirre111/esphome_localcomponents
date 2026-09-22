@@ -575,6 +575,42 @@ namespace esphome
       const MacStats &mac_stats() const { return this->mac_stats_; }
       void reset_mac_stats() { this->mac_stats_ = MacStats{}; }
 
+      // --- Mode C's Class A ledger ------------------------------------------
+      //
+      // The machinery to measure Class A reception already existed on both
+      // ends and was never added up. The hub places one reply into RX1 on
+      // every check-in (send_timesync -> send_into_class_a_window_), and the
+      // node reports that wake's funnel in its NEXT beacon
+      // (prevwakewindows/hits/detected/crcvalid, "Mode C's FER" in its own
+      // comment). But the two lived in a log line and a beacon field, so a
+      // success rate had to be correlated by hand — and an empty window is
+      // ambiguous between "nothing was aimed at it" and "aimed and missed".
+      //
+      // RAW COUNTERS, not a computed rate: the same rule as MacStats and the
+      // ModeTest report. The node never grades itself; the hub adds up what
+      // each end actually observed and the operator divides.
+      //
+      //   hit rate  = hits / offered
+      //   true FER  = 1 - crcValid / detected     (stage 2->3, mac-layer 6.1)
+      //
+      // offered is counted at the PLACEMENT, so it answers "did the hub aim a
+      // frame at a window that was open", which is the question an empty
+      // window could not previously distinguish.
+      struct ClassAStats
+      {
+        uint32_t offered   = 0;  // replies the hub PLACED in an open window
+        uint32_t windows   = 0;  // windows the node reports opening
+        uint32_t hits      = 0;  // windows that caught something
+        uint32_t detected  = 0;  // frames the modem detected
+        uint32_t crc_valid = 0;  // of those, CRC-valid
+      };
+      const ClassAStats &class_a_stats() const { return this->class_a_stats_; }
+      void reset_class_a_stats()
+      {
+        this->class_a_stats_          = ClassAStats{};
+        this->class_a_last_prev_msgid_ = 0;
+      }
+
      protected:
       // Builds the NEXT frame into drift_frame_, so the timer callback only
       // transmits. Packing must not happen inside the interval being measured.
@@ -751,6 +787,14 @@ namespace esphome
       uint8_t  mac_ping_frame_[192]{};
       size_t   mac_ping_frame_len_{0};
       MacStats mac_stats_{};
+      // Mode C's Class A ledger; see class_a_stats().
+      ClassAStats class_a_stats_{};
+      // The prevbeaconmsgid whose funnel has already been added. Each beacon
+      // reports the PREVIOUS wake, so two beacons from one wake would count
+      // that wake twice — exactly what fw 1.1.2 and 1.1.3 did before the
+      // one-uplink fix. Keying on the msgid makes the accumulation idempotent
+      // rather than trusting that fix to hold.
+      uint32_t    class_a_last_prev_msgid_{0};
 
      public:
 

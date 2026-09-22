@@ -488,6 +488,151 @@ TEST(RealLoraClient, TheOptimisticSwitchStillBurstsOnPositiveEvidence) {
     EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst);
 }
 
+namespace {
+// handle_beacon_ is protected, like handle_command_ack_ and
+// handle_grid_sync_request_ above. Same probe pattern, and for the same reason:
+// the node's wake beacon reaches exactly this function in production, so a test
+// that goes through it is testing the production path rather than a hook.
+struct BeaconProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::handle_beacon_;
+};
+
+// One wake beacon carrying the PREVIOUS wake's Class A funnel.
+//
+// Only the fields the ledger reads are set; the rest stay at INIT defaults.
+// prevbeaconmsgid is the wake's identity — the ledger keys on it so a wake
+// reported twice is counted once.
+void deliverBeaconWithWakeFunnel(LORAClient &rol, uint32_t prev_msgid,
+                                 uint32_t windows, uint32_t hits,
+                                 uint32_t detected, uint32_t crc) {
+    NodeWakeBeacon b     = NODE_WAKE_BEACON__INIT;
+    b.reason             = (WakeReason) WAKE_REASON__WAKE_TIMER_CHECKIN;
+    b.mode               = NODE_MODE__MODE_AUTO;
+    b.prevbeaconmsgid    = prev_msgid;
+    b.prevwakewindows    = windows;
+    b.prevwakehits       = hits;
+    b.prevwakedetected   = detected;
+    b.prevwakecrcvalid   = crc;
+    static_cast<BeaconProbe &>(rol).handle_beacon_(&b);
+}
+}  // namespace
+
+// MODE C's CLASS A LEDGER (2026-09-22).
+//
+// Both halves of this measurement already existed and were never added up: the
+// hub places one reply into RX1 on every check-in, and the node reports that
+// wake's funnel in its NEXT beacon. Without the pair, an empty Class A window
+// is ambiguous between "nothing was aimed at it" and "aimed and missed" — which
+// is exactly why no Class A FER could be quoted from the 2026-09-21 Mode C run
+// (`windows 4 hits 1`, `windows 2 hits 1`).
+//
+// offered is counted at the PLACEMENT, so it answers the question the funnel
+// alone cannot: did the hub aim a frame at a window it believed open.
+TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+
+    ASSERT_EQ(h.rol.class_a_stats().offered, 0u) << "a fresh listener owes nothing";
+
+    std::vector<uint8_t> payload{1, 2, 3, 4};
+
+    // DECLINE 1 — the default. A node that has never said it is in AUTO is
+    // MODE_INTERACTIVE and opens no Class A window at all.
+    ASSERT_EQ(h.rol.node_mode_, (uint32_t) NODE_MODE__MODE_INTERACTIVE);
+    ASSERT_EQ(h.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::NotClassA);
+    EXPECT_EQ(h.rol.class_a_stats().offered, 0u);
+
+    // DECLINE 2 — Class A, but the hub has never heard an uplink from this node,
+    // so there is no origin to hang the window off.
+    //
+    // THIS is the rung the first version of this test claimed to exercise. It
+    // called send_timesync() on a node left at the INTERACTIVE default, so it
+    // stopped at DECLINE 1 and never reached here — a mutant that counted a
+    // NoUplinkStamp decline as an offer SURVIVED it, as did deleting the
+    // increment outright. The mode check is what the order of the ladder makes
+    // load-bearing.
+    h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
+    ASSERT_EQ(h.rol.last_uplink_t0_us_, 0);
+    ASSERT_EQ(h.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::NoUplinkStamp);
+    EXPECT_EQ(h.rol.class_a_stats().offered, 0u)
+        << "a declined placement is not an offer: counting it would inflate the "
+           "denominator with frames that never went into a window";
+
+    // PLACED — the node's own uplink gives the window an origin. Without this
+    // half the test is one-sided: it proves the counter does not over-count
+    // while saying nothing about whether it counts at all.
+    constexpr int64_t kT0 = 100'000;
+    h.tracker.last_rx_t0_us_v  = kT0;
+    h.tracker.rx_uncertainty_v = 250;
+    auto from_self = real_helpers::serialize_avail(/*sender=*/18, /*msg_id=*/1);
+    h.rol.set_response(from_self.data(), from_self.size());
+    ASSERT_EQ(h.rol.last_uplink_t0_us_, kT0)
+        << "the node's OWN uplink is the origin — precondition, not the claim";
+
+    ASSERT_EQ(h.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::Placed);
+    EXPECT_EQ(h.rol.class_a_stats().offered, 1u)
+        << "the hit rate divides by this, so the increment has to be pinned: "
+           "deleting it left the earlier version of this test green";
+
+    // DECLINE 3 — both windows gone. The node is asleep, and this is the rung a
+    // dense Mode C campaign hits most often, not a corner case: every check-in
+    // the hub answers late lands here. A mutant that counted it as an offer
+    // survived the three-stage version of this test, which is the whole reason
+    // this stage exists — an inflated denominator makes Class A look worse than
+    // it is, and the funnel is what the mode is being judged on.
+    proto_sim_timer_advance_us(3 * 1'000'000);  // past RX2 at t0 + 2 s
+    ASSERT_EQ(h.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::WindowsPast);
+    EXPECT_EQ(h.rol.class_a_stats().offered, 1u)
+        << "a frame the hub declined to send because the node is asleep was "
+           "never aimed at a window; counting it would inflate the denominator";
+}
+
+TEST(RealLoraClient, TheClassALedgerAccumulatesTheNodesOwnFunnel) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+
+    // Two wakes, each reporting the PREVIOUS wake's funnel, as the beacon does.
+    deliverBeaconWithWakeFunnel(h.rol, /*prev_msgid=*/11,
+                                /*windows=*/2, /*hits=*/1, /*detected=*/1, /*crc=*/1);
+    deliverBeaconWithWakeFunnel(h.rol, /*prev_msgid=*/12,
+                                /*windows=*/3, /*hits=*/2, /*detected=*/2, /*crc=*/2);
+
+    const auto &s = h.rol.class_a_stats();
+    EXPECT_EQ(s.windows,   5u);
+    EXPECT_EQ(s.hits,      3u);
+    EXPECT_EQ(s.detected,  3u);
+    EXPECT_EQ(s.crc_valid, 3u) << "true FER is 1 - crcValid/detected, so both "
+                                  "stages have to be carried, not just the total";
+}
+
+TEST(RealLoraClient, TheClassALedgerDoesNotDoubleCountOneWake) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+
+    // THE GUARD THIS TEST EXISTS FOR. Each beacon reports the PREVIOUS wake, so
+    // two beacons from one wake carry the SAME prevbeaconmsgid and the same
+    // funnel. fw 1.1.2 and 1.1.3 both did exactly that — a MODE_CHANGED and a
+    // TIMER_CHECKIN per wake — and the one-uplink fix in 1.1.4 is what stopped
+    // it. The ledger must not depend on that fix holding.
+    deliverBeaconWithWakeFunnel(h.rol, /*prev_msgid=*/21,
+                                /*windows=*/2, /*hits=*/1, /*detected=*/1, /*crc=*/1);
+    deliverBeaconWithWakeFunnel(h.rol, /*prev_msgid=*/21,
+                                /*windows=*/2, /*hits=*/1, /*detected=*/1, /*crc=*/1);
+
+    const auto &s = h.rol.class_a_stats();
+    EXPECT_EQ(s.windows, 2u) << "the same wake, reported twice, is ONE wake — a "
+                                "regression of the one-uplink fix must not "
+                                "silently halve the apparent FER";
+    EXPECT_EQ(s.hits,    1u);
+}
+
 TEST(RealLoraClient, ANodeAskingForItsGridIsSentItAgain) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};

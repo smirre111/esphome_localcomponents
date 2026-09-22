@@ -3768,6 +3768,26 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
                    (int) this->wake_fit_.ppm());
       }
 
+      // Mode C's ledger, stages 1-3: what the node's PREVIOUS wake actually
+      // saw. Every beacon carries it, so this is the other half of the
+      // offered count above and the pair is what makes a Class A success rate
+      // a number rather than a correlation exercise.
+      //
+      // IDEMPOTENT ON prevbeaconmsgid. Each beacon reports the previous wake,
+      // so two beacons from one wake would add that wake twice — precisely
+      // what fw 1.1.2 and 1.1.3 did before the one-uplink fix. Keying on the
+      // msgid means a duplicate, a retransmission or a regression of that fix
+      // cannot inflate the ledger.
+      if (b->prevbeaconmsgid != 0 &&
+          b->prevbeaconmsgid != this->class_a_last_prev_msgid_)
+      {
+        this->class_a_last_prev_msgid_ = b->prevbeaconmsgid;
+        this->class_a_stats_.windows   += b->prevwakewindows;
+        this->class_a_stats_.hits      += b->prevwakehits;
+        this->class_a_stats_.detected  += b->prevwakedetected;
+        this->class_a_stats_.crc_valid += b->prevwakecrcvalid;
+      }
+
       // §4.6's promotion evidence. handle_beacon_ runs only for a DECRYPTED
       // beacon, which is what makes this an authenticated observation.
       this->notePhaseReport_(b->phase);
@@ -4203,6 +4223,13 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                this->get_name().c_str(), window, (long long) t0_uplink,
                (long long) wanted_t0, (long long) target,
                (unsigned) this->last_uplink_unc_us_);
+
+      // Mode C's ledger, stage 0: the hub AIMED a frame at a window it believed
+      // open. Counted here rather than in send_timesync so every caller of this
+      // path is counted, present and future — the question is "was a frame
+      // placed", not "which feature placed it".
+      this->class_a_stats_.offered++;
+
       return ClassAPlacement::Placed;
     }
 
