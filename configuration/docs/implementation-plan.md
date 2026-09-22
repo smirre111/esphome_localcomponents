@@ -2621,7 +2621,41 @@ scale, not a trend.
 |---|---|---|
 | **A** | **PASS** | true FER 0 of 52, +9 ppm, n 52 over 899 s, refusal 0 |
 | **B** | **PASS** | residual 0 ppm, 593/591 windows, HW-8 0 missed, FER 0 of 599 |
-| **C** | **DEPRIORITISED BY DECISION** | wake-clock ppm gates nothing in Class A: the RX window is anchored to the node's OWN uplink, so hub↔node drift cannot move it. At −49 ppm a 900 s sleep mispredicts by **44 ms**, three orders inside what the hub's check-in prediction needs. Behaviour was clean and identical to the 1.0.94 pass. |
+| **C** | **NOT ESTABLISHED on 1.1.4** | its **ppm metric** is low priority (below); its FUNCTION is not. Only A and B were re-run. |
+
+**MODE C: THE ppm IS LOW PRIORITY, MODE C ITSELF IS NOT — corrected 2026-09-22.**
+An earlier version of this table said "deprioritised by decision", which
+collapsed two different things and read as Mode C being set aside. It is not.
+The decision was about the **wake-clock ppm criterion**, for the reason it was
+made: in Class A the RX window is anchored to the node's OWN uplink, so hub↔node
+drift cannot move it, and at −49 ppm a 900 s sleep mispredicts by 44 ms — three
+orders inside what the hub's check-in prediction needs. **A, B and C all have to
+work solidly.**
+
+**What "Mode C works solidly" means, since the ppm is not the gate.** All four
+are things the HUB can observe, which matters because a Mode C run may not touch
+the serial port — opening it resets a sleeping node, and the sleep is the thing
+under test:
+
+| criterion | pass when |
+|---|---|
+| **every expected check-in is heard** | wakes heard == wakes due, each `reason=TIMER_CHECKIN reset=DEEPSLEEP` |
+| **the session survives every wake** | `resume=1` on each — no re-login, no REGISTER |
+| **the sleep is the sleep that was asked for** | applied ≈ requested after the crystal correction (≈ 899 874 xxx us for 900 s) |
+| **true FER over the auto wakes** | 0, with its sample count |
+| wake-clock ppm | **recorded, NOT a gate** (see above) |
+
+**KNOWN LIMITATION, stated so it is not mistaken for a pass.** The Class A
+funnel per wake (`prevwake` windows/hits/detected/crcValid) cannot separate "a
+window armed after an uplink the hub did not answer" — legitimately empty — from
+"armed and missed". That needs the node's own funnel, and the node's serial port
+is exactly what a Mode C run may not touch. So an empty Class A window is not
+evidence of loss, and solidity is judged on the four rows above.
+
+**Evidence on 1.1.4 so far is INCIDENTAL, not a run.** The one-uplink
+measurement (20:37–21:15) had Auto Mode on and produced 2 wakes, both heard,
+`reason=TIMER_CHECKIN reset=DEEPSLEEP fw=10104 resume=1 v=13.40`. Two samples,
+no funnel, no FER figure. Encouraging; not a Mode C result.
 
 1.1.4 is also the build that fixed the double uplink — **one uplink per wake**,
 measured — so the campaign and that fix are verified on the same firmware

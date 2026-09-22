@@ -45,7 +45,21 @@ B were re-run to establish the property on the build that actually ships.
 |---|---|---|
 | **A** | **PASS** | true FER 0 of 52, +9 ppm, n 52 over 899 s, refusal 0 |
 | **B** | **PASS** | residual 0 ppm, windows 593/591, HW-8 595 ≥ 593 → 0 missed, FER 0 of 599, phase p99 864 us |
-| **C** | **deprioritised by decision** | the wake-clock ppm gates nothing in Class A — the RX window hangs off the node's own uplink, and −49 ppm is a 44 ms misprediction over a 15 min sleep |
+| **C** | **NOT ESTABLISHED on 1.1.4 — still owed** | only A and B were re-run. Its **ppm metric** is low priority (the RX window hangs off the node's own uplink, so hub↔node drift cannot move it; −49 ppm is a 44 ms misprediction over a 15 min sleep). **Mode C's FUNCTION is not deprioritised** — A, B and C all have to work solidly. |
+
+**Mode C's pass criteria, now that the ppm is not the gate** — all four
+observable from the HUB, because a Mode C run may not open the node's serial
+port (that resets a sleeping node, which is the thing under test):
+
+1. every expected check-in heard — `reason=TIMER_CHECKIN reset=DEEPSLEEP`;
+2. `resume=1` on every wake — no re-login, no REGISTER;
+3. applied sleep ≈ requested after the crystal correction;
+4. true FER 0 over the auto wakes, quoted with its sample count.
+
+The wake-clock ppm is recorded but does not gate. **Known limitation:** the
+Class A funnel cannot distinguish a window armed after an unanswered uplink
+(legitimately empty) from one armed and missed — that needs the node's own
+funnel, which this run cannot read. Do not read an empty Class A window as loss.
 
 **Two procedural rules this cost two runs to learn, both worth obeying:**
 * **Press a ModeTest ONCE.** The node refuses a re-arm ("already running; the
