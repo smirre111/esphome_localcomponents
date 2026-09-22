@@ -2759,6 +2759,51 @@ ledger adds the `offered` denominator this run lacked. The hub still cannot see
 a promoted QUIET node; HW-1/2/3/4 remain untouched; and Mode C's counter-fit
 discrepancy is deprioritised, not explained.
 
+**MEASURED 2026-09-22 07:31–09:27 — the dense Mode C campaign, and the first
+hardware observation of `offered`.** Node 2 fw 1.1.4, hub `0x407577f7` (the
+build carrying the Class A ledger, `284425f`), check-in 5 min (`bfbd04e`,
+temporary), Auto Mode ON, serial shut. 24 samples at 5 min.
+
+| | total |
+|---|---|
+| replies **offered** (hub placed into an open window) | **20** |
+| windows opened (node) | 29 |
+| windows hit | **19** |
+| frames detected | **21** |
+| frames CRC-valid | **21** |
+| **true FER** = 1 − crcValid/detected | **0 of 21** |
+
+* **`offered` increments, once per check-in — never measured before.** The hub
+  placing one reply into RX1 on every check-in was inferred from the code
+  (`send_timesync` → `send_into_class_a_window_`); this is the first run in
+  which it was *counted*. 1→20 at 5 min spacing.
+* **Steady state is exact.** From 08:02 to 09:27, all 16 samples add +1
+  offered, +1 window, +1 hit, +1 detected, +1 crcValid. The hub log
+  independently shows eleven consecutive beacons 08:34–09:25, every one
+  `prev wake: windows 1 hits 1 detected 1 crcValid 1`, all
+  `reason=TIMER_CHECKIN reset=DEEPSLEEP resume=1`, `clock_offset` −1 to −2 s,
+  13.38–13.39 V, ppm −128 to −131 against a −139 crystal fit.
+* **The one miss is attributed, not hand-waved.** 19 hits against 20 offers,
+  and 29 windows against 19 hits, both trace to the SINGLE
+  interval-transition wake at 07:56, which opened 8 windows that caught
+  nothing while the node moved from 15 min to 5 min. Every wake after it is
+  1:1. A cumulative "95% hit rate" is therefore the wrong reading — it is one
+  transition miss amortised over a growing denominator, and the marginal rate
+  is 100%.
+* **n is the point.** 21 detected frames in under two hours, against 5 for the
+  whole 80 min 15 min run. Mode C's true FER is 0 at n 21.
+* **A forward risk, recorded because the readout depends on it.** The hub logs
+  `Deprecated URL format: /sensor/class_a_____replies_offered__node_2_ — use
+  entity name … Object ID URLs will be removed in 2026.7.0`. The campaign
+  script addresses all five sensors by object id. That is also why `object_id:`
+  was not accepted as a `sensor.template` option when it was tried: ESPHome is
+  moving these to name-based URLs. The ids must be discovered from `/events`
+  (`"id":"sensor-<object_id>"`), never guessed — the root page is a 174-byte JS
+  shell containing no ids at all, and `frames_crc-valid` keeps its HYPHEN,
+  which a guess of `crc_valid` gets wrong on precisely the FER numerator.
+
+**`checkin_interval` RESTORED TO 1h** at 09:27, as promised when it was set.
+
 **MEASURED 2026-09-21 — fw 1.1.2: the mode announcement reaches the hub, and the
 defect that had stopped it.** Node 2 fw 1.1.2 (`6030a2c`), hub `6c77067`.
 
