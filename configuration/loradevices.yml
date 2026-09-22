@@ -194,7 +194,24 @@ lora_client:
     # RESTORE TO 1h once Mode C is established. The reasoning for 1h is directly
     # above and unchanged: 15 min costs ~290 s awake per day against hourly's
     # 185 s.
-    checkin_interval: 15min
+    #
+    # *** 5min IS TEMPORARY — FOR THE MODE C CAMPAIGN ONLY. RESTORE TO 1h. ***
+    #
+    # The Class A ledger now makes each check-in a COMPLETE sample: the hub
+    # counts the reply it placed (offered) and the node reports that wake's
+    # funnel (windows/hits/detected/crcValid) in its next beacon. Before the
+    # ledger an empty window was ambiguous, so more samples bought nothing;
+    # now n scales directly with check-in rate, and a true FER needs n.
+    #
+    # 5 min gives ~12 samples/hour against 15 min's 4. The cost is battery and
+    # nothing else: the four things being established (wakes heard, resume=1,
+    # applied ~= requested, true FER) do not depend on interval length. The one
+    # thing that DOES scale with sleep duration is clock drift — the ppm — and
+    # that is the deprioritised metric, not Mode C itself.
+    #
+    # This is the highest awake-time setting used on this bench. It must not
+    # outlive the campaign.
+    checkin_interval: 5min
     catchup_window: 0min
     # Two events eight minutes apart so one run observes both a first entry
     # into auto mode AND a wake out of deep sleep with the RTC markers already
