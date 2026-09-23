@@ -298,9 +298,11 @@ constexpr UplinkAim aimUplink(const State &st, int64_t now_us,
 //
 // A beacon is the node's chance to correct the drift accumulated since the last
 // frame, which is what lets it hold Mode B for hours rather than for
-// resyncMaxS. But it is also a frame the node timed before authenticating, so
+// resyncMaxS. But it is also a frame the node TIMED before authenticating — the
+// arrival instant is captured in the ISR, long before any MAC is checked — so
 // an unbounded correction would let anything in radio range walk the anchor
-// away.
+// away. The bound stays even once the beacon carries a fleet-key MAC: a MAC
+// proves the sender held the key, and every node in the fleet holds it too.
 //
 // The rule: correct only by what fits inside the guard band. A larger error is
 // not drift — one round at +/-20 ppm is 30 us, and a whole resyncMaxS of it

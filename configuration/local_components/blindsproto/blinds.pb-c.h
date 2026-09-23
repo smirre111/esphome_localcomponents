@@ -711,10 +711,21 @@ struct  MacControl
  * Mode B and no measurable battery saving. The beacon is the mechanism that
  * keeps a node in the mode, which is why section 4.4 says it ships WITH the
  * one-window change rather than after it.
- * It is broadcast and unauthenticated by construction — one frame for 32 nodes
- * cannot be encrypted per session — so the node bounds what it may do: a
- * re-anchor is accepted only within the guard band (gridstate::reanchorIsSane),
- * which is far more than real drift and far less than a slot.
+ * It is broadcast, so it cannot be ENCRYPTED per session — one frame serves 32
+ * nodes — but nothing in it is secret either: the round, the slot and the
+ * pending bitmap are all public. What it needs is AUTHENTICITY, and that is
+ * what `mac` carries: an AES-CMAC over the beacon's own fields under a fleet
+ * key the hub hands each node inside its already-encrypted GridSync.
+ * A deterministic MAC rather than the AEAD the rest of the link uses. Extending
+ * AES-GCM to a one-to-many key would need a shared base nonce AND a counter
+ * that never repeats under it, which a hub reboot restarts while every node
+ * still holds the old key — so the counter would have to be persisted, and the
+ * failure mode for getting that wrong is not graceful. Two AAD-only tags under
+ * one nonce give an attacker GHASH(H,A1) XOR GHASH(H,A2), solvable for the hash
+ * subkey, after which beacons can be forged at will. CMAC has no nonce to reuse.
+ * FRESHNESS IS NOT THE MAC'S JOB. A replayed beacon declares the round it was
+ * minted for, so its predicted mark is rounds in the past and the node's
+ * reanchorIsSane refuses it. The MAC only has to stop forgery.
  */
 struct  GridBeacon
 {
@@ -738,10 +749,25 @@ struct  GridBeacon
    */
   uint32_t pendingmask;
   protobuf_c_boolean pendingmaskvalid;
+  /*
+   * Which fleet key this beacon is signed under. Minted with the key when the
+   * grid starts, so it is a random id rather than a counter — a counter would
+   * need NVS on a hub whose anchor is already gone after a restart.
+   * A node holding a DIFFERENT id refuses the beacon outright rather than
+   * guessing: the hub has rotated and this node has not yet had the GridSync
+   * carrying the new key, so it coasts on resyncMaxS until its next addressed
+   * frame — which is exactly the pre-beacon behaviour, and safe.
+   */
+  uint32_t netkeyid;
+  /*
+   * AES-CMAC over framecrypto::buildBeaconMacInput(), truncated to 8 bytes to
+   * match the AEAD tag budget already on this link.
+   */
+  ProtobufCBinaryData mac;
 };
 #define GRID_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&grid_beacon__descriptor) \
-    , 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, {0,NULL} }
 
 
 struct  GridSync
@@ -818,10 +844,29 @@ struct  GridSync
    */
   uint32_t pendingmask;
   protobuf_c_boolean pendingmaskvalid;
+  /*
+   * --- The fleet key (section 4.4 Tier 3) --------------------------------
+   * The key the broadcast beacon is signed under, and the id it is signed
+   * with. 16 bytes, AES-128, minted when the grid starts and re-minted on
+   * every hub restart — which costs nothing, because a restart already
+   * invalidates the anchor and forces this frame to be re-published anyway.
+   * The key's lifetime is therefore exactly the grid's.
+   * This needs no new bootstrap secret, which is what makes it cheap: every
+   * node already has a per-node AEAD session, so the fleet key rides an
+   * ordinary encrypted downlink and rotates the same way. The node adopts it
+   * ONLY from an authenticated GridSync — a plaintext one may not install a
+   * key, or the whole construction is decorative.
+   * Residual, stated rather than implied: any compromised node holds this key
+   * and can forge beacons for the fleet. That is inherent to one-to-many
+   * authentication without per-node signatures, and it is why the guard-band
+   * clamp on re-anchoring stays even for an authenticated beacon.
+   */
+  ProtobufCBinaryData netkey;
+  uint32_t netkeyid;
 };
 #define GRID_SYNC__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&grid_sync__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0,NULL}, 0 }
 
 
 /*

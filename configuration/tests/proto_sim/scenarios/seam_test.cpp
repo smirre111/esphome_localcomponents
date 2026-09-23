@@ -37,6 +37,8 @@
 #include "TimedGrid.h"
 #include "LoraTiming.h"
 #include "ClassAWindows.h"
+#include "GridState.h"
+#include "PendingData.h"
 
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
@@ -293,4 +295,109 @@ TEST_F(Seam, AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm) {
            "starts passing, the guard band and the catch predicate disagree";
     EXPECT_EQ(disp.phaseStats().outside_guard, 1u)
         << "and the node's own promotion criterion must see it";
+}
+
+// ---------------------------------------------------------------------------
+TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
+    // Section 4.4's authenticator, across the seam. Both the hub-side and the
+    // node-side tests call framecrypto::buildBeaconMacInput, so neither can
+    // catch the two ends disagreeing about the LAYOUT — they agree by
+    // construction, which is the same shape of blind spot the placement tests
+    // had. What only this test can say is that the tag the hub really put on
+    // the air verifies against the key the node really adopted.
+    //
+    // Three separate things have to line up for that, and each has failed in
+    // some form in this system already: the key has to reach the node at all
+    // (it rides an ENCRYPTED GridSync, so a plaintext publish carries none),
+    // the truncation convention has to match (the hub computes a full CMAC and
+    // takes eight bytes; the node verifies with PSA_ALG_TRUNCATED_MAC), and the
+    // beacon has to be delivered on a mark the node predicts.
+    proto_sim_timer_set_now_us(1'000'000);
+    tracker.startGrid();
+    ASSERT_NE(tracker.netKeyId(), 0u) << "startGrid must mint a fleet key";
+
+    // A real session, because the key is only carried on an encrypted GridSync
+    // and only adopted from an authenticated one. send_login() mints the base
+    // nonce and packs the real LoginMsg; the node adopts it from that frame.
+    // config_synced_ suppresses the request_register flag. Without it the
+    // node answers the challenge with a REGISTER instead of adopting the nonce,
+    // which is correct behaviour for an unprovisioned node and not the path
+    // under test here.
+    rol.config_synced_ = true;
+    rol.send_login();
+    const auto login = lastDownlink();
+    ASSERT_FALSE(login.empty()) << "send_login must have emitted a LoginMsg";
+    disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
+                      esp_timer_get_time());
+    uint32_t nonce = 0;
+    ASSERT_TRUE(disp.getBaseNonceForTest(1, nonce))
+        << "the node must hold the hub's base nonce before anything is encrypted";
+    // What the hub's own ack path would set once the node answers the challenge.
+    rol.session_confirmed_ = true;
+
+    // Now the grid. Encrypted, so it carries the key.
+    rol.enable_timed_mode(true);
+    const auto gridsync = lastDownlink();
+    ASSERT_FALSE(gridsync.empty());
+    const int64_t gs_t0 =
+        tracker.last_earliest_us + (int64_t) loratiming::kPreambleToT0Us;
+    deliverAtT0(gridsync, gs_t0);
+
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_TRUE(disp.hasNetKey())
+        << "an ENCRYPTED GridSync is what carries the fleet key; a plaintext "
+           "one carries none, and the beacon's MAC would then be decorative";
+    EXPECT_EQ(disp.netKeyId(), tracker.netKeyId())
+        << "and it must be the key THIS hub minted, not merely some key";
+
+    // The beacon. Built here rather than pulled off the air, because the SHIM
+    // tracker has no serviceBeacon — that path is covered against the real
+    // tracker in real_lora_tracker_test, which unpacks the frame it queues and
+    // re-verifies its tag. What only THIS test can add is the other half: the
+    // tag is produced by the hub-side convention (full CMAC, first eight bytes)
+    // and checked by the node's real verify, which asks PSA for a TRUNCATED
+    // MAC. Those are two different algorithm identifiers over the same key, and
+    // nothing else in the suite puts them on opposite sides of one assertion.
+    const uint32_t round = 0;
+    const uint32_t slot  = disp.gridState().params.beacon_slot;
+    const uint32_t mask  = pending::allListening();
+
+    uint8_t mac[framecrypto::kBeaconMacBytes];
+    ASSERT_TRUE(tracker.beaconMac(round, slot, mask, true, mac, sizeof(mac)))
+        << "a hub that cannot sign sends no beacon at all";
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = LORATracker::broadcastAddressing;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = 1;
+    hdr.msgid         = 0;      // a broadcast belongs to no per-node sequence
+    hdr.burstcount    = 1;
+
+    GridBeacon gb = GRID_BEACON__INIT;
+    gb.txround          = round;
+    gb.txslot           = slot;
+    gb.pendingmask      = mask;
+    gb.pendingmaskvalid = true;
+    gb.netkeyid         = tracker.netKeyId();
+    gb.mac.data         = mac;
+    gb.mac.len          = sizeof(mac);
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header     = &hdr;
+    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON;
+    op.gridbeacon = &gb;
+    std::vector<uint8_t> beacon(
+        lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, beacon.data());
+
+    // Delivered on the node's OWN predicted beacon mark, recovered from the
+    // anchor the node solved rather than from the hub's — which is the whole
+    // reason the anchor is solved locally instead of transferred.
+    deliverAtT0(beacon, gridstate::beaconT0ForRound(disp.gridState(), round));
+
+    EXPECT_TRUE(disp.pendingStateForTest().valid)
+        << "the node adopts a bitmap ONLY from a beacon whose MAC verified, so "
+           "this is the end-to-end statement: the hub's tag checked out against "
+           "the key the node got over the encrypted channel";
+    EXPECT_EQ(disp.pendingStateForTest().bits, mask);
 }

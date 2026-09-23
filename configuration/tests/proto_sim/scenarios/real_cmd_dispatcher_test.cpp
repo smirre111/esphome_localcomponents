@@ -32,6 +32,7 @@ extern "C" {
 
 #include "sim/crypto.h"
 
+#include <array>
 #include <psa/crypto.h>
 
 #include <cstring>
@@ -3372,6 +3373,45 @@ namespace {
 
 constexpr uint32_t kMtNonce = 0x5EED1234;
 
+// The fleet key a test hub hands out, and the AES-CMAC over a beacon's fields.
+// Computed here from framecrypto::buildBeaconMacInput rather than from a stored
+// golden tag: what can silently disagree between hub and node is WHICH BYTES go
+// into the MAC, and a golden tag would pin the node's arithmetic against the
+// node's own choice.
+const uint8_t kFleetKey[framecrypto::kNetKeyBytes] = {
+    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+    0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF};
+constexpr uint32_t kFleetKeyId = 0x5EED0001u;
+
+std::array<uint8_t, framecrypto::kBeaconMacBytes>
+beacon_mac(uint32_t key_id, uint32_t round, uint32_t slot, uint32_t mask,
+           bool mask_valid, const uint8_t *key = kFleetKey) {
+    uint8_t input[framecrypto::kBeaconMacInputBytes];
+    framecrypto::buildBeaconMacInput(key_id, round, slot, mask, mask_valid, input);
+
+    psa_crypto_init();
+    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE);
+    psa_set_key_algorithm(&attrs, PSA_ALG_CMAC);
+    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attrs, framecrypto::kNetKeyBytes * 8);
+    psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
+
+    psa_key_id_t kid = PSA_KEY_ID_NULL;
+    EXPECT_EQ(psa_import_key(&attrs, key, framecrypto::kNetKeyBytes, &kid),
+              PSA_SUCCESS);
+    uint8_t full[16];
+    size_t  full_len = 0;
+    EXPECT_EQ(psa_mac_compute(kid, PSA_ALG_CMAC, input, sizeof(input), full,
+                              sizeof(full), &full_len), PSA_SUCCESS);
+    psa_destroy_key(kid);
+
+    std::array<uint8_t, framecrypto::kBeaconMacBytes> out{};
+    memcpy(out.data(), full, out.size());
+    return out;
+}
+
+
 // Wrap an operation message as an encrypted downlink from the hub. Same
 // construction as DecryptedDownlinkProvesSessionEndToEnd, hoisted so more than
 // one test can reach the authenticated handlers.
@@ -3438,9 +3478,11 @@ std::vector<uint8_t> encrypted_mode_test_off(uint32_t msgid) {
     return encrypt_op(inner, msgid);
 }
 
-std::vector<uint8_t> encrypted_grid_sync(uint32_t slot, uint32_t msgid) {
+std::vector<uint8_t> encrypted_grid_sync(uint32_t slot, uint32_t msgid,
+                                        bool with_key = false,
+                                        bool enable = true) {
     GridSync gs = GRID_SYNC__INIT;
-    gs.enable            = true;
+    gs.enable            = enable;
     gs.slotindex         = slot;
     gs.slotcount         = timedgrid::kSlotCount;
     gs.roundus           = timedgrid::kRoundUs;
@@ -3452,6 +3494,11 @@ std::vector<uint8_t> encrypted_grid_sync(uint32_t slot, uint32_t msgid) {
     gs.symtimeout        = timedgrid::kSymbolTimeoutSymbols;
     gs.resyncmaxs        = 350;
     gs.uloffsetus        = 60000;
+    if (with_key) {
+        gs.netkey.data = const_cast<uint8_t *>(kFleetKey);
+        gs.netkey.len  = framecrypto::kNetKeyBytes;
+        gs.netkeyid    = kFleetKeyId;
+    }
 
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
@@ -3612,7 +3659,9 @@ namespace {
 
 std::vector<uint8_t> build_grid_beacon(uint32_t round, uint32_t slot,
                                        uint32_t msgid, uint32_t mask = 0,
-                                       bool mask_valid = false) {
+                                       bool mask_valid = false,
+                                       const uint8_t *mac = nullptr,
+                                       uint32_t key_id = 0) {
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = 0xFF;          // broadcast: one frame for the fleet
     hdr.destsubnet    = kSubnet;
@@ -3626,6 +3675,11 @@ std::vector<uint8_t> build_grid_beacon(uint32_t round, uint32_t slot,
     gb.txslot           = slot;
     gb.pendingmask      = mask;
     gb.pendingmaskvalid = mask_valid;
+    if (mac != nullptr) {
+        gb.netkeyid = key_id;
+        gb.mac.data = const_cast<uint8_t *>(mac);
+        gb.mac.len  = framecrypto::kBeaconMacBytes;
+    }
 
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     op.header     = &hdr;
@@ -3843,4 +3897,190 @@ TEST_F(RealNodeFixture, AnAnchorTheNodeDoesNotTrustIsNotAimedFrom) {
     ASSERT_FALSE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs));
 
     EXPECT_EQ(disp.uplinkCadStartUs(disp.expectedT0Us(), kAimBound), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Section 4.4 — the beacon is authenticated, and the fleet key that does it
+//
+// The beacon is one frame for 32 nodes, so it cannot be ENCRYPTED per session.
+// Nothing in it is secret either — round, slot and bitmap are all public — so
+// what it needs is AUTHENTICITY: an AES-CMAC under a fleet key the hub hands
+// each node inside its already-encrypted GridSync.
+//
+// A deterministic MAC rather than the AEAD the rest of the link uses, because
+// extending AES-GCM to a one-to-many key needs a counter that never repeats
+// under it, and a hub reboot restarts the counter while every node still holds
+// the key. CMAC has no nonce to reuse.
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, TheFleetKeyIsAdoptedOnlyFromAnAuthenticatedGridSync) {
+    // A plaintext GridSync carrying a key would make the whole construction
+    // decorative: anything in radio range could install the key it then signs
+    // its own beacons with. This is the §11a lesson — a deny-by-default rule is
+    // only shipped when the legitimate sender satisfies it — in a new place.
+    auto plain = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/601);
+    disp.onReceiveNew(plain.data(), static_cast<int>(plain.size()));
+    ASSERT_TRUE(disp.gridState().active) << "the grid itself is still adopted";
+    EXPECT_FALSE(disp.hasNetKey())
+        << "a plaintext frame may not install the key the beacon rests on";
+
+    // The real path: a login proves the session, then an encrypted GridSync
+    // carries the key.
+    auto login = pack_login_op(/*msgid=*/602, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto enc = encrypted_grid_sync(/*slot=*/4, /*msgid=*/603, /*with_key=*/true);
+    disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
+
+    ASSERT_TRUE(disp.gridState().active);
+    EXPECT_TRUE(disp.hasNetKey());
+    EXPECT_EQ(disp.netKeyId(), kFleetKeyId);
+}
+
+TEST_F(RealNodeFixture, AWithdrawnGridTakesTheFleetKeyWithIt) {
+    auto login = pack_login_op(/*msgid=*/610, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto enc = encrypted_grid_sync(4, 611, /*with_key=*/true);
+    disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
+    ASSERT_TRUE(disp.hasNetKey());
+
+    // The key authenticates beacons ABOUT AN ANCHOR. Keeping it past the
+    // anchor's life would only let a stale beacon look valid.
+    //
+    // Encrypted, and that is not incidental: once a node holds a session the
+    // plaintext gate refuses every non-LOGIN, non-beacon frame, so a plaintext
+    // withdrawal never reaches this handler at all. (The hub's STARTUP
+    // withdrawal is exactly that frame — recorded in the plan, not fixed here.)
+    auto off = encrypted_grid_sync(/*slot=*/4, /*msgid=*/612, /*with_key=*/false,
+                                   /*enable=*/false);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    EXPECT_FALSE(disp.gridState().active);
+    EXPECT_FALSE(disp.hasNetKey());
+}
+
+TEST_F(RealNodeFixture, AKeyedNodeAdoptsTheMaskFromASignedBeacon) {
+    // The gate used to be frame_authenticated_ — the AEAD flag, which is false
+    // for every broadcast by construction. So the branch could never be taken
+    // and Tier 3's saving was UNREACHABLE rather than merely unused.
+    auto login = pack_login_op(/*msgid=*/620, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto enc = encrypted_grid_sync(4, 621, /*with_key=*/true);
+    disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
+    ASSERT_TRUE(disp.hasNetKey());
+
+    const gridstate::State st = disp.gridState();
+    const uint32_t mask = pending::allListening();
+    const auto mac = beacon_mac(kFleetKeyId, 90, st.params.beacon_slot, mask, true);
+    auto b = build_grid_beacon(90, st.params.beacon_slot, /*msgid=*/1, mask,
+                               /*mask_valid=*/true, mac.data(), kFleetKeyId);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_beacon(st, 90, 0, (uint32_t) b.size()));
+
+    EXPECT_TRUE(disp.pendingStateForTest().valid)
+        << "a signed beacon is the only thing that may set this";
+    EXPECT_EQ(disp.pendingStateForTest().bits, mask);
+}
+
+TEST_F(RealNodeFixture, ASignedBeaconCanFinallyLetANodeSkipItsWindow) {
+    // Tier 3's actual saving, reachable for the first time. An armed window is
+    // ~29 ms of receive at ~11 mA against a ~1.2 mA average, and most windows
+    // on most nodes are empty.
+    //
+    // The hub does NOT clear bits today, and that is a separate decision from
+    // this one: a cleared bit is a promise it cannot keep for an interactive
+    // node, which can be commanded at any instant. What is pinned here is that
+    // the MECHANISM now works end to end, so the remaining question is policy.
+    auto login = pack_login_op(/*msgid=*/660, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto enc = encrypted_grid_sync(/*slot=*/4, /*msgid=*/661, /*with_key=*/true);
+    disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
+    ASSERT_TRUE(disp.hasNetKey());
+
+    const gridstate::State st = disp.gridState();
+    // Every bit set EXCEPT this node's: the hub has traffic for others and none
+    // for us.
+    const uint32_t mask = pending::withSlot(pending::allListening(),
+                                            st.params.slot_index, false);
+    const auto mac = beacon_mac(kFleetKeyId, 98, st.params.beacon_slot, mask, true);
+    auto b = build_grid_beacon(98, st.params.beacon_slot, /*msgid=*/1, mask,
+                               /*mask_valid=*/true, mac.data(), kFleetKeyId);
+    const int64_t rx = rx_for_beacon(st, 98, 0, (uint32_t) b.size());
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
+
+    EXPECT_FALSE(disp.shouldArmNextWindow(rx + 1))
+        << "this is the saving section 4.4 Tier 3 exists for, and it needed a "
+           "fleet key before a node could believe the bit";
+}
+
+TEST_F(RealNodeFixture, AForgedBeaconIsIgnoredEntirelyNotMerelyDistrusted) {
+    // The ratchet. Once forgery is DETECTABLE, tolerating an unsigned beacon
+    // would leave the whole attack open — an attacker would simply omit the
+    // MAC — and the guard band does not save the node there: it bounds ONE
+    // nudge, not a sequence of them, so anything in radio range could walk the
+    // anchor 14 ms per beacon until the node is off the grid.
+    auto login = pack_login_op(/*msgid=*/630, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto enc = encrypted_grid_sync(4, 631, /*with_key=*/true);
+    disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
+    ASSERT_TRUE(disp.hasNetKey());
+
+    const gridstate::State before = disp.gridState();
+    constexpr int64_t kDrift = 900;
+
+    // A tag that is right for a DIFFERENT mask than the one on the wire — the
+    // exact substitution the MAC exists to catch, and the one a tag over only
+    // the round would miss.
+    auto mac = beacon_mac(kFleetKeyId, 95, before.params.beacon_slot,
+                          pending::allListening(), true);
+    auto b = build_grid_beacon(95, before.params.beacon_slot, /*msgid=*/1,
+                               /*mask=*/0u, /*mask_valid=*/true, mac.data(),
+                               kFleetKeyId);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_beacon(before, 95, kDrift, (uint32_t) b.size()));
+
+    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us)
+        << "a beacon that fails its MAC moves nothing — not even the anchor";
+    EXPECT_FALSE(disp.pendingStateForTest().valid) << "and certainly not the mask";
+}
+
+TEST_F(RealNodeFixture, ABeaconUnderAnUnknownKeyIdIsRefused) {
+    // The hub has rotated — it re-mints on every restart — and this node has
+    // not yet had the GridSync carrying the new key. Refusing is right: the
+    // node coasts on resyncMaxS and re-syncs off its next addressed frame,
+    // which is exactly the behaviour it had before the beacon existed.
+    auto login = pack_login_op(/*msgid=*/640, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto enc = encrypted_grid_sync(4, 641, /*with_key=*/true);
+    disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
+    const gridstate::State before = disp.gridState();
+
+    const uint32_t other_id = kFleetKeyId + 1;
+    auto mac = beacon_mac(other_id, 96, before.params.beacon_slot, 0u, false);
+    auto b = build_grid_beacon(96, before.params.beacon_slot, 1, 0u, false,
+                               mac.data(), other_id);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_beacon(before, 96, 500, (uint32_t) b.size()));
+
+    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us);
+}
+
+TEST_F(RealNodeFixture, ANodeWithNoKeyKeepsTheBehaviourThatShipped) {
+    // The other half of the ratchet, and what makes this safe to ship ahead of
+    // the hubs: a node that never receives a key still corrects its anchor from
+    // a beacon, bounded by the guard, and still refuses the mask. No regression
+    // and no flag to set.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/650);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_FALSE(disp.hasNetKey());
+
+    const gridstate::State before = disp.gridState();
+    constexpr int64_t kDrift = 700;
+    auto b = build_grid_beacon(97, before.params.beacon_slot, /*msgid=*/1,
+                               /*mask=*/0u, /*mask_valid=*/true);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_beacon(before, 97, kDrift, (uint32_t) b.size()));
+
+    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us + kDrift)
+        << "an unsigned beacon may still make this node listen at the right time";
+    EXPECT_FALSE(disp.pendingStateForTest().valid)
+        << "but it may never make it listen LESS";
 }

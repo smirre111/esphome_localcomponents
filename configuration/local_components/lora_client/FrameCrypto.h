@@ -112,4 +112,72 @@ inline bool deriveIv(uint32_t base_nonce, uint64_t counter, uint8_t out[kIvBytes
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// The broadcast beacon's authenticator (section 4.4).
+//
+// The beacon is one frame for 32 nodes, so it cannot be sealed with a per-node
+// session key — but nothing in it is secret either. It needs AUTHENTICITY, not
+// confidentiality, and that is a MAC rather than an AEAD.
+//
+// AES-CMAC under a fleet key, deliberately, and not AES-GCM under a shared base
+// nonce. GCM would need a counter that never repeats under the fleet key; the
+// hub reboots and restarts its counter while every node still holds the key, so
+// it would have to be persisted in NVS, and the penalty for one repeat is total
+// rather than partial. Two AAD-only tags under the same nonce yield
+// GHASH(H,A1) XOR GHASH(H,A2), a polynomial solvable for the hash subkey H,
+// after which an attacker forges beacons freely. CMAC has no nonce at all.
+//
+// FRESHNESS IS NOT CARRIED HERE. A replayed beacon declares the round it was
+// minted for, so the node's own arithmetic already refuses it — the predicted
+// mark is rounds in the past, outside the guard band. The MAC stops forgery and
+// nothing else, which is why there is no timestamp in the input below.
+//
+// The input is FIXED LENGTH and starts with a domain tag. Fixed length so there
+// is no field-boundary ambiguity to exploit — with variable-length fields, two
+// different beacons could otherwise serialise to the same bytes. The domain tag
+// so this key can never be made to authenticate anything but a beacon.
+//
+//   input = "GB1" || netKeyId_BE32 || txRound_BE32 || txSlot_BE32
+//           || pendingMask_BE32 || pendingMaskValid_u8            (20 bytes)
+// ---------------------------------------------------------------------------
+
+static constexpr size_t kNetKeyBytes     = 16;  // AES-128, like the session key
+static constexpr size_t kBeaconMacBytes  = 8;   // truncated, same budget as the
+                                                // AEAD tag already on this link
+static constexpr size_t kBeaconMacInputBytes = 20;
+
+inline void buildBeaconMacInput(uint32_t net_key_id, uint32_t tx_round,
+                                uint32_t tx_slot, uint32_t pending_mask,
+                                bool pending_mask_valid,
+                                uint8_t out[kBeaconMacInputBytes])
+{
+    // The domain tag. Three bytes rather than four so the whole input stays a
+    // round 20; it is a separator, not a length.
+    out[0] = 'G';
+    out[1] = 'B';
+    out[2] = '1';
+    u32be(net_key_id,  out + 3);
+    u32be(tx_round,    out + 7);
+    u32be(tx_slot,     out + 11);
+    u32be(pending_mask, out + 15);
+    // The validity flag is covered too. It is the field that decides whether
+    // the mask means anything at all, so a MAC that omitted it would let an
+    // attacker flip "listen" to "a real all-clear" without touching a signed
+    // byte.
+    out[19] = pending_mask_valid ? 1u : 0u;
+}
+
+// A key of all zeroes is not a key — it is an unset field, or a proto3 default
+// — so callers ask this rather than testing bytes themselves. Paired with a
+// non-zero id: both must be present before a node believes it holds a key.
+inline bool netKeyIsSet(const uint8_t *key, size_t len, uint32_t net_key_id)
+{
+    if (key == nullptr || len != kNetKeyBytes || net_key_id == 0)
+        return false;
+    uint8_t acc = 0;
+    for (size_t i = 0; i < len; ++i)
+        acc = (uint8_t) (acc | key[i]);
+    return acc != 0;
+}
+
 }  // namespace framecrypto

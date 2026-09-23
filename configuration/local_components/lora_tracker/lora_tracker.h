@@ -20,6 +20,9 @@
 // including it here costs nothing; qualified path for the same reason as
 // TimedGrid.h in the .cpp.
 #include "esphome/components/lora_client/TxQueue.h"
+// Section 4.4's beacon authenticator. Dependency-free (no PSA), like TxQueue.h
+// above — only the byte LAYOUT lives there; the PSA call stays in the .cpp.
+#include "esphome/components/lora_client/FrameCrypto.h"
 
 // Configuration
 #define POOL_SIZE 5
@@ -191,6 +194,27 @@ namespace esphome
       uint32_t  roundForSlotT0(uint8_t slot, int64_t t0_us) const;
       // The next beacon mark at or after now_us, and 0 when there is no grid.
       int64_t   nextBeaconT0Us(int64_t now_us) const;
+      // --- The fleet key the beacon is signed under (section 4.4) ---------
+      //
+      // Minted WITH the anchor, in startGrid(), and re-minted on every hub
+      // restart. That costs nothing: a restart already invalidates every node's
+      // anchor and forces GridSync to be re-published, so the key's lifetime is
+      // exactly the grid's and there is nothing to persist.
+      //
+      // The id is random rather than a counter for the same reason — a counter
+      // would need NVS on a hub that has just lost the state a counter is for.
+      // A node holding a different id refuses the beacon and coasts on
+      // resyncMaxS, which is the pre-beacon behaviour and safe.
+      const uint8_t *netKey() const   { return this->net_key_; }
+      uint32_t       netKeyId() const { return this->net_key_id_; }
+      // The beacon's authenticator over the fields it carries. Returns false if
+      // no key has been minted or PSA refuses, and the caller then sends no
+      // beacon at all rather than an unsigned one: an unsigned beacon from a
+      // hub that HAS a key is indistinguishable on the air from a forgery.
+      bool      beaconMac(uint32_t tx_round, uint32_t tx_slot,
+                          uint32_t pending_mask, bool pending_mask_valid,
+                          uint8_t *out, size_t out_len) const;
+
       // For tests: how many beacons have actually been queued.
       uint32_t  beaconsSent() const { return this->beacons_sent_; }
       int64_t   gridAnchorUs() const { return this->grid_anchor_us_; }
@@ -355,6 +379,10 @@ namespace esphome
       uint32_t beacon_round_queued_{0xFFFFFFFFu};
       uint32_t beacons_sent_{0};
       bool    grid_started_{false};
+      // Section 4.4's fleet key. Minted in startGrid(), published inside each
+      // node's already-encrypted GridSync, never sent in the clear.
+      uint8_t  net_key_[framecrypto::kNetKeyBytes]{};
+      uint32_t net_key_id_{0};
       // When the hub's own burst stops occupying the channel, including the
       // post-burst response window sendTask holds the radio in.
       int64_t burst_busy_until_us_{0};

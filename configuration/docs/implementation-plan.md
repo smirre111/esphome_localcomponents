@@ -442,27 +442,69 @@ work at all, and each was its own defect:
   skips the beacon, because the beacon is what grants and revokes the
   permission and what expires it when it goes missing.
 - **The plaintext gate would have refused it.** A node holding a session
-  refuses every unauthenticated frame, and one broadcast cannot be sealed with
-  32 per-node session keys. `CMD_GRIDBEACON` is exempt, and what makes that
-  safe is that its effects are bounded by the node's own arithmetic rather than
-  by trust: the anchor moves only within the guard band
-  (`gridstate::reanchorIsSane`), a replayed beacon predicts a mark rounds in
-  the past and is refused by the same test, and the pending mask — the one
-  effect that could make a node listen LESS — is refused outright from an
-  unauthenticated beacon. It is exempt from the replay filter for a different
-  reason: a broadcast belongs to no per-node sequence, and running it through
-  one would ratchet every node's rx counter onto the beacon's.
+  refuses every unauthenticated frame, and one broadcast cannot be SEALED with
+  32 per-node session keys. `CMD_GRIDBEACON` stays exempt from that gate —
+  the gate asks "was this encrypted?" and a broadcast's answer is permanently
+  no — but it is no longer unauthenticated: it is **SIGNED**. See below. It is
+  exempt from the replay filter for a different reason: a broadcast belongs to
+  no per-node sequence, and running it through one would ratchet every node's
+  rx counter onto the beacon's.
 
-**Tier 3 (the pending mask) is published all-listening, deliberately.** Two
-independent things must be true before this hub may clear a bit, and neither is
-today. The beacon is unauthenticated, so the nodes refuse a mask from it at all
-— the saving needs a fleet key, which is a protocol change. And even
-authenticated, a clear bit is a promise the hub cannot keep for an INTERACTIVE
-node: Home Assistant can produce a command at any instant and the node would
-not be listening for up to 5.8 minutes, which is the opposite of what "timed
-interactive" is for. Tier 3 suits automatic-mode nodes, which are already
-unreachable between check-ins by design (§5.5). The mechanism is built and
-tested on both ends; what is published is `pending::allListening()`.
+### The beacon is authenticated: AES-CMAC under a fleet key
+
+**A MAC, not an AEAD, and the distinction is the whole design.** Nothing in a
+beacon is secret — `txRound`, `txSlot` and the bitmap are all public — so what
+it needs is *authenticity*, not confidentiality. Extending the existing AES-GCM
+to a one-to-many key would need a shared base nonce **and** a counter that never
+repeats under it; a hub reboot restarts that counter while every node still
+holds the key, so it would have to be persisted in NVS, and the penalty for one
+repeat is total rather than partial: two AAD-only tags under the same nonce
+yield `GHASH(H,A₁) ⊕ GHASH(H,A₂)`, a polynomial solvable for the hash subkey
+`H`, after which beacons can be forged at will. **AES-CMAC has no nonce to
+reuse**, so none of that state exists to get wrong.
+
+**Freshness is not the MAC's job.** A replayed beacon declares the round it was
+minted for, so its predicted mark is rounds in the past and `reanchorIsSane`
+refuses it on arithmetic alone. The MAC carries no timestamp and only has to
+stop forgery.
+
+**The key needs no new bootstrap secret**, which is what makes it cheap. Every
+node already has a per-node AEAD session, so `netKey` rides an ordinary
+encrypted `GridSync` and rotates the same way — adopted **only** from an
+authenticated frame, because a plaintext `GridSync` that could install the key
+would make the MAC decorative. It is minted in `startGrid()` alongside the
+anchor and re-minted on every hub restart, which costs nothing: a restart
+already invalidates every node's anchor and forces `GridSync` to be
+re-published, so the key's lifetime is exactly the grid's and there is nothing
+to persist. `netKeyId` is random rather than a counter for the same reason.
+
+**The ratchet, on the node.** A node holding **no** key behaves exactly as
+before — a beacon may correct the anchor within the guard and may never touch
+the mask — so nothing regresses on a node that never receives one, and this
+ships safely ahead of the hubs. A node holding a key requires a matching id and
+a valid tag, or the beacon is ignored **entirely**: no re-anchor, no phase
+sample, no mask. Tolerating an unsigned beacon once forgery is detectable would
+leave the attack open, because an attacker would simply omit the tag — and the
+guard band does not close it, since it bounds ONE nudge rather than a sequence
+of them. **That anchor walk is what the MAC buys today**, not Tier 3.
+
+**Residual, stated rather than implied:** any compromised node holds the fleet
+key and can forge beacons for the whole fleet. That is inherent to one-to-many
+authentication without per-node signatures, and it is why the guard-band clamp
+on re-anchoring stays *even for a beacon that verifies*.
+
+**Tier 3 (the pending mask) is still published all-listening, deliberately.**
+Two independent things had to be true before this hub could clear a bit. **One
+of them is now true and the other is not.** The nodes will now accept a mask —
+that was the fleet key's job and it is done. But a clear bit remains a promise
+the hub cannot keep for an INTERACTIVE node: Home Assistant can produce a
+command at any instant and the node would not be listening for up to 5.8
+minutes, which is the opposite of what "timed interactive" is for. Tier 3 suits
+automatic-mode nodes, which are already unreachable between check-ins by design
+(§5.5). *Being able to authenticate a bit and being willing to clear one are two
+separate decisions; only the first is made here.* The mechanism is now proven
+end to end — the seam test drives the hub's tag against the real node's verify —
+and what is published is `pending::allListening()`.
 
 **The beacon is not optional.** With it off, a node holds phase only for
 `resyncMaxS` after each frame — at 3.5 commands/day and the ±20 ppm ceiling of
@@ -1170,6 +1212,15 @@ against a node with a live session disabled MAC-1 and MAC-2.
   phase fit and the mark-hit counter that holds off demotion. Bounded
   (`phaseTrustworthy()` requires every sample inside the guard, so poisoning it
   demotes the node rather than desynchronising it silently), and untested.
+  **Narrowed, for the beacon specifically.** The beacon was the worst case here:
+  it is the one frame a node acts on with no addressing and no session, and the
+  anchor nudge it grants is bounded per beacon rather than in total — so an
+  attacker beaconing at the right instants could walk a node off the grid
+  14 ms at a time. A node holding a fleet key now refuses an unsigned or
+  wrongly-signed beacon **entirely** — no re-anchor and no phase sample — so
+  the walk is closed for a keyed node. A node holding none still has it, which
+  is the pre-existing behaviour, and ordinary addressed frames still feed the
+  tracker before authentication.
 - **A node that has never been provisioned accepts plaintext `ClientConfig`.**
   Inherent to bootstrap: the gate's test is "does this node hold a session", so
   a factory-fresh node is deliberately unaffected. The MAC check inside the
@@ -1298,11 +1349,40 @@ Recorded here rather than left to look maintained.
   authenticated by the beacon's GCM tag. Rule 4 is unchanged, so being wrong
   still costs one frame. `in_slot_acks` is still maintained as a diagnostic and
   no longer gates anything.
-  **Still open:** `ul_offset_us` remains unread and the pre-transmit backoff
-  remains unconditional — uplinks are still unslotted, which now costs nothing
-  but is still a published field nothing honours. The exhaustive safety sweep
-  was extended with the hub's phase dimensions and the bounded-exposure
-  property still holds.
+  ~~**Still open:** `ul_offset_us` remains unread~~ — **FIXED.**
+  `gridstate::aimUplink` solves for the first of this node's marks whose uplink
+  instant is still reachable and hands the transmit path a **CAD START**
+  instant, because the node transmits CAD-first: a frame aimed at T0 must begin
+  its CAD `kCadUs` earlier or it arrives late by the whole CAD. `kCadUs` is
+  derived (one symbol of listening plus 32 chips of correlation, both exact once
+  SF and BW are fixed), and the two unmeasured terms in the lead —
+  `d_cad_dispatch` and `d_tx_ramp` — are passed as **zero** rather than guessed,
+  so the placement is late by exactly what it omits, which is knowable, inside a
+  14 080 µs guard. The hub already passes 0 for `d_tx_ramp` everywhere.
+  **The random backoff is not removed.** It is a collision-avoidance measure and
+  still runs on every declined aim and on every RETRY — a retry has already lost
+  its mark, so pausing at random is right there and re-aiming at a passed instant
+  is wrong — and CAD runs either way, so the backstop is unchanged. Three
+  refusals, each because aiming would be *worse* than not aiming: no grid or no
+  published offset (which is also the rollout property — every node running
+  today gets the path that shipped, with no flag to set), timed RX off, and
+  **phase not trustworthy**, since the anchor is what the aim is measured from
+  and a confident wrong instant lands on a neighbour's slot where a random
+  backoff lands somewhere harmless.
+  How long a frame may wait for its mark belongs to the transmit path, not to
+  the grid: the only honest bound is the delay the waiting REPLACES, so
+  `LoraInterface::maxUplinkAimWaitUs` is the backoff's own worst case, derived
+  from the same member the backoff uses. An ack never pays it — it asks about
+  39 ms after its mark, when the published 60 ms offset is 17 ms away.
+  Hits and misses are counted, because a node whose turnaround exceeds the
+  offset misses EVERY mark and that is **HW-7's number showing itself in the one
+  place it can be seen without a scope**; a silent fallback would look exactly
+  like the offset working.
+  **Not covered:** the `LoraInterface.cpp` call site. That file is not compiled
+  by the host suite at all (§11a), so the aim is tested through the real
+  `CmdDispatcher` and the headers, and the wiring is not.
+  The exhaustive safety sweep was extended with the hub's phase dimensions and
+  the bounded-exposure property still holds.
 
   For the record, the arithmetic that made the old predicate unreachable:
   `txPolicyFor()` returns `Burst` in perpetuity and the hub logs a confidence
@@ -1317,6 +1397,30 @@ Recorded here rather than left to look maintained.
   as below `op_first_msgid_` and keeps retrying the second. Under the old named
   timeout the second REPLACED the first, which was also wrong. The queue has no
   cancel/replace API, which is what this actually needs.
+- **The hub's startup grid demote is plaintext, and a provisioned node refuses
+  it.** Found while testing the fleet key, not fixed here because the fix is a
+  design decision rather than a repair. `broadcast_grid_demote()` sends
+  `send_grid_sync(false)` to the broadcast address on startup — the frame whose
+  entire purpose is to tell every node that the anchor it holds is now wrong.
+  It packs through `s_pack_operation_message(..., session_confirmed_, ...)`, and
+  on a fresh hub boot `session_confirmed_` is false, so it goes out in the
+  clear. The node's plaintext gate refuses every non-`LOGIN`, non-`GRIDBEACON`
+  frame while it holds a session, and a node that resumed its session from NVS
+  holds one. So the one frame that must not be missed is dropped by exactly the
+  nodes it is aimed at; they demote later, via `kMaxMissedMarks`, which is
+  slower and looks like a reception fault.
+  The fleet key does not fix this: a restarted hub mints a NEW key, and the
+  nodes still hold the old one, so it cannot sign a demote they would accept.
+  A key that survived the restart would defeat the point of re-minting.
+  Pinned incidentally by `AWithdrawnGridTakesTheFleetKeyWithIt`, which has to
+  send its withdrawal encrypted for the handler to see it at all.
+- **A compromised node can forge beacons for the whole fleet.** Inherent to
+  one-to-many authentication without per-node signatures: every node holds the
+  same `netKey`. Bounded by what a beacon can do — a guard-band anchor nudge
+  (still clamped, deliberately, even for a beacon that verifies) and the pending
+  mask, which the hub does not clear today. Recorded rather than fixed because
+  the alternatives (per-node signatures on a broadcast, or a hardware root of
+  trust) cost more than the attack is worth on this link.
 - **`beacon_missed` is never written.** A `txPolicyFor` guard that contributes
   nothing. `rebooted_since_confirm` was in the same state and is now set from
   `handle_register_`; this one needs the hub to compare a predicted check-in
@@ -1362,7 +1466,7 @@ Ordered by what each one blocks.
 | ~~`AckCache.h` — the whole header~~ | ~~node `main/` — zero `.cpp` call sites~~ | **FIXED** — wired at `sendCommandAck()` and the `admitFrame` msgid rejection | ~~B4~~ |
 | ~~`CmdDispatcher::noteMarkOutcome()`~~ | ~~node~~ | **FIXED** — the demotion body is its own function, called from both counting paths | ~~Mode B demotion~~ |
 | ~~`CmdDispatcher::setExpectedT0Us()`~~ | ~~node~~ | **FIXED** — the expectation is predicted from the grid on every sample, nearest mark rather than next | ~~B2's gate~~ |
-| ~~`pending::Mask` on the wire~~ | ~~hub~~ | **REACHABLE** — `send_grid_sync(true)` is now called, and §4.4's broadcast beacon carries it too. Published `allListening()` on purpose: see §4.4 for the two independent reasons a bit may not be cleared yet | ~~§4.4~~ |
+| ~~`pending::Mask` on the wire~~ | ~~hub~~ | **REACHABLE, AND NOW BELIEVABLE.** `send_grid_sync(true)` is called and §4.4's beacon carries the mask too — but the node's gate on adopting it was `frame_authenticated_`, the AEAD flag, which is **false for every broadcast by construction**. So the branch could never be taken and Tier 3's saving was *unreachable* rather than merely unused. The gate is now the beacon's own AES-CMAC under the fleet key. Still published `allListening()` on purpose: of §4.4's two reasons, the fleet key closed the first and the interactive-node promise remains | ~~§4.4~~ |
 | ~~`gridstate::isBeaconRound()`~~ | ~~both~~ | **REACHABLE** — the node's arming path asks for the next window rather than the next mark (`gridstate::nextWindow`), and the hub's `serviceBeacon()` places a broadcast on the beacon mark | ~~§4.4~~ |
 | ~~`CmdDispatcher::setTimedRxEnabled()`~~ | ~~node~~ | **FIXED** — adopting a grid enables timed RX | ~~Mode B on the node side~~ |
 | ~~`CmdDispatcher::setBenchNode()`~~ | ~~node~~ | **FIXED** — `CONFIG_BLINDS_BENCH_NODE`, a build-time flag. Deliberately not over the air: the obvious carrier, `ClientConfig`, is unauthenticated and gated only by a MAC broadcast in the clear | ~~HW-2~~ |

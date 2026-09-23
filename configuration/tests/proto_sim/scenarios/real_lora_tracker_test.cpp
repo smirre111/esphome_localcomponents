@@ -848,11 +848,37 @@ TEST(RealTrackerBeacon, ABeaconIsQueuedOnceAndPlacedOnItsOwnMark) {
     EXPECT_EQ(msg->gridbeacon->txround % timedgrid::kBeaconEveryRounds, 0u);
     EXPECT_EQ(msg->gridbeacon->txslot, timedgrid::kBeaconSlotIndex);
 
-    // ALL LISTENING, and not a placeholder: a clear bit is a promise this hub
-    // cannot keep for an interactive node, and the nodes refuse a mask from an
-    // unauthenticated beacon anyway.
+    // ALL LISTENING, and not a placeholder: a clear bit is still a promise this
+    // hub cannot keep for an interactive node. Authenticating the beacon does
+    // not by itself start clearing bits — those are two separate decisions.
     EXPECT_TRUE(msg->gridbeacon->pendingmaskvalid);
     EXPECT_EQ(msg->gridbeacon->pendingmask, pending::allListening());
+
+    // Section 4.4: the beacon is SIGNED. An unsigned beacon from a hub that
+    // holds a key is indistinguishable on the air from a forgery, so
+    // serviceBeacon sends none at all rather than one without a tag.
+    EXPECT_EQ(msg->gridbeacon->netkeyid, t.netKeyId());
+    EXPECT_NE(msg->gridbeacon->netkeyid, 0u);
+    ASSERT_EQ(msg->gridbeacon->mac.len, framecrypto::kBeaconMacBytes);
+
+    // And it verifies under the hub's own key. Recomputed here from the LAYOUT
+    // rather than compared against a stored tag: what can silently disagree
+    // between the two ends is which bytes go into the MAC, and a golden tag
+    // would pin the hub's arithmetic against the hub's own choice.
+    uint8_t expect[framecrypto::kBeaconMacBytes];
+    ASSERT_TRUE(t.beaconMac(msg->gridbeacon->txround, msg->gridbeacon->txslot,
+                            msg->gridbeacon->pendingmask,
+                            msg->gridbeacon->pendingmaskvalid,
+                            expect, sizeof(expect)));
+    EXPECT_EQ(memcmp(expect, msg->gridbeacon->mac.data, sizeof(expect)), 0);
+
+    // The frame still fits the slot geometry it was priced against. A beacon
+    // that outgrew kBeaconPayloadBytes would need a second clear slot after it
+    // — beaconClearSlots() — and would blind a node on every beacon round
+    // forever, which is a failure that would present as "node b+1 is
+    // unreliable" and never be attributed to the beacon.
+    EXPECT_LE(bytes.size(), (size_t) timedgrid::kBeaconPayloadBytes)
+        << "the signed beacon must still fit the size the geometry assumes";
 
     lora_client_operation_message__free_unpacked(msg, nullptr);
 }

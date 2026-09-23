@@ -18,6 +18,7 @@
 // fully visible after this header. Mirror that.
 #include "esphome/components/lora_client/lora_client.h"
 #include "esphome/components/lora_client/lora_client_node.h"
+#include "esphome/components/lora_client/FrameCrypto.h"
 
 namespace proto_sim { class SimRadio; }
 
@@ -98,6 +99,17 @@ public:
     int64_t sim_now_us{0};
     int64_t grid_anchor_us_{0};
     bool    grid_started_{false};
+
+    // Section 4.4's fleet key, mirrored. Deterministic here rather than random:
+    // a test that asserts the node adopted the key the hub minted has to be
+    // able to name it. The PRODUCTION mint is random and lives in the real
+    // tracker; what this shim stands in for is the plumbing, not the entropy.
+    const uint8_t *netKey() const   { return net_key_; }
+    uint32_t       netKeyId() const { return net_key_id_; }
+    bool beaconMac(uint32_t tx_round, uint32_t tx_slot, uint32_t pending_mask,
+                   bool pending_mask_valid, uint8_t *out, size_t out_len) const;
+    uint8_t  net_key_[framecrypto::kNetKeyBytes]{};
+    uint32_t net_key_id_{0};
 
     // Hub→node TX: emits an AirFrame{HubToNode, bytes} into the active SimRadio.
     // Returns false when the frame was dropped, mirroring production.

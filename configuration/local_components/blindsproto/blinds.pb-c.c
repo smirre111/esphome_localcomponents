@@ -2587,7 +2587,7 @@ const ProtobufCMessageDescriptor mac_control__descriptor =
   (ProtobufCMessageInit) mac_control__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[4] =
+static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[6] =
 {
   {
     "txRound",
@@ -2637,8 +2637,34 @@ static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[4] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "netKeyId",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridBeacon, netkeyid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "mac",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(GridBeacon, mac),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned grid_beacon__field_indices_by_name[] = {
+  5,   /* field[5] = mac */
+  4,   /* field[4] = netKeyId */
   2,   /* field[2] = pendingMask */
   3,   /* field[3] = pendingMaskValid */
   0,   /* field[0] = txRound */
@@ -2647,7 +2673,7 @@ static const unsigned grid_beacon__field_indices_by_name[] = {
 static const ProtobufCIntRange grid_beacon__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 4 }
+  { 0, 6 }
 };
 const ProtobufCMessageDescriptor grid_beacon__descriptor =
 {
@@ -2657,14 +2683,14 @@ const ProtobufCMessageDescriptor grid_beacon__descriptor =
   "GridBeacon",
   "",
   sizeof(GridBeacon),
-  4,
+  6,
   grid_beacon__field_descriptors,
   grid_beacon__field_indices_by_name,
   1,  grid_beacon__number_ranges,
   (ProtobufCMessageInit) grid_beacon__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor grid_sync__field_descriptors[15] =
+static const ProtobufCFieldDescriptor grid_sync__field_descriptors[17] =
 {
   {
     "enable",
@@ -2846,12 +2872,38 @@ static const ProtobufCFieldDescriptor grid_sync__field_descriptors[15] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "netKey",
+    16,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, netkey),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "netKeyId",
+    17,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, netkeyid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned grid_sync__field_indices_by_name[] = {
   12,   /* field[12] = armOffsetUs */
   8,   /* field[8] = beaconEveryRounds */
   7,   /* field[7] = beaconSlotIndex */
   0,   /* field[0] = enable */
+  15,   /* field[15] = netKey */
+  16,   /* field[16] = netKeyId */
   13,   /* field[13] = pendingMask */
   14,   /* field[14] = pendingMaskValid */
   4,   /* field[4] = pitchUs */
@@ -2867,7 +2919,7 @@ static const unsigned grid_sync__field_indices_by_name[] = {
 static const ProtobufCIntRange grid_sync__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 15 }
+  { 0, 17 }
 };
 const ProtobufCMessageDescriptor grid_sync__descriptor =
 {
@@ -2877,7 +2929,7 @@ const ProtobufCMessageDescriptor grid_sync__descriptor =
   "GridSync",
   "",
   sizeof(GridSync),
-  15,
+  17,
   grid_sync__field_descriptors,
   grid_sync__field_indices_by_name,
   1,  grid_sync__number_ranges,

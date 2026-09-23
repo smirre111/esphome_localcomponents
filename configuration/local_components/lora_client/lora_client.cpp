@@ -1750,6 +1750,27 @@ namespace esphome
                                                 this->grid_slot_,
                                                 this->has_pending_downlink_());
         gs.pendingmaskvalid = true;
+
+        // Section 4.4's fleet key, and the one condition on carrying it.
+        //
+        // ONLY WHEN THIS FRAME WILL BE ENCRYPTED. s_pack_operation_message
+        // encrypts when a session exists and packs plaintext otherwise, so
+        // assigning the key unconditionally would put it on the air in the
+        // clear on exactly the path where no session had been established yet
+        // — which is every bootstrap, and would make the beacon's MAC
+        // decorative for the whole fleet. This is the §11a lesson in a new
+        // place: a rule is only shipped when the caller satisfies it.
+        //
+        // A node that gets a keyless GridSync simply holds no key and treats
+        // beacons the way it did before this existed: bounded re-anchor, no
+        // mask. The hub re-publishes on the next grid change.
+        if (this->session_confirmed_ && this->parent_ != nullptr &&
+            this->parent_->netKeyId() != 0)
+        {
+          gs.netkey.data = const_cast<uint8_t *>(this->parent_->netKey());
+          gs.netkey.len  = framecrypto::kNetKeyBytes;
+          gs.netkeyid    = this->parent_->netKeyId();
+        }
       }
       else
       {

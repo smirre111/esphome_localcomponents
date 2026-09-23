@@ -185,3 +185,92 @@ TEST(FrameCrypto, TagAndKeySizesMatchTheHub) {
     EXPECT_EQ(kTagBytes, 8u);
     EXPECT_EQ(kKeyBytes, 16u);
 }
+
+// ---------------------------------------------------------------------------
+// The broadcast beacon's authenticator (section 4.4)
+//
+// The one thing that can silently disagree between hub and node is WHICH BYTES
+// go into the MAC. Both ends call buildBeaconMacInput, so the layout is pinned
+// here byte by byte — a tag computed over a different byte order or a missing
+// field fails exactly like a wrong key, and there is no diagnostic on the air
+// to tell them apart.
+// ---------------------------------------------------------------------------
+
+TEST(FrameCrypto, BeaconMacInputIsFixedLengthAndDomainSeparated) {
+    uint8_t in[kBeaconMacInputBytes];
+    buildBeaconMacInput(0x11223344u, 0x55667788u, 31u, 0xDEADBEEFu, true, in);
+
+    // The domain tag comes first, so this key can never be made to authenticate
+    // anything but a beacon — a fleet key that also signed, say, a config frame
+    // would let a compromised node repurpose it.
+    EXPECT_EQ(in[0], 'G');
+    EXPECT_EQ(in[1], 'B');
+    EXPECT_EQ(in[2], '1');
+
+    const uint8_t want[kBeaconMacInputBytes] = {
+        'G', 'B', '1',
+        0x11, 0x22, 0x33, 0x44,      // netKeyId, big-endian like every other
+        0x55, 0x66, 0x77, 0x88,      // txRound
+        0x00, 0x00, 0x00, 0x1F,      // txSlot
+        0xDE, 0xAD, 0xBE, 0xEF,      // pendingMask
+        0x01,                        // pendingMaskValid
+    };
+    EXPECT_EQ(memcmp(in, want, sizeof(want)), 0);
+
+    // Fixed length is the property, not a convenience. With variable-length
+    // fields two different beacons could serialise to the same bytes and share
+    // a tag; at 20 bytes there is no boundary to shift.
+    EXPECT_EQ(kBeaconMacInputBytes, 20u);
+}
+
+TEST(FrameCrypto, TheValidityFlagIsCoveredByTheMac) {
+    // It is the field that decides whether the mask MEANS anything, so a MAC
+    // that omitted it would let an attacker turn "listen" into a real all-clear
+    // without touching a signed byte.
+    uint8_t a[kBeaconMacInputBytes], b[kBeaconMacInputBytes];
+    buildBeaconMacInput(1, 2, 3, 0, /*valid=*/false, a);
+    buildBeaconMacInput(1, 2, 3, 0, /*valid=*/true,  b);
+    EXPECT_NE(memcmp(a, b, sizeof(a)), 0);
+}
+
+TEST(FrameCrypto, EveryBeaconFieldChangesTheMacInput) {
+    // A tag over only the round would not catch a mask substitution, which is
+    // the cheapest useful forgery: replay a real beacon's round with an
+    // all-clear mask and the fleet stops listening.
+    uint8_t base[kBeaconMacInputBytes];
+    buildBeaconMacInput(1, 2, 3, 4, true, base);
+
+    uint8_t v[kBeaconMacInputBytes];
+    buildBeaconMacInput(9, 2, 3, 4, true, v);
+    EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "netKeyId";
+    buildBeaconMacInput(1, 9, 3, 4, true, v);
+    EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "txRound";
+    buildBeaconMacInput(1, 2, 9, 4, true, v);
+    EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "txSlot";
+    buildBeaconMacInput(1, 2, 3, 9, true, v);
+    EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "pendingMask";
+}
+
+TEST(FrameCrypto, AZeroKeyOrZeroIdIsNotAKey) {
+    // Both are proto3 defaults, so "the field was absent" and "the hub sent
+    // zeroes" arrive identically. A node that treated either as a key would
+    // start refusing every real beacon while believing it was authenticating.
+    uint8_t key[kNetKeyBytes];
+    memset(key, 0xA5, sizeof(key));
+    EXPECT_TRUE(netKeyIsSet(key, sizeof(key), 1));
+
+    EXPECT_FALSE(netKeyIsSet(key, sizeof(key), 0)) << "id zero means unset";
+    EXPECT_FALSE(netKeyIsSet(nullptr, kNetKeyBytes, 1));
+    EXPECT_FALSE(netKeyIsSet(key, kNetKeyBytes - 1, 1)) << "wrong length";
+
+    memset(key, 0, sizeof(key));
+    EXPECT_FALSE(netKeyIsSet(key, sizeof(key), 1)) << "all zeroes is not a key";
+}
+
+TEST(FrameCrypto, TheBeaconTagSharesTheAeadTagBudget) {
+    // 8 bytes on the air, like the AEAD tag, because the beacon is priced into
+    // the slot geometry at kBeaconPayloadBytes and a wider tag would eat the
+    // margin that keeps beaconClearSlots() at one.
+    EXPECT_EQ(kBeaconMacBytes, kTagBytes);
+    EXPECT_EQ(kNetKeyBytes, kKeyBytes) << "AES-128, like the session key";
+}

@@ -8,6 +8,9 @@
 #include "sim/sim_radio.h"
 #include "TimedGrid.h"
 
+#include <cstring>
+#include <psa/crypto.h>
+
 namespace esphome::lora_tracker {
 
 namespace shim_hooks {
@@ -24,6 +27,50 @@ void LORATracker::startGrid() {
     if (grid_started_) return;
     grid_anchor_us_ = 0;   // deterministic in the sim
     grid_started_ = true;
+    psa_crypto_init();   // idempotent; mirrors production's call in startGrid
+    // Mint a fleet key, deterministically. Production draws it from esp_random
+    // in startGrid() for the same reason it sets the anchor there — the key's
+    // lifetime is the grid's — but a sim that could not name the key could not
+    // assert that the node adopted THAT key rather than some key.
+    for (size_t i = 0; i < sizeof(net_key_); ++i)
+        net_key_[i] = (uint8_t) (0xA0 + i);
+    net_key_id_ = 0x5EED0001u;
+}
+
+// AES-CMAC, exactly as production computes it. Not a stub: the seam test's
+// whole point is that the hub's tag verifies on the real node, and a stub tag
+// would assert only that two mirrors of the same mistake agree.
+bool LORATracker::beaconMac(uint32_t tx_round, uint32_t tx_slot,
+                            uint32_t pending_mask, bool pending_mask_valid,
+                            uint8_t *out, size_t out_len) const {
+    if (out == nullptr || out_len != framecrypto::kBeaconMacBytes) return false;
+    if (!framecrypto::netKeyIsSet(net_key_, sizeof(net_key_), net_key_id_))
+        return false;
+
+    uint8_t input[framecrypto::kBeaconMacInputBytes];
+    framecrypto::buildBeaconMacInput(net_key_id_, tx_round, tx_slot,
+                                     pending_mask, pending_mask_valid, input);
+
+    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE);
+    psa_set_key_algorithm(&attrs, PSA_ALG_CMAC);
+    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attrs, framecrypto::kNetKeyBytes * 8);
+    psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
+
+    psa_key_id_t kid = PSA_KEY_ID_NULL;
+    if (psa_import_key(&attrs, net_key_, sizeof(net_key_), &kid) != PSA_SUCCESS)
+        return false;
+    uint8_t full[16];
+    size_t  full_len = 0;
+    const psa_status_t st = psa_mac_compute(kid, PSA_ALG_CMAC, input,
+                                            sizeof(input), full, sizeof(full),
+                                            &full_len);
+    psa_destroy_key(kid);
+    if (st != PSA_SUCCESS || full_len < framecrypto::kBeaconMacBytes)
+        return false;
+    memcpy(out, full, framecrypto::kBeaconMacBytes);
+    return true;
 }
 
 uint32_t LORATracker::roundForSlotT0(uint8_t slot, int64_t t0_us) const {
