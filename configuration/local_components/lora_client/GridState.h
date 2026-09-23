@@ -236,6 +236,64 @@ constexpr int64_t nextWindowArmDelayUs(const State &st, int64_t now_us,
     return (d < 1) ? 1 : d;
 }
 
+// --- Placing an uplink in this node's slot (section 4.3) --------------------
+//
+// `ulOffsetUs` has been published in every GridSync since the grid was designed
+// and nothing has ever read it: the node replied "as soon as CAD says the
+// channel is free", after an unconditional random 29-290 ms backoff. Against a
+// 29 ms quantum and the hub's 28.16 ms in-slot band, at most one of ten delays
+// could qualify, so section 4.6's in-slot predicate was unreachable and the
+// hub's own measurement of where uplinks land meant nothing.
+//
+// This is the arithmetic that makes the field mean what it says. The node aims
+// its uplink at its OWN mark plus the offset — the instant the hub subtracts
+// again in noteUplinkPlacement_ — and starts the CAD one lead earlier so the
+// CAD, the ramp and the preamble all fit in front of T0.
+//
+// Two deliberate limits, because this is the node's transmit path and the
+// random backoff it replaces is a collision-avoidance measure:
+//
+//   * It aims at a mark it can still REACH, and `max_wait_us` bounds how long
+//     it may wait for one. The bound belongs to the CALLER, not to the grid:
+//     the only honest number is the delay this aim replaces, and that lives in
+//     the transmit path (LoraInterface::maxUplinkAimWaitUs). Since the marks
+//     are one round apart, any bound below a round also guarantees a frame is
+//     never held for a later round.
+//   * `aimed == false` is not a failure. It is the honest answer whenever there
+//     is no grid, no published offset, or no reachable mark, and the caller
+//     falls back to exactly the behaviour that shipped before.
+struct UplinkAim
+{
+    bool    aimed{false};
+    int64_t cad_start_us{0};   // when to begin CAD
+    int64_t t0_us{0};          // where the frame's T0 is aimed
+};
+
+// `lead_us` is t0 - cad_start for this frame, i.e. what loratiming::
+// cadStartInstantUs() subtracts. It is the caller's because only the caller
+// knows its own dispatch cost.
+constexpr UplinkAim aimUplink(const State &st, int64_t now_us,
+                              int64_t lead_us, int64_t max_wait_us)
+{
+    if (!st.active || st.params.ul_offset_us == 0 || st.params.round_us == 0)
+        return UplinkAim{};
+
+    // This node's marks, shifted by the offset the hub published. Solved
+    // directly rather than by stepping: the first n whose CAD start has not
+    // already passed. Truncating division rounds towards zero, so the negative
+    // branch is explicit for the same reason it is in nextT0Us().
+    const int64_t base  = t0ForRound(st, 0) + (int64_t) st.params.ul_offset_us;
+    const int64_t round = (int64_t) st.params.round_us;
+    const int64_t need  = now_us + lead_us - base;
+    const int64_t n     = (need <= 0) ? 0 : ((need + round - 1) / round);
+    const int64_t t0    = base + n * round;
+    const int64_t start = t0 - lead_us;
+
+    if (start - now_us > max_wait_us)
+        return UplinkAim{};      // too far out — send the ordinary way instead
+    return UplinkAim{true, start, t0};
+}
+
 // --- Re-anchoring from a beacon --------------------------------------------
 //
 // A beacon is the node's chance to correct the drift accumulated since the last

@@ -123,6 +123,20 @@ constexpr int64_t t0FromRxDoneUs(int64_t t_rxdone_us, uint32_t payload_len)
     return t_rxdone_us - (int64_t) t0ToRxDoneUs(payload_len);
 }
 
+// --- Channel-activity detection ------------------------------------------
+//
+// CAD duration at this PHY, from the datasheet's own decomposition: the
+// receiver listens for one symbol (2^SF / BW) and then spends a further 32/BW
+// correlating what it heard. Both terms are exact once SF and BW are fixed, so
+// this is a DERIVATION, not an assumption — unlike kDetectSymbolsAssumed in
+// TimedGrid.h, which is a rule of thumb wearing a number's clothes.
+//
+// It matters because the node transmits CAD-first: a frame aimed at an instant
+// must begin its CAD this much earlier or it arrives a whole CAD late.
+static constexpr uint32_t kCadUs =
+    (uint32_t) ((((uint64_t) 1u << kSpreadingFactor) + 32ull) * 1000000ull
+                / kBandwidthHz);
+
 // The hub's fire instant for a wanted T0. d_tx_ramp is the PLL/PA ramp between
 // the RegOpMode=TX write and the first chirp leaving the antenna; it is
 // UNMEASURED (implementation-plan.md section 12.1) and is passed in rather than
@@ -130,6 +144,28 @@ constexpr int64_t t0FromRxDoneUs(int64_t t_rxdone_us, uint32_t payload_len)
 constexpr int64_t fireInstantUs(int64_t t0_us, uint32_t d_tx_ramp_us)
 {
     return t0_us - (int64_t) kPreambleToT0Us - (int64_t) d_tx_ramp_us;
+}
+
+// The instant a CAD-then-transmit sequence must BEGIN for the resulting frame's
+// T0 to land on `t0_us`. This is fireInstantUs() with the sender's own
+// pre-transmit work in front of it:
+//
+//   cad_start ---kCadUs---> fire ---d_tx_ramp---> air start ---T_pre---> T0
+//                 |
+//                 +-- d_cad_dispatch: the software between deciding to send and
+//                     the CAD actually running (task hop, radio mutex, the
+//                     RegOpMode/DIO-mapping writes, the queue reset).
+//
+// d_cad_dispatch is UNMEASURED (test-plan.md HW-7's neighbour) and is passed in
+// for the same reason d_tx_ramp is: a caller that supplies 0 is EARLY by
+// nothing and LATE by exactly that term, which is a knowable error, whereas a
+// constant guessed here would be an unknowable one.
+constexpr int64_t cadStartInstantUs(int64_t t0_us, uint32_t d_cad_dispatch_us,
+                                    uint32_t d_tx_ramp_us)
+{
+    return fireInstantUs(t0_us, d_tx_ramp_us)
+         - (int64_t) kCadUs
+         - (int64_t) d_cad_dispatch_us;
 }
 
 // And back. A producer that has already chosen a mark hands the queue a FIRE
@@ -148,6 +184,7 @@ constexpr int64_t t0FromFireInstantUs(int64_t fire_us, uint32_t d_tx_ramp_us)
 static_assert(kSymbolUs == 256, "T_sym must be 256 us at SF7/BW500");
 static_assert(kPreambleToT0Us == 3136, "air start -> T0 must be 3136 us");
 static_assert(kHeaderUs == 2048, "T0 -> ValidHeader must be 2048 us");
+static_assert(kCadUs == 320, "CAD must be 320 us at SF7/BW500");
 
 static_assert(symbolCount(25) == 72,   "25 B ack");
 static_assert(symbolCount(45) == 120,  "45 B beacon");

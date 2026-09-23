@@ -3751,3 +3751,96 @@ TEST_F(RealNodeFixture, ABeaconDoesNotRatchetTheReplayCounter) {
     EXPECT_EQ(disp.gridState().anchor_us, st.anchor_us)
         << "and it still re-anchored (by zero) rather than being dropped";
 }
+
+// ---------------------------------------------------------------------------
+// Section 4.3 — the node reads ulOffsetUs at last
+//
+// The field has been published in every GridSync since the grid was designed,
+// validated on arrival, and stored in gridstate::Params — and nothing ever read
+// it. Every uplink went out after an unconditional random 29-290 ms backoff, so
+// the hub's in-slot measurement was comparing arrivals against a number the
+// node had never heard of. These drive the REAL dispatcher, not the header.
+// ---------------------------------------------------------------------------
+
+namespace {
+// The bound the transmit path passes (LoraInterface::maxUplinkAimWaitUs).
+constexpr int64_t kAimBound = 290000;
+
+// Walk the node onto the grid and give it enough on-mark samples that
+// phaseTrustworthy() is satisfied — the gate uplinkCadStartUs() applies before
+// it will aim at anything.
+int64_t settle_on_grid(CmdDispatcher &disp, uint32_t slot, uint32_t first_msgid) {
+    auto gs = build_grid_sync(/*enable=*/true, slot, first_msgid);
+    const int64_t anchor_rx = 20'000'000;
+    disp.noteDriftSample(anchor_rx);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), anchor_rx);
+    if (!disp.gridState().active) return 0;
+
+    int64_t mark = disp.expectedT0Us();
+    for (uint32_t i = 0; i < 10; ++i) {
+        auto op = pack_sysop_op(first_msgid + 1 + i, CLIENT_OPERATION__CMD_STATUS);
+        mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+        const int64_t rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
+        disp.noteDriftSample(rx);
+        disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
+    }
+    return mark;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, AnAckIsAimedAtTheMarkTheHubWillSubtract) {
+    const int64_t mark = settle_on_grid(disp, /*slot=*/4, /*first_msgid=*/900);
+    ASSERT_NE(mark, 0);
+    ASSERT_TRUE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs))
+        << "the aim is gated on trusted phase; without it this asserts nothing";
+    ASSERT_EQ(disp.gridState().params.ul_offset_us, 60000u)
+        << "the offset must have survived adoption — it is the number under test";
+
+    // Where an ack really asks: just after RxDone for the frame it is acking.
+    const int64_t asks_at = mark + (int64_t) loratiming::t0ToRxDoneUs(60);
+    const int64_t cad_start = disp.uplinkCadStartUs(asks_at, kAimBound);
+    ASSERT_GT(cad_start, 0) << "an ack inside the offset must be placed";
+
+    // The frame's T0 is one lead after the CAD start, and the hub recovers the
+    // mark by subtracting the offset it published. That inverse is the contract.
+    const int64_t t0 = cad_start + CmdDispatcher::kUplinkAimLeadUs;
+    EXPECT_EQ(t0 - (int64_t) disp.gridState().params.ul_offset_us, mark);
+    EXPECT_EQ(disp.uplinkAimHits(), 1u);
+    EXPECT_EQ(disp.uplinkAimMisses(), 0u);
+}
+
+TEST_F(RealNodeFixture, AnUnplaceableUplinkDeclinesAndSaysSo) {
+    const int64_t mark = settle_on_grid(disp, /*slot=*/4, /*first_msgid=*/950);
+    ASSERT_NE(mark, 0);
+
+    // A turnaround longer than the published offset: the instant is behind us
+    // and the next one is a round away. Declining is right; counting it is what
+    // makes HW-7's number visible in the field, where a silent fallback would
+    // look exactly like the offset working.
+    EXPECT_EQ(disp.uplinkCadStartUs(mark + 400'000, kAimBound), 0);
+    EXPECT_EQ(disp.uplinkAimMisses(), 1u);
+    EXPECT_EQ(disp.uplinkAimHits(), 0u);
+}
+
+TEST_F(RealNodeFixture, ANodeOffTheGridNeverAims) {
+    // The rollout property: with no grid there is no aim, so every node running
+    // today gets exactly the transmit path that shipped, with no flag to set.
+    ASSERT_FALSE(disp.gridState().active);
+    EXPECT_EQ(disp.uplinkCadStartUs(1'000'000, kAimBound), 0);
+}
+
+TEST_F(RealNodeFixture, AnAnchorTheNodeDoesNotTrustIsNotAimedFrom) {
+    // Adoption enables timed RX immediately, but the phase evidence takes ten
+    // frames. In between, aiming would be worse than not aiming: a random
+    // backoff lands somewhere harmless, while a confident wrong instant lands
+    // on another node's slot — 32 nodes with bad anchors would converge on one
+    // window instead of spreading out.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/980);
+    disp.noteDriftSample(20'000'000);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 20'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_TRUE(disp.timedRxEnabledForTest());
+    ASSERT_FALSE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs));
+
+    EXPECT_EQ(disp.uplinkCadStartUs(disp.expectedT0Us(), kAimBound), 0);
+}

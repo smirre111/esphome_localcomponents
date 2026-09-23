@@ -408,3 +408,137 @@ TEST(GridState, ABeaconMayCorrectDriftButNotWalkTheAnchor) {
     // node onto its neighbour's window.
     EXPECT_FALSE(reanchorIsSane((int64_t) timedgrid::kSlotPitchUs, timedgrid::kGuardUs));
 }
+
+// ---------------------------------------------------------------------------
+// Placing the uplink (section 4.3)
+//
+// ulOffsetUs was on the wire from the beginning and nothing read it, so the
+// hub's in-slot measurement was testing a number the node had never heard of.
+// These pin the arithmetic that makes the field mean what it says.
+// ---------------------------------------------------------------------------
+
+namespace {
+// The lead the node actually uses: CAD + preamble, with the two unmeasured
+// terms at zero. Restated here rather than imported so a change to either end
+// shows up as a failing test rather than as an assertion that agrees with
+// whatever the code does.
+constexpr int64_t kLead = (int64_t) loratiming::kPreambleToT0Us
+                        + (int64_t) loratiming::kCadUs;
+// The bound the node passes: the random backoff this aim replaces, at its
+// worst case (LoraInterface::maxUplinkAimWaitUs — 29 ms x 10).
+constexpr int64_t kMaxWait = 290000;
+State aimable(uint32_t slot = 3, int64_t anchor = 1'000'000) {
+    State st = gridded(slot, anchor);
+    st.params.ul_offset_us = 60000;   // LORAListener::kUplinkOffsetUs
+    return st;
+}
+}  // namespace
+
+TEST(GridState, AnAimedUplinkLandsOnTheMarkTheHubSubtracts) {
+    const State st = aimable(3);
+    // The hub finds the mark by subtracting kUplinkOffsetUs from the arriving
+    // T0 (noteUplinkPlacement_). The aim has to be the exact inverse or the two
+    // ends disagree about what "in slot" means.
+    const int64_t now = t0ForRound(st, 0) - 1000;
+    const UplinkAim a = aimUplink(st, now, kLead, kMaxWait);
+    ASSERT_TRUE(a.aimed);
+    EXPECT_EQ(a.t0_us - (int64_t) st.params.ul_offset_us, t0ForRound(st, 0));
+    EXPECT_EQ(a.cad_start_us, a.t0_us - kLead);
+    EXPECT_GE(a.cad_start_us, now);
+}
+
+TEST(GridState, TheAimIsInsideTheHubsInSlotBand) {
+    // The whole point: an uplink placed this way passes the hub's own test.
+    // The band is the same guard the node's phase tracking uses.
+    const State st = aimable(7);
+    const UplinkAim a =
+        aimUplink(st, t0ForRound(st, 0) - 5000, kLead, kMaxWait);
+    ASSERT_TRUE(a.aimed);
+    const int64_t err = (a.t0_us - (int64_t) st.params.ul_offset_us) - t0ForRound(st, 0);
+    EXPECT_LE(err, (int64_t) timedgrid::kGuardUs);
+    EXPECT_GE(err, -(int64_t) timedgrid::kGuardUs);
+    EXPECT_EQ(err, 0);
+}
+
+TEST(GridState, AMarkAlreadyPastIsNotAimedAt) {
+    // The next mark is a whole ROUND away, and holding an ack for 1.5 s to
+    // place it trades the thing the user notices for a statistic. Declining is
+    // the answer, and the caller then sends the old way.
+    const State st = aimable(3);
+    const int64_t just_missed = t0ForRound(st, 0) + (int64_t) st.params.ul_offset_us;
+    const UplinkAim a =
+        aimUplink(st, just_missed, kLead, kMaxWait);
+    EXPECT_FALSE(a.aimed);
+    EXPECT_EQ(a.cad_start_us, 0);
+}
+
+TEST(GridState, AnUplinkNeverWaitsLongerThanTheBackoffItReplaces) {
+    // The bound that makes this safe to ship: honouring the offset can only
+    // make an uplink EARLIER than the 29-290 ms random backoff, never later.
+    const State st = aimable(3);
+    for (int64_t off = -2'000'000; off <= 2'000'000; off += 7919) {
+        const UplinkAim a =
+            aimUplink(st, t0ForRound(st, 0) + off, kLead, kMaxWait);
+        if (!a.aimed) continue;
+        const int64_t wait = a.cad_start_us - (t0ForRound(st, 0) + off);
+        EXPECT_GE(wait, 0);
+        EXPECT_LE(wait, (int64_t) kMaxWait);
+    }
+}
+
+TEST(GridState, NoGridAndNoPublishedOffsetBothDecline) {
+    // Two independent refusals, and the second is the one that matters for
+    // rollout: a hub that has not published an offset gets exactly the
+    // behaviour that shipped before, on every node, with no flag to set.
+    State no_grid = aimable(3);
+    no_grid.active = false;
+    EXPECT_FALSE(aimUplink(no_grid, 0, kLead, kMaxWait).aimed);
+
+    State no_offset = gridded(3);      // ul_offset_us defaults to 0
+    ASSERT_EQ(no_offset.params.ul_offset_us, 0u);
+    EXPECT_FALSE(aimUplink(no_offset, 0, kLead, kMaxWait).aimed);
+}
+
+TEST(GridState, EveryAimedMarkIsOneOfThisNodesOwn) {
+    // Not the beacon slot's, and not a neighbour's. An aim that drifted onto
+    // another slot would be a systematic collision — 32 nodes transmitting into
+    // one window — which is worse than the unslotted uplink it replaces.
+    const State st = aimable(11);
+    for (int64_t off = -3'000'000; off <= 3'000'000; off += 4001) {
+        const UplinkAim a =
+            aimUplink(st, t0ForRound(st, 0) + off, kLead, kMaxWait);
+        if (!a.aimed) continue;
+        const int64_t mark = a.t0_us - (int64_t) st.params.ul_offset_us;
+        EXPECT_EQ((mark - st.anchor_us) % (int64_t) st.params.round_us,
+                  (int64_t) st.params.slot_index * (int64_t) st.params.pitch_us);
+    }
+}
+
+TEST(GridState, TheAckCaseIsTheOneThatHasToWork) {
+    // The load-bearing case, and the reason the bound is the backoff rather
+    // than something tidier. The hub transmits AT this node's mark; a 60 B
+    // downlink puts RxDone at mark + 38 912 us, and the node asks a moment
+    // later. The published 60 ms offset is then ~17 ms away — comfortably
+    // inside the bound, so an ack is placed without ever paying for the wait.
+    const State st = aimable(3);
+    const int64_t mark    = t0ForRound(st, 0);
+    const int64_t rx_done = mark + (int64_t) loratiming::t0ToRxDoneUs(60);
+    ASSERT_EQ(rx_done - mark, 38912);
+
+    const UplinkAim a = aimUplink(st, rx_done, kLead, kMaxWait);
+    ASSERT_TRUE(a.aimed);
+    EXPECT_EQ(a.t0_us - (int64_t) st.params.ul_offset_us, mark);   // THIS round
+    EXPECT_LT(a.cad_start_us - rx_done, 20000);
+}
+
+TEST(GridState, TurnaroundLongerThanTheOffsetMissesEveryMark) {
+    // HW-7's number showing itself. If the node cannot build and hand over a
+    // reply within ulOffsetUs of its mark, the instant is always in the past
+    // and the next one is a round away — so the aim declines every time, and
+    // the counter the dispatcher keeps is what says so. Silence here would look
+    // exactly like the offset working.
+    const State st = aimable(3);
+    const int64_t mark = t0ForRound(st, 0);
+    for (int64_t turnaround : {70'000, 100'000, 500'000})
+        EXPECT_FALSE(aimUplink(st, mark + turnaround, kLead, kMaxWait).aimed);
+}

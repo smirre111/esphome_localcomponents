@@ -160,3 +160,37 @@ TEST(LoraTiming, BurstOccupies1450msForARoutineCommand) {
     EXPECT_EQ(span, 1450048u);
     EXPECT_GT(span, 1'400'000u);
 }
+
+// ---------------------------------------------------------------------------
+// CAD, and the lead in front of an aimed uplink
+// ---------------------------------------------------------------------------
+
+TEST(LoraTiming, CadIsOneSymbolPlus32Chips) {
+    // Derived, not assumed: the datasheet's own decomposition is one symbol of
+    // listening (2^SF / BW) plus 32/BW of correlation. Both exact once SF and
+    // BW are fixed — unlike kDetectSymbolsAssumed, which is a rule of thumb.
+    EXPECT_EQ(kCadUs, 320u);
+    EXPECT_EQ(kCadUs, (1u << kSpreadingFactor) * 1000000u / kBandwidthHz
+                    + 32u * 1000000u / kBandwidthHz);
+}
+
+TEST(LoraTiming, CadStartIsTheFireInstantMinusTheCad) {
+    // The node transmits CAD-first, so a frame aimed at an instant must begin
+    // its CAD a whole CAD earlier or it arrives 320 us late — which is small,
+    // and exactly the kind of small that accumulates into a missed window when
+    // it is left out of the arithmetic entirely.
+    const int64_t t0 = 5'000'000;
+    EXPECT_EQ(cadStartInstantUs(t0, 0, 0), fireInstantUs(t0, 0) - (int64_t) kCadUs);
+    EXPECT_EQ(t0 - cadStartInstantUs(t0, 0, 0),
+              (int64_t) kPreambleToT0Us + (int64_t) kCadUs);
+}
+
+TEST(LoraTiming, UnmeasuredLeadsMakeTheUplinkLateNotEarly) {
+    // Both unmeasured terms are passed as zero, and the sign of that choice is
+    // the point: a zero lead fires LATE by exactly the term it omitted, which
+    // is a knowable error inside a 14 080 us guard. Guessing a value would put
+    // the error on the early side of the window AND make it unknowable.
+    const int64_t t0 = 5'000'000;
+    EXPECT_LT(cadStartInstantUs(t0, 3000, 200), cadStartInstantUs(t0, 0, 0));
+    EXPECT_EQ(cadStartInstantUs(t0, 0, 0) - cadStartInstantUs(t0, 3000, 200), 3200);
+}
