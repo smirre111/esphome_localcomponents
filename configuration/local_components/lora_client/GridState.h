@@ -153,4 +153,105 @@ constexpr bool isBeaconRound(const State &st, uint32_t round)
            (round % st.params.beacon_every_rounds) == 0;
 }
 
+// --- The beacon window (section 4.4) ---------------------------------------
+//
+// The 32 private windows sit at 32 different phases, so one broadcast cannot
+// reach them all. The beacon has its own instant, in its own slot, on beacon
+// rounds only, and every node opens it.
+
+// Which round contains `t0`, measured against THIS node's marks. The inverse of
+// t0ForRound, and the number both ends must agree on for "beacon round" to mean
+// the same thing — which is why the hub has to declare the round it actually
+// transmits in rather than 0.
+constexpr uint32_t roundForT0(const State &st, int64_t t0_us)
+{
+    const int64_t rel = t0_us - st.anchor_us
+                      - (int64_t) st.params.slot_index * (int64_t) st.params.pitch_us;
+    if (rel < 0 || st.params.round_us == 0) return 0;
+    return (uint32_t) (rel / (int64_t) st.params.round_us);
+}
+
+// The BEACON's T0 in a given round — the beacon slot's phase, not this node's.
+constexpr int64_t beaconT0ForRound(const State &st, uint32_t round)
+{
+    return st.anchor_us
+         + (int64_t) round * (int64_t) st.params.round_us
+         + (int64_t) st.params.beacon_slot * (int64_t) st.params.pitch_us;
+}
+
+// The first beacon T0 at or after `now`. Same explicit negative branch as
+// nextT0Us, and 0 when no cadence has been published — a caller must read that
+// as "there is no beacon", never as an instant.
+constexpr int64_t nextBeaconT0Us(const State &st, int64_t now_us)
+{
+    if (!st.active || st.params.beacon_every_rounds == 0) return 0;
+    const int64_t stride = (int64_t) st.params.round_us
+                         * (int64_t) st.params.beacon_every_rounds;
+    const int64_t base   = beaconT0ForRound(st, 0);
+    if (now_us <= base) return base;
+    return base + ((now_us - base + stride - 1) / stride) * stride;
+}
+
+enum class WindowKind : uint8_t { Own, Beacon };
+
+struct NextWindow
+{
+    int64_t    t0_us{0};
+    WindowKind kind{WindowKind::Own};
+};
+
+// The next window this node should open.
+//
+// `skip_own` is section 4.4's Tier 3 permission, and it drops the PRIVATE
+// window only. The beacon window is never skipped, for a reason that is easy to
+// get backwards: the beacon is the thing that grants and revokes the
+// permission, so a node that skipped it too could never learn it has traffic
+// waiting, and one lost beacon would strand it instead of expiring the skip.
+//
+// With no beacon cadence published this is exactly the old behaviour — the
+// node's own next mark.
+constexpr NextWindow nextWindow(const State &st, int64_t now_us, bool skip_own)
+{
+    const int64_t own    = nextT0Us(st, now_us);
+    const int64_t beacon = nextBeaconT0Us(st, now_us);
+    if (beacon == 0)              return NextWindow{own, WindowKind::Own};
+    if (skip_own)                 return NextWindow{beacon, WindowKind::Beacon};
+    // A tie goes to the beacon: it is the broadcast every node depends on, and
+    // the private window comes round again in one round.
+    return (beacon <= own) ? NextWindow{beacon, WindowKind::Beacon}
+                           : NextWindow{own,    WindowKind::Own};
+}
+
+// armDelayUs for whichever window comes next, reporting which one it is: the
+// caller has to know, because a beacon window that closes empty is not a missed
+// MARK and must not feed the demotion counter.
+constexpr int64_t nextWindowArmDelayUs(const State &st, int64_t now_us,
+                                       int64_t lead_us, bool skip_own,
+                                       WindowKind &kind_out)
+{
+    if (!st.active) { kind_out = WindowKind::Own; return 1; }
+    const NextWindow w = nextWindow(st, now_us, skip_own);
+    kind_out = w.kind;
+    const int64_t d = armInstantUs(st, w.t0_us) - lead_us - now_us;
+    return (d < 1) ? 1 : d;
+}
+
+// --- Re-anchoring from a beacon --------------------------------------------
+//
+// A beacon is the node's chance to correct the drift accumulated since the last
+// frame, which is what lets it hold Mode B for hours rather than for
+// resyncMaxS. But it is also a frame the node timed before authenticating, so
+// an unbounded correction would let anything in radio range walk the anchor
+// away.
+//
+// The rule: correct only by what fits inside the guard band. A larger error is
+// not drift — one round at +/-20 ppm is 30 us, and a whole resyncMaxS of it
+// still fits inside G — so it is either a foreign frame or a node that has
+// already lost the grid. Both are cases for DEMOTING rather than for chasing
+// the anchor, which is what the phase tracker's own criteria then do.
+constexpr bool reanchorIsSane(int64_t err_us, uint32_t guard_us)
+{
+    return err_us <= (int64_t) guard_us && err_us >= -(int64_t) guard_us;
+}
+
 }  // namespace gridstate

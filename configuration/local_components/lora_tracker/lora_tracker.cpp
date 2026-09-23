@@ -32,6 +32,9 @@
 // Symbol arithmetic for the Bx receive timestamp (T0 from RxDone). Same
 // reasoning as above: qualified path, and unconditional.
 #include "esphome/components/lora_client/LoraTiming.h"
+// Section 4.4's pending-data bitmap. The tracker publishes it because the
+// fleet-wide view is here, where the queues are.
+#include "esphome/components/lora_client/PendingData.h"
 
 #ifdef USE_OTA
 #include "esphome/components/ota/ota_backend.h"
@@ -183,6 +186,10 @@ namespace esphome
     {
       if (lora_tx_busy_ == false)
         this->receive();
+      // Section 4.4's broadcast beacon. Cheap and idempotent — it queues at most
+      // one frame per beacon round — so it belongs on the loop rather than on a
+      // timer of its own.
+      this->serviceBeacon();
       esphome::delay(10);
       // this->sendPacketBytes(txBuf, len);
 
@@ -502,6 +509,142 @@ namespace esphome
                (unsigned) timedgrid::kSlotCount,
                (unsigned) timedgrid::kSlotPitchUs,
                (unsigned) timedgrid::kRoundUs);
+    }
+
+    uint32_t LORATracker::roundForSlotT0(uint8_t slot, int64_t t0_us) const
+    {
+      if (!this->grid_started_)
+        return 0;
+      const int64_t rel = t0_us - this->grid_anchor_us_
+                        - (int64_t) (slot % timedgrid::kSlotCount)
+                            * (int64_t) timedgrid::kSlotPitchUs;
+      if (rel < 0)
+        return 0;
+      return (uint32_t) (rel / (int64_t) timedgrid::kRoundUs);
+    }
+
+    uint32_t LORATracker::beaconRoundForT0(int64_t t0_us) const
+    {
+      return this->roundForSlotT0((uint8_t) timedgrid::kBeaconSlotIndex, t0_us);
+    }
+
+    int64_t LORATracker::nextBeaconT0Us(int64_t now_us) const
+    {
+      if (!this->grid_started_ || timedgrid::kBeaconEveryRounds == 0)
+        return 0;
+      // The beacon slot's marks come every round; only every Nth is a beacon.
+      const int64_t stride = (int64_t) timedgrid::kRoundUs
+                           * (int64_t) timedgrid::kBeaconEveryRounds;
+      const int64_t base   = this->grid_anchor_us_
+                           + (int64_t) timedgrid::kBeaconSlotIndex
+                               * (int64_t) timedgrid::kSlotPitchUs;
+      if (now_us <= base)
+        return base;
+      return base + ((now_us - base + stride - 1) / stride) * stride;
+    }
+
+    // Section 4.4. The frame that keeps a node IN Mode B.
+    //
+    // Without it a node holds phase only for resyncMaxS after each addressed
+    // frame — at 3.5 commands/day that is 2.9 % of the day on the grid, and no
+    // measurable battery saving, so the mode would buy a narrower window for
+    // nothing. Cost to the hub is FLAT IN NODE COUNT: one broadcast, 13.1 s of
+    // air per day at the default cadence, against 80.1 s/day for today's
+    // bursts.
+    void LORATracker::serviceBeacon()
+    {
+      if (!this->grid_started_ || timedgrid::kBeaconEveryRounds == 0)
+        return;
+
+      const int64_t now = esp_timer_get_time();
+      const int64_t t0  = this->nextBeaconT0Us(now);
+      if (t0 <= 0)
+        return;
+
+      const uint32_t round = this->beaconRoundForT0(t0);
+      if (round == this->beacon_round_queued_)
+        return;                       // already placed for this beacon
+
+      // Queue only once the mark is close enough that a placed frame is worth
+      // holding a buffer for, and no closer than the queue can fire on. The
+      // buffer pool is five deep, so a beacon queued minutes ahead would hold a
+      // fifth of it for the whole interval.
+      const int64_t fire = loratiming::fireInstantUs(t0, 0);
+      const int64_t lead = fire - now;
+      if (lead > (int64_t) timedgrid::kRoundUs || lead < txqueue::kPrepareLeadUs)
+        return;
+
+      LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = LORATracker::broadcastAddressing;
+      header.destsubnet    = LORATracker::subnetAddressing;
+      header.senderaddress = esphome::lora_tracker::kHubAddress;
+      // A broadcast belongs to no per-node sequence, and the nodes exempt it
+      // from their replay filter for exactly that reason: running it through
+      // one would ratchet every node's rx counter onto the beacon's. Its replay
+      // protection is txRound — a replayed beacon predicts a mark rounds in the
+      // past, which no node will accept.
+      header.msgid         = 0;
+      header.burstindex    = 0;
+      header.burstcount    = 1;
+      op.header = &header;
+
+      GridBeacon gb = GRID_BEACON__INIT;
+      gb.txround = round;
+      gb.txslot  = timedgrid::kBeaconSlotIndex;
+      // ALL LISTENING, deliberately, and not a placeholder.
+      //
+      // A clear bit tells a node to stop listening for up to a beacon interval.
+      // Two independent things have to be true before this hub may clear one,
+      // and neither is today:
+      //
+      //   * The beacon is unauthenticated — one broadcast cannot be sealed with
+      //     32 per-node session keys — so the nodes refuse a mask from it
+      //     outright. Tier 3's saving needs a fleet key first.
+      //   * Even authenticated, a cleared bit is a promise this hub cannot keep
+      //     for an INTERACTIVE node: Home Assistant can produce a command at
+      //     any instant, and the node would not be listening for up to 5.8
+      //     minutes. Tier 3 suits automatic-mode nodes, which are already
+      //     unreachable between check-ins by design (section 5.5).
+      //
+      // Publishing all-set is the honest state and costs nothing: it is what
+      // pending::allListening() exists for, and what every node assumes anyway
+      // until told otherwise.
+      gb.pendingmask      = pending::allListening();
+      gb.pendingmaskvalid = true;
+      op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON;
+      op.gridbeacon = &gb;
+
+      const size_t len = lora_client_operation_message__get_packed_size(&op);
+      if (len == 0 || len > BUFFER_SIZE)
+      {
+        ESP_LOGE(TAG, "beacon would not fit (%u B)", (unsigned) len);
+        this->beacon_round_queued_ = round;   // do not retry it every loop
+        return;
+      }
+      std::vector<uint8_t> buf(len);
+      lora_client_operation_message__pack(&op, buf.data());
+
+      TxPolicy p;
+      p.copies      = 1;              // one broadcast, on one mark
+      p.stride_ms   = 0;
+      p.earliest_us = fire;
+      p.priority    = 0;              // a beacon that slips its mark is useless
+      if (!this->send(buf.data(), buf.size(), p))
+      {
+        // Dropped rather than queued: no pool buffer. Say so, and let the next
+        // beacon round try again — recording the round as queued would hide a
+        // hub that has stopped beaconing entirely.
+        ESP_LOGW(TAG, "beacon for round %u was dropped, not queued",
+                 (unsigned) round);
+        return;
+      }
+
+      this->beacon_round_queued_ = round;
+      this->beacons_sent_++;
+      ESP_LOGI(TAG, "beacon queued: round %u, slot %u, T0 %lld us, fire %lld us",
+               (unsigned) round, (unsigned) timedgrid::kBeaconSlotIndex,
+               (long long) t0, (long long) fire);
     }
 
     int64_t LORATracker::nextT0ForSlotUs(uint8_t slot, int64_t now_us) const

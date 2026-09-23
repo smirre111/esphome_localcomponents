@@ -170,6 +170,29 @@ namespace esphome
       // is one grid per radio: two anchors would put two nodes on overlapping
       // slots while each believed it owned its own.
       void      startGrid();
+
+      // --- Section 4.4: the periodic broadcast beacon ---------------------
+      //
+      // It lives on the TRACKER, not on a listener, for the same reason the
+      // anchor does: there is one grid per radio and one beacon for the whole
+      // fleet. A per-listener beacon would be 32 broadcasts of the same frame,
+      // which is the unicast keepalive section 4.4 prices and rejects.
+      //
+      // Called from loop(). Cheap and idempotent: it queues at most one beacon
+      // per beacon round, placed on that round's beacon mark.
+      void      serviceBeacon();
+      // The round `t0` falls in, for the beacon slot. The number both ends must
+      // agree on: the hub declares it so "beacon round" means the same thing at
+      // each end.
+      uint32_t  beaconRoundForT0(int64_t t0_us) const;
+      // The round a given slot's mark falls in. A placed frame declares this so
+      // the node numbers its rounds the same way the hub does — without it,
+      // "beacon round" means something different at each end.
+      uint32_t  roundForSlotT0(uint8_t slot, int64_t t0_us) const;
+      // The next beacon mark at or after now_us, and 0 when there is no grid.
+      int64_t   nextBeaconT0Us(int64_t now_us) const;
+      // For tests: how many beacons have actually been queued.
+      uint32_t  beaconsSent() const { return this->beacons_sent_; }
       int64_t   gridAnchorUs() const { return this->grid_anchor_us_; }
       bool      gridStarted() const  { return this->grid_started_; }
 
@@ -324,6 +347,13 @@ namespace esphome
 
       esp_err_t init_memory_pool(void);
       int64_t grid_anchor_us_{0};
+      // The last beacon round this hub queued a frame for, so loop() does not
+      // queue the same beacon repeatedly while its mark approaches. Held as
+      // "one past" rather than a bool so a beacon missed entirely (a hub busy
+      // through the whole window) is simply skipped rather than sent late into
+      // a slot the nodes have stopped listening in.
+      uint32_t beacon_round_queued_{0xFFFFFFFFu};
+      uint32_t beacons_sent_{0};
       bool    grid_started_{false};
       // When the hub's own burst stops occupying the channel, including the
       // post-burst response window sendTask holds the radio in.

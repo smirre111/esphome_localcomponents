@@ -423,6 +423,47 @@ so the beacon covers only the gaps; and `symTimeout` is a runtime write, so the
 window can widen while sync is stale (200 symbols → ±25.0 ms, 3.41 % duty,
 holds 20 ppm for 20.8 min — still better than today's 5.9 %).
 
+**BUILT.** `GridBeacon` on the wire, `LORATracker::serviceBeacon()` transmitting
+it from the loop, and the node opening a beacon window and re-anchoring off it.
+It is the tracker's rather than a listener's for the same reason the anchor is:
+one grid per radio, one beacon for the fleet — 32 per-listener beacons would BE
+the unicast keepalive priced below. Three things were needed before it could
+work at all, and each was its own defect:
+
+- **The two ends numbered rounds differently.** `send_grid_sync` declared
+  `txround = 0` while the frame went out in some later round, so the node
+  numbered its rounds from wherever the frame happened to land and "beacon
+  round" meant something different at each end. The mark it will be placed on
+  is now chosen BEFORE the frame is built (`nextPlacementT0_`, shared with
+  `send_aligned_` so the two cannot answer differently) and the true round is
+  declared.
+- **A node that skipped its window would have skipped the beacon too.** The
+  skip permission drops the private window only; `gridstate::nextWindow` never
+  skips the beacon, because the beacon is what grants and revokes the
+  permission and what expires it when it goes missing.
+- **The plaintext gate would have refused it.** A node holding a session
+  refuses every unauthenticated frame, and one broadcast cannot be sealed with
+  32 per-node session keys. `CMD_GRIDBEACON` is exempt, and what makes that
+  safe is that its effects are bounded by the node's own arithmetic rather than
+  by trust: the anchor moves only within the guard band
+  (`gridstate::reanchorIsSane`), a replayed beacon predicts a mark rounds in
+  the past and is refused by the same test, and the pending mask — the one
+  effect that could make a node listen LESS — is refused outright from an
+  unauthenticated beacon. It is exempt from the replay filter for a different
+  reason: a broadcast belongs to no per-node sequence, and running it through
+  one would ratchet every node's rx counter onto the beacon's.
+
+**Tier 3 (the pending mask) is published all-listening, deliberately.** Two
+independent things must be true before this hub may clear a bit, and neither is
+today. The beacon is unauthenticated, so the nodes refuse a mask from it at all
+— the saving needs a fleet key, which is a protocol change. And even
+authenticated, a clear bit is a promise the hub cannot keep for an INTERACTIVE
+node: Home Assistant can produce a command at any instant and the node would
+not be listening for up to 5.8 minutes, which is the opposite of what "timed
+interactive" is for. Tier 3 suits automatic-mode nodes, which are already
+unreachable between check-ins by design (§5.5). The mechanism is built and
+tested on both ends; what is published is `pending::allListening()`.
+
 **The beacon is not optional.** With it off, a node holds phase only for
 `resyncMaxS` after each frame — at 3.5 commands/day and the ±20 ppm ceiling of
 704 s that is `3.5 × 704 / 86400` = **2.9 % of the day** in Mode B, and there is
@@ -966,7 +1007,7 @@ Track B below, not here.
 | **B1** | ~~Hub grid anchor; bursts start at the addressed node's `T0`~~ — **DONE**, alignment **default off** (it costs up to 1.5 s of latency and buys nothing until B3; B3 enables it per promoted node). The startup broadcast demote moves to B3, where `GridSync` exists. | bursts observably start on the grid; nothing regresses |
 | **B1a** | **DONE.** `TxQueue.h` (shared, gated) and `sendTask` draining `data_queue` into it and waiting on `nextEligibleUs()` replaced an `xQueueReceive(portMAX_DELAY)` that held a deferred frame not until it was eligible but until unrelated traffic woke the task. `send_aligned_` now produces placed frames for every grid-aligned downlink — `earliest_us` = the node's next mark clear of the hub's own burst — instead of holding them in an ESPHome timeout that could only hand them to the back of the queue near the right time (and that silently REPLACED a second command for the same node inside one round; the second now goes to the following mark). `earliest_us` reaches the air instant too: `popDue()` releases a placed frame one prepare-lead early and `firePacket()` fires it on the mark (B5). **Corrected after review:** `earliest_us` is a FIRE instant and both producers were handing it a wanted T0, so every placed frame landed 3136 µs late — `LoraTiming.h`'s own `fireInstantUs()`, the declared conversion for this, had no production caller in either repo. Also corrected: `send()` returned void and drops silently on an exhausted buffer pool, so the mark was recorded as spent for a frame that never entered the queue, pushing the next real command a further round out. **Still open:** the deferral moved from the heap into a 5-entry buffer pool (`POOL_SIZE`) against a 16-entry queue, and a placed frame holds its buffer until its mark; and `send_aligned_` is reached only by the tracked-op path, so GridSync, TimeSync and ScheduleConfig are still unplaced. `txqueue::deferUntilUs()` is superseded rather than wired — see §11a. | "a frame can be placed 'not before round n+2, behind nothing else'" — **expressible and expressed.** Met. |
 | **B2** | ~~Node phase tracking~~ — **DONE.** `PhaseTracker.h` (shared, gated); sample committed only for addressed frames; distribution not mean, so a bimodal set is rejected on spread. Beacon carries `rtcSlowSrc`, ppm, phase error/spread/count. 14 tests. Original text: `T0_measured`, `phaseErrUs`, `ppmEstimate`, `rtcSlowSrc` in the beacon. **Must filter the phase sample by slot/address first**: `noteDriftSample` is called before parsing by design (`frtosTasks.cpp:160-165`), so a node currently stamps its neighbour's frames and `phaseErrUs` would be bimodal at 0 and ±46.9 ms. | `phaseErrUs` inside ±2 ms in the field, on every node, over days |
-| **B3** | ~~**Mode B is unreachable**~~ — **REACHABLE NOW, both ends; still default OFF and still ungated by a bench measurement.** Node: adopting a `GridSync` enables timed RX (`setTimedRxEnabled` had no caller); the phase expectation is predicted from the grid on every sample instead of being frozen at adoption (`setExpectedT0Us` had no caller, so `phaseTrustworthy()` went permanently false on the *second* addressed frame); the demotion body is reachable from the live counting path (it sat in `noteMarkOutcome`, which has none); and `resyncMaxS` and the anti-flap hold now come from real timestamps rather than hardcodes that disabled both criteria. Hub: `LORAListener::enable_timed_mode()` starts the grid, sets alignment and publishes `GridSync(true)` — exposed as a **`switch`** in `loradevices.yml`, default off, per node. **This also unblocks HW-2**, which needs a `GridSync` carrying `armOffsetUs`. **§4.6's hub half now works:** `txPolicyFor()` and `HubBelief` had no production caller at all, so the whole airtime saving of Mode B — 17 copies down to 1 — was written, tested and never asked for; a hub in Mode B paid Mode A's cost for a narrower window. Each listener now maintains its belief from observed events: `admit_frame_` measures every uplink's T0 against the grid (its mark plus the `ulOffsetUs` the hub itself published, within the same guard the node's phase tracking uses) and counts consecutive in-slot arrivals; a login sets `session_changed`; the first retry of a single shot sets `single_shot_unacked`, which is Rule 4's one-frame exposure; `firmware_known` follows the beacon's version. `send_aligned_` asks the policy and sends ONE copy when it says so. **Still open, node half:** `in_slot_uplinks` in the node's `NodeState` is still hardcoded. It is *hub-confirmed* by definition — "a beacon saying I am ready says nothing about where its window actually landed" — so the node cannot fill it in from its own measurements without turning it into the claim §4.6 rejects. It needs the count on the wire, and the hub no longer measures it either — promotion moved to the node's `PhaseReport`, so `in_slot_acks` is a diagnostic on both ends. Left optimistic meanwhile, as the other criteria gate promotion. **Note what did NOT close this:** the hub's periodic broadcast beacon (§4.4, `beaconEveryRounds`, `isBeaconRound()` still with zero production callers) is a DOWNLINK that keeps node phase fresh and carries the pending mask. It is not a carrier for anything the node has to tell the hub, so it was never the mechanism §4.6 was waiting on; that turned out to be the CommandAck. The broadcast beacon remains unimplemented and remains required for the mode's battery case. And the gate below is unchanged. | `T_detect` on the bench first, then reception ≥ Mode A over a week |
+| **B3** | ~~**Mode B is unreachable**~~ — **REACHABLE NOW, both ends; still default OFF and still ungated by a bench measurement.** Node: adopting a `GridSync` enables timed RX (`setTimedRxEnabled` had no caller); the phase expectation is predicted from the grid on every sample instead of being frozen at adoption (`setExpectedT0Us` had no caller, so `phaseTrustworthy()` went permanently false on the *second* addressed frame); the demotion body is reachable from the live counting path (it sat in `noteMarkOutcome`, which has none); and `resyncMaxS` and the anti-flap hold now come from real timestamps rather than hardcodes that disabled both criteria. Hub: `LORAListener::enable_timed_mode()` starts the grid, sets alignment and publishes `GridSync(true)` — exposed as a **`switch`** in `loradevices.yml`, default off, per node. **This also unblocks HW-2**, which needs a `GridSync` carrying `armOffsetUs`. **§4.6's hub half now works:** `txPolicyFor()` and `HubBelief` had no production caller at all, so the whole airtime saving of Mode B — 17 copies down to 1 — was written, tested and never asked for; a hub in Mode B paid Mode A's cost for a narrower window. Each listener now maintains its belief from observed events: `admit_frame_` measures every uplink's T0 against the grid (its mark plus the `ulOffsetUs` the hub itself published, within the same guard the node's phase tracking uses) and counts consecutive in-slot arrivals; a login sets `session_changed`; the first retry of a single shot sets `single_shot_unacked`, which is Rule 4's one-frame exposure; `firmware_known` follows the beacon's version. `send_aligned_` asks the policy and sends ONE copy when it says so. **Still open, node half:** `in_slot_uplinks` in the node's `NodeState` is still hardcoded. It is *hub-confirmed* by definition — "a beacon saying I am ready says nothing about where its window actually landed" — so the node cannot fill it in from its own measurements without turning it into the claim §4.6 rejects. It needs the count on the wire, and the hub no longer measures it either — promotion moved to the node's `PhaseReport`, so `in_slot_acks` is a diagnostic on both ends. Left optimistic meanwhile, as the other criteria gate promotion. **Note what did NOT close this:** the hub's periodic broadcast beacon (§4.4) is a DOWNLINK that keeps node phase fresh and carries the pending mask. It is not a carrier for anything the node has to tell the hub, so it was never the mechanism §4.6 was waiting on; that turned out to be the CommandAck. **The beacon is now built** — `GridBeacon`, `serviceBeacon()`, and the node's beacon window — which is what makes the mode worth being in: without it a node holds phase only for `resyncMaxS` after each addressed frame. And the gate below is unchanged. | `T_detect` on the bench first, then reception ≥ Mode A over a week |
 busy window before each burst (last copy's air-end plus `responseWindowMs`) and
 `msUntilNextClearT0()` skips marks that fall inside it, so a timed downlink
 moves to the same slot a round later rather than being transmitted into a burst.
@@ -1189,11 +1230,10 @@ Recorded here rather than left to look maintained.
   `onReceiveNew`'s `saved_header` copied four fields and dropped `burstIndex`
   and `burstCount`, so every handler downstream read the burst position as 0
   regardless of which copy arrived.
-  **Still open here:** `txround` stays 0 while the frame goes out in some later
-  round. That is sound for the ANCHOR — shifting the declared round by n shifts
-  the solved anchor by n·`kRoundUs`, and the mark set is invariant modulo
-  `kRoundUs` — but not for the round COUNTER, which `beacon_every_rounds` phases
-  off, so hub and node can disagree about which round is a beacon round.
+  ~~**Still open here:** `txround` stays 0~~ — **FIXED.** It was sound for the
+  ANCHOR and wrong for the round COUNTER, which `beacon_every_rounds` phases
+  off; the mark is now chosen before the frame is built and the true round is
+  declared. This was a prerequisite for §4.4's beacon, not a tidy-up.
 - ~~**§4.6's in-slot predicate is unreachable.**~~ **RESOLVED, by changing the
   evidence rather than the transmit path.** The predicate needed
   `|T0 − mark − 60000| ≤ 14080` from a node whose every uplink is preceded by
@@ -1322,7 +1362,8 @@ Ordered by what each one blocks.
 | ~~`AckCache.h` — the whole header~~ | ~~node `main/` — zero `.cpp` call sites~~ | **FIXED** — wired at `sendCommandAck()` and the `admitFrame` msgid rejection | ~~B4~~ |
 | ~~`CmdDispatcher::noteMarkOutcome()`~~ | ~~node~~ | **FIXED** — the demotion body is its own function, called from both counting paths | ~~Mode B demotion~~ |
 | ~~`CmdDispatcher::setExpectedT0Us()`~~ | ~~node~~ | **FIXED** — the expectation is predicted from the grid on every sample, nearest mark rather than next | ~~B2's gate~~ |
-| ~~`pending::Mask` on the wire~~ | ~~hub~~ | **REACHABLE** — `send_grid_sync(true)` is now called | ~~§4.4~~ |
+| ~~`pending::Mask` on the wire~~ | ~~hub~~ | **REACHABLE** — `send_grid_sync(true)` is now called, and §4.4's broadcast beacon carries it too. Published `allListening()` on purpose: see §4.4 for the two independent reasons a bit may not be cleared yet | ~~§4.4~~ |
+| ~~`gridstate::isBeaconRound()`~~ | ~~both~~ | **REACHABLE** — the node's arming path asks for the next window rather than the next mark (`gridstate::nextWindow`), and the hub's `serviceBeacon()` places a broadcast on the beacon mark | ~~§4.4~~ |
 | ~~`CmdDispatcher::setTimedRxEnabled()`~~ | ~~node~~ | **FIXED** — adopting a grid enables timed RX | ~~Mode B on the node side~~ |
 | ~~`CmdDispatcher::setBenchNode()`~~ | ~~node~~ | **FIXED** — `CONFIG_BLINDS_BENCH_NODE`, a build-time flag. Deliberately not over the air: the obvious carrier, `ClientConfig`, is unauthenticated and gated only by a MAC broadcast in the clear | ~~HW-2~~ |
 | ~~`ModeTest.mode`~~ | ~~node `CmdDispatcher.cpp:2364`~~ | **FIXED.** It was stored in `mt_mode_` and echoed into the report and nothing else, so the "Mode Test B" button ran a **Mode A** measurement labelled `mode = 2` and the hub logged it as a Mode B result. `handleModeTest` now applies the mode to `timed_rx_enabled_`, and the report's label is DERIVED from that state (`modeApplied`) rather than copied from the request, so a mode that fails to apply cannot be reported as if it had. Two modes are now refused instead of silently not applied: **MODE_C**, because Class A is a sleep discipline rather than a flag this handler can flip, and **MODE_B/MODE_SWEEP on a node with no adopted grid**, where there is no anchor to arm a window against. The save/restore either side of the test was already written for a mode that changes; only the change was missing. | ~~every Mode B number the system can currently produce~~ |

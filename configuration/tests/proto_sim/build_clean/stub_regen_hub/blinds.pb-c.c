@@ -682,6 +682,51 @@ void   mac_control__free_unpacked
   assert(message->base.descriptor == &mac_control__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   grid_beacon__init
+                     (GridBeacon         *message)
+{
+  static const GridBeacon init_value = GRID_BEACON__INIT;
+  *message = init_value;
+}
+size_t grid_beacon__get_packed_size
+                     (const GridBeacon *message)
+{
+  assert(message->base.descriptor == &grid_beacon__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t grid_beacon__pack
+                     (const GridBeacon *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &grid_beacon__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t grid_beacon__pack_to_buffer
+                     (const GridBeacon *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &grid_beacon__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+GridBeacon *
+       grid_beacon__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (GridBeacon *)
+     protobuf_c_message_unpack (&grid_beacon__descriptor,
+                                allocator, len, data);
+}
+void   grid_beacon__free_unpacked
+                     (GridBeacon *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &grid_beacon__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   grid_sync__init
                      (GridSync         *message)
 {
@@ -2542,6 +2587,83 @@ const ProtobufCMessageDescriptor mac_control__descriptor =
   (ProtobufCMessageInit) mac_control__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
+static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[4] =
+{
+  {
+    "txRound",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridBeacon, txround),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "txSlot",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridBeacon, txslot),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "pendingMask",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridBeacon, pendingmask),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "pendingMaskValid",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(GridBeacon, pendingmaskvalid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned grid_beacon__field_indices_by_name[] = {
+  2,   /* field[2] = pendingMask */
+  3,   /* field[3] = pendingMaskValid */
+  0,   /* field[0] = txRound */
+  1,   /* field[1] = txSlot */
+};
+static const ProtobufCIntRange grid_beacon__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 4 }
+};
+const ProtobufCMessageDescriptor grid_beacon__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "GridBeacon",
+  "GridBeacon",
+  "GridBeacon",
+  "",
+  sizeof(GridBeacon),
+  4,
+  grid_beacon__field_descriptors,
+  grid_beacon__field_indices_by_name,
+  1,  grid_beacon__number_ranges,
+  (ProtobufCMessageInit) grid_beacon__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
 static const ProtobufCFieldDescriptor grid_sync__field_descriptors[15] =
 {
   {
@@ -3630,7 +3752,7 @@ const ProtobufCMessageDescriptor mode_test_report__descriptor =
   (ProtobufCMessageInit) mode_test_report__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[14] =
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[15] =
 {
   {
     "header",
@@ -3800,6 +3922,18 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "gridbeacon",
+    23,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, gridbeacon),
+    &grid_beacon__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   7,   /* field[7] = basenonce */
@@ -3807,6 +3941,7 @@ static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   5,   /* field[5] = coverconfig */
   10,   /* field[10] = drifttest */
   1,   /* field[1] = encrypted */
+  14,   /* field[14] = gridbeacon */
   12,   /* field[12] = gridsync */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
@@ -3822,7 +3957,7 @@ static const ProtobufCIntRange lora_client_operation_message__number_ranges[3 + 
   { 1, 0 },
   { 9, 1 },
   { 20, 11 },
-  { 0, 14 }
+  { 0, 15 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -3832,7 +3967,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  14,
+  15,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
   3,  lora_client_operation_message__number_ranges,

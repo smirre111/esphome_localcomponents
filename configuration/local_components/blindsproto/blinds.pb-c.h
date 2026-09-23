@@ -30,6 +30,7 @@ typedef struct NodeWakeBeacon NodeWakeBeacon;
 typedef struct LoraHeader LoraHeader;
 typedef struct DriftTest DriftTest;
 typedef struct MacControl MacControl;
+typedef struct GridBeacon GridBeacon;
 typedef struct GridSync GridSync;
 typedef struct ModeTest ModeTest;
 typedef struct Hist Hist;
@@ -698,7 +699,51 @@ struct  MacControl
  * grid it does not agree with: a hub and node compiled against different
  * TimedGrid.h constants would otherwise each believe in a different slot pitch
  * and quietly miss every window.
+ * ---------------------------------------------------------------------------
+ * The periodic broadcast beacon (section 4.4).
+ * Separate from GridSync, and the separation is the point. GridSync ASSIGNS —
+ * its slotIndex is "your slot", its params are the grid's geometry — and a
+ * broadcast carrying those fields would hand every node in the fleet the same
+ * slot. This carries only what is true for everyone: where this frame sits on
+ * the grid, and who has traffic waiting.
+ * What it is FOR is phase. Without it a node holds phase only for resyncMaxS
+ * after each addressed frame; at 3.5 commands/day that is 2.9 % of the day in
+ * Mode B and no measurable battery saving. The beacon is the mechanism that
+ * keeps a node in the mode, which is why section 4.4 says it ships WITH the
+ * one-window change rather than after it.
+ * It is broadcast and unauthenticated by construction — one frame for 32 nodes
+ * cannot be encrypted per session — so the node bounds what it may do: a
+ * re-anchor is accepted only within the guard band (gridstate::reanchorIsSane),
+ * which is far more than real drift and far less than a slot.
  */
+struct  GridBeacon
+{
+  ProtobufCMessage base;
+  /*
+   * Where this frame sits on the grid, so a node can re-solve its anchor.
+   * txRound is the round the hub ACTUALLY transmits in — a beacon declaring 0
+   * would put the two ends on different round numbers, and "beacon round"
+   * would then mean something different at each end.
+   */
+  uint32_t txround;
+  /*
+   * the beacon slot
+   */
+  uint32_t txslot;
+  /*
+   * Section 4.4 Tier 3, same semantics as GridSync's copy: one bit per slot,
+   * SET means the hub has traffic for that node, and validity is carried
+   * separately because a zeroed proto3 field cannot be told apart from a
+   * deliberate "nothing for anyone".
+   */
+  uint32_t pendingmask;
+  protobuf_c_boolean pendingmaskvalid;
+};
+#define GRID_BEACON__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_beacon__descriptor) \
+    , 0, 0, 0, 0 }
+
+
 struct  GridSync
 {
   ProtobufCMessage base;
@@ -993,6 +1038,7 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL = 20,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC = 21,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST = 22,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON = 23,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
@@ -1017,6 +1063,12 @@ struct  LoraClientOperationMessage
      * structured fields above are absent.  Field 9 keeps a 1-byte tag.
      */
     EncryptedPayload *encrypted;
+    /*
+     * Section 4.4's periodic broadcast beacon. A node that does not know
+     * this field ignores it and simply keeps holding phase off ordinary
+     * traffic, which is the safe direction.
+     */
+    GridBeacon *gridbeacon;
     /*
      * The timed-window grid (B3). A node that does not know this field
      * ignores it and stays in Mode A, which is the safe direction.
@@ -1443,6 +1495,25 @@ MacControl *
 void   mac_control__free_unpacked
                      (MacControl *message,
                       ProtobufCAllocator *allocator);
+/* GridBeacon methods */
+void   grid_beacon__init
+                     (GridBeacon         *message);
+size_t grid_beacon__get_packed_size
+                     (const GridBeacon   *message);
+size_t grid_beacon__pack
+                     (const GridBeacon   *message,
+                      uint8_t             *out);
+size_t grid_beacon__pack_to_buffer
+                     (const GridBeacon   *message,
+                      ProtobufCBuffer     *buffer);
+GridBeacon *
+       grid_beacon__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_beacon__free_unpacked
+                     (GridBeacon *message,
+                      ProtobufCAllocator *allocator);
 /* GridSync methods */
 void   grid_sync__init
                      (GridSync         *message);
@@ -1680,6 +1751,9 @@ typedef void (*DriftTest_Closure)
 typedef void (*MacControl_Closure)
                  (const MacControl *message,
                   void *closure_data);
+typedef void (*GridBeacon_Closure)
+                 (const GridBeacon *message,
+                  void *closure_data);
 typedef void (*GridSync_Closure)
                  (const GridSync *message,
                   void *closure_data);
@@ -1739,6 +1813,7 @@ extern const ProtobufCMessageDescriptor lora_header__descriptor;
 extern const ProtobufCMessageDescriptor drift_test__descriptor;
 extern const ProtobufCMessageDescriptor mac_control__descriptor;
 extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
+extern const ProtobufCMessageDescriptor grid_beacon__descriptor;
 extern const ProtobufCMessageDescriptor grid_sync__descriptor;
 extern const ProtobufCMessageDescriptor mode_test__descriptor;
 extern const ProtobufCEnumDescriptor    mode_test__mode__descriptor;

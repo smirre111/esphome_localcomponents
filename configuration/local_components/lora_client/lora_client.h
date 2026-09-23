@@ -298,6 +298,9 @@ namespace esphome
       // when RX1 passed with no data. False means neither is reachable and the
       // caller should fall back to the burst.
       bool send_into_class_a_window_(const uint8_t *buf, size_t len);
+      // The mark a placed frame for this node would go out on. Shared with
+      // send_grid_sync, which must declare the round it will be transmitted in.
+      int64_t nextPlacementT0_(int64_t now_us) const;
       // Capture this node's own uplink T0 and score it against the grid. Called
       // only for a frame that has earned the replay counter — see
       // commit_rx_msgid_.

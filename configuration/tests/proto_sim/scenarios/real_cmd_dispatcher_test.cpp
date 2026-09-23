@@ -3597,3 +3597,157 @@ TEST_F(RealNodeFixture, ReAnchoringClearsWhatThePhaseReportWouldClaim) {
     disp.fillPhaseReport(pr);
     EXPECT_EQ(pr.samples, 0u) << "old samples describe the old anchor";
 }
+
+// ---------------------------------------------------------------------------
+// Section 4.4 — the broadcast beacon, on the real dispatcher.
+//
+// This is the frame that keeps a node IN Mode B: without it a node holds phase
+// only for resyncMaxS after each addressed frame, which at 3.5 commands/day is
+// 2.9 % of the day on the grid and no battery saving at all.
+//
+// It is also the only frame the node acts on without authenticating, so most of
+// what is pinned here is what it may NOT do.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<uint8_t> build_grid_beacon(uint32_t round, uint32_t slot,
+                                       uint32_t msgid, uint32_t mask = 0,
+                                       bool mask_valid = false) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = 0xFF;          // broadcast: one frame for the fleet
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = msgid;
+    hdr.burstindex    = 0;
+    hdr.burstcount    = 1;
+
+    GridBeacon gb = GRID_BEACON__INIT;
+    gb.txround          = round;
+    gb.txslot           = slot;
+    gb.pendingmask      = mask;
+    gb.pendingmaskvalid = mask_valid;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header     = &hdr;
+    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON;
+    op.gridbeacon = &gb;
+
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+// The rx instant that makes a beacon for `round` land `err_us` from where this
+// node predicts the beacon mark. Built from the node's own grid so the test
+// states the ERROR it is exercising rather than an opaque timestamp.
+int64_t rx_for_beacon(const gridstate::State &st, uint32_t round, int64_t err_us,
+                      uint32_t len) {
+    const int64_t t0 = gridstate::beaconT0ForRound(st, round) + err_us;
+    return t0 + (int64_t) loratiming::t0ToRxDoneUs(len);
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, ABeaconCorrectsDriftWithoutTouchingTheGeometry) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/1000);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    const gridstate::State before = disp.gridState();
+    constexpr int64_t kDrift = 900;          // us — a plausible hour of it
+
+    auto b = build_grid_beacon(/*round=*/50, before.params.beacon_slot,
+                               /*msgid=*/1);
+    const int64_t rx = rx_for_beacon(before, 50, kDrift, (uint32_t) b.size());
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
+
+    const gridstate::State after = disp.gridState();
+    EXPECT_EQ(after.anchor_us, before.anchor_us + kDrift)
+        << "the anchor moves by the measured error, which is the whole point";
+    // Geometry is GridSync's, never a broadcast's: a beacon that could rewrite
+    // it would hand every node in the fleet the same slot.
+    EXPECT_EQ(after.params.slot_index, before.params.slot_index);
+    EXPECT_EQ(after.params.pitch_us,   before.params.pitch_us);
+    EXPECT_EQ(after.params.beacon_every_rounds, before.params.beacon_every_rounds);
+    // And it is the sample an idle node's phase tracking otherwise never gets.
+    EXPECT_GE(disp.phaseStats().n, 1u);
+}
+
+TEST_F(RealNodeFixture, ABeaconOutsideTheGuardIsNotDriftAndIsRefused) {
+    // A beacon cannot be sealed with a per-node session key, so this bound is
+    // what makes acting on it safe. A whole slot pitch out is the case that
+    // matters: adopting it would move this node onto its neighbour's window.
+    auto gs = build_grid_sync(true, 4, 1010);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    const gridstate::State before = disp.gridState();
+
+    auto b = build_grid_beacon(60, before.params.beacon_slot, 1);
+    const int64_t rx = rx_for_beacon(before, 60,
+                                     (int64_t) timedgrid::kSlotPitchUs,
+                                     (uint32_t) b.size());
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
+
+    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us)
+        << "an error this large is a foreign frame, not drift";
+}
+
+TEST_F(RealNodeFixture, ABeaconInTheWrongSlotIsNotOurBeacon) {
+    auto gs = build_grid_sync(true, 4, 1020);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    const gridstate::State before = disp.gridState();
+
+    // Correctly timed for ITS slot, but that is not the beacon slot we were
+    // told about — a stale beacon from before a re-assignment, or another grid.
+    auto b = build_grid_beacon(70, before.params.beacon_slot - 1, 1);
+    const int64_t rx = rx_for_beacon(before, 70, 0, (uint32_t) b.size());
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
+
+    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us);
+}
+
+TEST_F(RealNodeFixture, APlaintextBeaconMayNotMakeTheNodeListenLess) {
+    // A clear bit says "stop listening for up to a beacon interval" — 5.8
+    // minutes at the default cadence. Honouring that from an unauthenticated
+    // frame would be a cheap, silent way to mute the fleet: cheaper than
+    // jamming, and invisible, because a node that skips wrongly reports
+    // nothing. An unauthenticated frame may make this node listen MORE, never
+    // less.
+    auto gs = build_grid_sync(true, 4, 1030);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    const gridstate::State st = disp.gridState();
+
+    // A mask with every bit clear, offered as valid, correctly timed.
+    auto b = build_grid_beacon(80, st.params.beacon_slot, 1,
+                               /*mask=*/0, /*mask_valid=*/true);
+    const int64_t rx = rx_for_beacon(st, 80, 0, (uint32_t) b.size());
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
+
+    EXPECT_TRUE(disp.shouldArmNextWindow(rx + 1))
+        << "an unauthenticated beacon must not talk this node out of listening";
+}
+
+TEST_F(RealNodeFixture, ABeaconDoesNotRatchetTheReplayCounter) {
+    // A broadcast belongs to no per-node sequence. Running it through the
+    // replay filter would ratchet rx_message_id_ onto the beacon's counter and
+    // wedge the node's link to the hub until its next login — the same counter
+    // pollution the address filter was moved up to prevent, arriving by a
+    // different door.
+    const uint32_t kNonce = 0xBEEF0001;
+    auto login = pack_login_op(/*msgid=*/1, kNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    const uint32_t rx_id_before = disp.rxMsgIdForTest();
+
+    auto gs = build_grid_sync(true, 4, 2);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    const gridstate::State st = disp.gridState();
+
+    // A beacon carrying a msgid far ahead of anything this node has seen.
+    auto b = build_grid_beacon(90, st.params.beacon_slot, /*msgid=*/999999);
+    const int64_t rx = rx_for_beacon(st, 90, 0, (uint32_t) b.size());
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
+
+    EXPECT_LE(disp.rxMsgIdForTest(), rx_id_before + 2)
+        << "the beacon's own counter must not become the node's";
+    EXPECT_EQ(disp.gridState().anchor_us, st.anchor_us)
+        << "and it still re-anchored (by zero) rather than being dropped";
+}

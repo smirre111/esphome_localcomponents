@@ -370,7 +370,10 @@ typedef struct {
     int64_t nextArmInstantUs(int64_t now_us) const;
     // How long to wait before arming, given the caller's own arm lead. The
     // clamping rules live in GridState.h with their tests.
-    int64_t nextArmDelayUs(int64_t now_us, int64_t lead_us) const;
+    // Delay until the next window worth opening, and which kind it is. See the
+    // definition: the beacon window is never skipped, and it is not a mark.
+    int64_t nextArmDelayUs(int64_t now_us, int64_t lead_us,
+                           gridstate::WindowKind &kind_out) const;
     // Section 4.4's pending-data bitmap: false means the last beacon said the
     // hub has nothing for this node and that statement has not expired, so the
     // next window can be skipped. Always true when anything is uncertain.
@@ -425,6 +428,10 @@ typedef struct {
     bool    classAActive() const { return this->classaSnapshot_().active; }
 
     // --- ModeTest (test-plan.md section 10) -------------------------------
+    // Section 4.4's broadcast beacon: re-anchor within the guard, sample the
+    // phase, adopt the pending bitmap. Carries no geometry — see the banner.
+    void handleGridBeacon(LoraClientOperationMessage *message_to_process,
+                          const LoraHeader *outer_header, int64_t rx_us);
     void handleModeTest(LoraClientOperationMessage *message_to_process,
                         const LoraHeader *outer_header, int64_t rx_us);
     // §4.6's promotion evidence, filled into every uplink that carries it (the

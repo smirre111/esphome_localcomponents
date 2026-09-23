@@ -3137,9 +3137,22 @@ int64_t CmdDispatcher::nextArmInstantUs(int64_t now_us) const
                                  gridstate::nextT0Us(this->grid_, now_us));
 }
 
-int64_t CmdDispatcher::nextArmDelayUs(int64_t now_us, int64_t lead_us) const
+int64_t CmdDispatcher::nextArmDelayUs(int64_t now_us, int64_t lead_us,
+                                      gridstate::WindowKind &kind_out) const
 {
-  return gridstate::armDelayUs(this->grid_, now_us, lead_us);
+  // Two kinds of window now: this node's private mark, and section 4.4's
+  // broadcast beacon. The caller needs to know which, because a beacon window
+  // that closes empty is not a missed MARK — the hub promised this node nothing
+  // in it — and counting it would make WMR a measure of beacon reception and
+  // feed a demotion the node has not earned. Same distinction, and the same
+  // reason, as C2's Class A windows.
+  //
+  // The skip permission applies to the private window only. See
+  // gridstate::nextWindow: a node that skipped the beacon as well could never
+  // hear the thing that grants and revokes the permission.
+  const bool skip_own = !this->shouldArmNextWindow(now_us);
+  return gridstate::nextWindowArmDelayUs(this->grid_, now_us, lead_us,
+                                         skip_own, kind_out);
 }
 
 // Whether the window for the NEXT mark is worth opening at all.
@@ -3475,6 +3488,135 @@ void CmdDispatcher::handleGridSync(LoraClientOperationMessage *message_to_proces
            (unsigned) p.beacon_slot, (unsigned) p.beacon_every_rounds);
 }
 
+// ---------------------------------------------------------------------------
+// Section 4.4 — the broadcast beacon.
+//
+// This is what keeps a node IN Mode B. Without it a node holds phase only for
+// resyncMaxS after each addressed frame, and at 3.5 commands/day that is 2.9 %
+// of the day on the grid and no measurable battery saving; the mode would be a
+// narrower window for nothing.
+//
+// Three things happen here and the order matters:
+//
+//   1. The frame is TIMED against where this node expected the beacon to be.
+//      That error is drift, and correcting the anchor by it is the whole
+//      mechanism — a node that only reset a staleness timer would keep the
+//      accumulated error and eventually miss its own window.
+//   2. The correction is BOUNDED by the guard band. A beacon is broadcast, so
+//      it cannot be encrypted per session, and an unbounded correction would
+//      let anything in radio range walk the anchor away. Real drift is orders
+//      of magnitude smaller: one round at +/-20 ppm is 30 us against a 14080 us
+//      guard.
+//   3. The pending bitmap is adopted only after the frame has proved it is on
+//      OUR grid. A mask taken from a frame whose timing made no sense would be
+//      a stranger telling this node to stop listening.
+//
+// Deliberately NOT done here: adopting geometry. A beacon carries no slot
+// assignment, no pitch, no cadence — those are GridSync's, and a broadcast that
+// could rewrite them would hand every node in the fleet the same slot.
+void CmdDispatcher::handleGridBeacon(LoraClientOperationMessage *message_to_process,
+                                     const LoraHeader *outer_header, int64_t rx_us)
+{
+  const GridBeacon *gb = (message_to_process != nullptr)
+                       ? message_to_process->gridbeacon : nullptr;
+  if (gb == nullptr)
+    return;
+
+  // A node with no grid has no anchor to correct and no window to skip. It is
+  // not an error: every node in range hears every beacon.
+  if (!this->grid_.active)
+    return;
+
+  // Not our beacon slot means not our beacon. The hub publishes the slot in
+  // GridSync; a frame claiming a different one is either a stale beacon from
+  // before a re-assignment or another grid entirely.
+  if (gb->txslot != this->grid_.params.beacon_slot)
+  {
+    ESP_LOGW(TAG, "   GridBeacon: slot %u is not our beacon slot %u — ignored",
+             (unsigned) gb->txslot,
+             (unsigned) this->grid_.params.beacon_slot);
+    return;
+  }
+
+  if (rx_us <= 0)
+    return;
+
+  // One copy, not a burst: a beacon that repeated would occupy the slots after
+  // it, which is exactly what the beacon slot's clearance rule exists to stop.
+  // burstIndex is read anyway rather than assumed, because assuming it is what
+  // put the anchor a non-integral number of slots out when GridSync did it.
+  const uint32_t burst_index =
+      (outer_header != nullptr) ? outer_header->burstindex : 0u;
+  const int64_t t0_measured =
+      phase::t0FromRx(rx_us, (uint32_t) this->last_rx_len_)
+      - (int64_t) burst_index * drift::kCopySpacingUs;
+
+  const int64_t predicted =
+      gridstate::beaconT0ForRound(this->grid_, gb->txround);
+  const int64_t err = t0_measured - predicted;
+
+  if (!gridstate::reanchorIsSane(err, timedgrid::kGuardUs))
+  {
+    // Not drift. Either a foreign frame or a node that has already lost the
+    // grid; chasing it would move the anchor to wherever the interference was.
+    // Demotion is the phase tracker's job and it is already counting.
+    ESP_LOGW(TAG, "   GridBeacon: %lld us off our own beacon mark — outside the "
+                  "guard, not re-anchoring", (long long) err);
+    return;
+  }
+
+  this->grid_.anchor_us += err;
+  this->grid_.last_round = gb->txround;
+
+  // The beacon is the frame the node's phase tracking exists to measure: it is
+  // the only one guaranteed to arrive on a known mark whether or not this node
+  // has traffic. Sampling it is what lets phaseTrustworthy() mean something on
+  // an idle node.
+  phase::Sample sample;
+  sample.t0_measured_us = t0_measured;
+  sample.t0_expected_us = predicted;
+  phase::commit(this->phase_, sample, timedgrid::kGuardUs);
+
+  // Section 4.4 Tier 3, and the one thing a plaintext beacon may NOT do.
+  //
+  // A clear bit is an instruction to stop listening for up to a beacon interval
+  // — 5.8 minutes at the default cadence — so honouring it from an
+  // unauthenticated frame would hand anyone in radio range a cheap way to
+  // silence the fleet: far cheaper than jamming, and invisible, because a node
+  // that skips wrongly reports nothing. The rule is that an unauthenticated
+  // frame may make this node listen MORE and never less, so the mask is taken
+  // only from an authenticated beacon, and a plaintext one clears validity —
+  // which means LISTEN.
+  //
+  // Today that is every beacon, because a broadcast cannot be sealed with a
+  // per-node session key. Tier 3's saving therefore needs a fleet key, and
+  // until there is one the beacon is worth having for PHASE alone — which is
+  // the part that decides whether Mode B is worth being in.
+  this->pending_.beacon_round        = gb->txround;
+  this->pending_.beacon_every_rounds = this->grid_.params.beacon_every_rounds;
+  if (this->frame_authenticated_)
+  {
+    this->pending_.bits  = gb->pendingmask;
+    this->pending_.valid = gb->pendingmaskvalid;
+  }
+  else
+  {
+    this->pending_.bits  = 0;
+    this->pending_.valid = false;      // unknown means listen
+  }
+
+  // The staleness clock. A beacon IS the hub, heard on a mark this node
+  // predicted, so it is exactly the evidence resyncMaxS asks for — and it is
+  // the reason a node with no traffic of its own can stay in Mode B at all.
+  this->last_addressed_us_ = esp_timer_get_time();
+  this->expected_t0_us_    = gridstate::nextT0Us(this->grid_, rx_us);
+
+  ESP_LOGD(TAG, "   GridBeacon: round %u, re-anchored by %+lld us, mask %08x "
+                "valid %d",
+           (unsigned) gb->txround, (long long) err,
+           (unsigned) gb->pendingmask, (int) gb->pendingmaskvalid);
+}
+
 void CmdDispatcher::dispatchCommand(LoraClientOperationMessage *message_to_process,
                                     const LoraHeader *outer_header)
 {
@@ -3516,6 +3658,11 @@ void CmdDispatcher::dispatchCommand(LoraClientOperationMessage *message_to_proce
   // B3. Also MAC-layer state: terminates here, reaches no application handler.
   case LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC:
     handleGridSync(message_to_process, outer_header, this->drift_rx_us_);
+    break;
+  // Section 4.4's broadcast beacon. Also MAC-layer: it never reaches an
+  // application handler, and it addresses the whole fleet rather than a node.
+  case LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON:
+    handleGridBeacon(message_to_process, outer_header, this->drift_rx_us_);
     break;
   case LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN:
     handleLogin(message_to_process, outer_header);
@@ -3811,8 +3958,27 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
   // A node that has never been provisioned holds no session, so bootstrap is
   // unaffected and plaintext still reaches it — which is the whole point of
   // the distinction.
+  // CMD_GRIDBEACON is exempt, and it is the one exemption added since this gate
+  // was written, so the reasoning is here rather than in the handler:
+  //
+  //   * It CANNOT be encrypted. One broadcast serves 32 nodes and the sessions
+  //     are per-node, so there is no key it could be sealed with short of a
+  //     fleet key, which is a protocol change and not this one.
+  //   * Its effects are bounded by the node's own arithmetic, not by trust. The
+  //     anchor moves only by what fits inside the guard band
+  //     (gridstate::reanchorIsSane), and its OTHER effect — the pending bitmap —
+  //     is refused outright from a plaintext beacon in the handler, because an
+  //     unauthenticated frame must never be able to make a node listen LESS.
+  //   * Replay is answered by the same arithmetic. A replayed beacon carries
+  //     the round it was minted for, so its predicted mark is rounds in the
+  //     past and the error is orders of magnitude outside the guard.
+  //
+  // What remains, and is recorded in 11b with the phase samples it belongs
+  // with: an attacker transmitting real beacons at the right instants can nudge
+  // the anchor by up to a guard band each time.
   if (!was_encrypted &&
-      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN)
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN &&
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON)
   {
     if (this->session_.hasValidState() || this->session_proven_)
     {
@@ -3861,8 +4027,16 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
   // strictly stronger than an address match, so dropping the msgid check here
   // loses nothing: a foreign CLIENTCONFIG is still rejected, just without
   // touching our counter first.
+  //
+  // CMD_GRIDBEACON is exempt for a third reason: it is a BROADCAST, so it
+  // belongs to no per-node sequence at all. Running it through this check would
+  // ratchet rx_message_id_ onto the beacon's own counter and wedge the node's
+  // link to the hub until its next login — the same counter pollution the
+  // address filter was moved up to prevent, arriving by a different door. Its
+  // replay protection is its timing: see the plaintext gate above.
   if (message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN &&
-      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG)
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG &&
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON)
   {
     ESP_LOGI(TAG, "   Message ID check");
     // Accept only a forward jump within a bounded window.  msgid increments by 1

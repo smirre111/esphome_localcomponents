@@ -69,6 +69,9 @@ public:
     int64_t gridAnchorUs() const { return grid_anchor_us_; }
     bool    gridStarted() const  { return grid_started_; }
     int64_t nextT0ForSlotUs(uint8_t slot, int64_t now_us) const;
+    // Section 4.4: the round a slot's mark falls in. Mirrors production — a
+    // placed frame declares it so both ends number rounds the same way.
+    uint32_t roundForSlotT0(uint8_t slot, int64_t t0_us) const;
     uint32_t msUntilNextT0(uint8_t slot) const;
     int64_t  busyUntilUs() const;
     int64_t  nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const;

@@ -132,6 +132,15 @@ constexpr int64_t fireInstantUs(int64_t t0_us, uint32_t d_tx_ramp_us)
     return t0_us - (int64_t) kPreambleToT0Us - (int64_t) d_tx_ramp_us;
 }
 
+// And back. A producer that has already chosen a mark hands the queue a FIRE
+// instant, and a consumer that has to reason about the mark again — which round
+// it falls in, say — must not re-derive it by open-coding the offset with the
+// wrong sign. That has happened once already, in both placement producers.
+constexpr int64_t t0FromFireInstantUs(int64_t fire_us, uint32_t d_tx_ramp_us)
+{
+    return fire_us + (int64_t) kPreambleToT0Us + (int64_t) d_tx_ramp_us;
+}
+
 // ---------------------------------------------------------------------------
 // Compile-time pins. If a radio setting above is edited, these fail here rather
 // than in the field as a window that is armed at the wrong microsecond.

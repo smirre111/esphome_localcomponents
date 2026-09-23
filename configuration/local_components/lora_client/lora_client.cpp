@@ -319,14 +319,11 @@ namespace esphome
 
     uint8_t LORAListener::s_next_login_slot_ = 0;
 
-    // Beacon placement (implementation-plan.md 4.4). Slot 0 is deliberately NOT
-    // used: a 45 B beacon there runs to +30.7 ms and covers slot 1's window
-    // opening at +29.7, blinding the same node on every beacon round forever.
-    // The beacon owns the last slot, and beaconClearSlots() worth of slots
-    // after it are left free.
-    static constexpr uint32_t kBeaconSlotIndex  = timedgrid::kSlotCount - 1;
-    // 350 s at 1.5 s per round, i.e. half the +/-20 ppm ceiling.
-    static constexpr uint32_t kBeaconEveryRounds = 233;
+    // Beacon placement (implementation-plan.md 4.4) now lives in TimedGrid.h,
+    // with the geometry it belongs to: the tracker TRANSMITS the beacon and
+    // this file ANNOUNCES it, and two copies is how those two come to disagree.
+    using timedgrid::kBeaconSlotIndex;
+    using timedgrid::kBeaconEveryRounds;
 
     void LORAListener::setup()
     {
@@ -1664,6 +1661,12 @@ namespace esphome
       header.senderaddress = kHubAddress;
       header.msgid         = this->incrTxMessageId();
 
+      // Chosen BEFORE the frame is built, because the frame declares it.
+      const int64_t planned_t0 =
+          (enable && this->grid_aligned_ && this->parent_->gridStarted())
+              ? this->nextPlacementT0_(esp_timer_get_time())
+              : 0;
+
       GridSync gs = GRID_SYNC__INIT;
       gs.enable = enable;
       if (enable)
@@ -1697,7 +1700,18 @@ namespace esphome
         // place. It is NOT sound for the round COUNTER, which beacon_every_rounds
         // phases off — hub and node can disagree about which round is a beacon
         // round. Pre-existing, unchanged here, and recorded in the plan.
-        gs.txround = 0;
+        // THE ROUND THIS FRAME ACTUALLY GOES OUT IN.
+        //
+        // It was hardcoded 0, and that was sound for the ANCHOR — shifting the
+        // declared round by n shifts the solved anchor by n*kRoundUs, and the
+        // mark set is invariant modulo kRoundUs — but not for the round
+        // COUNTER, which beacon_every_rounds phases off. With 0 declared, the
+        // node numbered its rounds from whenever this frame happened to land,
+        // so hub and node disagreed about which round is a beacon round by a
+        // random offset, and section 4.4's beacon window would have opened at
+        // the wrong time on every node. It is placed on `planned_t0` below, so
+        // the round is knowable here rather than approximated.
+        gs.txround = this->parent_->roundForSlotT0(this->grid_slot_, planned_t0);
         gs.txslot  = this->grid_slot_;
 
         // The pending-data bitmap (section 4.4). A LORAListener knows only its
@@ -1752,6 +1766,10 @@ namespace esphome
         // stride; the node backs out its own copy's offset with burstIndex.
         TxPolicy p;
         p.copies = this->parent_->defaultBurstCopies();
+        // The mark the declaration above was computed from, so the frame goes
+        // out where it says it does.
+        p.earliest_us = (planned_t0 != 0)
+                            ? loratiming::fireInstantUs(planned_t0, 0) : 0;
         this->send_aligned_(buf, len, p);
       }
       else
@@ -1827,6 +1845,20 @@ namespace esphome
       this->send_aligned_(buf, len, TxPolicy{});
     }
 
+    // The mark a placed frame for this node would go out on.
+    //
+    // Split out of send_aligned_ so a producer that must DECLARE its position
+    // can ask the same question the placement will answer. Two computations of
+    // "the next clear mark" would be two answers the moment either moved.
+    int64_t LORAListener::nextPlacementT0_(int64_t now_us) const
+    {
+      int64_t t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now_us);
+      if (t0 <= this->last_placed_t0_us_)
+        t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_,
+                                                 this->last_placed_t0_us_ + 1);
+      return t0;
+    }
+
     void LORAListener::send_aligned_(const uint8_t *buf, size_t len,
                                      const TxPolicy &in_policy)
     {
@@ -1882,10 +1914,13 @@ namespace esphome
       //     FOLLOWING mark keeps both: one frame per mark is the invariant that
       //     was wanted, and dropping was never the way to get it.
       const int64_t now = esp_timer_get_time();
-      int64_t t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now);
-      if (t0 <= this->last_placed_t0_us_)
-        t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_,
-                                                 this->last_placed_t0_us_ + 1);
+      // A caller that has already chosen the mark keeps it. send_grid_sync does
+      // that because it has to DECLARE the round the frame goes out in, and a
+      // declaration computed from one mark and transmitted on another is how
+      // the two ends came to disagree about which round is a beacon round.
+      const int64_t t0 = (policy.earliest_us != 0)
+                             ? loratiming::t0FromFireInstantUs(policy.earliest_us, 0)
+                             : this->nextPlacementT0_(now);
       // earliest_us is a FIRE instant; t0 is where the node expects the frame's
       // reference to land. They differ by kPreambleToT0Us, and the node's
       // window is built around the T0, so the conversion belongs here. See

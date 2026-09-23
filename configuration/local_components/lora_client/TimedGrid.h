@@ -197,4 +197,22 @@ static_assert(kInterWindowGapUs == 17435, "clear time between adjacent windows")
 static_assert(!secondWindowFitsInGap(), "a second window cannot be disjoint at 32 slots");
 static_assert(beaconClearSlots() == 1, "the beacon must leave one slot clear");
 
+// WHERE the beacon sits, and HOW OFTEN it comes.
+//
+// Both were file-static in the hub's lora_client.cpp, which meant the code that
+// TRANSMITS the beacon could not see the values the code that ANNOUNCES it
+// publishes. They are grid geometry, both ends need them, and a second copy is
+// how a beacon comes to be transmitted in a slot nobody is listening in.
+//
+// Slot 0 is deliberately not used: a kBeaconPayloadBytes beacon there runs to
+// +30.7 ms and covers slot 1's window opening at +29.7, blinding the same node
+// on every beacon round forever. The beacon owns the LAST slot, with
+// beaconClearSlots() free after it.
+static constexpr uint32_t kBeaconSlotIndex = kSlotCount - 1;
+
+// 233 rounds is 350 s at 1.5 s per round: half the +/-20 ppm resync ceiling,
+// which is the safety factor section 4.4 states once and prices its airtime
+// table against.
+static constexpr uint32_t kBeaconEveryRounds = 233;
+
 }  // namespace timedgrid

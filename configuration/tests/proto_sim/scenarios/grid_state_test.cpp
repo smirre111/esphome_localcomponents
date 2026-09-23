@@ -280,3 +280,131 @@ TEST(GridState, WithoutAGridTheDelayIsImmediateNotAStall) {
         << "no grid means the caller should not be asking; stalling is worse "
            "than arming early";
 }
+
+// ---------------------------------------------------------------------------
+// The beacon window (section 4.4)
+//
+// The 32 private windows sit at 32 different phases, so one broadcast cannot
+// reach them all: the beacon has its own slot, on beacon rounds only, and every
+// node opens it. Without it a node holds phase for resyncMaxS after each
+// addressed frame — at 3.5 commands/day that is 2.9 % of the day on the grid,
+// and no battery saving at all.
+// ---------------------------------------------------------------------------
+
+namespace {
+State gridded(uint32_t slot = 3, int64_t anchor = 1'000'000) {
+    State st;
+    st.active = true;
+    st.params = good(slot);
+    st.anchor_us = anchor;
+    return st;
+}
+}  // namespace
+
+TEST(GridState, BeaconMarksSitInTheBeaconSlotNotTheNodes) {
+    const State st = gridded(3);
+    // Same round, two different phases: the beacon's slot and this node's.
+    EXPECT_EQ(beaconT0ForRound(st, 5) - t0ForRound(st, 5),
+              (int64_t) (st.params.beacon_slot - st.params.slot_index)
+                  * (int64_t) timedgrid::kSlotPitchUs);
+}
+
+TEST(GridState, TheNextBeaconIsOnABeaconRound) {
+    const State st = gridded(3);
+    const int64_t t0 = nextBeaconT0Us(st, st.anchor_us + 1);
+    ASSERT_GT(t0, 0);
+    // It must be a mark of the beacon slot, and its round a multiple of the
+    // cadence — those are two different statements and both have to hold.
+    const int64_t rel = t0 - st.anchor_us
+                      - (int64_t) st.params.beacon_slot * (int64_t) timedgrid::kSlotPitchUs;
+    ASSERT_EQ(rel % (int64_t) timedgrid::kRoundUs, 0);
+    const uint32_t round = (uint32_t) (rel / (int64_t) timedgrid::kRoundUs);
+    EXPECT_EQ(round % st.params.beacon_every_rounds, 0u);
+    EXPECT_TRUE(isBeaconRound(st, round));
+}
+
+TEST(GridState, NoCadenceMeansNoBeaconRatherThanInstantZero) {
+    State st = gridded(3);
+    st.params.beacon_every_rounds = 0;
+    EXPECT_EQ(nextBeaconT0Us(st, st.anchor_us + 1), 0)
+        << "0 is the signal that there is no beacon — never an instant";
+    // And the caller must then behave exactly as it did before beacons existed.
+    const NextWindow w = nextWindow(st, st.anchor_us + 1, /*skip_own=*/false);
+    EXPECT_EQ(w.kind, WindowKind::Own);
+    EXPECT_EQ(w.t0_us, nextT0Us(st, st.anchor_us + 1));
+}
+
+TEST(GridState, ASkippingNodeStillOpensTheBeaconWindow) {
+    // The one that must not be got backwards. The beacon is what GRANTS and
+    // REVOKES the skip permission and what expires it when it goes missing, so
+    // a node that skipped it too could never learn it has traffic waiting.
+    const State st = gridded(3);
+    const int64_t now = st.anchor_us + 1;
+
+    const NextWindow skipped = nextWindow(st, now, /*skip_own=*/true);
+    EXPECT_EQ(skipped.kind, WindowKind::Beacon);
+    EXPECT_EQ(skipped.t0_us, nextBeaconT0Us(st, now));
+
+    // And it is genuinely further away than the private mark it replaced —
+    // otherwise this test would pass on a grid where they coincide.
+    const NextWindow listening = nextWindow(st, now, /*skip_own=*/false);
+    EXPECT_EQ(listening.kind, WindowKind::Own);
+    EXPECT_LT(listening.t0_us, skipped.t0_us);
+}
+
+TEST(GridState, TheBeaconWinsWhenItComesFirst) {
+    // A listening node opens whichever comes first, so it hears the beacon on
+    // beacon rounds without losing its own marks on every other round.
+    const State st = gridded(3);
+    // Just before a beacon mark: the beacon is next, not this node's slot.
+    const int64_t beacon = nextBeaconT0Us(st, st.anchor_us + 1);
+    const NextWindow w = nextWindow(st, beacon - 1000, /*skip_own=*/false);
+    EXPECT_EQ(w.kind, WindowKind::Beacon);
+    EXPECT_EQ(w.t0_us, beacon);
+}
+
+TEST(GridState, TheArmDelayReportsWhichWindowItIsFor) {
+    // The caller has to know: a beacon window that closes empty is not a missed
+    // MARK, and counting it would feed a demotion the node has not earned.
+    const State st = gridded(3);
+    WindowKind kind = WindowKind::Own;
+    const int64_t beacon = nextBeaconT0Us(st, st.anchor_us + 1);
+
+    nextWindowArmDelayUs(st, beacon - 1000, (int64_t) timedgrid::kArmLeadUs, false, kind);
+    EXPECT_EQ(kind, WindowKind::Beacon);
+
+    nextWindowArmDelayUs(st, st.anchor_us + 1, (int64_t) timedgrid::kArmLeadUs, false, kind);
+    EXPECT_EQ(kind, WindowKind::Own);
+}
+
+TEST(GridState, RoundNumbersAreRecoverableFromAMark) {
+    // The number both ends must agree on. The hub declares the round it
+    // transmits in precisely so this inverse works out to the same value there.
+    const State st = gridded(3);
+    for (uint32_t r : {0u, 1u, 232u, 233u, 1000u})
+        EXPECT_EQ(roundForT0(st, t0ForRound(st, r)), r);
+}
+
+// ---------------------------------------------------------------------------
+// Re-anchoring from a beacon
+// ---------------------------------------------------------------------------
+
+TEST(GridState, ABeaconMayCorrectDriftButNotWalkTheAnchor) {
+    // A beacon is broadcast, so it cannot be sealed with a per-node session
+    // key. The bound is what makes it safe to act on: real drift is orders of
+    // magnitude smaller than the guard — one round at +/-20 ppm is 30 us
+    // against 14080 — so anything larger is a foreign frame or a node that has
+    // already lost the grid, and both are cases for demoting rather than for
+    // chasing the anchor.
+    EXPECT_TRUE(reanchorIsSane(0, timedgrid::kGuardUs));
+    EXPECT_TRUE(reanchorIsSane(30, timedgrid::kGuardUs));
+    EXPECT_TRUE(reanchorIsSane(-30, timedgrid::kGuardUs));
+    EXPECT_TRUE(reanchorIsSane((int64_t) timedgrid::kGuardUs, timedgrid::kGuardUs));
+    EXPECT_TRUE(reanchorIsSane(-(int64_t) timedgrid::kGuardUs, timedgrid::kGuardUs));
+
+    EXPECT_FALSE(reanchorIsSane((int64_t) timedgrid::kGuardUs + 1, timedgrid::kGuardUs));
+    EXPECT_FALSE(reanchorIsSane(-(int64_t) timedgrid::kGuardUs - 1, timedgrid::kGuardUs));
+    // A whole slot out is the case that matters: adopting it would move this
+    // node onto its neighbour's window.
+    EXPECT_FALSE(reanchorIsSane((int64_t) timedgrid::kSlotPitchUs, timedgrid::kGuardUs));
+}

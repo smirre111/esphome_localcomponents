@@ -4,6 +4,7 @@
 // existed, lora_tracker.cpp reached no compiler in this suite, and two review
 // findings lived in that gap.
 
+#include "PendingData.h"
 #include <gtest/gtest.h>
 
 #include "esphome/components/lora_tracker/lora_tracker.h"
@@ -774,4 +775,127 @@ TEST(RealTrackerDefer, WithoutAGridThereIsNothingToDeferTo) {
     ASSERT_FALSE(t.gridStarted());
     EXPECT_EQ(t.msUntilNextClearT0(3), 0u)
         << "no grid means send now, the same answer msUntilNextT0 gives";
+}
+
+// ---------------------------------------------------------------------------
+// Section 4.4 — the periodic broadcast beacon, on the real tracker.
+//
+// It lives here rather than on a listener because there is one grid per radio
+// and one beacon for the whole fleet: a per-listener beacon would be 32
+// broadcasts of the same frame, which is the unicast keepalive section 4.4
+// prices at 3.4x worse than plain burst and rejects.
+//
+// What it BUYS is phase. Without it a node holds phase only for resyncMaxS
+// after each addressed frame — at 3.5 commands/day that is 2.9 % of the day on
+// the grid, and no measurable battery saving, so Mode B would be a narrower
+// window for nothing.
+// ---------------------------------------------------------------------------
+
+TEST(RealTrackerBeacon, NoGridMeansNoBeacon) {
+    proto_sim_timer_reset();
+    TxProbe t;
+    t.init();
+    ASSERT_FALSE(t.gridStarted());
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 0u) << "there is no grid to beacon on";
+}
+
+TEST(RealTrackerBeacon, ABeaconIsQueuedOnceAndPlacedOnItsOwnMark) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    TxProbe t;
+    t.init();
+    t.startGrid();
+
+    const int64_t beacon_t0 = t.nextBeaconT0Us(esp_timer_get_time());
+    ASSERT_GT(beacon_t0, 0);
+
+    // Round 0 is a beacon round, so a hub that has just started its grid
+    // beacons within its first round rather than waiting out a whole cadence:
+    // the nodes it is about to admit need a mark to hold phase against.
+    //
+    // Queued once, however many times the loop asks.
+    t.serviceBeacon();
+    t.serviceBeacon();
+    t.serviceBeacon();
+    ASSERT_EQ(t.beaconsSent(), 1u) << "one beacon per beacon round";
+
+    // Fire it, and read back what actually went on the air.
+    const int64_t fire = loratiming::fireInstantUs(beacon_t0, 0);
+    proto_sim_timer_set_now_us(fire - LORATracker::kPrepareLeadUs);
+    ASSERT_TRUE(t.serviceTxQueue(fire - LORATracker::kPrepareLeadUs));
+
+    ASSERT_EQ(lorahal::rec().tx_us.size(), (size_t) 1)
+        << "one broadcast, on one mark — a burst is the opposite construction";
+    EXPECT_EQ(lorahal::rec().tx_us[0], fire)
+        << "a beacon that slips its mark is a beacon nobody is listening for";
+
+    const auto &bytes = lorahal::rec().packets.at(0);
+    LoraClientOperationMessage *msg = lora_client_operation_message__unpack(
+        nullptr, bytes.size(), bytes.data());
+    ASSERT_NE(msg, nullptr);
+    ASSERT_EQ(msg->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON);
+    ASSERT_NE(msg->gridbeacon, nullptr);
+    ASSERT_NE(msg->header, nullptr);
+
+    EXPECT_EQ(msg->header->destaddress, (uint32_t) LORATracker::broadcastAddressing)
+        << "one frame for 32 nodes at 32 different phases";
+    // THE ROUND IT ACTUALLY GOES OUT IN. Declaring 0 would leave the node
+    // numbering rounds from wherever the frame landed, and "beacon round" would
+    // mean something different at each end.
+    EXPECT_EQ(msg->gridbeacon->txround, t.beaconRoundForT0(beacon_t0));
+    EXPECT_EQ(msg->gridbeacon->txround % timedgrid::kBeaconEveryRounds, 0u);
+    EXPECT_EQ(msg->gridbeacon->txslot, timedgrid::kBeaconSlotIndex);
+
+    // ALL LISTENING, and not a placeholder: a clear bit is a promise this hub
+    // cannot keep for an interactive node, and the nodes refuse a mask from an
+    // unauthenticated beacon anyway.
+    EXPECT_TRUE(msg->gridbeacon->pendingmaskvalid);
+    EXPECT_EQ(msg->gridbeacon->pendingmask, pending::allListening());
+
+    lora_client_operation_message__free_unpacked(msg, nullptr);
+}
+
+TEST(RealTrackerBeacon, ABeaconIsNotQueuedMinutesAheadOfItsMark) {
+    // The pool is five buffers deep and a placed frame holds one until its
+    // instant, so queueing the next beacon as soon as the last one fired would
+    // spend a fifth of the pool for 5.8 minutes.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    TxProbe t;
+    t.init();
+    t.startGrid();
+
+    t.serviceBeacon();                       // round 0's beacon
+    ASSERT_EQ(t.beaconsSent(), 1u);
+    const int64_t first = t.nextBeaconT0Us(esp_timer_get_time());
+
+    // Just past the first mark: the next one is a whole cadence out.
+    proto_sim_timer_set_now_us(first + 1);
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 1u) << "nothing to queue yet";
+
+    // And within a round of the next mark, it is queued.
+    const int64_t second = t.nextBeaconT0Us(first + 1);
+    proto_sim_timer_set_now_us(second - (int64_t) timedgrid::kRoundUs / 2);
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 2u);
+}
+
+TEST(RealTrackerBeacon, TheNextBeaconIsAWholeCadenceAfterTheLast) {
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    TxProbe t;
+    t.init();
+    t.startGrid();
+
+    const int64_t first  = t.nextBeaconT0Us(esp_timer_get_time());
+    const int64_t second = t.nextBeaconT0Us(first + 1);
+    EXPECT_EQ(second - first,
+              (int64_t) timedgrid::kRoundUs * (int64_t) timedgrid::kBeaconEveryRounds)
+        << "the cadence is what bounds how long a node may hold phase";
+    EXPECT_EQ(t.beaconRoundForT0(second) - t.beaconRoundForT0(first),
+              timedgrid::kBeaconEveryRounds);
 }

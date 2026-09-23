@@ -26,6 +26,15 @@ void LORATracker::startGrid() {
     grid_started_ = true;
 }
 
+uint32_t LORATracker::roundForSlotT0(uint8_t slot, int64_t t0_us) const {
+    if (!grid_started_) return 0;
+    const int64_t rel = t0_us - grid_anchor_us_
+                      - (int64_t) (slot % timedgrid::kSlotCount)
+                          * (int64_t) timedgrid::kSlotPitchUs;
+    if (rel < 0) return 0;
+    return (uint32_t) (rel / (int64_t) timedgrid::kRoundUs);
+}
+
 int64_t LORATracker::nextT0ForSlotUs(uint8_t slot, int64_t now_us) const {
     if (!grid_started_) return now_us;
     const int64_t pitch = (int64_t) timedgrid::kSlotPitchUs;
