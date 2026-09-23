@@ -1522,6 +1522,27 @@ namespace esphome
           (unsigned) rep->tickratehz, (unsigned) rep->cpufreqmhz,
           (unsigned) rep->elapseds, (unsigned) rep->armrefusal);
 
+      // The same numbers, kept as numbers. The log line above is for a human
+      // reading a console; these are for Home Assistant, where B3's gate lives:
+      // "reception >= Mode A over a week" is a week of history, and a 512-byte
+      // string truncated to HA's 255-character limit is not a measurement.
+      ModeTestSummary sum;
+      sum.valid                    = true;
+      sum.mode                     = rep->mode;
+      sum.arm_refusal              = rep->armrefusal;
+      sum.elapsed_s                = rep->elapseds;
+      sum.windows_armed            = rep->windowsarmed;
+      sum.windows_hit              = rep->windowshit;
+      sum.fer_link_ppm             = macfunnel::ferLinkPpm(c, expected);
+      sum.wmr_ppm                  = macfunnel::wmrPpm(c);
+      sum.dup_ppm                  = macfunnel::dupPpm(c);
+      sum.mic_fail_ppm             = macfunnel::micFailPpm(c);
+      sum.phase_p50_us             = rep->phaseerrus ? rep->phaseerrus->p50 : 0;
+      sum.phase_p99_us             = rep->phaseerrus ? rep->phaseerrus->p99 : 0;
+      sum.turnaround_p99_us        = rep->turnaroundus ? rep->turnaroundus->p99 : 0;
+      sum.power_profile_production = rep->powerprofileproduction;
+      this->mode_test_summary_     = sum;
+
       this->last_mode_test_report_ = buf;
       ESP_LOGW(TAG, "[%s] ModeTest REPORT: %s", this->get_name().c_str(), buf);
     }

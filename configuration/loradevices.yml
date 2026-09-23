@@ -346,7 +346,178 @@ button:
     on_press:
       - lambda: 'id(rol_2)->start_mode_test(120, 1100, 4, 1, true, false, false, true, -12000);'
 
+  # --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------------
+  #
+  # The one test mode that had no control at all: start_mac_ping() and
+  # stop_mac_ping() were written and had zero callers, so the mode existed and
+  # could not be run.
+  #
+  # It is the only way to measure TURNAROUND honestly. A MAC control frame is
+  # answered by MAC-0 itself, with no application message in either direction,
+  # so what it times is RxDone -> TX fire and nothing else. Every other exchange
+  # this system has carries a cover operation or a schedule somewhere inside it,
+  # and a turnaround measured that way silently includes application dispatch.
+  #
+  # It is also where stage 0 of the frame funnel comes from. Only the SENDER
+  # knows what it offered, so the node can never compute its own frame-error
+  # rate — it cannot know what it did not hear.
+  #
+  # One copy per mark, not a burst: seventeen copies of one mark is not one
+  # mark. 1100 ms for the same incommensurability reason as the drift test.
+  - platform: template
+    name: "MAC Ping Start (node 2)"
+    id: rol_2_mac_ping_start
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->start_mac_ping(300, 1100, true, 0);'
+  - platform: template
+    name: "MAC Ping Stop (node 2)"
+    id: rol_2_mac_ping_stop
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->stop_mac_ping();'
+  - platform: template
+    name: "MAC Ping Reset Counters (node 2)"
+    id: rol_2_mac_ping_reset
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->reset_mac_stats();'
+
 sensor:
+  # --- ModeTest and MAC-ping results, as numbers ---------------------------
+  #
+  # The hub already recomputes these from the node's RAW counters (I1: the node
+  # never grades itself) and logs them in one line. The line is for a console;
+  # these are for Home Assistant, where B3's gate actually lives — "reception
+  # >= Mode A over a week" is a week of HISTORY, and a log line cannot be
+  # graphed. A single text_sensor could not carry it either: HA caps a state at
+  # 255 characters and the report line is up to 512, so it would truncate
+  # silently, which is the trap the `help` entity already fell into once.
+  #
+  # update_interval is slow on purpose: a report arrives at the END of a run
+  # (300 s by default), so polling faster only costs entity churn.
+  - platform: template
+    name: "Mode Test — mode actually run (node 2)"
+    id: rol_2_mt_mode
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    # 1 = A, 2 = B, 4 = SWEEP. DERIVED from what the node applied, not from
+    # what the button asked for: mode was echoed from the request until this
+    # session, so every "Mode Test B" number ever taken described Mode A.
+    lambda: 'return id(rol_2)->mode_test_summary().valid
+                 ? (float) id(rol_2)->mode_test_summary().mode
+                 : NAN;'
+  - platform: template
+    name: "Mode Test — arm refusal (node 2)"
+    id: rol_2_mt_refusal
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    # 0 = armed. Anything else and the run below describes nothing: see
+    # ModeTestPolicy.h's ArmRefusal.
+    lambda: 'return id(rol_2)->mode_test_summary().valid
+                 ? (float) id(rol_2)->mode_test_summary().arm_refusal
+                 : NAN;'
+  - platform: template
+    name: "Mode Test — windows armed (node 2)"
+    id: rol_2_mt_windows_armed
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    # The witness for whether Mode B actually RAN. Enabling timed RX makes the
+    # mode reachable; timedRxActive() re-runs the promotion test at every mark,
+    # so a node whose phase never becomes trustworthy reports mode = 2 over
+    # marks it never armed. This reads 0 when that happened — and WMR cannot
+    # say so, because a zero denominator gives 0 ppm, the same number a
+    # flawless run gives.
+    lambda: 'return id(rol_2)->mode_test_summary().valid
+                 ? (float) id(rol_2)->mode_test_summary().windows_armed
+                 : NAN;'
+  - platform: template
+    name: "Mode Test — windows hit (node 2)"
+    id: rol_2_mt_windows_hit
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return id(rol_2)->mode_test_summary().valid
+                 ? (float) id(rol_2)->mode_test_summary().windows_hit
+                 : NAN;'
+  - platform: template
+    name: "Mode Test — FER link (node 2)"
+    id: rol_2_mt_fer_link
+    entity_category: diagnostic
+    unit_of_measurement: "ppm"
+    update_interval: 30s
+    accuracy_decimals: 0
+    # The honest denominator is the node's own seqFirst..seqLast span, not the
+    # hub's count: dividing by what the hub queued before the node started
+    # listening would report the node's late arrival as packet loss.
+    lambda: 'return id(rol_2)->mode_test_summary().valid
+                 ? (float) id(rol_2)->mode_test_summary().fer_link_ppm
+                 : NAN;'
+  - platform: template
+    name: "Mode Test — window miss rate (node 2)"
+    id: rol_2_mt_wmr
+    entity_category: diagnostic
+    unit_of_measurement: "ppm"
+    update_interval: 30s
+    accuracy_decimals: 0
+    # Read this WITH windows armed above, never alone.
+    lambda: 'return id(rol_2)->mode_test_summary().valid
+                 ? (float) id(rol_2)->mode_test_summary().wmr_ppm
+                 : NAN;'
+  - platform: template
+    name: "Mode Test — phase error p99 (node 2)"
+    id: rol_2_mt_phase_p99
+    entity_category: diagnostic
+    unit_of_measurement: "us"
+    update_interval: 30s
+    accuracy_decimals: 0
+    # Against the guard band of 14080 us. p99 rather than a mean, because the
+    # tail is the thing: a mean would hide exactly the excursions that miss a
+    # window.
+    lambda: 'return id(rol_2)->mode_test_summary().valid
+                 ? (float) id(rol_2)->mode_test_summary().phase_p99_us
+                 : NAN;'
+  - platform: template
+    name: "Mode Test — turnaround p99 (node 2)"
+    id: rol_2_mt_turnaround_p99
+    entity_category: diagnostic
+    unit_of_measurement: "us"
+    update_interval: 30s
+    accuracy_decimals: 0
+    # Section 4.3's servable-slot rule is priced against this.
+    lambda: 'return id(rol_2)->mode_test_summary().valid
+                 ? (float) id(rol_2)->mode_test_summary().turnaround_p99_us
+                 : NAN;'
+
+  # MAC ping, stage 0 of the funnel. pings_offered is the only number in this
+  # system that the HUB alone can know.
+  - platform: template
+    name: "MAC Ping — offered (node 2)"
+    id: rol_2_macping_offered
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->mac_stats().pings_offered;'
+  - platform: template
+    name: "MAC Ping — echoes received (node 2)"
+    id: rol_2_macping_echoes
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    lambda: 'return (float) id(rol_2)->mac_stats().echoes_rx;'
+  - platform: template
+    name: "MAC Ping — echo gaps (node 2)"
+    id: rol_2_macping_gaps
+    entity_category: diagnostic
+    update_interval: 30s
+    accuracy_decimals: 0
+    # Marks with no echo, counted by SEQUENCE rather than by absence: a gap is
+    # a mark the node did not answer, which is not the same as a slow one.
+    lambda: 'return (float) id(rol_2)->mac_stats().echo_seq_gaps;'
+
   - platform: uptime
     name: '${devicename} Uptime'
     unit_of_measurement: days

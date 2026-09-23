@@ -2402,3 +2402,92 @@ TEST(TrackedOpRetry, ANewCommandGetsANewMsgid) {
 // send_cover_operation() always starts a fresh tracked op. Pack-once removes it
 // by construction (the retry never re-reads live state), and that is verified
 // above by byte identity rather than by reproducing the mutation.
+
+// ---------------------------------------------------------------------------
+// The ModeTest report, as numbers.
+//
+// The hub recomputes every rate from the node's RAW counters — I1: the node
+// never grades itself — and logged them in one line that only a console can
+// read. B3's gate is "reception >= Mode A over a week", which is a week of
+// Home Assistant history, so the numbers have to exist as numbers. A single
+// text_sensor cannot carry them either: HA caps a state at 255 characters and
+// the line is up to 512.
+// ---------------------------------------------------------------------------
+
+TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+    rol.registered_ = true;
+
+    EXPECT_FALSE(rol.mode_test_summary().valid)
+        << "nothing has been measured yet — the entity must read unknown, not 0";
+
+    // A report as the node sends one: raw counters, no conclusions.
+    Hist phase = HIST__INIT;
+    phase.p50 = 120; phase.p99 = 900; phase.max = 1500; phase.n = 64;
+    Hist turn  = HIST__INIT;
+    turn.p50 = 4000; turn.p99 = 7000; turn.n = 64;
+
+    ModeTestReport rep = MODE_TEST_REPORT__INIT;
+    rep.mode          = 2;            // what the node APPLIED
+    rep.armrefusal    = 0;
+    rep.elapseds      = 300;
+    rep.seqfirst      = 1;
+    rep.seqlast       = 100;          // 100 offered over the span it observed
+    rep.detected      = 95;
+    rep.crcvalid      = 94;
+    rep.addressed     = 90;
+    rep.windowsarmed  = 100;
+    rep.windowshit    = 90;
+    rep.phaseerrus    = &phase;
+    rep.turnaroundus  = &turn;
+    rep.powerprofileproduction = true;
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = esphome::lora_tracker::kHubAddress;
+    hdr.destsubnet    = 2;
+    hdr.senderaddress = 18;
+    hdr.msgid         = 1;
+
+    LoraClientResponseMessage msg = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    msg.header         = &hdr;
+    msg.proto_case     = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT;
+    msg.modetestreport = &rep;
+
+    std::vector<uint8_t> frame(lora_client_response_message__get_packed_size(&msg));
+    lora_client_response_message__pack(&msg, frame.data());
+    rol.set_response(frame.data(), frame.size());
+
+    const auto &s = rol.mode_test_summary();
+    ASSERT_TRUE(s.valid) << "a report must reach the summary, not only the log";
+    EXPECT_EQ(s.mode, 2u);
+    EXPECT_EQ(s.arm_refusal, 0u);
+    EXPECT_EQ(s.windows_armed, 100u);
+    EXPECT_EQ(s.windows_hit, 90u);
+    EXPECT_EQ(s.phase_p99_us, 900);
+    EXPECT_EQ(s.turnaround_p99_us, 7000);
+    // Recomputed here, not taken from the node: 10 of 100 windows missed.
+    EXPECT_EQ(s.wmr_ppm, 100000u);
+    // Link loss is CRC-VALID over offered — the air, before any addressing or
+    // MAC decision — against the node's own seqFirst..seqLast span, which is
+    // the honest denominator: the hub's own count would report the node's late
+    // arrival as packet loss. 94 of 100, so 6 %.
+    EXPECT_EQ(s.fer_link_ppm, 60000u);
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}

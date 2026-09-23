@@ -236,8 +236,42 @@ namespace esphome
       void stop_mode_test();
       bool mode_test_active() const { return this->mode_test_active_; }
       // The report the node sent back, verbatim. Empty until one arrives.
+      //
+      // Kept, but it is not the entity to publish: Home Assistant caps a
+      // text_sensor state at 255 characters and this line is up to 512, so a
+      // single sensor carrying it would silently truncate — the same trap the
+      // `help` entity fell into. The NUMBERS below are what belongs in HA, one
+      // per sensor, because B3's gate ("reception >= Mode A over a week") is a
+      // week of history and a string cannot be graphed.
       const std::string &last_mode_test_report() const {
         return this->last_mode_test_report_;
+      }
+
+      // --- The last ModeTest report, as numbers ---------------------------
+      //
+      // Recomputed by the hub from the node's RAW counters (I1: the node never
+      // grades itself), stored so HA can plot them rather than have an operator
+      // read them out of an ESPHome log line.
+      struct ModeTestSummary
+      {
+        bool     valid{false};        // false until a report has arrived
+        uint32_t mode{0};             // what the node ACTUALLY ran — see
+                                      // modetest::modeApplied
+        uint32_t arm_refusal{0};
+        uint32_t elapsed_s{0};
+        uint32_t windows_armed{0};
+        uint32_t windows_hit{0};
+        uint32_t fer_link_ppm{0};
+        uint32_t wmr_ppm{0};
+        uint32_t dup_ppm{0};
+        uint32_t mic_fail_ppm{0};
+        int32_t  phase_p50_us{0};
+        int32_t  phase_p99_us{0};
+        int32_t  turnaround_p99_us{0};
+        bool     power_profile_production{true};
+      };
+      const ModeTestSummary &mode_test_summary() const {
+        return this->mode_test_summary_;
       }
 
       // --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------
@@ -519,6 +553,7 @@ namespace esphome
       uint8_t  mt_frame_[160]{};
       size_t   mt_frame_len_{0};
       std::string last_mode_test_report_{};
+      ModeTestSummary mode_test_summary_{};
 
       bool     mac_ping_active_{false};
       bool     mac_ping_want_echo_{true};
