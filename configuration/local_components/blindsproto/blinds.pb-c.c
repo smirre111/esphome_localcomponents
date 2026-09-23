@@ -3045,18 +3045,6 @@ static const ProtobufCFieldDescriptor mode_test__field_descriptors[13] =
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "keepPowerProfile",
-    7,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BOOL,
-    0,   /* quantifier_offset */
-    offsetof(ModeTest, keeppowerprofile),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
     "reportEveryS",
     8,
     PROTOBUF_C_LABEL_NONE,
@@ -3128,25 +3116,38 @@ static const ProtobufCFieldDescriptor mode_test__field_descriptors[13] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "dropPowerProfile",
+    14,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(ModeTest, droppowerprofile),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned mode_test__field_indices_by_name[] = {
-  9,   /* field[9] = armOffsetUs */
+  8,   /* field[8] = armOffsetUs */
   4,   /* field[4] = copies */
+  12,   /* field[12] = dropPowerProfile */
   1,   /* field[1] = durationS */
   0,   /* field[0] = enable */
-  10,   /* field[10] = enableCounter */
-  11,   /* field[11] = enableCrypto */
+  9,   /* field[9] = enableCounter */
+  10,   /* field[10] = enableCrypto */
   3,   /* field[3] = gridPeriodMs */
-  6,   /* field[6] = keepPowerProfile */
-  12,   /* field[12] = macEcho */
+  11,   /* field[11] = macEcho */
   2,   /* field[2] = mode */
   5,   /* field[5] = payloadPadTo */
-  7,   /* field[7] = reportEveryS */
-  8,   /* field[8] = seq */
+  6,   /* field[6] = reportEveryS */
+  7,   /* field[7] = seq */
 };
-static const ProtobufCIntRange mode_test__number_ranges[1 + 1] =
+static const ProtobufCIntRange mode_test__number_ranges[2 + 1] =
 {
   { 1, 0 },
+  { 8, 6 },
   { 0, 13 }
 };
 const ProtobufCMessageDescriptor mode_test__descriptor =
@@ -3160,7 +3161,7 @@ const ProtobufCMessageDescriptor mode_test__descriptor =
   13,
   mode_test__field_descriptors,
   mode_test__field_indices_by_name,
-  1,  mode_test__number_ranges,
+  2,  mode_test__number_ranges,
   (ProtobufCMessageInit) mode_test__init,
   NULL,NULL,NULL    /* reserved[123] */
 };

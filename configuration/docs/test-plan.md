@@ -719,7 +719,8 @@ message ModeTest {
   uint32 gridPeriodMs    = 4;   // hub cadence; integer ms (LoraTiming gate)
   uint32 copies          = 5;   // 1..17 — exercises B-1's per-frame TX policy
   uint32 payloadPadTo    = 6;   // pad to N bytes: sweep toa() across the table
-  bool   keepPowerProfile= 7;   // DEFAULT TRUE — the difference from DriftTest
+  reserved 7;                   // was keepPowerProfile — see dropPowerProfile
+  bool   dropPowerProfile= 14;  // FALSE = production profile, the default
   uint32 reportEveryS    = 8;   // partial reports; 0 = final only
   uint32 seq             = 9;   // hub's monotonic mark index — the ruler
   int32  armOffsetUs     = 10;  // MODE_SWEEP: deliberate ARM error, for T_detect
@@ -825,7 +826,8 @@ Copied from `DriftTest`, with two additions:
    that stops answering.
 3. **Deep sleep refused for the duration**, as today in
    `SystemCtrl::enterDeepSleepTask`.
-4. **`keepPowerProfile = true` is the default**, and the report says which
+4. **The production power profile is the default** — `dropPowerProfile` is
+   false unless a sender asks otherwise — and the report says which
    profile it ran under (`powerProfileProduction`), so a number measured with
    sleep disabled can never be quoted as a production number by accident. That
    confusion is what §12.5 is.
@@ -911,9 +913,9 @@ comparison is only meaningful if both arms are measured the same way.
 |---|---|---|---|
 | **HW-1** | `d_tx_ramp` (§12.1) | **Partly unidentifiable by design.** A constant ramp is absorbed into the grid anchor and cancels; only its *variance* affects reception. So: run `MODE_A` at fixed payload, report `phaseErrUs` spread — that bounds the variance. The **mean** needs a scope on hub DIO0 or the wired-DIO0 hub of B5's gate. State the split rather than pretending the mean is measurable on-node. | scope for the mean only |
 | **HW-2** | `T_detect` (§12.2) | **UNBLOCKED.** The hub publishes a grid now — `enable_timed_mode()`, a per-node switch in `loradevices.yml`, default off — and a bench unit is built with `CONFIG_BLINDS_BENCH_NODE` so `MODE_SWEEP` and a non-zero `armOffsetUs` are no longer refused outright. Previously: `GridSync.armOffsetUs` (bench-gated) + `SweepAnalysis.h` exist and round-trip against the simulated radio, and the node arms from them. But `send_grid_sync()` is only ever called with `false`, so no `GridSync` carrying an `armOffsetUs` ever reaches a node and the sweep cannot start. See implementation-plan.md §11a. ~~Remaining: `LoraInterface` must arm at `gridstate::armInstantUs()`.~~ Done on the NODE — a one-shot timer at `gridstate::armDelayUs()` replaces the free-running periodic one while `timedRxActive()`. That half is real; the sweep still cannot run, for the hub reason above. 6 host tests on the delay arithmetic, including that `arm_offset_us` reaches the timer one-for-one, without which the sweep would measure nothing. **`MODE_SWEEP`.** Step `armOffsetUs` late in 500 µs increments until reception fails; the failure edge gives `T_detect` directly, since a window armed `l` late catches the frame iff `l ≤ G`. Sweep early too — the early edge returns `G` independently, and the two must sum to `N·T_sym − T_detect`. **No scope needed.** This was described as the B3 blocker; the dependency is now the other way round — the sweep is blocked on hub wiring (§11a), not B3 on the sweep. | a bench-flagged node + timed mode switched on |
-| **HW-3** | RxDone ISR + light-sleep wake latency, **distribution** (§12.3) | Fixed grid, known marks; the `phaseErrUs` residual spread is ISR latency + wake latency + hub fire jitter. Separate the wake term by running the identical test twice, `keepPowerProfile` true then false; the **delta** is the light-sleep wake cost. Repeat with the motor running to catch the PM-lock frequency change §12.3 warns about. | none |
+| **HW-3** | RxDone ISR + light-sleep wake latency, **distribution** (§12.3) | Fixed grid, known marks; the `phaseErrUs` residual spread is ISR latency + wake latency + hub fire jitter. Separate the wake term by running the identical test twice, `dropPowerProfile` false then true; the **delta** is the light-sleep wake cost. Repeat with the motor running to catch the PM-lock frequency change §12.3 warns about. | none |
 | **HW-4** | RX-on current (§12.4) | `ModeTest` gives an exactly known window count and duration, so a meter reading divides cleanly. Run at `windowsArmed` = 1/round and 3/round; the difference is the marginal cost of a window, which is the number §4.1 and §4.7 actually need — and it sidesteps the ~11 mA figure being a whole-node number for the measuring profile rather than a radio-only one. | current meter |
-| **HW-5** | ppm under the **production** profile (§12.5) | The default `keepPowerProfile = true` run *is* this measurement. Compare against `DriftTest`'s +8 ppm (sleep disabled). Requires **B0** first — without a GPIO light-sleep wake source the timestamp records when the CPU woke, up to 500 ms late, and the fit is worthless. **B0 is therefore a prerequisite for HW-5, not merely for Mode B.** | B0 landed |
+| **HW-5** | ppm under the **production** profile (§12.5) | The default run — `dropPowerProfile` unset — *is* this measurement. Compare against `DriftTest`'s +8 ppm (sleep disabled). Requires **B0** first — without a GPIO light-sleep wake source the timestamp records when the CPU woke, up to 500 ms late, and the fit is worthless. **B0 is therefore a prerequisite for HW-5, not merely for Mode B.** | B0 landed |
 | **HW-6** | interactive/automatic split (§12.6) | Not a measurement. A deployment decision; `ModeTest` cannot help. | — |
 | **HW-7** | node DRAIN + build turnaround (§12.7) | `turnaroundUs` histogram: `t_reply_fire − t_rxdone`, both from `esp_timer` on-node. Sweep `payloadPadTo` across 25/45/60/152 B — the FIFO read is per-byte, so this must be measured *as a function of length*. Feeds directly into §5.2's parameterised servable-slot test: **k+2 breaks above 36.5 ms**. | none |
 | **HW-8** | `esp_timer` one-shot wakes from automatic light sleep (§12.8) | `oneShotErrorUs` histogram plus a miss counter: arm a one-shot at a known offset under the production profile, record `t_actual − t_target`. **The whole ARM mechanism depends on this and the plan asserts it nowhere.** A single miss is a failed gate, not an outlier. | none |
@@ -956,7 +958,7 @@ degrading before it demotes:
   internal RC oscillator must be **visibly** in Mode A, not silently.
 
 The same warning as `DriftTest` applies and should be in the YAML comment: a test
-run is not something to leave on. `MODE_A` with `keepPowerProfile = false` is
+run is not something to leave on. `MODE_A` with `dropPowerProfile = true` is
 `DriftTest`'s power cost (~11 mA against a ~1.2 mA interactive average); the
 default profile is much cheaper but still above idle.
 

@@ -2808,7 +2808,11 @@ namespace esphome
       mt.mode             = (ModeTest__Mode) this->mt_mode_;
       mt.gridperiodms     = this->mt_grid_ms_;
       mt.copies           = this->mt_copies_;
-      mt.keeppowerprofile = this->mt_keep_power_profile_;
+      // The hub's own knob keeps the human polarity — "keep the profile" is
+      // what the button and the YAML argument mean — and the wire carries the
+      // inverse, because proto3's zero has to be the safe answer. See the
+      // reserved field 7 in blinds.proto.
+      mt.droppowerprofile = !this->mt_keep_power_profile_;
       mt.enablecounter    = this->mt_enable_counter_;
       mt.enablecrypto     = this->mt_enable_crypto_;
       mt.macecho          = this->mt_mac_echo_;

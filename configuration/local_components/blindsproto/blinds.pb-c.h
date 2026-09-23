@@ -909,12 +909,6 @@ struct  ModeTest
    */
   uint32_t payloadpadto;
   /*
-   * DEFAULT TRUE, and the difference from DriftTest. The report echoes it so
-   * a number measured with sleep disabled can never be quoted later as a
-   * production number.
-   */
-  protobuf_c_boolean keeppowerprofile;
-  /*
    * partial reports; 0 = final only
    */
   uint32_t reporteverys;
@@ -946,6 +940,17 @@ struct  ModeTest
    * MAC-0 replies, no application round trip
    */
   protobuf_c_boolean macecho;
+  /*
+   * The difference from DriftTest, in the polarity proto3 can express.
+   * FALSE — the default, and what an omitting sender gets — means the node
+   * runs under its PRODUCTION power profile: light sleep on, CPU scaled. That
+   * is the whole point of this mode; a number measured with sleep disabled is
+   * not a production number, and the report echoes what it actually ran under
+   * so one can never be quoted as the other by accident.
+   * TRUE deliberately disables it, which is a bench act and reads like one at
+   * the call site.
+   */
+  protobuf_c_boolean droppowerprofile;
 };
 #define MODE_TEST__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&mode_test__descriptor) \

@@ -427,13 +427,18 @@ namespace {
 
 // sysop is a plain ClientOperation enum field on the operation message, not a
 // nested message — see blinds.proto field 11.
-std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what) {
+std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what,
+                                   uint32_t burst_index = 0) {
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     LoraHeader hdr               = LORA_HEADER__INIT;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = msgid;
+    // Which copy of the hub's burst this is. Re-stamped per copy by the hub,
+    // and the number every phase path has to back out before it stamps a mark.
+    hdr.burstindex    = burst_index;
+    hdr.burstcount    = 17;
     op.header         = &hdr;
 
     op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
@@ -3458,10 +3463,28 @@ std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
     mt.mode             = mode;
     mt.gridperiodms     = grid_period_ms;
     mt.copies           = 1;
-    mt.keeppowerprofile = true;
+    mt.droppowerprofile = false;
     mt.enablecounter    = true;
     mt.enablecrypto     = true;
 
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+    inner.modetest = &mt;
+    return encrypt_op(inner, msgid);
+}
+
+// A ModeTest that leaves the power-profile field at its proto3 default — the
+// frame a sender that has never heard of the field produces. That used to mean
+// "pin the CPU at 240 MHz with light sleep off", which is the opposite of what
+// the field's own comment promised.
+std::vector<uint8_t> encrypted_mode_test_default_profile(uint32_t msgid) {
+    ModeTest mt = MODE_TEST__INIT;
+    mt.enable       = true;
+    mt.durations    = 60;
+    mt.mode         = MODE_TEST__MODE__MODE_A;
+    mt.gridperiodms = 1100;
+    mt.copies       = 1;
+    // droppowerprofile deliberately NOT set.
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
     inner.modetest = &mt;
@@ -4083,4 +4106,141 @@ TEST_F(RealNodeFixture, ANodeWithNoKeyKeepsTheBehaviourThatShipped) {
         << "an unsigned beacon may still make this node listen at the right time";
     EXPECT_FALSE(disp.pendingStateForTest().valid)
         << "but it may never make it listen LESS";
+}
+
+// ---------------------------------------------------------------------------
+// 11b — the three things the section listed as still open
+// ---------------------------------------------------------------------------
+
+TEST_F(RealNodeFixture, AnOmittedPowerProfileFieldMeansTheProductionProfile) {
+    // The field was `keepPowerProfile`, documented "DEFAULT TRUE". proto3
+    // scalars have no presence, so an omitting sender got FALSE and the node
+    // ran the measurement with light sleep off at 240 MHz — then reported it as
+    // if it were a production number. A comment cannot change a wire default.
+    //
+    // Inverted to dropPowerProfile, so proto3's own zero is the safe answer.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    auto mt = encrypted_mode_test_default_profile(/*msgid=*/2);
+    disp.onReceiveNew(mt.data(), static_cast<int>(mt.size()));
+
+    ASSERT_TRUE(disp.modeTestActive());
+    EXPECT_TRUE(disp.modeTestProductionProfile())
+        << "a sender that omits the field must get the profile the mode exists "
+           "to measure, not its opposite";
+}
+
+TEST_F(RealNodeFixture, DroppingThePowerProfileIsAnExplicitAct) {
+    // The other direction, so the inversion is not merely a constant that
+    // happens to read true: asking for the bench profile still works, and now
+    // it reads like the bench act it is at the call site.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+
+    ModeTest mt = MODE_TEST__INIT;
+    mt.enable           = true;
+    mt.durations        = 60;
+    mt.mode             = MODE_TEST__MODE__MODE_A;
+    mt.gridperiodms     = 1100;
+    mt.copies           = 1;
+    mt.droppowerprofile = true;
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+    inner.modetest = &mt;
+    auto frame = encrypt_op(inner, /*msgid=*/2);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    ASSERT_TRUE(disp.modeTestActive());
+    EXPECT_FALSE(disp.modeTestProductionProfile())
+        << "and the report must say so, or a bench number can be quoted as a "
+           "production one";
+}
+
+TEST_F(RealNodeFixture, ABeaconCommitsOneSampleAndItIsInsideTheGuard) {
+    // The beacon exists to be "the sample an idle node's phase tracking
+    // otherwise never gets". It was doing the opposite.
+    //
+    // A beacon is a BROADCAST, so it passed the address filter, and admitFrame
+    // then stamped it against THIS node's own mark — while the beacon sits in
+    // the beacon slot, 27 pitches away for a node in slot 4. That is 234 ms
+    // against a 14 080 us guard, so outside_guard went to 1; phaseTrustworthy()
+    // requires ZERO outside the guard, so one beacon made the node distrust its
+    // own anchor permanently. handleGridBeacon then committed a second, correct
+    // sample against the beacon slot's mark — which is the one that belongs.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/700);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.phaseStats().n, 0u) << "adoption resets the stats";
+
+    const gridstate::State st = disp.gridState();
+    auto b = build_grid_beacon(/*round=*/50, st.params.beacon_slot, /*msgid=*/1);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
+                      rx_for_beacon(st, 50, 0, (uint32_t) b.size()));
+
+    EXPECT_EQ(disp.phaseStats().n, 1u)
+        << "one frame, one sample — the generic path must leave the beacon to "
+           "the handler that knows which slot it is in";
+    EXPECT_EQ(disp.phaseStats().outside_guard, 0u)
+        << "a beacon landing exactly on its own mark must not be recorded as a "
+           "quarter-second phase error";
+}
+
+TEST_F(RealNodeFixture, ABurstCopyIsStampedAsCopyZero) {
+    // handleGridSync and handleGridBeacon both back out burstIndex; the generic
+    // phase path did not. Copies are one 88 ms stride apart, so stamping copy N
+    // as copy 0 commits an error of N x 88 ms against a 14 080 us guard — and
+    // one such sample is enough to fail phaseTrustworthy() forever.
+    //
+    // Not a rare case: until the hub promotes to single-shot it sends seventeen
+    // copies, and a node that has not promoted is sweeping a free-running
+    // window, so the copy it hears first is usually not copy 0.
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/710);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // Copy 3 of a burst whose copy 0 sat exactly on this node's mark.
+    constexpr uint32_t kCopy = 3;
+    auto op = pack_sysop_op(/*msgid=*/711, CLIENT_OPERATION__CMD_STATUS, kCopy);
+    const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+    const int64_t rx = mark + (int64_t) kCopy * drift::kCopySpacingUs
+                     + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
+
+    ASSERT_EQ(disp.phaseStats().n, 1u);
+    EXPECT_EQ(disp.phaseStats().outside_guard, 0u)
+        << "copy 3 is 264 ms after the mark; read as copy 0 that is a phase "
+           "error eighteen guard bands wide";
+    EXPECT_LT(std::abs((long) disp.phaseStats().last_us), 2000L);
+}
+
+TEST_F(RealNodeFixture, APlaintextFrameCannotFeedThePhaseFit) {
+    // 11b's second open item. The sample used to be committed with the address
+    // filter, above the plaintext gate, so anything in radio range could bias
+    // the fit that decides whether this node trusts its own anchor — and
+    // therefore whether it enters Mode B and where it aims its uplinks.
+    //
+    // Bounded, because poisoning drives outside_guard up and DEMOTES rather
+    // than desynchronising silently. A bound is not a reason to accept it.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_TRUE(disp.isSessionProven());
+    const uint32_t n_before = disp.phaseStats().n;
+
+    // A plaintext frame addressed to this node, arriving half a guard band off
+    // the mark — a plausible nudge rather than an obvious forgery.
+    auto op = pack_sysop_op(/*msgid=*/3, CLIENT_OPERATION__CMD_STATUS);
+    const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+    const int64_t rx = mark + 7000
+                     + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
+
+    EXPECT_EQ(disp.phaseStats().n, n_before)
+        << "a frame the node refuses to ACT on must not move the belief that "
+           "decides where it listens";
 }

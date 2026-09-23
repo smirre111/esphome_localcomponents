@@ -161,9 +161,14 @@ struct NodeContext {
     // handleModeTest then wrote sublayers_.counter_enabled and
     // sublayers_.crypto_enabled — the exact two variables applyMacConfig_ guards
     // — from proto3 fields that default to false. A plaintext ModeTest against a
-    // node with a live session disabled MAC-1 and MAC-2 and, because
-    // keepPowerProfile is a proto3 bool defaulting to false despite its comment
-    // saying "DEFAULT TRUE", pinned the CPU at 240 MHz with light sleep off.
+    // node with a live session disabled MAC-1 and MAC-2 and, because the power
+    // profile was carried as `keepPowerProfile` — a proto3 bool defaulting to
+    // FALSE despite its comment saying "DEFAULT TRUE" — pinned the CPU at
+    // 240 MHz with light sleep off. That field is now `dropPowerProfile`, so
+    // proto3's own zero is the safe answer and a sender cannot get it wrong by
+    // silence; the general lesson stands, which is why it is still described
+    // here: a default that has to be remembered is a default that will be
+    // forgotten.
     //
     // Defaults to false, so a NodeContext that forgets to set it refuses rather
     // than arms — the same direction as every other default in these headers.

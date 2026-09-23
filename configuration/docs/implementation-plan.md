@@ -1202,31 +1202,68 @@ against a node with a live session disabled MAC-1 and MAC-2.
 
 ### What is still open
 
-- **`keepPowerProfile` is a proto3 `bool` defaulting to `false`** despite its
-  comment saying "DEFAULT TRUE", so a `ModeTest` that omits it pins the CPU at
-  240 MHz with light sleep off. Now unreachable without authentication, but the
-  field still reads as the opposite of its documentation.
-- **Phase and drift samples are still taken from unauthenticated frames.** The
-  sampling sits above the plaintext gate because it keys off arrival time, which
-  is not a claim of authority — but an attacker in range can still bias the
-  phase fit and the mark-hit counter that holds off demotion. Bounded
-  (`phaseTrustworthy()` requires every sample inside the guard, so poisoning it
-  demotes the node rather than desynchronising it silently), and untested.
-  **Narrowed, for the beacon specifically.** The beacon was the worst case here:
-  it is the one frame a node acts on with no addressing and no session, and the
-  anchor nudge it grants is bounded per beacon rather than in total — so an
-  attacker beaconing at the right instants could walk a node off the grid
-  14 ms at a time. A node holding a fleet key now refuses an unsigned or
-  wrongly-signed beacon **entirely** — no re-anchor and no phase sample — so
-  the walk is closed for a keyed node. A node holding none still has it, which
-  is the pre-existing behaviour, and ordinary addressed frames still feed the
-  tracker before authentication.
+- ~~**`keepPowerProfile` is a proto3 `bool` defaulting to `false`**~~ —
+  **FIXED, by polarity rather than by a companion flag.** proto3 scalars have no
+  presence, so an omitted field arrived as `false` and the node pinned the CPU
+  at 240 MHz with light sleep off — then reported the run as if it were a
+  production measurement. A comment cannot change a wire default.
+  `pendingMaskValid` is the other pattern available and it is the wrong one
+  here: it exists because "absent" and "empty" genuinely differ for a bitmap,
+  whereas this field has one safe answer, so the fix is to make that answer the
+  one proto3 gives for free. Field 7 is now `reserved` and the meaning is
+  carried by `dropPowerProfile = 14`, whose `false` means "run under the
+  production profile". **Reserved rather than reused**: an old sender's
+  `keepPowerProfile = true` decoded under the new meaning would read as "drop
+  the profile", which is the same trap with the sign flipped. The hub's own knob
+  keeps the human polarity — the button and the YAML argument still say *keep* —
+  and `send_mode_test` inverts on the way out.
+- ~~**Phase samples are still taken from unauthenticated frames**~~ —
+  **FIXED, and it turned out to be hiding two worse things.**
+  The **phase** commit has moved down past the plaintext gate, to sit with the
+  mark-hit counter under the comment that already said "only now, past every
+  gate". The arrival instant is still captured early — that is right, and it is
+  what *drift* needs — but committing it is now something only a frame the node
+  will act on can do. On a node with no session nothing changes: the gate does
+  not fire there, the same bootstrap carve-out `ClientConfig` has. Pinned by
+  `APlaintextFrameCannotFeedThePhaseFit`, verified to fail with the commit
+  restored to its old position. **Drift** sampling is deliberately left where it
+  is: it runs on the DIO0 task off arrival time alone, it is a free-running ppm
+  estimate rather than an input to any decision, and moving it would make it a
+  measurement of the traffic pattern instead of the crystal.
+  **The beacon was destroying phase trustworthiness, not feeding it.** A beacon
+  is a broadcast, so it passed the address filter, and the generic path stamped
+  it against **this node's own mark** — while the beacon sits in the beacon
+  slot, 27 pitches away for a node in slot 4. That is 234 ms against a 14 080 µs
+  guard, so `outside_guard` went to 1; `phaseTrustworthy()` requires **zero**
+  outside the guard, so **one beacon made a node distrust its own anchor
+  permanently** — and `handleGridBeacon` then committed a second, correct sample
+  against the beacon slot's mark. Measured before the fix: `n=2, outside=1`.
+  After: `n=1, outside=0`. The generic path now leaves `CMD_GRIDBEACON` to the
+  handler that knows which slot it is in.
+  **And the generic path never backed out `burstIndex`,** which
+  `handleGridSync` and `handleGridBeacon` both do. Copies are one 88 ms stride
+  apart, so stamping copy N as copy 0 commits an error of N × 88 ms — one such
+  sample fails `phaseTrustworthy()` forever. Not a rare case: until the hub
+  promotes to single-shot it sends seventeen copies, and a node that has not
+  promoted is sweeping a free-running window, so the copy it hears first is
+  usually not copy 0. Both are the same mistake the plan already records twice,
+  arriving in the one place nobody had looked.
+  **Also narrowed, for the beacon.** The anchor nudge a beacon grants is bounded
+  per beacon rather than in total, so an attacker beaconing at the right
+  instants could walk a node off the grid 14 ms at a time. A node holding a
+  fleet key now refuses an unsigned or wrongly-signed beacon **entirely**. A
+  node holding none still has it, which is the pre-existing behaviour.
 - **A node that has never been provisioned accepts plaintext `ClientConfig`.**
-  Inherent to bootstrap: the gate's test is "does this node hold a session", so
-  a factory-fresh node is deliberately unaffected. The MAC check inside the
-  handler is the only gate there, and the MAC is broadcast in the plaintext
-  `ClientRegister`. Closing it needs a provisioning secret, which is a protocol
-  change, not a patch.
+  **Still open, and deliberately so — this is the one item here that is not a
+  defect.** The gate's test is "does this node hold a session", so a
+  factory-fresh node is unaffected *by design*: without that carve-out there is
+  no way to provision a node at all. The MAC check inside the handler is the
+  only gate there, and the MAC is broadcast in the plaintext `ClientRegister`.
+  Closing it needs a shared secret present on the node before its first
+  exchange, which means burning one at manufacture or entering one by hand — a
+  deployment decision with a cost outside this repository, not a patch. The
+  fleet key does not help: it is distributed *over* an established session, so
+  it presupposes exactly what is missing here.
 
 **Corrected after review — the gate asked the wrong question.** It tested
 "do I hold a base nonce for the **sender**", and `senderaddress` is a plaintext

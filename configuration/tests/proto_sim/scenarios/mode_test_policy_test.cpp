@@ -331,9 +331,11 @@ TEST(ModeTestPolicy, APlaintextArmIsRefusedEvenWithALiveSession) {
     // sublayer variables applyMacConfig_ guards — counter_enabled and
     // crypto_enabled — from proto3 fields defaulting to false. A plaintext
     // ModeTest against a node with a live session therefore disabled MAC-1 and
-    // MAC-2, and pinned the CPU at 240 MHz with light sleep off because
-    // keepPowerProfile is a proto3 bool defaulting to false despite its comment
-    // saying "DEFAULT TRUE".
+    // MAC-2, and pinned the CPU at 240 MHz with light sleep off because the
+    // power profile was carried as `keepPowerProfile`, a proto3 bool defaulting
+    // to false despite its comment saying "DEFAULT TRUE". That field is now
+    // `dropPowerProfile`, so proto3's zero is the safe answer — but the
+    // authentication gate is what this test is for, and it is unchanged.
     NodeContext c = armable();
     c.frame_authenticated = false;
     EXPECT_EQ(armRefusal(modeA(), c), ArmRefusal::NotAuthenticated);
