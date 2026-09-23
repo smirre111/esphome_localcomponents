@@ -520,6 +520,12 @@ namespace esphome
       // Rule 4 bounds the exposure to ONE frame: the first retry of a single
       // shot puts the node back on bursts until it is confirmed again.
       bool     op_sent_single_shot_{false};
+      // The shape of the LAST frame send_aligned_ placed, whoever placed it.
+      // Distinct from op_sent_single_shot_ above, which is the TRACKED
+      // COMMAND's shape and the one Rule 4 judges: every producer through
+      // send_aligned_ would otherwise overwrite it, and a grid publication
+      // already did.
+      bool     last_placed_single_shot_{false};
       // The mark the last placed downlink for this node was aimed at, so a
       // second command inside the same round goes to the FOLLOWING mark instead
       // of on top of the first. 0 = nothing placed yet.

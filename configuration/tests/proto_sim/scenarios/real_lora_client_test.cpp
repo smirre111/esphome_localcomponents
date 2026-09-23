@@ -2557,3 +2557,123 @@ TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);
 }
+
+// ---------------------------------------------------------------------------
+// The routine downlinks are PLACED (B1a's last open half)
+//
+// send_aligned_ was reached only by the tracked-op path and the grid
+// publication. TimeSync, ScheduleConfig and BaseNonceExchange went out through
+// the bare parent_->send(), so in Mode B they left whenever the queue drained
+// — into a window the node had stopped opening. The largest frame on the link
+// (a 152 B ScheduleConfig) was also the one least likely to be heard.
+//
+// Whether each may be sent as ONE copy is a separate question from whether it
+// is placed, and it turns on one thing: is the loss visible?
+// ---------------------------------------------------------------------------
+
+TEST(PlacedDownlinks, AScheduleConfigIsPlacedAndMayBeASingleShot) {
+    // Single-shot ELIGIBLE, and the only one of the three that is: the node
+    // ACKS a schedule push, so a missed copy is visible and the retry is
+    // already a burst. That is precisely Rule 4's bounded exposure.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.tracker.gridStarted());
+    give_phase_report(h);
+    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot);
+
+    const size_t before = h.tracker.sent_earliest_us.size();
+    h.rol.send_schedule_config();
+    ASSERT_GT(h.tracker.sent_earliest_us.size(), before)
+        << "the schedule push must have been sent";
+
+    EXPECT_GT(h.tracker.last_earliest_us, 0)
+        << "PLACED: a schedule push sent bare leaves whenever the queue drains, "
+           "which in Mode B is not when the node is listening";
+    EXPECT_EQ(h.tracker.last_copies, 1)
+        << "and it is single-shot eligible, because its loss is visible";
+}
+
+TEST(PlacedDownlinks, ATimeSyncIsPlacedButAlwaysABurst) {
+    // A TimeSync carries NO ack. Rule 4's "being wrong costs one frame" rests
+    // on the loss being visible; for an unacked frame a missed single copy is
+    // silent and the node runs on a stale clock until the next push. So the
+    // burst is asked for explicitly, even on a node the hub would otherwise
+    // trust with one copy.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    give_phase_report(h);
+    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot);
+
+    const size_t before = h.tracker.sent_earliest_us.size();
+    h.rol.send_timesync();
+    ASSERT_GT(h.tracker.sent_earliest_us.size(), before);
+
+    EXPECT_GT(h.tracker.last_earliest_us, 0) << "placed";
+    EXPECT_NE(h.tracker.last_copies, 1)
+        << "an unacked frame must not be reduced to one copy: nothing would "
+           "ever learn it was lost";
+}
+
+TEST(PlacedDownlinks, ABaseNonceExchangeIsPlacedAndAlwaysABurst) {
+    // This frame INSTALLS A KEY — the node adopts the nonce and persists it,
+    // and until it does neither end can decrypt the other. It carries no ack,
+    // so a lost single copy breaks the session silently. There is no version of
+    // "costs one frame" that applies.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    give_phase_report(h);
+    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot);
+
+    const size_t before = h.tracker.sent_earliest_us.size();
+    h.rol.send_base_nonce_exchange();
+    ASSERT_GT(h.tracker.sent_earliest_us.size(), before);
+
+    EXPECT_GT(h.tracker.last_earliest_us, 0) << "placed";
+    EXPECT_NE(h.tracker.last_copies, 1) << "never one copy for a key install";
+}
+
+TEST(PlacedDownlinks, ARoutineDownlinkDoesNotEraseRuleFoursExposure) {
+    // The defect routing these through send_aligned_ would have made routine.
+    //
+    // send_aligned_ assigned op_sent_single_shot_ — the flag Rule 4 reads to
+    // decide whether an unacked command costs this node its confidence — so
+    // ANY later frame overwrote the tracked command's shape. A grid publication
+    // already did it (it asks for the burst explicitly, so it cleared the
+    // flag); a TimeSync or schedule push would have done it on every push.
+    // The flag now belongs to the command it describes.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    give_phase_report(h);
+    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot);
+
+    // A command that really did go out as one copy.
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                               COV_OPERATION__CMD_OPEN, 0.0f);
+    h.clock.tick(10);
+    ASSERT_EQ(h.tracker.last_copies, 1) << "precondition: it was a single shot";
+
+    // A TimeSync in between — a burst, and nothing to do with that command.
+    h.rol.send_timesync();
+    h.clock.tick(10);
+    ASSERT_NE(h.tracker.last_copies, 1);
+
+    // Now let the command go unacked. Rule 4 must still fire: one frame of
+    // exposure is the whole promise single-shot makes, and it is only kept if
+    // the hub can still tell the command was a single shot.
+    h.clock.tick(3000 + 50);   // kOpRetryIntervalMs
+    EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst)
+        << "an unacked single shot must put this node back on bursts, however "
+           "many routine downlinks happened in between";
+}

@@ -1929,7 +1929,19 @@ namespace esphome
                  (int) belief.phase_spread_us, (unsigned) belief.phase_samples,
                  (unsigned) belief.confirmation_age_s);
       }
-      this->op_sent_single_shot_ = single_shot;
+      // The SHAPE of the frame just placed, which is not the same thing as the
+      // shape of the tracked command.
+      //
+      // This used to assign op_sent_single_shot_ directly, and Rule 4 reads
+      // that to decide whether an unacked command costs this node its
+      // single-shot confidence. Every other producer through send_aligned_ then
+      // clobbered it: a grid publication asks for the burst explicitly, so
+      // publishing a grid CLEARED the flag and Rule 4 could not fire for a
+      // single shot that really had gone unacked. Routing TimeSync and
+      // ScheduleConfig through here would have made that routine rather than
+      // rare. The tracked-op senders copy it into op_sent_single_shot_
+      // themselves, so the flag belongs to the command it describes.
+      this->last_placed_single_shot_ = single_shot;
 
       if (!this->grid_aligned_ || !this->parent_->gridStarted())
       {
@@ -2047,6 +2059,10 @@ namespace esphome
         // alignment on, this is the burst that must observably start on the
         // grid. With it off (the default) behaviour is byte-for-byte as before.
         this->send_aligned_(buf, len, this->tracked_op_policy_());
+        // Rule 4's exposure is THIS command's, so the shape is recorded here
+        // rather than inside send_aligned_, where every other producer would
+        // overwrite it.
+        this->op_sent_single_shot_ = this->last_placed_single_shot_;
         free(buf);
       }
       else
@@ -2177,6 +2193,7 @@ namespace esphome
       // the frame it is a retry of.
       this->send_aligned_(this->op_frame_.data(), this->op_frame_.size(),
                           this->tracked_op_policy_());
+      this->op_sent_single_shot_ = this->last_placed_single_shot_;
       return this->op_frame_msgid_;
     }
 
@@ -2371,7 +2388,17 @@ namespace esphome
       size_t len    = lora_client_operation_message__get_packed_size(&op_message);
       uint8_t *buf  = new uint8_t[len];
       lora_client_operation_message__pack(&op_message, buf);
-      this->parent_->send(buf, len);
+      // PLACED, and as a BURST.
+      //
+      // This frame INSTALLS A KEY: the node adopts the nonce and persists it to
+      // NVS, and until it does, nothing either end sends can be decrypted by
+      // the other. It carries no ack, so a single copy that misses its window
+      // is silent and the session is simply broken from that moment. There is
+      // no version of Rule 4's "costs one frame" that applies to it — so the
+      // burst is asked for explicitly rather than left to the policy.
+      TxPolicy p;
+      p.copies = this->parent_->defaultBurstCopies();
+      this->send_aligned_(buf, len, p);
       delete[] buf;
 
       ESP_LOGI(TAG, "Sent BaseNonceExchange (base=0x%08x) to peer %u",
@@ -3170,7 +3197,17 @@ namespace esphome
       size_t   len = 0;
       if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
       {
-        this->parent_->send(buf, len);
+        // PLACED. It used to go out through the bare send(), so in Mode B it
+        // left whenever the queue drained — into a window the node had stopped
+        // opening. That made the largest frame on the link (152 B) also the one
+        // least likely to be heard.
+        //
+        // Single-shot ELIGIBLE, deliberately, and it is the only one of the
+        // three routine downlinks that is: the node ACKS a schedule push, so a
+        // missed single copy is visible and the retry above is already a burst.
+        // That is exactly Rule 4's bounded exposure. TimeSync and
+        // BaseNonceExchange carry no ack and ask for the burst explicitly.
+        this->send_aligned_(buf, len);
         free(buf);
         // Arm the retransmit.  The node acks a schedule push (unlike TimeSync);
         // that ack is what cancels this.
@@ -3705,7 +3742,21 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         // a node the hub cannot place still gets its TimeSync the way it always
         // did.
         if (!this->send_into_class_a_window_(buf, len))
-          this->parent_->send(buf, len);
+        {
+          // PLACED, and as a BURST. Placement is the fix: through the bare
+          // send() this left whenever the queue drained, so in Mode B it
+          // arrived outside the node's window and the clock silently did not
+          // advance.
+          //
+          // The burst is asked for EXPLICITLY because a TimeSync carries no
+          // ack. Rule 4's exposure argument — "being wrong costs one frame" —
+          // rests on the loss being visible; for an unacked frame a missed
+          // single copy is silent, and the node runs on a stale clock until
+          // the next push. Airtime is the cheaper side of that trade.
+          TxPolicy p;
+          p.copies = this->parent_->defaultBurstCopies();
+          this->send_aligned_(buf, len, p);
+        }
         free(buf);
         ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
                  this->get_name().c_str(), (unsigned long long) epoch,
