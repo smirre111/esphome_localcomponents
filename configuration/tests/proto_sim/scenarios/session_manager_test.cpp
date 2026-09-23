@@ -110,11 +110,68 @@ TEST(SessionManager, RejectsAReplayAndLeavesTheCounterAlone) {
     SessionManager s = freshManager();
     ASSERT_TRUE(s.acceptRxId(10));
 
-    EXPECT_FALSE(s.acceptRxId(10)) << "same id is a replay";
-    EXPECT_FALSE(s.acceptRxId(9))  << "older id is a replay";
+    EXPECT_FALSE(s.acceptRxId(10)) << "the same id twice is a replay";
     EXPECT_EQ(s.rxId(), 10u)
         << "a rejected frame must not move the counter — that is how an "
            "overheard frame used to wedge the link";
+}
+
+// --- the window, and why it is not a ratchet -------------------------------
+//
+// This test USED TO assert that "an older id is a replay", and that assumption
+// is what made a retried command undeliverable: pack-once retransmits the
+// byte-identical frame, so a retry is never a forward jump, and any other
+// downlink in between had already moved the mark past it. See the header.
+
+TEST(SessionManager, AnUnseenIdBelowTheMarkIsAReorderNotAReplay) {
+    SessionManager s = freshManager();
+    ASSERT_TRUE(s.acceptRxId(10));
+
+    EXPECT_TRUE(s.acceptRxId(9))
+        << "the node has never seen 9; refusing it is what loses a retried "
+           "command for good";
+    EXPECT_FALSE(s.acceptRxId(9)) << "but only once — the second time is a replay";
+    EXPECT_EQ(s.rxId(), 10u)
+        << "and accepting behind the mark must not move the mark backwards, or "
+           "the next replay walks in behind it";
+}
+
+TEST(SessionManager, AnIdAlreadySeenIsRefusedHoweverItArrives) {
+    // The property the whole filter exists for, and the one the window must not
+    // weaken: a frame the node has acted on cannot be made to act again.
+    SessionManager s = freshManager();
+    for (uint32_t id : {5u, 6u, 7u, 8u})
+        ASSERT_TRUE(s.acceptRxId(id));
+
+    for (uint32_t id : {5u, 6u, 7u, 8u})
+        EXPECT_FALSE(s.acceptRxId(id)) << "replay of " << id;
+}
+
+TEST(SessionManager, TooFarBehindTheMarkIsStillARefusal) {
+    // The reorder window is deliberately much smaller than kMsgIdWindow: a
+    // forward jump may be 1024, but an attacker replaying something old gets
+    // kReplayWindow of reach, not that.
+    SessionManager s = freshManager();
+    ASSERT_TRUE(s.acceptRxId(1000));
+
+    EXPECT_FALSE(s.acceptRxId(1000 - SessionManager::kReplayWindow))
+        << "exactly the window's width behind is out";
+    EXPECT_TRUE(s.acceptRxId(1000 - SessionManager::kReplayWindow + 1))
+        << "one inside it is a reorder";
+    EXPECT_LT(SessionManager::kReplayWindow, SessionManager::kMsgIdWindow);
+}
+
+TEST(SessionManager, ALoginClearsWhatHasBeenSeenAsWellAsTheMark) {
+    // The bitmap has to go with the mark. Bits describing ids under the old
+    // numbering would refuse the first frames of the new session — and a login
+    // is exactly when the hub starts counting from 1 again.
+    SessionManager s = freshManager();
+    ASSERT_TRUE(s.acceptRxId(5));
+    s.resetCounters();
+
+    EXPECT_EQ(s.rxId(), 0u);
+    EXPECT_TRUE(s.acceptRxId(1)) << "the new session's first frame";
+    EXPECT_TRUE(s.acceptRxId(2));
 }
 
 TEST(SessionManager, RejectsAJumpBeyondTheWindow) {

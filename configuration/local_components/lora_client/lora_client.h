@@ -409,6 +409,17 @@ namespace esphome
         this->send_aligned_(buf, len);
       }
 
+      // --- Tracked-delivery state, read-only -------------------------------
+      //
+      // What the end-to-end suite asserts a conversation against, and what a
+      // diagnostic could publish: is this listener still waiting for an ack,
+      // did it give up, and is a schedule push outstanding. All three were
+      // observable only through a log line or a binary sensor.
+      bool     awaitingAck() const     { return this->op_awaiting_ack_; }
+      bool     commandFailed() const   { return this->command_failed_; }
+      uint32_t schedulePushMsgid() const { return this->sched_push_msgid_; }
+      uint32_t opRetryCount() const    { return this->op_retry_count_; }
+
       const MacStats &mac_stats() const { return this->mac_stats_; }
       void reset_mac_stats() { this->mac_stats_ = MacStats{}; }
 

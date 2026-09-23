@@ -57,24 +57,98 @@ enum class Decision : uint8_t {
     Exhausted,       // re-acked enough; drop
 };
 
-struct Cache
+// One remembered command. The cache holds several, which is not a size tweak:
+// a SINGLE entry is evicted by the next acked command, and the hub routinely
+// sends one. Found end to end (e2e_test, ALostAckIsRecoveredByTheRetry...):
+//
+//   1. the node accepts a cover op as msgid 2 and acks it — the ack is lost;
+//   2. the login-confirm path delivers ScheduleConfig as msgid 4, which the
+//      node also acks, and that OVERWRITES the entry for msgid 2;
+//   3. the hub retries the cover op, byte-identical, still msgid 2;
+//   4. classify() finds msgid 4 in the cache, answers NotADuplicate, and the
+//      frame is refused with no re-ack.
+//
+// So B4's whole purpose — making a lost ack recoverable — failed whenever any
+// other acked command arrived in between, which is most of the time. Four
+// entries cover every frame the hub can have in flight to one node.
+struct Entry
 {
     bool     valid{false};
     uint32_t msgid{0};
     int64_t  first_seen_us{0};
     int64_t  last_reack_us{0};
     uint8_t  reacks{0};
+    uint32_t stamp{0};        // insertion order, for eviction
+};
+
+struct Cache
+{
+    static constexpr uint8_t kEntries = 4;
+
+    Entry    entries[kEntries]{};
+    uint32_t next_stamp{1};
 
     void reset() { *this = Cache{}; }
 
-    // Remember a command we have just accepted and answered.
+    // The entry for a msgid, or nullptr. Const and non-const, because classify
+    // reads and noteReAck writes.
+    const Entry *find(uint32_t id) const
+    {
+        for (uint8_t i = 0; i < kEntries; ++i)
+            if (entries[i].valid && entries[i].msgid == id) return &entries[i];
+        return nullptr;
+    }
+    Entry *find(uint32_t id)
+    {
+        for (uint8_t i = 0; i < kEntries; ++i)
+            if (entries[i].valid && entries[i].msgid == id) return &entries[i];
+        return nullptr;
+    }
+
+    // The most recently noted entry, or an empty one. What a log line and a
+    // "has anything been acked" check want.
+    const Entry &newest() const
+    {
+        static const Entry none{};
+        const Entry *best = nullptr;
+        for (uint8_t i = 0; i < kEntries; ++i)
+            if (entries[i].valid && (!best || entries[i].stamp > best->stamp))
+                best = &entries[i];
+        return best ? *best : none;
+    }
+
+    // Convenience readers, so a caller that only cares about the last command
+    // does not have to reach through newest() every time.
+    bool     valid() const        { return newest().valid; }
+    uint32_t msgid() const        { return newest().msgid; }
+    uint8_t  reacks() const       { return newest().reacks; }
+    int64_t  firstSeenUs() const  { return newest().first_seen_us; }
+    int64_t  lastReackUs() const  { return newest().last_reack_us; }
+
+    // Remember a command we have just accepted and answered. Re-noting an id
+    // already held REFRESHES nothing — the first acceptance is what bounds the
+    // re-ack budget, and resetting it here would let an attacker mint fresh
+    // budget by replaying.
     void note(uint32_t accepted_msgid, int64_t now_us)
     {
-        this->valid         = true;
-        this->msgid         = accepted_msgid;
-        this->first_seen_us = now_us;
-        this->last_reack_us = 0;
-        this->reacks        = 0;
+        if (find(accepted_msgid) != nullptr) return;
+
+        Entry *slot = nullptr;
+        for (uint8_t i = 0; i < kEntries; ++i)
+            if (!entries[i].valid) { slot = &entries[i]; break; }
+        if (slot == nullptr)
+        {
+            // Evict the oldest. A command old enough to be the oldest of four
+            // is one whose retry ladder has long since run out.
+            slot = &entries[0];
+            for (uint8_t i = 1; i < kEntries; ++i)
+                if (entries[i].stamp < slot->stamp) slot = &entries[i];
+        }
+        *slot = Entry{};
+        slot->valid         = true;
+        slot->msgid         = accepted_msgid;
+        slot->first_seen_us = now_us;
+        slot->stamp         = this->next_stamp++;
     }
 };
 
@@ -86,27 +160,31 @@ struct Cache
 // staying silent costs nothing while a spurious uplink costs battery.
 inline Decision classify(const Cache &c, uint32_t msgid, int64_t now_us)
 {
-    if (!c.valid || msgid != c.msgid)
+    const Entry *e = c.find(msgid);
+    if (e == nullptr)
         return Decision::NotADuplicate;
 
-    const int64_t since_first = now_us - c.first_seen_us;
+    const int64_t since_first = now_us - e->first_seen_us;
     if (since_first < kBurstSpanUs)
         return Decision::SilentCopy;
 
-    if (c.reacks >= kMaxReAcks)
+    if (e->reacks >= kMaxReAcks)
         return Decision::Exhausted;
 
-    if (c.last_reack_us != 0 && (now_us - c.last_reack_us) < kMinReAckIntervalUs)
+    if (e->last_reack_us != 0 && (now_us - e->last_reack_us) < kMinReAckIntervalUs)
         return Decision::SilentCopy;
 
     return Decision::ReAck;
 }
 
-// Record that a re-ack was sent.
-inline void noteReAck(Cache &c, int64_t now_us)
+// Record that a re-ack was sent. Takes the msgid because the cache holds
+// several commands and the budget belongs to the one being re-acked.
+inline void noteReAck(Cache &c, uint32_t msgid, int64_t now_us)
 {
-    c.last_reack_us = now_us;
-    if (c.reacks < 0xFF) c.reacks++;
+    Entry *e = c.find(msgid);
+    if (e == nullptr) return;
+    e->last_reack_us = now_us;
+    if (e->reacks < 0xFF) e->reacks++;
 }
 
 }  // namespace ackcache

@@ -41,6 +41,19 @@ HW-n` families, which name the PHASES of this plan and are already spoken for.
 **Nothing below is deployed.** The host suite is green at 848 and says nothing
 about a roof. That is the largest open item and it is not a row.
 
+### Fixed by the end-to-end suite
+
+`e2e_test` drives the real hub and the real node through whole conversations —
+login to a proven session, command to ack, a lost ack, a lost command, a
+schedule push. It found two defects on its first run, both of which had been
+invisible because every earlier end-to-end scenario drove hand-written mirrors
+that agreed with each other by construction.
+
+| what | the sequence |
+|---|---|
+| **A retried command was undeliverable once any other downlink had arrived.** The replay filter was a bare ratchet (`msgid > rx_id_`), and pack-once retransmits the byte-identical frame — so a retry is never a forward jump. Four retries refused, then the hub tore down a session that was working. Now a **sliding window**: the high-water mark plus a bitmap, so an unseen id behind the mark is accepted once and a true replay still finds its bit set. | cover op = 2, lost on air → TimeSync 3 and ScheduleConfig 4 arrive, mark = 4 → retry of 2 refused |
+| **A lost ack was unrecoverable once another command was acked.** `AckCache` held ONE entry, so the next acked command evicted the one about to be retried and B4's recovery could not fire. Now four entries, each with its own re-ack budget. | cover op 2 acked, ack lost → ScheduleConfig 4 acked, evicting 2 → retry of 2 not recognised |
+
 ### Bugs — something behaves wrongly today
 
 Two. Both are known, both have a reason they are still here, and neither is a
@@ -68,7 +81,7 @@ padded with work nobody has argued for is how a real item gets lost.
 |---|---|---|---|
 | T-1 | **`LoraInterface.cpp` and `frtosTasks.cpp` are not compiled by the host suite.** | This is why two defects this year were invisible: the uplink-aim call site is untested, and a log line inside the aimed critical path was caught by reading the diff rather than by a test. Every fix in those files is made blind. **Highest-value structural item.** | §11b |
 | T-2 | The 5-entry buffer pool (`POOL_SIZE`) against a 16-entry queue, and a placed frame holds its buffer until its mark. | A fleet pushing schedules could starve the pool, and `send()` drops silently when it does. | §8 B1a |
-| T-3 | `processTxCommand`'s two lines assigning the phase report into the outgoing message are not covered end to end. | That body is a task loop the host harness does not run. | §11b |
+| ~~T-3~~ | ~~`processTxCommand` is not covered end to end~~ — **CLOSED.** Its body is now `serviceTxCommand`, and `runOneTxCommand()` drives one iteration, so the host suite reaches the code that builds every uplink the node sends. The task still loops and blocks; behaviour is unchanged. | This is what made `e2e_test` possible at all. | §11b |
 
 ### Accepted — recorded, with the price, not to be fixed
 
@@ -1562,8 +1575,20 @@ Recorded here rather than left to look maintained.
   that an unplaced `GridSync` displaces every mark the node will ever arm. The
   beacon's fleet-key MAC is checked there too: the hub's tag, produced by the
   hub-side convention, against the node's real `psa_mac_verify`.
-  What the seam still cannot reach is `LoraInterface.cpp` and `frtosTasks.cpp` —
-  see the entry below, which is the one that is actually still open.
+  **Extended 2026-09 into `e2e_test.cpp`**, which asserts CONVERSATIONS rather
+  than geometry: login to a proven session, a command executed and acked, a lost
+  ack recovered without the blind moving twice, a command lost on air carried
+  through by the retry, Mode B entered and a command still completing, the grid
+  withdrawn, a schedule push confirmed. It found two defects on its first run —
+  see §0 — and it was only possible once `processTxCommand`'s body was split out
+  of its blocking task loop, because the node's entire uplink path lived inside
+  it. No ESPHome entity and no Home Assistant: the hub is driven through the API
+  its automations call and every assertion is protocol state.
+  The e2e harness drives the SHIM tracker, so it cannot reach frame placement,
+  the prepare/fire split, or queue supersession; those need the real
+  `LORATracker` and are tested against it in `real_lora_tracker_test`.
+  What NEITHER can reach is `LoraInterface.cpp` and `frtosTasks.cpp` — see the
+  entry below, which is the one that is actually still open.
 - **`LoraInterface.cpp` and `frtosTasks.cpp` are not compiled by the host suite
   at all** (the CMake shims `LoraInterface.h`). The Class A task-ordering defect
   and the cross-core `classa_` read were both fixed blind, and no test in either

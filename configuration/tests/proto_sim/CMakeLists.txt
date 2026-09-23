@@ -685,6 +685,30 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         PRIVATE real_cmd_dispatcher_seam real_lora_client proto_sim
                 GTest::gtest GTest::gtest_main)
     gtest_discover_tests(seam_test)
+
+    # ------------------------------------------------------------------
+    # END TO END. The seam test asserts GEOMETRY — does the hub's frame land
+    # in the node's window. This one asserts CONVERSATIONS: login to session,
+    # command to ack, a lost ack recovered, a superseded command, a schedule
+    # push confirmed. Same two static libraries, same clock, same air.
+    #
+    # It exists because every end-to-end scenario before it drove hand-written
+    # mirrors (sim/hub_model.cpp, sim/node_model.cpp) that agree with each other
+    # by construction. Nothing asserted that the REAL hub and the REAL node can
+    # hold a conversation, and the node's whole uplink path — processTxCommand,
+    # where every frame it sends is built — was unreachable from the harness
+    # until its body was split out of the task loop.
+    #
+    # No ESPHome entity, no Home Assistant: the hub is driven through the same
+    # API its automations call, and what is asserted is protocol state.
+    add_executable(e2e_test
+        scenarios/e2e_test.cpp
+        ${NODE_SHIM_DIR}/host_clock.c)
+    target_include_directories(e2e_test BEFORE PRIVATE ${NODE_STAGE} ${NODE_SHIM_DIR})
+    target_link_libraries(e2e_test
+        PRIVATE real_cmd_dispatcher_seam real_lora_client proto_sim
+                GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(e2e_test)
 else()
     message(STATUS "BlindsESP node source not found at ${BLINDS_ESP_MAIN} — "
                    "skipping real_cmd_dispatcher target")

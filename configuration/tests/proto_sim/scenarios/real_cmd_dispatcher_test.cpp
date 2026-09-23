@@ -2946,17 +2946,30 @@ TEST_F(RealNodeFixture, TheOtherSixteenBurstCopiesStaySilent) {
         << "every duplicate inside the burst span must be silent";
 }
 
-TEST_F(RealNodeFixture, ADuplicateOfADifferentCommandIsNotAReAck) {
-    // The cache holds one command. A duplicate whose msgid is not the cached
-    // one is an ordinary replay and must be dropped, not answered.
+TEST_F(RealNodeFixture, AnUnseenIdBehindTheMarkIsAcceptedOnceThenRefused) {
+    // This test USED TO assert that an id the node had "already moved past" was
+    // an ordinary replay and must be dropped. That was the assumption, and it
+    // is what made a retried command undeliverable: pack-once retransmits the
+    // byte-identical frame, so a retry is never a forward jump.
+    //
+    // The replay filter is now a sliding window. An id BELOW the mark that the
+    // node has never seen is a reordered frame and is accepted — once. The
+    // second attempt finds its bit set and is refused, which is the property
+    // the filter actually exists for.
     auto a = pack_sysop_op(/*msgid=*/910, CLIENT_OPERATION__CMD_STATUS);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_EQ(drain_acks(disp), 1);
 
-    // An OLD msgid the node has already moved past.
-    auto stale = pack_sysop_op(/*msgid=*/905, CLIENT_OPERATION__CMD_STATUS);
-    disp.onReceiveNew(stale.data(), static_cast<int>(stale.size()));
-    EXPECT_EQ(drain_acks(disp), 0);
+    auto behind = pack_sysop_op(/*msgid=*/905, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(behind.data(), static_cast<int>(behind.size()));
+    EXPECT_EQ(drain_acks(disp), 1)
+        << "a frame the node has never seen must be acted on, not discarded "
+           "because something with a higher id arrived first";
+
+    disp.onReceiveNew(behind.data(), static_cast<int>(behind.size()));
+    EXPECT_EQ(drain_acks(disp), 0)
+        << "and the same id a second time is a replay again — within the burst "
+           "span it is a copy, so it is silent either way";
 }
 
 TEST_F(RealNodeFixture, APlaintextDuplicateNeverMakesTheNodeTransmit) {
@@ -2982,15 +2995,15 @@ TEST_F(RealNodeFixture, AckingACommandArmsTheReAckCache) {
     // Wiring half 1: sendCommandAck populates the cache. It is recorded there
     // rather than at the three handler call sites so a handler added later
     // cannot forget to do it — this asserts that placement holds.
-    EXPECT_FALSE(disp.ackCacheForTest().valid) << "nothing acked yet";
+    EXPECT_FALSE(disp.ackCacheForTest().valid()) << "nothing acked yet";
 
     auto op = pack_sysop_op(/*msgid=*/930, CLIENT_OPERATION__CMD_STATUS);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
     ASSERT_EQ(drain_acks(disp), 1);
 
-    EXPECT_TRUE(disp.ackCacheForTest().valid);
-    EXPECT_EQ(disp.ackCacheForTest().msgid, 930u);
-    EXPECT_EQ(disp.ackCacheForTest().reacks, 0);
+    EXPECT_TRUE(disp.ackCacheForTest().valid());
+    EXPECT_EQ(disp.ackCacheForTest().msgid(), 930u);
+    EXPECT_EQ(disp.ackCacheForTest().reacks(), 0);
 }
 
 TEST_F(RealNodeFixture, TheArmedCacheWouldReAckOnceTheBurstSpanHasPassed) {
@@ -3004,9 +3017,9 @@ TEST_F(RealNodeFixture, TheArmedCacheWouldReAckOnceTheBurstSpanHasPassed) {
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
     ASSERT_EQ(drain_acks(disp), 1);
     const ackcache::Cache &c = disp.ackCacheForTest();
-    ASSERT_TRUE(c.valid);
+    ASSERT_TRUE(c.valid());
 
-    const int64_t armed_at = c.first_seen_us;
+    const int64_t armed_at = c.firstSeenUs();
     EXPECT_EQ(ackcache::classify(c, 931, armed_at + 1000),
               ackcache::Decision::SilentCopy) << "immediately: a burst copy";
     EXPECT_EQ(ackcache::classify(c, 931, armed_at + ackcache::kBurstSpanUs - 1),

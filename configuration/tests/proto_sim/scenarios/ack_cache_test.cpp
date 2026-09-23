@@ -74,7 +74,7 @@ TEST(AckCache, AnEmptyCacheNeverClaimsADuplicate) {
 TEST(AckCache, ReAcksAreRateLimited) {
     Cache c = accepted();
     ASSERT_EQ(classify(c, 42, kT0 + 3000000), Decision::ReAck);
-    noteReAck(c, kT0 + 3000000);
+    noteReAck(c, 42, kT0 + 3000000);
 
     // Immediately afterwards: suppressed, however many retries arrive.
     EXPECT_EQ(classify(c, 42, kT0 + 3100000), Decision::SilentCopy);
@@ -91,7 +91,7 @@ TEST(AckCache, ReAcksAreFinite) {
     int64_t t = kT0 + 3000000;
     for (uint8_t i = 0; i < kMaxReAcks; ++i) {
         ASSERT_EQ(classify(c, 42, t), Decision::ReAck) << "re-ack " << (int) i;
-        noteReAck(c, t);
+        noteReAck(c, 42, t);
         t += kMinReAckIntervalUs;
     }
     EXPECT_EQ(classify(c, 42, t), Decision::Exhausted);
@@ -102,13 +102,13 @@ TEST(AckCache, ReAcksAreFinite) {
 TEST(AckCache, ANewCommandClearsTheLedger) {
     Cache c = accepted(42);
     int64_t t = kT0 + 3000000;
-    for (uint8_t i = 0; i < kMaxReAcks; ++i) { noteReAck(c, t); t += kMinReAckIntervalUs; }
+    for (uint8_t i = 0; i < kMaxReAcks; ++i) { noteReAck(c, 42, t); t += kMinReAckIntervalUs; }
     ASSERT_EQ(classify(c, 42, t), Decision::Exhausted);
 
     c.note(43, t);
     EXPECT_EQ(classify(c, 43, t + 3000000), Decision::ReAck)
         << "the next command starts with a full budget";
-    EXPECT_EQ(c.reacks, 0u);
+    EXPECT_EQ(c.reacks(), 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,13 +128,74 @@ TEST(AckCache, TheFirstReAckIsNotBlockedByAnUnsetTimestamp) {
     // without the "has re-acked at all" guard would suppress the first re-ack
     // for the first 2 s of node uptime.
     Cache c = accepted(42, /*at=*/0);
-    EXPECT_EQ(c.last_reack_us, 0);
+    EXPECT_EQ(c.lastReackUs(), 0);
     EXPECT_EQ(classify(c, 42, 3000000), Decision::ReAck);
 }
 
 TEST(AckCache, ResetForgetsEverything) {
     Cache c = accepted();
     c.reset();
-    EXPECT_FALSE(c.valid);
+    EXPECT_FALSE(c.valid());
     EXPECT_EQ(classify(c, 42, kT0 + 3000000), Decision::NotADuplicate);
+}
+
+// ---------------------------------------------------------------------------
+// Several commands at once
+//
+// The cache used to hold ONE, and the next acked command evicted it — so B4's
+// whole purpose, making a lost ack recoverable, failed whenever any other acked
+// command arrived in between. Found end to end: a ScheduleConfig ack evicted the
+// cover op the hub was about to retry.
+// ---------------------------------------------------------------------------
+
+TEST(AckCache, AnotherAckedCommandDoesNotEvictTheOneStillBeingRetried) {
+    Cache c;
+    c.note(42, kT0);
+    c.note(43, kT0);          // e.g. a schedule push, acked right after
+
+    EXPECT_EQ(classify(c, 42, kT0 + 3000000), Decision::ReAck)
+        << "the first command must still be re-ackable, or its lost ack is "
+           "unrecoverable and the hub tears down a working session";
+    EXPECT_EQ(classify(c, 43, kT0 + 3000000), Decision::ReAck);
+}
+
+TEST(AckCache, EachCommandGetsItsOwnReAckBudget) {
+    // The budget bounds how many times ONE command may be answered again. Shared
+    // across commands it would be spent by whichever arrived first.
+    Cache c;
+    c.note(42, kT0);
+    c.note(43, kT0);
+
+    int64_t t = kT0 + 3000000;
+    for (uint8_t i = 0; i < kMaxReAcks; ++i) { noteReAck(c, 42, t); t += kMinReAckIntervalUs; }
+    EXPECT_EQ(classify(c, 42, t), Decision::Exhausted);
+    EXPECT_EQ(classify(c, 43, t), Decision::ReAck) << "43 has spent nothing";
+}
+
+TEST(AckCache, ReNotingAnIdDoesNotMintFreshBudget) {
+    // Otherwise a replay refreshes the very budget that bounds how often it can
+    // be answered — an attacker could keep a node transmitting indefinitely.
+    Cache c;
+    c.note(42, kT0);
+    int64_t t = kT0 + 3000000;
+    for (uint8_t i = 0; i < kMaxReAcks; ++i) { noteReAck(c, 42, t); t += kMinReAckIntervalUs; }
+    ASSERT_EQ(classify(c, 42, t), Decision::Exhausted);
+
+    c.note(42, t);
+    EXPECT_EQ(classify(c, 42, t + 3000000), Decision::Exhausted)
+        << "re-noting must not reset first_seen_us or the re-ack count";
+}
+
+TEST(AckCache, TheOldestEntryIsTheOneEvicted) {
+    // Four entries cover every frame the hub can have in flight to one node.
+    // Past that, the command whose retry ladder ran out longest ago is the one
+    // to forget.
+    Cache c;
+    for (uint32_t id = 1; id <= Cache::kEntries; ++id) c.note(id, kT0);
+    c.note(99, kT0);          // one too many
+
+    EXPECT_EQ(classify(c, 1, kT0 + 3000000), Decision::NotADuplicate)
+        << "the oldest is gone";
+    EXPECT_EQ(classify(c, 2, kT0 + 3000000), Decision::ReAck);
+    EXPECT_EQ(classify(c, 99, kT0 + 3000000), Decision::ReAck);
 }
