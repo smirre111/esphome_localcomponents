@@ -28,6 +28,70 @@ heard / decoded, phase error, ppm, arm and turnaround residuals). It also lists
 
 ---
 
+## 0. Open work — the index
+
+**One place to look, and it holds no reasoning of its own.** Every row points at
+the section that argues the case; a duplicated argument is a duplicated thing to
+drift, which is the failure mode this whole document is organised against.
+
+Row ids are prefixed **D** (defect), **U** (unwired), **T** (testability) and
+**K** (known and accepted). They are deliberately NOT in the `B-1 … B5 / C2 /
+HW-n` families, which name the PHASES of this plan and are already spoken for.
+
+**Nothing below is deployed.** The host suite is green at 848 and says nothing
+about a roof. That is the largest open item and it is not a row.
+
+### Bugs — something behaves wrongly today
+
+Two. Both are known, both have a reason they are still here, and neither is a
+repair — each needs a decision first. The list is short on purpose: a backlog
+padded with work nobody has argued for is how a real item gets lost.
+
+| # | what | where | why it is not done | §ref |
+|---|---|---|---|---|
+| D-1 | **The hub's startup grid demote goes out in the clear**, and a node holding a session resumed from NVS refuses it. The one frame that must not be missed is dropped by exactly the nodes it is aimed at; they demote later via `kMaxMissedMarks`, which is slower and reads as a reception fault. | `broadcast_grid_demote()` | The fleet key cannot sign it — a restarted hub mints a NEW key while the nodes hold the old one — and a key that survived the restart would defeat re-minting. Needs a design decision, not a repair. | §11b |
+| D-2 | **A copy sent into RX1 and lost on air is not retried into RX2.** The node is still listening (`rx1_had_data` stays false) and the hub knows where that window is. | `send_into_class_a_window_` | TimeSync is not acked, so the hub has no trigger. Inventing one is a retry policy, not a fix to this path. | §8 C2 |
+
+### Wiring — code that exists and nothing calls
+
+| # | symbol | consequence | §ref |
+|---|---|---|---|
+| U-1 | `LORAListener::hubBelief()` | Whether a node is on single-shot or burst — what Mode B's whole airtime saving turns on — is visible only in a log line. A template sensor away. | §11a |
+| U-2 | `LoraInterface::rxBusySkips()` | Counted and never carried, so "the one failure the KPIs cannot see" still cannot be seen. Also false-positives for a whole drift test and logs unthrottled. | §11a |
+| U-3 | `CmdDispatcher::noteClassASleepOk()` | Wiring it would break the invariant that `active` means "a window is still to open". Needs the invariant restated first. | §11a |
+| U-4 | `NodeState::in_slot_uplinks` | Still hardcoded on the node. Now worth closing: the uplink aim makes the hub's own in-slot measurement succeed, so the count is real evidence again — but the node cannot fill its own field without the count on the wire. | §11b |
+| U-5 | `belief_.beacon_missed` | A `txPolicyFor` guard contributing nothing. Needs the hub to compare a predicted check-in against an observed one, which is a feature. | §11b |
+
+### Structural — gaps in what can be tested at all
+
+| # | what | why it matters | §ref |
+|---|---|---|---|
+| T-1 | **`LoraInterface.cpp` and `frtosTasks.cpp` are not compiled by the host suite.** | This is why two defects this year were invisible: the uplink-aim call site is untested, and a log line inside the aimed critical path was caught by reading the diff rather than by a test. Every fix in those files is made blind. **Highest-value structural item.** | §11b |
+| T-2 | The 5-entry buffer pool (`POOL_SIZE`) against a 16-entry queue, and a placed frame holds its buffer until its mark. | A fleet pushing schedules could starve the pool, and `send()` drops silently when it does. | §8 B1a |
+| T-3 | `processTxCommand`'s two lines assigning the phase report into the outgoing message are not covered end to end. | That body is a task loop the host harness does not run. | §11b |
+
+### Accepted — recorded, with the price, not to be fixed
+
+| # | what | the price of closing it |
+|---|---|---|
+| K-1 | **A compromised node can forge beacons fleet-wide.** Every node holds the same `netKey`. Bounded by what a beacon can do, and why the guard-band clamp stays even for a beacon that verifies. | Per-node signatures on a broadcast, or a hardware root of trust. |
+| K-2 | **An unprovisioned node accepts plaintext `ClientConfig`.** Not a defect: the carve-out is what makes provisioning possible at all. | A secret present before the first exchange — burned at manufacture or entered by hand. |
+| K-3 | **Drift samples are still taken from unauthenticated frames.** Deliberate: it runs off arrival time alone and feeds no decision. Gating it would make it a measurement of the traffic pattern rather than of the crystal. | Nothing worth paying. |
+
+### Measurements — nothing here can be settled from the repositories
+
+Nine, in §12, mapped to bench procedures in `test-plan.md` §10.6. Seven close
+on-node with no external instrument using the `ModeTest` mode. Two now gate work
+that has already shipped:
+
+| ref | measurement | what it gates |
+|---|---|---|
+| §12.2 | **`T_detect`** | Turning Mode B on at all. It sets the entire late-side guard and is a rule of thumb today. |
+| §12.7 | **Node DRAIN + build turnaround** (HW-7) | Whether the uplink aim ever hits its mark. The node's own hit/miss counters are what will say. |
+| the rest | §12.1, 12.3–12.6, 12.8–12.9 | Battery figures, the servable-slot count, and one deployment decision. |
+
+---
+
 ## 1. Three modes, two tracks
 
 | mode | shape | node population | status |
