@@ -33,6 +33,10 @@ struct TxPolicy {
     // asked for, not merely that it asked.
     int64_t  earliest_us{0};
     uint8_t  priority{1};
+    // Supersession, mirrored: a queued frame is dropped at the front once a
+    // higher generation is queued under the same key. 0 = takes no part.
+    uint32_t supersede_key{0};
+    uint32_t supersede_gen{0};
 };
 
 
@@ -93,6 +97,12 @@ public:
     // caller requested and not only the bytes.
     int64_t              last_earliest_us{0};
     uint8_t              last_priority{1};
+    // Supersession, as requested. A listener-level test can only see what the
+    // policy CARRIED; whether the frame is then dropped at the front of the
+    // queue is the real tracker's business and is tested there.
+    uint32_t             last_supersede_key{0};
+    uint32_t             last_supersede_gen{0};
+    std::vector<uint32_t> sent_supersede_gen;
     std::vector<int64_t> sent_earliest_us;
     // The sim's "now" for grid arithmetic. Production reads esp_timer_get_time();
     // a test sets this instead so the answer is deterministic.

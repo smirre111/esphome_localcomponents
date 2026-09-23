@@ -184,6 +184,86 @@ class Queue
     uint8_t  count_{0};
 };
 
+// ---------------------------------------------------------------------------
+// SUPERSESSION — how a queued frame learns it is no longer wanted.
+//
+// The queue's ordering rule deliberately KEEPS two frames for the same node:
+// "placing the second at the following mark keeps both; one frame per mark is
+// the invariant that was wanted, and dropping was never the way to get it."
+// That is right for two commands a person actually asked for.
+//
+// It is wrong for a SUPERSEDED one. The hub tracks exactly one command per node
+// (op_first_msgid_ / op_awaiting_ack_), so the moment a second arrives the hub
+// has ALREADY stopped caring about the first: it will not accept its ack, and
+// it will not retry it. Transmitting it anyway is the inconsistency — the blind
+// moves to the first position, then 1.5 s later to the second, from one gesture.
+//
+// Cancelling out of the queue is the obvious fix and the wrong one here: a
+// frame in flight sits in either the hand-off queue or the scheduler, and
+// surgery on a FreeRTOS queue from another task is how buffers get lost. This
+// does it at the other end instead — a frame is DROPPED WHEN IT REACHES THE
+// FRONT if a newer generation has since been queued under the same key. That
+// works wherever the frame currently is, cannot corrupt either queue, and the
+// buffer is returned on the same path a transmitted one takes.
+//
+// `key` is the node's short address; `gen` is a per-node counter. Deliberately
+// NOT msgid: send_login() zeroes the message counters, so a gen taken from
+// msgid would go BACKWARDS after a re-login and the first command afterwards
+// would be dropped as stale. ModeTest's `seq` is separate from msgid for the
+// same family of reason.
+//
+// key == 0 means "this frame supersedes nothing and is superseded by nothing",
+// which is every frame except a tracked op.
+// ---------------------------------------------------------------------------
+class SupersedeTable
+{
+  public:
+    // One entry per node that has ever queued a tracked op. Sized to the grid
+    // so a full fleet cannot evict each other; an unknown key past that is
+    // treated as current, which is the safe direction (send it).
+    static constexpr uint8_t kMaxKeys = 32;
+
+    void clear() { for (uint8_t i = 0; i < kMaxKeys; ++i) keys_[i] = Slot{}; }
+
+    // Record that (key, gen) has been queued. Later generations win; an older
+    // one arriving out of order must not lower the mark.
+    void note(uint32_t key, uint32_t gen)
+    {
+        if (key == 0) return;
+        for (uint8_t i = 0; i < kMaxKeys; ++i)
+        {
+            if (!keys_[i].used || keys_[i].key != key) continue;
+            if (gen > keys_[i].gen) keys_[i].gen = gen;
+            return;
+        }
+        for (uint8_t i = 0; i < kMaxKeys; ++i)
+        {
+            if (keys_[i].used) continue;
+            keys_[i] = Slot{key, gen, true};
+            return;
+        }
+        // Table full: every later frame for an unrecorded key is treated as
+        // current, so the failure mode is the old behaviour, not a lost command.
+    }
+
+    // Is a frame still the newest for its key? Unknown keys and key 0 are
+    // current by definition.
+    bool isCurrent(uint32_t key, uint32_t gen) const
+    {
+        if (key == 0) return true;
+        for (uint8_t i = 0; i < kMaxKeys; ++i)
+        {
+            if (!keys_[i].used || keys_[i].key != key) continue;
+            return gen >= keys_[i].gen;
+        }
+        return true;
+    }
+
+  private:
+    struct Slot { uint32_t key{0}; uint32_t gen{0}; bool used{false}; };
+    Slot keys_[kMaxKeys]{};
+};
+
 // Section 4.5's deferral, as a function so the "two, not one" reasoning lives
 // with the number rather than at a call site.
 //

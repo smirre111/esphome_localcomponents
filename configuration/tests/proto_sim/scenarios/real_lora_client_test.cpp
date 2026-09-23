@@ -2396,6 +2396,72 @@ TEST(TrackedOpRetry, ANewCommandGetsANewMsgid) {
         << "a new command is not a retransmission";
 }
 
+TEST(TrackedOpRetry, ASecondGestureSupersedesTheFirstOnTheWire) {
+    // Section 11b: "one Home Assistant gesture can become two commands 1.5 s
+    // apart." The hub tracks exactly ONE command per node — begin_tracked_op_
+    // overwrites op_first_msgid_ — so from the instant the second arrives the
+    // hub will neither accept the first's ack nor retry it. The first frame was
+    // nevertheless still in the transmit queue, placed at an earlier mark, and
+    // went out anyway.
+    //
+    // What the listener can say is what the frame CARRIES. Whether it is then
+    // dropped at the front of the queue is the tracker's half, and is tested
+    // against the real queue in real_lora_tracker_test.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                               COV_OPERATION__CMD_OPEN, 0.0f);
+    h.clock.tick(10);
+    const uint32_t gen_first = h.tracker.last_supersede_gen;
+    EXPECT_EQ(h.tracker.last_supersede_key, 18u)
+        << "the key is the node's address: one node's command must not retire "
+           "another's";
+    EXPECT_NE(gen_first, 0u) << "0 means 'takes no part', which a command does";
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                               COV_OPERATION__CMD_CLOSE, 0.0f);
+    h.clock.tick(10);
+    EXPECT_GT(h.tracker.last_supersede_gen, gen_first)
+        << "a new logical command must retire the one still waiting for its mark";
+}
+
+TEST(TrackedOpRetry, ARetryDoesNotSupersedeTheFrameItIsARetryOf) {
+    // The half that is easy to get wrong. A retransmission is the SAME logical
+    // command; giving it a fresh generation would retire the original frame —
+    // the bug this fixes, with an extra step, and it would show up only when a
+    // retry overtook a placed original.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.5f);
+    h.clock.tick(10);
+    const uint32_t gen = h.tracker.last_supersede_gen;
+
+    h.clock.tick(3000 + 50);   // kOpRetryIntervalMs, no ack
+    EXPECT_EQ(h.tracker.last_supersede_gen, gen)
+        << "a retry rides under the generation its frame was built with";
+}
+
+TEST(TrackedOpRetry, RoutineDownlinksTakeNoPartInSupersession) {
+    // Everything that is not a tracked op carries key 0. A GridSync or a
+    // schedule push retired by a cover command would be a frame silently lost
+    // because somebody moved a blind.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+
+    h.rol.send_login();
+    h.clock.tick(10);
+    EXPECT_EQ(h.tracker.last_supersede_key, 0u)
+        << "a login is not a tracked op and must never retire one";
+}
+
 // NOTE on what is NOT tested here. The sharpest form of the hazard —
 // op_position_ changing between the pack and the retry WITHOUT a new command —
 // is not reachable through the public API in this harness, because

@@ -2046,7 +2046,7 @@ namespace esphome
         // The tracked command downlink is the one B1's gate is about: with
         // alignment on, this is the burst that must observably start on the
         // grid. With it off (the default) behaviour is byte-for-byte as before.
-        this->send_aligned_(buf, len);
+        this->send_aligned_(buf, len, this->tracked_op_policy_());
         free(buf);
       }
       else
@@ -2078,6 +2078,10 @@ namespace esphome
       this->op_operation_  = operation;
       this->op_position_   = position;
 
+      // A NEW logical command, so a previous one still sitting in the transmit
+      // queue is now stale. Bumped before the pack, so the frame carries the
+      // generation that supersedes it. See txqueue::SupersedeTable.
+      this->op_generation_++;
       this->begin_tracked_op_(this->tx_tracked_op_(), "Cover op");
     }
 
@@ -2090,6 +2094,7 @@ namespace esphome
       this->op_kind_  = TrackedOpKind::SYSOP;
       this->op_sysop_ = sysop;
 
+      this->op_generation_++;   // same reasoning as send_cover_operation
       this->begin_tracked_op_(this->tx_tracked_op_(), "Sysop");
     }
 
@@ -2147,6 +2152,14 @@ namespace esphome
     //
     // Returns the msgid actually transmitted, which for a retry is the ORIGINAL
     // one — that is the point. A fresh msgid would be a new command to the node.
+    TxPolicy LORAListener::tracked_op_policy_() const
+    {
+      TxPolicy p;
+      p.supersede_key = this->short_address_;
+      p.supersede_gen = this->op_generation_;
+      return p;
+    }
+
     uint32_t LORAListener::retransmit_tracked_op_()
     {
       if (this->op_frame_.empty())
@@ -2159,7 +2172,11 @@ namespace esphome
         return this->tx_tracked_op_();
       }
 
-      this->send_aligned_(this->op_frame_.data(), this->op_frame_.size());
+      // Under the SAME generation as the original: a retransmission is the same
+      // logical command, and giving it a fresh one would let a retry supersede
+      // the frame it is a retry of.
+      this->send_aligned_(this->op_frame_.data(), this->op_frame_.size(),
+                          this->tracked_op_policy_());
       return this->op_frame_msgid_;
     }
 

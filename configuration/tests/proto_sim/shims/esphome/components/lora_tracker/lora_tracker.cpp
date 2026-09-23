@@ -124,6 +124,9 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     last_earliest_us = policy.earliest_us;
     sent_earliest_us.push_back(policy.earliest_us);
     last_priority = policy.priority;
+    last_supersede_key = policy.supersede_key;
+    last_supersede_gen = policy.supersede_gen;
+    sent_supersede_gen.push_back(policy.supersede_gen);
 
     // A simulated drop happens AFTER the policy is recorded and BEFORE anything
     // reaches the air: production drops in send() too, having already computed

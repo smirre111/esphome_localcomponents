@@ -925,3 +925,155 @@ TEST(RealTrackerBeacon, TheNextBeaconIsAWholeCadenceAfterTheLast) {
     EXPECT_EQ(t.beaconRoundForT0(second) - t.beaconRoundForT0(first),
               timedgrid::kBeaconEveryRounds);
 }
+
+// ---------------------------------------------------------------------------
+// Supersession — one Home Assistant gesture, one command on the air
+//
+// Placement is monotone per node, so a second command arriving before the first
+// has fired is placed at the FOLLOWING mark — both are kept, deliberately, and
+// that is right for two commands a person actually asked for.
+//
+// It was wrong for a superseded one. The hub tracks exactly ONE command per
+// node: begin_tracked_op_ overwrites op_first_msgid_, so the moment the second
+// arrives the hub will neither accept the first's ack nor retry it. Sending it
+// anyway made the blind move to the first position and then, 1.5 s later, to
+// the second — and the ack for the one it executed was logged as rejected.
+// ---------------------------------------------------------------------------
+
+TEST(RealTrackerTx, ASupersededFrameIsDroppedAtTheFrontOfTheQueue) {
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    TxPolicy first;
+    first.copies        = 1;
+    first.earliest_us   = 1'000'000;
+    first.supersede_key = 18;          // the node's short address
+    first.supersede_gen = 1;
+    auto a = tagged(0xC1);
+    ASSERT_TRUE(t.send(a.data(), a.size(), first));
+
+    // The second gesture, before the first has fired. Placed a round later, as
+    // the monotone rule requires — it is not a replacement in the queue.
+    TxPolicy second = first;
+    second.earliest_us   = 2'500'000;
+    second.supersede_gen = 2;
+    auto b = tagged(0xC2);
+    ASSERT_TRUE(t.send(b.data(), b.size(), second));
+
+    const int64_t lead = LORATracker::kPrepareLeadUs;
+
+    // The first frame's mark arrives. It is no longer wanted, so nothing goes
+    // out — and serviceTxQueue reports no work rather than pretending it did
+    // some, because the next real frame must not be paced a service interval
+    // behind a frame that was never sent.
+    EXPECT_FALSE(t.serviceTxQueue(1'000'000 - lead));
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0)
+        << "the superseded command must never reach the air";
+    EXPECT_EQ(t.supersededDrops(), 1u);
+
+    // The second one does.
+    EXPECT_TRUE(t.serviceTxQueue(2'500'000 - lead));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    EXPECT_EQ(firstByteOfPacket(0), 0xC2);
+    EXPECT_EQ(t.supersededDrops(), 1u) << "and it is not dropped itself";
+}
+
+TEST(RealTrackerTx, ADropDoesNotStallTheFrameBehindIt) {
+    // Both marks in the same service call. Popping one entry and returning as
+    // if work had been done would hold the live frame until the next service
+    // interval — which for a placed command is the round it was aimed at, so
+    // the fix for a double move would have become a late one.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    TxPolicy p;
+    p.copies        = 1;
+    p.earliest_us   = 1'000'000;
+    p.supersede_key = 18;
+    p.supersede_gen = 1;
+    auto a = tagged(0xD1);
+    ASSERT_TRUE(t.send(a.data(), a.size(), p));
+
+    p.supersede_gen = 2;
+    auto b = tagged(0xD2);
+    ASSERT_TRUE(t.send(b.data(), b.size(), p));   // same instant, both eligible
+
+    const int64_t lead = LORATracker::kPrepareLeadUs;
+    EXPECT_TRUE(t.serviceTxQueue(1'000'000 - lead))
+        << "the live frame goes out in the SAME call that skipped the stale one";
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    EXPECT_EQ(firstByteOfPacket(0), 0xD2);
+    EXPECT_EQ(t.supersededDrops(), 1u);
+}
+
+TEST(RealTrackerTx, ABeaconIsNotRetiredByACommand) {
+    // Everything that is not a tracked op carries key 0. A beacon retired by
+    // one node's command would be a broadcast the whole fleet stopped hearing
+    // because somebody moved a blind.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    TxPolicy beacon;
+    beacon.copies      = 1;
+    beacon.earliest_us = 1'000'000;      // key 0 by default
+    auto bc = tagged(0xE1);
+    ASSERT_TRUE(t.send(bc.data(), bc.size(), beacon));
+
+    TxPolicy cmd;
+    cmd.copies        = 1;
+    cmd.earliest_us   = 1'000'000;
+    cmd.supersede_key = 18;
+    cmd.supersede_gen = 99;
+    auto c = tagged(0xE2);
+    ASSERT_TRUE(t.send(c.data(), c.size(), cmd));
+
+    const int64_t lead = LORATracker::kPrepareLeadUs;
+    EXPECT_TRUE(t.serviceTxQueue(1'000'000 - lead));
+    EXPECT_TRUE(t.serviceTxQueue(1'000'000 - lead));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 2);
+    EXPECT_EQ(firstByteOfPacket(0), 0xE1) << "FIFO within a priority, unchanged";
+    EXPECT_EQ(firstByteOfPacket(1), 0xE2);
+    EXPECT_EQ(t.supersededDrops(), 0u);
+}
+
+TEST(RealTrackerTx, TheBufferOfADroppedFrameGoesBackToThePool) {
+    // The pool is five buffers deep and a placed frame holds one until its
+    // mark. A drop that leaked would exhaust it after five superseded commands
+    // and every later downlink would be REFUSED — a worse failure than the one
+    // being fixed, and one that would present as a dead radio.
+    //
+    // Three rounds of "queue four, drain": if the dropped buffers were not
+    // returned, the pool would be empty by round two and send() would fail.
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+
+    const int64_t lead = LORATracker::kPrepareLeadUs;
+    uint32_t gen = 0;
+    for (int round = 0; round < 3; ++round)
+    {
+        const int64_t mark = 1'000'000 + (int64_t) round * 1'000'000;
+        for (int i = 0; i < 4; ++i)
+        {
+            TxPolicy p;
+            p.copies        = 1;
+            p.earliest_us   = mark;
+            p.supersede_key = 18;
+            p.supersede_gen = ++gen;
+            auto f = tagged((uint8_t) gen);
+            ASSERT_TRUE(t.send(f.data(), f.size(), p))
+                << "pool exhausted in round " << round << " — a dropped buffer leaked";
+        }
+        while (t.serviceTxQueue(mark - lead)) { }
+    }
+
+    // Three per round survive as drops, one per round goes out.
+    EXPECT_EQ(t.supersededDrops(), 9u);
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 3);
+    EXPECT_EQ(firstByteOfPacket(0), 4);
+    EXPECT_EQ(firstByteOfPacket(1), 8);
+    EXPECT_EQ(firstByteOfPacket(2), 12);
+}

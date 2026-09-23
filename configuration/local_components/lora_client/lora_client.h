@@ -819,6 +819,16 @@ namespace esphome
       bool     op_awaiting_ack_{false};
       uint32_t op_first_msgid_{0};   // first msgid used for the current logical command
       uint32_t op_last_msgid_{0};    // msgid of the most recent (re)transmission
+      // Which LOGICAL command this is, for txqueue::SupersedeTable. Bumped once
+      // per command from Home Assistant — never per retransmission, which must
+      // stay under the generation it belongs to.
+      //
+      // Deliberately NOT msgid, even though msgid is also monotonic: a LoginMsg
+      // ZEROES the message counters, so a generation taken from msgid would go
+      // backwards after a re-login and the first command afterwards would be
+      // dropped as stale by frames queued before it. Starts at 1 because 0 is
+      // the table's "takes no part in this" value.
+      uint32_t op_generation_{1};
       uint8_t  op_retry_count_{0};
       // Stored operation, replayed on each retransmission with a fresh msgid.
       uint32_t op_covop_case_{0};
@@ -843,6 +853,15 @@ namespace esphome
       // Send a tracked system operation (e.g. CMD_OTA) through the same
       // retransmit-until-acked path as cover ops.  sysop is a ClientOperation value.
       void     send_tracked_sysop_(int32_t sysop);
+      // The supersession key/generation a tracked op's frame carries. One
+      // place, because the first send and every retransmission must agree: a
+      // retry under a fresh generation would supersede the frame it is a retry
+      // of, which is the original bug with an extra step.
+      //
+      // Defined in the .cpp: TxPolicy is only forward-declared here (lora_client
+      // is included BY lora_tracker.h, not the other way round), so an inline
+      // body would need a complete type this header must not have.
+      TxPolicy tracked_op_policy_() const;
       // Shared tail for send_cover_operation / send_tracked_sysop_: record the
       // msgid, arm ack tracking, and schedule the first retransmit.
       void     begin_tracked_op_(uint32_t msgid, const char *what);

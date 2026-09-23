@@ -54,6 +54,11 @@ typedef struct
   uint32_t tx_stride_ms;  // 0 = the default txIntervalMs
   int64_t  tx_earliest_us; // 0 = no constraint
   uint8_t  tx_priority;    // txqueue::Priority as an integer
+  // Supersession (txqueue::SupersedeTable). These travel WITH the frame for the
+  // same reason the policy above does: the decision is made when the frame
+  // reaches the front, by which time the caller that queued it is long gone.
+  uint32_t tx_supersede_key;  // 0 = supersedes nothing, superseded by nothing
+  uint32_t tx_supersede_gen;
 } rx_buffer_t;
 
 // Statistics
@@ -98,6 +103,17 @@ namespace esphome
     // integer so this header does not force TxQueue.h on every includer.
     // 0 = Immediate, 1 = Normal, 2 = Background.
     uint8_t  priority{1};
+
+    // Supersession. A frame queued under a key is dropped at the front of the
+    // queue if a HIGHER generation has since been queued under the same key —
+    // which is how a command the hub has already stopped tracking stops being
+    // transmitted. See txqueue::SupersedeTable for why it is done there rather
+    // than by cancelling out of the queue.
+    //
+    // 0 (the default) means this frame takes no part in it, which is every
+    // frame except a tracked cover op or sysop.
+    uint32_t supersede_key{0};
+    uint32_t supersede_gen{0};
   };
 
 
@@ -214,6 +230,11 @@ namespace esphome
       bool      beaconMac(uint32_t tx_round, uint32_t tx_slot,
                           uint32_t pending_mask, bool pending_mask_valid,
                           uint8_t *out, size_t out_len) const;
+
+      // How many queued frames were dropped at the front because a newer
+      // generation had superseded them. Diagnostic, and the only visible sign
+      // that the supersession path is doing anything.
+      uint32_t  supersededDrops() const { return this->tx_superseded_drops_; }
 
       // For tests: how many beacons have actually been queued.
       uint32_t  beaconsSent() const { return this->beacons_sent_; }
@@ -377,6 +398,10 @@ namespace esphome
       // through the whole window) is simply skipped rather than sent late into
       // a slot the nodes have stopped listening in.
       uint32_t beacon_round_queued_{0xFFFFFFFFu};
+      // Which generation is current for each node, so a frame that reaches the
+      // front can tell whether it is still wanted.
+      txqueue::SupersedeTable supersede_;
+      uint32_t tx_superseded_drops_{0};
       uint32_t beacons_sent_{0};
       bool    grid_started_{false};
       // Section 4.4's fleet key. Minted in startGrid(), published inside each

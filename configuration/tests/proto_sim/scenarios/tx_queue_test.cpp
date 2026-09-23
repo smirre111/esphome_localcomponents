@@ -208,3 +208,91 @@ TEST(TxQueue, AClockThatJumpsBackwardsDoesNotLoseFrames) {
     EXPECT_EQ(q.pop(500), kInvalidSlot);
     EXPECT_EQ(q.pop(2000), 4u) << "it is still there once time passes again";
 }
+
+// ---------------------------------------------------------------------------
+// Supersession — how a queued frame learns it is no longer wanted
+//
+// The queue's ordering rule deliberately KEEPS two frames for the same node,
+// placing the second at the following mark. That is right for two commands a
+// person actually asked for, and wrong for a superseded one: the hub tracks
+// exactly one command per node, so the moment a second arrives it has already
+// stopped accepting the first's ack and stopped retrying it. Sending it anyway
+// is what moved the blind twice, 1.5 s apart, from one gesture.
+// ---------------------------------------------------------------------------
+
+TEST(SupersedeTable, ANewerGenerationRetiresAnOlderOne) {
+    SupersedeTable t;
+    t.note(/*key=*/18, /*gen=*/1);
+    EXPECT_TRUE(t.isCurrent(18, 1));
+
+    t.note(18, 2);
+    EXPECT_FALSE(t.isCurrent(18, 1)) << "the first command is no longer wanted";
+    EXPECT_TRUE(t.isCurrent(18, 2));
+}
+
+TEST(SupersedeTable, ARetryUnderTheSameGenerationSurvives) {
+    // The retransmit path resends the STORED frame under the generation it was
+    // built with. If a retry were given a fresh generation it would supersede
+    // the frame it is a retry of — the original bug with an extra step.
+    SupersedeTable t;
+    t.note(18, 7);
+    t.note(18, 7);
+    EXPECT_TRUE(t.isCurrent(18, 7));
+}
+
+TEST(SupersedeTable, NodesDoNotRetireEachOthersCommands) {
+    // The key is the node's short address. A busy fleet queues frames for many
+    // nodes between one node's command and its mark, and every one of those
+    // would otherwise look like a supersession.
+    SupersedeTable t;
+    t.note(18, 1);
+    t.note(19, 5);
+    t.note(20, 9);
+    EXPECT_TRUE(t.isCurrent(18, 1));
+    EXPECT_TRUE(t.isCurrent(19, 5));
+    EXPECT_TRUE(t.isCurrent(20, 9));
+}
+
+TEST(SupersedeTable, KeyZeroTakesNoPartInAnyOfThis) {
+    // Every frame except a tracked op: beacons, GridSync, TimeSync, schedule
+    // pushes. A beacon that could be retired by a command would be a broadcast
+    // the whole fleet stopped receiving because one node was told to move.
+    SupersedeTable t;
+    t.note(0, 1);
+    t.note(0, 2);
+    EXPECT_TRUE(t.isCurrent(0, 1));
+    EXPECT_TRUE(t.isCurrent(0, 0));
+}
+
+TEST(SupersedeTable, AnUnknownKeyIsCurrent) {
+    // The safe direction is SEND. A frame whose key the table has never seen is
+    // either the first for that node or one whose record was lost; dropping it
+    // would turn a bookkeeping gap into a lost command.
+    SupersedeTable t;
+    EXPECT_TRUE(t.isCurrent(42, 1));
+}
+
+TEST(SupersedeTable, AnOutOfOrderNoteDoesNotLowerTheMark) {
+    // note() is called as frames are ACCEPTED, and nothing guarantees two
+    // producers hit it in generation order. Taking the lower of the two would
+    // resurrect a command the hub has stopped tracking.
+    SupersedeTable t;
+    t.note(18, 5);
+    t.note(18, 3);
+    EXPECT_FALSE(t.isCurrent(18, 3));
+    EXPECT_TRUE(t.isCurrent(18, 5));
+}
+
+TEST(SupersedeTable, AFullTableFailsTowardsSending) {
+    // Sized to the grid, so a full fleet cannot evict each other. Past that the
+    // failure mode is deliberately the OLD behaviour — both frames go out —
+    // rather than a command silently dropped because a table was full.
+    SupersedeTable t;
+    for (uint32_t k = 1; k <= SupersedeTable::kMaxKeys; ++k)
+        t.note(k, 2);
+    const uint32_t overflow = SupersedeTable::kMaxKeys + 1;
+    t.note(overflow, 2);
+    EXPECT_TRUE(t.isCurrent(overflow, 1))
+        << "an unrecorded key must still be transmitted";
+    EXPECT_FALSE(t.isCurrent(1, 1)) << "the recorded ones still work";
+}

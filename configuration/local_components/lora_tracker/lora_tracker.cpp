@@ -371,13 +371,40 @@ namespace esphome
       // prepare cost and B5's prepare/fire split has nothing left to hold back.
       // firePacket()'s not_before_us was written for exactly this and had one
       // call site, hardcoded to 0 — the split was built and never used.
-      int64_t fire_at_us = 0;
-      const uint8_t slot =
-          this->tx_queue_.popDue(now_us, kPrepareLeadUs, fire_at_us);
-      if (slot == txqueue::kInvalidSlot)
-        return false;
+      // Loop rather than one pop per call: a superseded frame is not work, and
+      // returning as if it were would pace the next real frame a whole service
+      // interval later — which for a tracked command is the round it was placed
+      // on.
+      int64_t      fire_at_us = 0;
+      rx_buffer_t *rx_buffer  = nullptr;
+      for (;;)
+      {
+        fire_at_us = 0;
+        const uint8_t slot =
+            this->tx_queue_.popDue(now_us, kPrepareLeadUs, fire_at_us);
+        if (slot == txqueue::kInvalidSlot)
+          return false;
 
-      rx_buffer_t *rx_buffer = &memory_pool[slot];
+        rx_buffer = &memory_pool[slot];
+
+        // Section 11b's "one gesture, two commands": the hub tracks exactly one
+        // command per node, so a second arriving before the first has fired
+        // means the hub has ALREADY stopped caring about the first — it will
+        // not accept its ack and will not retry it. Transmitting it anyway is
+        // what made the blind move twice, 1.5 s apart, from one gesture.
+        if (!this->supersede_.isCurrent(rx_buffer->tx_supersede_key,
+                                        rx_buffer->tx_supersede_gen))
+        {
+          this->tx_superseded_drops_++;
+          ESP_LOGI(TAG, "dropping superseded frame for node %u (gen %u), %u so far",
+                   (unsigned) rx_buffer->tx_supersede_key,
+                   (unsigned) rx_buffer->tx_supersede_gen,
+                   (unsigned) this->tx_superseded_drops_);
+          this->return_buffer_to_pool(rx_buffer);
+          continue;   // the next entry may be the one that IS wanted
+        }
+        break;
+      }
 
       ESP_LOGI(TAG, "Processing %d bytes from buffer %p",
                rx_buffer->length, rx_buffer);
@@ -895,6 +922,14 @@ namespace esphome
         rx_buffer->tx_stride_ms   = policy.stride_ms;
         rx_buffer->tx_earliest_us = policy.earliest_us;
         rx_buffer->tx_priority    = policy.priority;
+        rx_buffer->tx_supersede_key = policy.supersede_key;
+        rx_buffer->tx_supersede_gen = policy.supersede_gen;
+
+        // Recorded HERE, at the moment the frame is accepted, not when it
+        // reaches the front. A second command queued while the first is still
+        // waiting has to raise the mark immediately, or the first would look
+        // current right up until the second overtook it.
+        this->supersede_.note(policy.supersede_key, policy.supersede_gen);
 
         // Send buffer pointer to data queue
         if (xQueueSend(data_queue, &rx_buffer, 0) != pdTRUE)
