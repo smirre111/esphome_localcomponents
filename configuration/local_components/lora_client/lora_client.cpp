@@ -1874,12 +1874,46 @@ namespace esphome
     {
       // Broadcast, because after a restart the hub may not yet know which nodes
       // exist — and every one of them is holding an anchor that is now wrong.
-      const uint8_t saved = this->short_address_;
-      this->short_address_ = LORATracker::broadcastAddressing;
-      this->send_grid_sync(false);
-      this->short_address_ = saved;
-      ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent",
-               this->get_name().c_str());
+      //
+      // GridDemote, not GridSync{enable=false}, and that was a real defect
+      // rather than a tidy-up. This frame is sent on a FRESH BOOT, when no
+      // session exists, so s_pack_operation_message packed it in the clear —
+      // and the node's plaintext gate refuses every non-LOGIN, non-beacon frame
+      // while it holds a session resumed from NVS. The one frame that must not
+      // be missed was dropped by exactly the nodes it was aimed at; they fell
+      // back on their own missed-mark counter instead, which is the mechanism
+      // that actually works and made this one look redundant rather than
+      // broken.
+      //
+      // GridDemote has no fields and is exempt from that gate. What makes the
+      // exemption safe is that its only effect is to throw an anchor away:
+      // Mode A is three windows per round against Mode B's one, so an
+      // unauthenticated sender can only make a node listen MORE.
+      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = LORATracker::broadcastAddressing;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      // A broadcast belongs to no per-node sequence, and the nodes exempt it
+      // from their replay filter for that reason — the same treatment the
+      // beacon gets, and for the same reason.
+      header.msgid         = 0;
+      op_message.header    = &header;
+
+      GridDemote demote = GRID_DEMOTE__INIT;
+      op_message.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE;
+      op_message.griddemote = &demote;
+
+      const size_t len = lora_client_operation_message__get_packed_size(&op_message);
+      std::vector<uint8_t> buf(len);
+      lora_client_operation_message__pack(&op_message, buf.data());
+
+      // Unplaced, and as a burst: it is broadcast, and it is addressed to nodes
+      // whose anchor is by definition already wrong — so there is no mark to
+      // place it on that any of them would agree with.
+      this->parent_->send(buf.data(), buf.size());
+      ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent (%u B)",
+               this->get_name().c_str(), (unsigned) len);
     }
 
     void LORAListener::send_aligned_(const uint8_t *buf, size_t len)

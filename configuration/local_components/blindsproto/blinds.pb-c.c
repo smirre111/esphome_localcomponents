@@ -727,6 +727,51 @@ void   grid_beacon__free_unpacked
   assert(message->base.descriptor == &grid_beacon__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   grid_demote__init
+                     (GridDemote         *message)
+{
+  static const GridDemote init_value = GRID_DEMOTE__INIT;
+  *message = init_value;
+}
+size_t grid_demote__get_packed_size
+                     (const GridDemote *message)
+{
+  assert(message->base.descriptor == &grid_demote__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t grid_demote__pack
+                     (const GridDemote *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &grid_demote__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t grid_demote__pack_to_buffer
+                     (const GridDemote *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &grid_demote__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+GridDemote *
+       grid_demote__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (GridDemote *)
+     protobuf_c_message_unpack (&grid_demote__descriptor,
+                                allocator, len, data);
+}
+void   grid_demote__free_unpacked
+                     (GridDemote *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &grid_demote__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   grid_sync__init
                      (GridSync         *message)
 {
@@ -2690,6 +2735,24 @@ const ProtobufCMessageDescriptor grid_beacon__descriptor =
   (ProtobufCMessageInit) grid_beacon__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
+#define grid_demote__field_descriptors NULL
+#define grid_demote__field_indices_by_name NULL
+#define grid_demote__number_ranges NULL
+const ProtobufCMessageDescriptor grid_demote__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "GridDemote",
+  "GridDemote",
+  "GridDemote",
+  "",
+  sizeof(GridDemote),
+  0,
+  grid_demote__field_descriptors,
+  grid_demote__field_indices_by_name,
+  0,  grid_demote__number_ranges,
+  (ProtobufCMessageInit) grid_demote__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
 static const ProtobufCFieldDescriptor grid_sync__field_descriptors[17] =
 {
   {
@@ -3805,7 +3868,7 @@ const ProtobufCMessageDescriptor mode_test_report__descriptor =
   (ProtobufCMessageInit) mode_test_report__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[15] =
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[16] =
 {
   {
     "header",
@@ -3987,6 +4050,18 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "griddemote",
+    24,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, griddemote),
+    &grid_demote__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   7,   /* field[7] = basenonce */
@@ -3995,6 +4070,7 @@ static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   10,   /* field[10] = drifttest */
   1,   /* field[1] = encrypted */
   14,   /* field[14] = gridbeacon */
+  15,   /* field[15] = griddemote */
   12,   /* field[12] = gridsync */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
@@ -4010,7 +4086,7 @@ static const ProtobufCIntRange lora_client_operation_message__number_ranges[3 + 
   { 1, 0 },
   { 9, 1 },
   { 20, 11 },
-  { 0, 15 }
+  { 0, 16 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -4020,7 +4096,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  15,
+  16,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
   3,  lora_client_operation_message__number_ranges,

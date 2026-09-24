@@ -31,6 +31,7 @@ typedef struct LoraHeader LoraHeader;
 typedef struct DriftTest DriftTest;
 typedef struct MacControl MacControl;
 typedef struct GridBeacon GridBeacon;
+typedef struct GridDemote GridDemote;
 typedef struct GridSync GridSync;
 typedef struct ModeTest ModeTest;
 typedef struct Hist Hist;
@@ -770,6 +771,39 @@ struct  GridBeacon
     , 0, 0, 0, 0, 0, {0,NULL} }
 
 
+/*
+ * The hub's startup withdrawal, and the one frame that carries NOTHING.
+ * After a restart the hub's anchor is gone while every node still holds the old
+ * one, so every node has to be told to drop back to Mode A. That frame used to
+ * be GridSync{enable=false} sent to the broadcast address — and it could never
+ * work: s_pack_operation_message encrypts only when a session exists, and on a
+ * fresh boot none does, so it went out in the clear and every node holding a
+ * session resumed from NVS refused it under the plaintext gate. The one frame
+ * that must not be missed, dropped by exactly the nodes it is aimed at.
+ * So it is its own type, exempt from that gate. What makes the exemption safe
+ * is the same rule the beacon's rests on: an unauthenticated frame may make a
+ * node listen MORE and never less. Mode A is three windows per round against
+ * Mode B's one — the safe direction, and the mode the fleet ships in.
+ * IT HAS NO FIELDS, deliberately. A demote has exactly one meaning, so there is
+ * nothing for a sender to choose and nothing for an attacker to set. Exempting
+ * GridSync{enable=false} instead would have put a payload field inside the
+ * gate's decision, and `enable=true` installs a slot assignment, the grid
+ * geometry, armOffsetUs and the fleet key. Presence in the oneof is the whole
+ * message.
+ * What it must NOT do, and the node enforces both: it may not clear the fleet
+ * key (a node with no key accepts UNSIGNED beacons again, which re-opens the
+ * anchor walk the key was added to close), and it is accepted only as a
+ * BROADCAST, so a targeted attacker has to take the whole fleet with it.
+ */
+struct  GridDemote
+{
+  ProtobufCMessage base;
+};
+#define GRID_DEMOTE__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_demote__descriptor) \
+     }
+
+
 struct  GridSync
 {
   ProtobufCMessage base;
@@ -1089,6 +1123,7 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC = 21,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST = 22,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON = 23,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE = 24,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
@@ -1119,6 +1154,12 @@ struct  LoraClientOperationMessage
      * traffic, which is the safe direction.
      */
     GridBeacon *gridbeacon;
+    /*
+     * The startup withdrawal. A node that does not know this field ignores
+     * it and falls back on its own demotion criteria, which is the safe
+     * direction and what happens today.
+     */
+    GridDemote *griddemote;
     /*
      * The timed-window grid (B3). A node that does not know this field
      * ignores it and stays in Mode A, which is the safe direction.
@@ -1564,6 +1605,25 @@ GridBeacon *
 void   grid_beacon__free_unpacked
                      (GridBeacon *message,
                       ProtobufCAllocator *allocator);
+/* GridDemote methods */
+void   grid_demote__init
+                     (GridDemote         *message);
+size_t grid_demote__get_packed_size
+                     (const GridDemote   *message);
+size_t grid_demote__pack
+                     (const GridDemote   *message,
+                      uint8_t             *out);
+size_t grid_demote__pack_to_buffer
+                     (const GridDemote   *message,
+                      ProtobufCBuffer     *buffer);
+GridDemote *
+       grid_demote__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_demote__free_unpacked
+                     (GridDemote *message,
+                      ProtobufCAllocator *allocator);
 /* GridSync methods */
 void   grid_sync__init
                      (GridSync         *message);
@@ -1804,6 +1864,9 @@ typedef void (*MacControl_Closure)
 typedef void (*GridBeacon_Closure)
                  (const GridBeacon *message,
                   void *closure_data);
+typedef void (*GridDemote_Closure)
+                 (const GridDemote *message,
+                  void *closure_data);
 typedef void (*GridSync_Closure)
                  (const GridSync *message,
                   void *closure_data);
@@ -1864,6 +1927,7 @@ extern const ProtobufCMessageDescriptor drift_test__descriptor;
 extern const ProtobufCMessageDescriptor mac_control__descriptor;
 extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
 extern const ProtobufCMessageDescriptor grid_beacon__descriptor;
+extern const ProtobufCMessageDescriptor grid_demote__descriptor;
 extern const ProtobufCMessageDescriptor grid_sync__descriptor;
 extern const ProtobufCMessageDescriptor mode_test__descriptor;
 extern const ProtobufCEnumDescriptor    mode_test__mode__descriptor;

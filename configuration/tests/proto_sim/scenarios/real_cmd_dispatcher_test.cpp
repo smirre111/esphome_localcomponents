@@ -3972,25 +3972,146 @@ TEST_F(RealNodeFixture, TheFleetKeyIsAdoptedOnlyFromAnAuthenticatedGridSync) {
     EXPECT_EQ(disp.netKeyId(), kFleetKeyId);
 }
 
-TEST_F(RealNodeFixture, AWithdrawnGridTakesTheFleetKeyWithIt) {
+TEST_F(RealNodeFixture, AWithdrawnGridKeepsTheFleetKey) {
     auto login = pack_login_op(/*msgid=*/610, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
     auto enc = encrypted_grid_sync(4, 611, /*with_key=*/true);
     disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
     ASSERT_TRUE(disp.hasNetKey());
 
-    // The key authenticates beacons ABOUT AN ANCHOR. Keeping it past the
-    // anchor's life would only let a stale beacon look valid.
+    // THIS ASSERTED THE OPPOSITE when the fleet key landed, and the reasoning
+    // then was wrong. It read "a key that outlived its grid would let a stale
+    // beacon look valid" — but the netKeyId check refuses a beacon signed under
+    // a different generation, so a stale key is INERT. What clearing it does is
+    // put the node back on the no-key policy, where UNSIGNED beacons are
+    // accepted; the guard band bounds one anchor nudge and not a sequence, so
+    // that is the walk the key exists to close. A withdrawal must not re-open
+    // it, and with GridDemote now unauthenticated that matters much more: it
+    // would be a one-packet way to strip the key.
     //
     // Encrypted, and that is not incidental: once a node holds a session the
-    // plaintext gate refuses every non-LOGIN, non-beacon frame, so a plaintext
-    // withdrawal never reaches this handler at all. (The hub's STARTUP
-    // withdrawal is exactly that frame — recorded in the plan, not fixed here.)
+    // plaintext gate refuses every non-LOGIN, non-beacon, non-demote frame, so
+    // a plaintext GridSync never reaches this handler at all.
     auto off = encrypted_grid_sync(/*slot=*/4, /*msgid=*/612, /*with_key=*/false,
                                    /*enable=*/false);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    EXPECT_FALSE(disp.gridState().active) << "the grid goes";
+    EXPECT_TRUE(disp.hasNetKey())
+        << "but the key stays: clearing it is how an unsigned beacon gets "
+           "believed again";
+}
+
+// ---------------------------------------------------------------------------
+// D-1 — the hub's startup withdrawal, as its own unauthenticated frame
+//
+// GridSync{enable=false} could never do this job. It is sent on a fresh boot,
+// when no session exists, so it went out in the clear — and the plaintext gate
+// refuses every non-LOGIN, non-beacon frame while the node holds a session
+// resumed from NVS. The one frame that must not be missed, dropped by exactly
+// the nodes it was aimed at.
+//
+// GridDemote is exempt from that gate. The justification is the rule the beacon
+// exemption already rests on: an unauthenticated frame may make this node listen
+// MORE and never less, and Mode A is three windows per round against Mode B's
+// one. It carries no fields, so there is nothing for a sender to choose.
+// ---------------------------------------------------------------------------
+
+namespace {
+std::vector<uint8_t> build_grid_demote(uint32_t dest = 0xFF) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = dest;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = 0;     // a broadcast belongs to no per-node sequence
+
+    GridDemote gd = GRID_DEMOTE__INIT;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header     = &hdr;
+    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE;
+    op.griddemote = &gd;
+
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, APlaintextGridDemoteIsAcceptedEvenWithASession) {
+    // The whole point. A node holding a session refuses plaintext everything
+    // else, and this is the frame it has to accept from a hub that has just
+    // restarted and holds no session to encrypt with.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_TRUE(disp.isSessionProven()) << "precondition: the gate is armed";
+
+    auto demote = build_grid_demote();
+    disp.onReceiveNew(demote.data(), static_cast<int>(demote.size()));
+
+    EXPECT_FALSE(disp.gridState().active)
+        << "a plaintext GridSync would have been refused here; that is the bug "
+           "this frame type exists to fix";
+}
+
+TEST_F(RealNodeFixture, AGridDemoteMayNotStripTheFleetKey) {
+    // The concern that decided the design. A node with no key accepts UNSIGNED
+    // beacons again, and the guard bounds ONE anchor nudge rather than a
+    // sequence — so if an unauthenticated demote could clear the key, it would
+    // be a one-packet way to re-open the anchor walk the key was added to
+    // close. Strictly an escalation, not a denial of service.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.hasNetKey());
+
+    auto demote = build_grid_demote();
+    disp.onReceiveNew(demote.data(), static_cast<int>(demote.size()));
+
     EXPECT_FALSE(disp.gridState().active);
-    EXPECT_FALSE(disp.hasNetKey());
+    EXPECT_TRUE(disp.hasNetKey())
+        << "the key must survive an unauthenticated demote, or the demote IS "
+           "the attack";
+    EXPECT_EQ(disp.netKeyId(), kFleetKeyId);
+}
+
+TEST_F(RealNodeFixture, AGridDemoteAddressedToOneNodeIsRefused) {
+    // Broadcast-only, so an attacker cannot pick one node out of the fleet —
+    // and because a broadcast is what the hub actually sends: after a restart
+    // it does not yet know which nodes exist.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    auto targeted = build_grid_demote(/*dest=*/kNodeAddr);
+    disp.onReceiveNew(targeted.data(), static_cast<int>(targeted.size()));
+
+    EXPECT_TRUE(disp.gridState().active)
+        << "addressed to this node it is not the hub's startup broadcast";
+}
+
+TEST_F(RealNodeFixture, AGridDemoteDoesNotRatchetTheReplayCounter) {
+    // Same reason the beacon is exempt: a broadcast belongs to no per-node
+    // sequence, and running it through the counter would pull every node's rx id
+    // onto the hub's broadcast numbering and wedge the link until the next
+    // login.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+
+    auto demote = build_grid_demote();
+    disp.onReceiveNew(demote.data(), static_cast<int>(demote.size()));
+
+    // An ordinary encrypted command with the NEXT msgid must still be accepted.
+    auto gs2 = encrypted_grid_sync(/*slot=*/4, /*msgid=*/3, /*with_key=*/true);
+    disp.onReceiveNew(gs2.data(), static_cast<int>(gs2.size()));
+    EXPECT_TRUE(disp.gridState().active)
+        << "the demote must not have moved the rx counter";
 }
 
 TEST_F(RealNodeFixture, AKeyedNodeAdoptsTheMaskFromASignedBeacon) {

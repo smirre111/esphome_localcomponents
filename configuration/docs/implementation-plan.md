@@ -62,7 +62,7 @@ padded with work nobody has argued for is how a real item gets lost.
 
 | # | what | where | why it is not done | §ref |
 |---|---|---|---|---|
-| D-1 | **The hub's startup grid demote goes out in the clear**, and a node holding a session resumed from NVS refuses it. The one frame that must not be missed is dropped by exactly the nodes it is aimed at; they demote later via `kMaxMissedMarks`, which is slower and reads as a reception fault. | `broadcast_grid_demote()` | The fleet key cannot sign it — a restarted hub mints a NEW key while the nodes hold the old one — and a key that survived the restart would defeat re-minting. Needs a design decision, not a repair. | §11b |
+| ~~D-1~~ | ~~**The hub's startup grid demote goes out in the clear**~~ — **FIXED** as `GridDemote`, a fieldless broadcast exempt from the plaintext gate. See §11b. | `broadcast_grid_demote()` | — | §11b |
 | D-2 | **A copy sent into RX1 and lost on air is not retried into RX2.** The node is still listening (`rx1_had_data` stays false) and the hub knows where that window is. | `send_into_class_a_window_` | TimeSync is not acked, so the hub has no trigger. Inventing one is a retry policy, not a fix to this path. | §8 C2 |
 
 ### Wiring — code that exists and nothing calls
@@ -1539,23 +1539,60 @@ Recorded here rather than left to look maintained.
   fix for a double move would have become a late one. The dropped buffer is
   returned to the pool, which is five deep; a leak there would refuse every
   later downlink and present as a dead radio, so it has its own test.
-- **The hub's startup grid demote is plaintext, and a provisioned node refuses
-  it.** Found while testing the fleet key, not fixed here because the fix is a
-  design decision rather than a repair. `broadcast_grid_demote()` sends
-  `send_grid_sync(false)` to the broadcast address on startup — the frame whose
-  entire purpose is to tell every node that the anchor it holds is now wrong.
-  It packs through `s_pack_operation_message(..., session_confirmed_, ...)`, and
-  on a fresh hub boot `session_confirmed_` is false, so it goes out in the
-  clear. The node's plaintext gate refuses every non-`LOGIN`, non-`GRIDBEACON`
-  frame while it holds a session, and a node that resumed its session from NVS
-  holds one. So the one frame that must not be missed is dropped by exactly the
-  nodes it is aimed at; they demote later, via `kMaxMissedMarks`, which is
-  slower and looks like a reception fault.
-  The fleet key does not fix this: a restarted hub mints a NEW key, and the
-  nodes still hold the old one, so it cannot sign a demote they would accept.
-  A key that survived the restart would defeat the point of re-minting.
-  Pinned incidentally by `AWithdrawnGridTakesTheFleetKeyWithIt`, which has to
-  send its withdrawal encrypted for the handler to see it at all.
+- ~~**The hub's startup grid demote is plaintext, and a provisioned node
+  refuses it.**~~ — **FIXED, and not the way this entry proposed.**
+  `broadcast_grid_demote()` sent `send_grid_sync(false)` to the broadcast
+  address on startup — the frame whose entire purpose is to tell every node that
+  the anchor it holds is now wrong. It packs through
+  `s_pack_operation_message(..., session_confirmed_, ...)`, and on a fresh boot
+  `session_confirmed_` is false, so it went out in the clear and the node's
+  plaintext gate refused it. Dropped by exactly the nodes it was aimed at.
+  **The entry was wrong about the severity and about the options.** Two
+  corrections:
+  *On severity*: the fallback is FAST, not slow. Three consecutive missed marks
+  at one mark per round is ~4.5 s, and `CmdDispatcher.cpp` already carries the
+  conclusion this scenario produced — *"Demotion has to rest on the node's own
+  evidence, not on an instruction it may never receive."* Self-demotion is the
+  mechanism; this frame is belt-and-braces that did not work.
+  *On options*: the entry said only the fleet key could sign it, and a restarted
+  hub mints a new one. True, and irrelevant — **the frame needs no
+  authentication at all.** The plaintext gate's question is not "is this
+  secret", it is "may this frame make the node DO something", and a demote's
+  only effect is Mode A: three receive windows per round against Mode B's one.
+  That satisfies the rule the beacon exemption already rests on — *an
+  unauthenticated frame may make this node listen MORE and never less* —
+  more cleanly than the beacon does, since a beacon can also nudge the anchor
+  while this can only throw one away.
+  **Shipped as `GridDemote`, a message with NO FIELDS**, exempt from both the
+  plaintext gate and the replay counter (a broadcast belongs to no per-node
+  sequence). Three deliberate constraints:
+  - *Its own type, not `GridSync{enable=false}`.* The gate switches on
+    `cmd_case`; exempting a conditional would put a payload field inside its
+    decision, and `enable=true` installs a slot assignment, the geometry,
+    `armOffsetUs` and the fleet key.
+  - *No fields at all*, so there is nothing for a sender to choose and nothing
+    that can later grow into something installable.
+  - *Broadcast only*, so a targeted attacker must take the whole fleet with it —
+    and because a broadcast is what the hub actually sends, not yet knowing
+    which nodes exist.
+  **It may not clear the fleet key, and that reversed an earlier decision in
+  this same document.** The withdrawal path used to clear it, reasoning that a
+  key outliving its grid would let a stale beacon look valid. It would not: the
+  `netKeyId` check refuses a beacon signed under a different generation, so a
+  stale key is inert. What clearing it does is put the node back on the no-key
+  policy, where UNSIGNED beacons are accepted — and the guard band bounds ONE
+  anchor nudge, not a sequence. With the demote unauthenticated that would have
+  been a one-packet way to re-open the walk the key was added to close: an
+  escalation, not a fallback. The encrypted `GridSync` withdrawal no longer
+  clears it either, for the same reason.
+  **The residual, stated:** an attacker who can transmit one frame can now force
+  a node from Mode B to Mode A. Previously that needed a jammer denying
+  reception in three consecutive windows — `noteMarkMissed` fires only on
+  `RX_TIMEOUT`, so a window an attacker transmits into counts as neither hit nor
+  miss. So this is a real widening of capability, bounded by a ceiling of "the
+  node runs the mode the fleet ships in": ~3x receive duty, 5.89 % against
+  1.96 %. Judged worth it, because the alternative is a startup frame that
+  cannot work.
 - **A compromised node can forge beacons for the whole fleet.** Inherent to
   one-to-many authentication without per-node signatures: every node holds the
   same `netKey`. Bounded by what a beacon can do — a guard-band anchor nudge

@@ -409,8 +409,34 @@ TEST_F(E2E, WithdrawingTheGridPutsTheNodeBackInModeA) {
 
     EXPECT_FALSE(disp.gridState().active)
         << "the withdrawal must reach the node and clear its anchor";
-    EXPECT_FALSE(disp.hasNetKey())
-        << "and the fleet key goes with the grid it authenticates";
+    EXPECT_TRUE(disp.hasNetKey())
+        << "but NOT the fleet key: a node with no key believes unsigned beacons "
+           "again, and the guard bounds one anchor nudge rather than a sequence";
+}
+
+TEST_F(E2E, AHubRestartsAndItsBroadcastDemoteReachesAKeyedNode) {
+    // D-1, end to end. The hub sends this frame on a FRESH BOOT, holding no
+    // session, so it goes out in the clear — and a node holding a session
+    // resumed from NVS refuses plaintext everything else. As
+    // GridSync{enable=false} it was dropped by exactly the nodes it was aimed
+    // at; as its own fieldless type it is exempt from that gate.
+    bringUpSession();
+    rol.enable_timed_mode(true);
+    settle();
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_TRUE(disp.hasNetKey());
+    ASSERT_TRUE(disp.isSessionProven()) << "precondition: the gate is armed";
+
+    // What the hub really emits on startup, through its own call.
+    rol.broadcast_grid_demote();
+    settle();
+
+    EXPECT_FALSE(disp.gridState().active)
+        << "the node must be back in Mode A — three windows per round, which is "
+           "the only direction an unauthenticated frame may move it";
+    EXPECT_TRUE(disp.hasNetKey())
+        << "and its key must survive, or the demote is an escalation rather "
+           "than a fallback";
 }
 
 // ---------------------------------------------------------------------------
