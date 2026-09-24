@@ -459,3 +459,79 @@ TEST_F(E2E, ASchedulePushIsAcknowledgedAndTheVersionAgrees) {
     EXPECT_EQ(rol.schedulePushMsgid(), 0u)
         << "the node's ack must have cleared the outstanding push";
 }
+
+// ---------------------------------------------------------------------------
+// 6. D-2: a lost reply into RX1, and why the hub does not retry into RX2
+//
+// The frame the hub aims at a Class A RX1 window is a TimeSync, and it does two
+// jobs: it refreshes the node's clock, and — because it is encrypted — it is the
+// node's proof that a resumed session actually works. If it is lost, the hub
+// has no trigger to try RX2 with, because a TimeSync carries no ack.
+//
+// It does not need one. THE RECOVERY IS NODE-DRIVEN: armResumeFallback() starts
+// a ladder of two re-beacons at ~4 s before escalating to a REGISTER at 12 s,
+// and the hub answers EVERY beacon with a TimeSync. So the node re-ASKS rather
+// than the hub guessing which window to re-aim at — strictly better
+// information, and it is why a hub-side RX2 retry would be redundant.
+//
+// What makes that structural rather than lucky: sleepOk rides the TimeSync
+// itself. A node that loses the reply never receives permission to sleep early,
+// so it stays awake for the full quiet window — which is exactly the window the
+// ladder needs. The failure keeps its own recovery alive.
+// ---------------------------------------------------------------------------
+
+TEST_F(E2E, ALostReplyLeavesTheSessionUnprovenSoTheLadderRuns) {
+    // The precondition the whole argument rests on. A decrypted downlink is
+    // what cancels the resume fallback (noteSessionProven); if the reply is
+    // lost, the node must NOT believe its session is proven, because that
+    // belief is what would stop it re-asking.
+    bringUpSession();
+    // NOT proven yet, and that is correct rather than incidental: a LoginMsg is
+    // the one frame the hub sends in the clear, so the login exchange cannot
+    // itself prove the session works. Only a DECRYPTED downlink can, which is
+    // why the reply to the beacon carries that job.
+    ASSERT_FALSE(disp.isSessionProven());
+
+    // A fresh wake: the node beacons, the hub answers, and the answer is lost.
+    disp.sendWakeBeacon(WAKE_REASON__WAKE_TIMER_CHECKIN);
+    pumpUp();
+    tick(800);
+    const size_t answered = radio.hub_to_node_frames().size();
+    ASSERT_GT(answered, 0u) << "the hub must have answered the beacon";
+    delivered_ = answered;          // lost on air — D-2's scenario
+
+    EXPECT_FALSE(disp.isSessionProven())
+        << "a reply that never arrived cannot have proved anything, and it is "
+           "that unproven state which arms the re-beacon ladder";
+}
+
+TEST_F(E2E, TheHubAnswersAReBeaconSoTheNodeRecoversByReAsking) {
+    // D-2's recovery, end to end, and the reason no hub-side RX2 retry is
+    // needed: the node re-ASKS and the hub answers again. The hub never has to
+    // guess which window to re-aim at, which is better information than a
+    // retry policy could have.
+    bringUpSession();
+
+    // Wake 1: answered, and the answer is lost.
+    disp.sendWakeBeacon(WAKE_REASON__WAKE_TIMER_CHECKIN);
+    pumpUp();
+    tick(800);
+    const size_t after_first = radio.hub_to_node_frames().size();
+    ASSERT_GT(after_first, 0u);
+    delivered_ = after_first;                 // dropped
+    ASSERT_FALSE(disp.isSessionProven());
+
+    // The ladder's re-beacon, ~4 s later. The hub answers EVERY beacon, so
+    // this one gets its own reply.
+    disp.sendWakeBeacon(WAKE_REASON__WAKE_TIMER_CHECKIN);
+    pumpUp();
+    tick(800);
+    ASSERT_GT(radio.hub_to_node_frames().size(), after_first)
+        << "the hub must answer the re-beacon too — that IS the retry";
+
+    // This one lands.
+    settle();
+    EXPECT_TRUE(disp.isSessionProven())
+        << "and the answer to the re-beacon is what recovers the session, "
+           "before the 12 s REGISTER fallback ever escalates";
+}
