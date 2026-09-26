@@ -53,7 +53,15 @@ MAC1 = """  - platform: template
     id: rol_2_modetest_b_long_mac1
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, true, true, false, true);'""".splitlines()
+      - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, true, true, false, true);'
+  - platform: template
+    name: "MAC Ping Start long (node 2)"
+    id: rol_2_mac_ping_start_long
+    entity_category: diagnostic
+    on_press:
+      # Pressed ~20 s AFTER a 900 s ModeTest starts: the node answers a plaintext
+      # ping only while an authenticated ModeTest is armed (fw 1.1.5).
+      - lambda: 'id(rol_2)->start_mac_ping(860, 1100, true, 0);'""".splitlines()
 anchor = next(i for i, l in enumerate(out) if 'name: "Mode Test B — long, sleep off (node 2)"' in l or 'long, sleep off (node 2)' in l)
 out[anchor - 1:anchor - 1] = MAC1          # anchor-1 is its "- platform: template" line
 open("loradevices.bench.yml", "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")

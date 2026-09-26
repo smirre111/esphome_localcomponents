@@ -32,4 +32,16 @@ typedef enum {
     ESP_LOG_VERBOSE = 5,
 } esp_log_level_t;
 
-inline void esp_log_level_set(const char *, esp_log_level_t) {}
+#include <map>
+#include <string>
+// Recorded, so a test can assert that a measurement really ran quiet and that the
+// level came back. Still writes nothing to a UART.
+inline std::map<std::string, esp_log_level_t> &proto_sim_log_levels()
+{
+    static std::map<std::string, esp_log_level_t> m;
+    return m;
+}
+inline void esp_log_level_set(const char *tag, esp_log_level_t level)
+{
+    proto_sim_log_levels()[tag ? tag : "*"] = level;
+}

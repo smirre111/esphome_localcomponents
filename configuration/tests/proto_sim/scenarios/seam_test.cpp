@@ -547,3 +547,46 @@ TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin
            "handle_register_, which defers again, and the two ends never "
            "converge";
 }
+
+TEST_F(Seam, ARealMacPingReachesANodeThatHoldsASession) {
+    // Every existing MAC ping test runs on a fresh node with no session, where a
+    // plaintext frame is accepted. A node in the field holds a session, and its
+    // plaintext gate refuses everything except LOGIN and the grid broadcasts.
+    // MAC control is not on that list. So the question the turnaround
+    // measurement (HW-7) rests on - does a ping the hub really builds get
+    // answered by a node that has a session? - had never been asked.
+    tracker.startGrid();
+    rol.config_synced_ = true;
+    rol.send_login();
+    const auto login = lastDownlink();
+    ASSERT_FALSE(login.empty());
+    disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
+                      esp_timer_get_time());
+    uint32_t nonce = 0;
+    ASSERT_TRUE(disp.getBaseNonceForTest(1, nonce)) << "precondition: the node holds a session";
+    rol.mark_session_confirmed_for_test();
+
+    // A ping is answered only while an AUTHENTICATED ModeTest is armed (the frames
+    // a test measures need no session; arming does). Arm it the way the hub does:
+    // its real ModeTest frame, encrypted under the session, delivered to the node.
+    rol.start_mode_test(60, 1093, /*mode=*/1, /*copies=*/1, /*keep_power_profile=*/true,
+                        /*enable_counter=*/false, /*enable_crypto=*/false, /*mac_echo=*/true);
+    rol.mode_test_tick_for_test();
+    const auto mt_frame = lastDownlink();
+    disp.onReceiveNew(const_cast<uint8_t *>(mt_frame.data()), (int) mt_frame.size(),
+                      esp_timer_get_time());
+    ASSERT_TRUE(disp.modeTestActive()) << "precondition: the hub's own ModeTest armed the node";
+
+    const size_t before = radio.hub_to_node_frames().size();
+    rol.start_mac_ping(60, 1100, /*want_echo=*/true, 0);
+    rol.mac_ping_tick_for_test();
+    ASSERT_GT(radio.hub_to_node_frames().size(), before) << "the hub must have sent a ping";
+    const auto ping = lastDownlink();
+
+    ASSERT_EQ(disp.macCounters().ping_rx, 0u);
+    disp.onReceiveNew(const_cast<uint8_t *>(ping.data()), (int) ping.size(),
+                      esp_timer_get_time());
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u)
+        << "a node that holds a session must still hear the hub's MAC ping";
+    EXPECT_EQ(disp.macCounters().echo_tx, 1u) << "and answer it from MAC-0";
+}

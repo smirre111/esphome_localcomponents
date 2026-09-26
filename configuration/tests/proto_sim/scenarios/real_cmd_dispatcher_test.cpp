@@ -99,6 +99,7 @@ struct NodeProbe : CmdDispatcher {
               portMUX_TYPE &mm, portMUX_TYPE &bm)
         : CmdDispatcher(m, s, l, mm, bm) {}
     using CmdDispatcher::last_rx_window_gen_;
+    using CmdDispatcher::modeTestExpiredCb_;   // the node-owned deadline
     // What the HUB was last told, as distinct from what the console last saw.
     // The flicker test has to assert the state the hub ends up believing, and
     // that reason travels inside the beacon BODY (built later, in
@@ -2719,7 +2720,9 @@ TEST_F(RealNodeFixture, PaddingSweepsTimeOnAirWithoutChangingBehaviour) {
     // function of frame length. Padding must not change what the MAC does.
     for (size_t pad : {size_t{0}, size_t{20}, size_t{100}}) {
         disp.resetMacCounters();
-        auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/true,
+        // Three independent pings, so three increasing seqs: MAC-1 is on by
+        // default and a repeated seq is (correctly) a duplicate.
+        auto bytes = build_mac_ping(/*seq=*/(uint32_t)(pad + 1), /*want_echo=*/true,
                                     /*msgid=*/(uint32_t)(200 + pad), pad);
         EXPECT_GT(bytes.size(), pad);
         disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
@@ -3994,7 +3997,9 @@ std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgi
 std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
                                          uint32_t grid_period_ms = 1093,
                                          uint32_t seq = 0,
-                                         int32_t arm_offset_us = 0) {
+                                         int32_t arm_offset_us = 0,
+                                         bool counter = true,
+                                         bool mac_echo = false) {
     ModeTest mt = MODE_TEST__INIT;
     // HW-2: non-zero only for MODE_SWEEP, which deliberately mis-arms its
     // windows. Defaulted so every existing caller builds the frame it did.
@@ -4009,7 +4014,8 @@ std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
     mt.gridperiodms     = grid_period_ms;
     mt.copies           = 1;
     mt.droppowerprofile = false;
-    mt.enablecounter    = true;
+    mt.enablecounter    = counter;
+    mt.macecho          = mac_echo;   // the hub always sets it; a test that wants the echo says so
     mt.enablecrypto     = true;
 
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -4107,6 +4113,221 @@ TEST_F(RealNodeFixture, ModeTestBActuallyPutsTheNodeInTimedRx) {
     ASSERT_TRUE(disp.modeTestActive());
     EXPECT_TRUE(disp.timedRxEnabledForTest());
     EXPECT_EQ(disp.modeTestReportedMode(), (uint8_t) modetest::Mode::B);
+}
+
+// ---------------------------------------------------------------------------
+// A MAC ping and a node that holds a session (HW-7, MAC-1's cost in time).
+//
+// Every MAC-ping test above runs on a fresh node with no session, where a
+// plaintext frame is accepted. A node in the field holds one, and its plaintext
+// gate refuses everything but LOGIN and the grid broadcasts - MAC control was
+// not on the list. So the hub's ping has never been answered by a real node and
+// the turnaround histogram has been `n 0` in every run ever taken.
+//
+// The ping is deliberately unauthenticated (mac-layer.md section 4: the frames
+// being MEASURED may be plaintext; ARMING the test must not be). So the
+// exemption is exactly that shape: a PING, and only while a ModeTest that was
+// armed by an authenticated frame is running.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid,
+                                            uint32_t sender = 1) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = sender;
+    hdr.msgid         = msgid;
+
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind           = MAC_CONTROL__KIND__MAC_CONFIG;
+    mc.disablecounter = disable_counter;
+    mc.durations      = 60;
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header     = &hdr;
+    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.maccontrol = &mc;
+
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+// Login, then a Mode A ModeTest armed by an ENCRYPTED frame, counter on or off.
+void holdSessionAndArmTest(NodeProbe &disp, bool counter_on) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, 0, counter_on, /*mac_echo=*/true);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, APlaintextPingIsRefusedWhenNoTestIsArmed) {
+    // The boundary that must hold: outside a test, an unauthenticated frame may
+    // not make a session-holding node transmit.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    ASSERT_TRUE(disp.canResumeSession())
+        << "precondition: the node holds a session, which is what its plaintext gate asks";
+    ASSERT_FALSE(disp.modeTestActive());
+
+    auto ping = build_mac_ping(/*seq=*/1, /*want_echo=*/true, /*msgid=*/500);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 0u);
+    EXPECT_EQ(disp.macCounters().echo_tx, 0u)
+        << "an unauthenticated ping must not be a way to make a node transmit";
+}
+
+TEST_F(RealNodeFixture, APlaintextPingIsAnsweredWhileAnAuthenticatedTestIsArmed) {
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    ASSERT_TRUE(disp.modeTestActive());
+
+    auto ping = build_mac_ping(/*seq=*/1, /*want_echo=*/true, /*msgid=*/500);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u)
+        << "the frames a test MEASURES need no session; only arming does";
+    EXPECT_EQ(disp.macCounters().echo_tx, 1u) << "and MAC-0 answers it";
+}
+
+TEST_F(RealNodeFixture, ThePingExemptionEndsWithTheTest) {
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    auto off = encrypted_mode_test_off(/*msgid=*/3);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    ASSERT_FALSE(disp.modeTestActive());
+
+    auto ping = build_mac_ping(/*seq=*/1, /*want_echo=*/true, /*msgid=*/501);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 0u) << "a stopped test leaves no door open";
+}
+
+TEST_F(RealNodeFixture, APlaintextMacConfigIsStillRefusedWhileATestIsArmed) {
+    // Only the PING is exempt. MAC_CONFIG changes what the node enforces; it is
+    // honoured only when authenticated, and a plaintext one must not slip
+    // through the same door.
+    holdSessionAndArmTest(disp, /*counter_on=*/true);
+    ASSERT_TRUE(disp.macSublayers().counter_enabled);
+
+    const auto before = disp.destAddress;
+    auto cfg = build_mac_config_plain(/*disable_counter=*/true, /*msgid=*/502, /*sender=*/77);
+    disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
+    EXPECT_TRUE(disp.macSublayers().counter_enabled)
+        << "a plaintext MAC_CONFIG must not be able to switch a sublayer off";
+    // The second lock (applying needs authentication) would hold even if the gate
+    // let the frame through, so the sublayer state cannot show the gate working.
+    // What only the gate protects: uplinks are aimed at the sender of the last
+    // frame that passed EVERY gate.
+    EXPECT_EQ(disp.destAddress, before)
+        << "a refused frame must not retarget the node's uplinks";
+}
+
+TEST_F(RealNodeFixture, WithTheCounterOnAPingSequenceIsChecked) {
+    // MAC-1 for control frames is their own sequence: the session's replay
+    // window cannot be satisfied by a ping (its msgid is a separate counter) and
+    // must not be ratcheted by an unauthenticated frame. So the ping's `seq` is
+    // what is checked: strictly increasing.
+    holdSessionAndArmTest(disp, /*counter_on=*/true);
+    ASSERT_TRUE(disp.macSublayers().counter_enabled);
+
+    auto p5 = build_mac_ping(5, true, 600);
+    disp.onReceiveNew(p5.data(), static_cast<int>(p5.size()));
+    ASSERT_EQ(disp.macCounters().ping_rx, 1u) << "a first ping must be accepted";
+
+    auto p5again = build_mac_ping(5, true, 601);
+    disp.onReceiveNew(p5again.data(), static_cast<int>(p5again.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u) << "the same seq again is a duplicate";
+
+    auto p4 = build_mac_ping(4, true, 602);
+    disp.onReceiveNew(p4.data(), static_cast<int>(p4.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u) << "an older seq is a replay";
+
+    auto p9 = build_mac_ping(9, true, 603);
+    disp.onReceiveNew(p9.data(), static_cast<int>(p9.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 2u)
+        << "a gap is a lost frame, not a violation: later seqs are accepted";
+}
+
+TEST_F(RealNodeFixture, WithTheCounterOffPingRepeatsAreAccepted) {
+    // The MAC-0 baseline the counter-on run is measured against: no sequencing.
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    ASSERT_FALSE(disp.macSublayers().counter_enabled);
+
+    auto p5 = build_mac_ping(5, false, 600);
+    disp.onReceiveNew(p5.data(), static_cast<int>(p5.size()));
+    auto p5b = build_mac_ping(5, false, 601);
+    disp.onReceiveNew(p5b.data(), static_cast<int>(p5b.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 2u);
+}
+
+TEST_F(RealNodeFixture, ThePingSequenceRestartsWithEachTest) {
+    // The hub's ping seq is its own counter and restarts with the hub; a node
+    // that carried the old high-water into the next test would refuse every ping.
+    holdSessionAndArmTest(disp, /*counter_on=*/true);
+    auto p9 = build_mac_ping(9, false, 600);
+    disp.onReceiveNew(p9.data(), static_cast<int>(p9.size()));
+    ASSERT_EQ(disp.macCounters().ping_rx, 1u);
+
+    auto off = encrypted_mode_test_off(/*msgid=*/3);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, 0, true, true);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    ASSERT_TRUE(disp.modeTestActive());
+
+    auto p1 = build_mac_ping(1, false, 601);
+    disp.onReceiveNew(p1.data(), static_cast<int>(p1.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 2u) << "seq 1 of a NEW test is not a replay";
+}
+
+// ---------------------------------------------------------------------------
+// A ModeTest measures with the receive path quiet.
+//
+// Measured 2026-09-26, the first MAC ping a session-holding node ever answered:
+// turnaround p50 82 ms, and the node's own log showed why - the ping handler ran
+// 70 ms after the DIO0 interrupt, with ~20 INFO lines between them, each ~10 ms
+// at 115200 baud. The number was the UART, not the MAC. DriftTest already clamps
+// the noisy per-packet tags to WARN for the same reason; ModeTest measures the
+// same interval and must do the same, and must give the verbosity back on EVERY
+// exit path (a hub that vanishes mid-test must not leave the node mute).
+// ---------------------------------------------------------------------------
+namespace {
+esp_log_level_t tagLevel(const char *tag) {
+    auto &m = proto_sim_log_levels();
+    auto it = m.find(tag);
+    return it == m.end() ? ESP_LOG_INFO : it->second;   // IDF's build default is INFO
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, AModeTestClampsTheReceivePathTagsToWarn) {
+    proto_sim_log_levels().clear();
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    ASSERT_TRUE(disp.modeTestActive());
+    for (const char *tag : {"CmdDispatcher", "LoraInterface", "frtosTasks"})
+        EXPECT_EQ(tagLevel(tag), ESP_LOG_WARN)
+            << tag << ": INFO lines in the receive path are ~10 ms each at 115200 baud "
+                      "and land inside the RxDone -> echo interval being measured";
+}
+
+TEST_F(RealNodeFixture, TheLogLevelsComeBackWhenTheTestStops) {
+    proto_sim_log_levels().clear();
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    auto off = encrypted_mode_test_off(/*msgid=*/3);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    ASSERT_FALSE(disp.modeTestActive());
+    for (const char *tag : {"CmdDispatcher", "LoraInterface", "frtosTasks"})
+        EXPECT_EQ(tagLevel(tag), ESP_LOG_INFO) << tag << " must not stay muted after the test";
+}
+
+TEST_F(RealNodeFixture, TheLogLevelsComeBackWhenTheNodeEndsItsOwnTest) {
+    // The node-owned deadline: no OFF frame arrives, and the node must still
+    // restore what it changed.
+    proto_sim_log_levels().clear();
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    ASSERT_TRUE(disp.modeTestActive());
+    NodeProbe::modeTestExpiredCb_(&disp);
+    ASSERT_FALSE(disp.modeTestActive());
+    for (const char *tag : {"CmdDispatcher", "LoraInterface", "frtosTasks"})
+        EXPECT_EQ(tagLevel(tag), ESP_LOG_INFO) << tag;
 }
 
 // ---------------------------------------------------------------------------

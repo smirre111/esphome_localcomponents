@@ -535,6 +535,8 @@ namespace esphome
       // from a free one and see who holds it.
       static void reset_onboarding_gate_for_test() { s_onboarding_gate_.reset(); }
       bool onboarding_held_for_test() const { return this->onboarding_held_; }
+      // Fire one MAC ping exactly as the esp_timer would.
+      void mac_ping_tick_for_test() { mac_ping_timer_cb_(this); }
       // What confirm_session_ sets, without its pushes: for a test that needs a
       // confirmed session and will drive the follow-up traffic itself.
       void mark_session_confirmed_for_test() {

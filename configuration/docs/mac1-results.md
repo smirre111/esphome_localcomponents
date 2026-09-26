@@ -48,4 +48,34 @@ Both pass the Mode B line (|residual| < 20 ppm, mode 2, windows armed > 0, 0 mis
 
 ## Next layer
 
-MAC-2 (crypto): `Mode Test A — with MAC-1 + MAC-2` and its Mode B equivalent, then the MAC-ping turnaround for both sublayers.
+MAC-2 (crypto): `Mode Test A — with MAC-1 + MAC-2` and its Mode B equivalent, then the MAC-ping turnaround with MAC-2 on.
+
+---
+
+## Addendum 2026-09-26 (evening): MAC-1's cost in time, measured
+
+The gap above ("turnaround n 0 in all four") turned out to be two defects, and closing them is what made the measurement possible.
+
+**Why turnaround had never been measured.** (1) A node that holds a session refused the hub's MAC ping: it is plaintext and MAC control was not in the node's plaintext-gate exemptions (host tests all ran on a fresh node with no session). (2) With MAC-1 on, control frames were checked against the SESSION replay window, which a ping (its own msgid counter) can never satisfy. Both fixed in node **fw 1.1.5**: a PING, only while an authenticated ModeTest is armed, passes the gate (MAC_CONFIG stays refused); with the counter on a ping is sequenced by its own `seq` (strictly increasing, gaps allowed, restarts with each test), so an unauthenticated frame cannot ratchet the session window.
+
+**Why the first number was wrong.** First run (1.1.5): turnaround p50 **82.4 ms** (counter off) / 84.4 ms (on). The node's log showed the ping handler running 70 ms after the DIO0 interrupt with ~20 INFO lines between, each ~10 ms at 115200 baud: the number was the UART. DriftTest already clamps the noisy tags to WARN for this reason; ModeTest did not. Fixed in **fw 1.1.6** (clamped at arm, restored on every exit path including the node-owned deadline).
+
+**Result, fw 1.1.6, Mode A, 900 s, ping running inside the test, production profile:**
+
+| | counter OFF | counter ON |
+|---|---|---|
+| turnaround p50 / p99 (RxDone → echo enqueue) | **6 912 / 7 675 µs** | **6 926 / 7 660 µs** |
+| samples | 52 | 47 |
+| true FER (CRC-valid → addressed) | 0 of 105 | 0 of 106 (1 not addressed: counter-accepted 105) |
+
+**MAC-1 costs ~14 µs at the median (p99: −15 µs) — inside the noise of two 50-sample runs.** The counter is a compare and an increment; the measurement now agrees.
+
+**HW-7 gets its first real number: the MAC turnaround is ~6.9 ms**, against the plan's assumed 20 ms budget, the k+3 headline's 62.9 ms ceiling, the k+2 ack row's 36.5 ms ceiling and `kUplinkOffsetUs` = 60 ms. All hold with a wide margin. It was measured at one frame length (a bare ping); the per-byte FIFO read means other lengths still need the `payloadPadTo` sweep (unimplemented). It excludes CAD and backoff (it ends at TX enqueue).
+
+**Caveats.**
+* n ≈ 50 per run: the node is in free-running Mode A (~6 % catch), so a 900 s run yields ~50 echoes. The spread is tight (p99 − p50 ≈ 0.75 ms), so the median is well supported; a p99 from 50 samples is not.
+* Running pings inside the test **perturbed the raw clock-rate figure** (ppm +33/+43 vs +10/+9 without pings, same period 1 093 008–9 µs). Do not read ppm from these runs; use the ping-free runs above.
+* A ModeTest now runs the node's receive path at WARN, so node-side INFO lines are absent during a run (the hub log and the report are unaffected).
+
+Raw captures: `logs/20260926_174545_turnaround/` (fw 1.1.5, the UART-inflated 82 ms) and `logs/20260926_182848_turnaround2/` (fw 1.1.6).
+
