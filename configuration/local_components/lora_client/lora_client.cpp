@@ -318,6 +318,7 @@ namespace esphome
     }
 
     uint8_t LORAListener::s_next_login_slot_ = 0;
+    onboarding::Gate LORAListener::s_onboarding_gate_;
 
     // Beacon placement (implementation-plan.md 4.4) now lives in TimedGrid.h,
     // with the geometry it belongs to: the tracker TRANSMITS the beacon and
@@ -589,6 +590,7 @@ namespace esphome
 
     void LORAListener::note_node_heard_()
     {
+      this->onboarding_heard_ = true;
       if (this->time != nullptr && this->time->now().is_valid())
         this->last_heard_epoch_ = static_cast<uint32_t>(this->time->now().timestamp);
     }
@@ -698,6 +700,17 @@ namespace esphome
       // message path) before this timer fired.  We still need to send LoginMsg so
       // that the AES-GCM base-nonce map is repopulated (it is cleared on hub
       // reboot as a file-scope static and is never persisted to flash).
+      //
+      // One node's onboarding at a time. The downlink is a single queue at ~1.85 s
+      // a frame; a second node's login started behind the first's config, time
+      // and schedule pushes sits in that queue while every ack timer runs. Checked
+      // before the log so a wait is one line, not one per poll.
+      if (this->parent_ != nullptr && !this->acquire_onboarding_())
+      {
+        this->set_timeout("login_startup", onboarding::kPollMs,
+                          [this]() { this->do_login_and_arm_retry_(); });
+        return;
+      }
       ESP_LOGI(TAG, "[%s] Login challenge firing (parent=%s)",
                this->get_name().c_str(), this->parent_ == nullptr ? "NULL" : "ok");
       if (this->parent_ == nullptr)
@@ -736,6 +749,9 @@ namespace esphome
       uint64_t delay = static_cast<uint64_t>(kLoginRetryBaseMs) << shift;
       if (delay > kLoginRetryIntervalMs)
         delay = kLoginRetryIntervalMs;
+      // The backoff counts from when the login is ON THE AIR, not from when it
+      // was queued behind another node's bursts.
+      delay = this->ack_wait_ms_(static_cast<uint32_t>(delay));
       // Never retry earlier than the node can hear it. A sleeping node cannot
       // answer, so a burst sent before its wake is pure airtime and hub TX
       // energy — 68 such retries were observed in one log before this gate.
@@ -750,23 +766,36 @@ namespace esphome
         delay = until_awake;
       }
 
-      this->set_timeout("login_retry", static_cast<uint32_t>(delay), [this]()
+      this->set_timeout("login_retry", static_cast<uint32_t>(delay),
+                        [this]() { this->login_retry_step_(); });
+    }
+
+    void LORAListener::login_retry_step_()
+    {
+      if (this->login_acked_)
+        return; // acked already; one-shot, nothing to re-arm
+      // A retry is a login challenge like any other: it may not start while
+      // another node is being brought up. The attempt is NOT counted and the
+      // backoff is not advanced — it has not been made yet.
+      if (this->parent_ != nullptr && !this->acquire_onboarding_())
       {
-        if (this->login_acked_)
-          return; // acked already; one-shot, nothing to re-arm
-        if (++this->login_retry_count_ >= kMaxLoginRetries)
-        {
-          ESP_LOGE(TAG, "[%s] Login not acknowledged after %u retries — giving up",
-                   this->get_name().c_str(), static_cast<unsigned>(kMaxLoginRetries));
-          return;
-        }
-        ESP_LOGW(TAG, "[%s] Login not acknowledged — retry %u/%u",
-                 this->get_name().c_str(),
-                 static_cast<unsigned>(this->login_retry_count_),
-                 static_cast<unsigned>(kMaxLoginRetries));
-        this->send_login();
-        this->schedule_login_retry_(); // re-arm the next one-shot
-      });
+        this->set_timeout("login_retry", onboarding::kPollMs,
+                          [this]() { this->login_retry_step_(); });
+        return;
+      }
+      if (++this->login_retry_count_ >= kMaxLoginRetries)
+      {
+        ESP_LOGE(TAG, "[%s] Login not acknowledged after %u retries — giving up",
+                 this->get_name().c_str(), static_cast<unsigned>(kMaxLoginRetries));
+        this->release_onboarding_("gave up");
+        return;
+      }
+      ESP_LOGW(TAG, "[%s] Login not acknowledged — retry %u/%u",
+               this->get_name().c_str(),
+               static_cast<unsigned>(this->login_retry_count_),
+               static_cast<unsigned>(kMaxLoginRetries));
+      this->send_login();
+      this->schedule_login_retry_(); // re-arm the next one-shot
     }
 
     // void LORAListener::send_remote_address()
@@ -852,7 +881,10 @@ namespace esphome
         ESP_LOGI(TAG, "This clients' MAC address: %d", this->address_uint64_);
         if (reg->mac_addr != this->address_uint64_)
         {
-          ESP_LOGE(TAG, "%s, MAC address does not match, ignoring register command", this->get_name().c_str());
+          // Every REGISTER reaches every listener; all but the addressed one land
+          // here. That is routing, not a fault, and at ERROR it read as one — it
+          // was logged twice per handshake and hid the real errors around it.
+          ESP_LOGD(TAG, "%s: REGISTER is for another node's MAC — ignoring", this->get_name().c_str());
           lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
         }
@@ -926,6 +958,7 @@ namespace esphome
         // arm a short delay so ClientConfig + node configs are transmitted first.
         this->login_acked_              = false;
         this->login_retry_count_        = 0;
+        this->relogin_pending_          = true;  // the node restarted: its old session is gone
         this->pending_login_nonce_      = 0;     // node just (re-)registered → mint fresh
         this->startup_login_initiated_  = true;  // prevent NTP callback from cancelling this timer
         this->cancel_timeout("login_startup");
@@ -1087,6 +1120,14 @@ namespace esphome
     void LORAListener::confirm_session_()
     {
       this->session_confirmed_ = true;
+      this->relogin_pending_   = false;
+      // The settle clock for the onboarding gate starts here: the pushes that
+      // follow a confirmation are queued over the next ~2 s.
+      if (this->onboarding_held_ && !this->onboarding_confirmed_)
+      {
+        this->onboarding_confirmed_        = true;
+        this->onboarding_since_confirm_ms_ = 0;
+      }
 
       // The deferred config push from handle_register_. This is the first
       // moment it can be encrypted, and a provisioned node will not accept it
@@ -1871,6 +1912,15 @@ namespace esphome
     // -----------------------------------------------------------------------
     void LORAListener::send_grid_sync(bool enable)
     {
+      // Publishing a grid needs the key it carries to be encrypted, so it waits
+      // for the session (see relogin_pending_); confirm_session_ publishes it
+      // again if timed mode is on. WITHDRAWING one is not deferred: it is the safe
+      // direction and carries no key.
+      if (enable && this->relogin_pending_)
+      {
+        ESP_LOGD(TAG, "[%s] GridSync deferred — session being rebuilt", this->get_name().c_str());
+        return;
+      }
       LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = this->short_address_;
@@ -2034,7 +2084,7 @@ namespace esphome
         if (this->gridsync_msgid_count_ < kGridSyncMaxRepublishes + 1)
           this->gridsync_msgids_[this->gridsync_msgid_count_++] = header.msgid;
         this->cancel_timeout("gridsync_retry");
-        this->set_timeout("gridsync_retry", kGridSyncRetryMs, [this]() {
+        this->set_timeout("gridsync_retry", this->ack_wait_ms_(kGridSyncRetryMs), [this]() {
           if (this->gridsync_msgid_count_ == 0 || !this->timed_mode_enabled_)
             return;
           if (this->gridsync_retries_ >= kGridSyncMaxRepublishes)
@@ -2420,7 +2470,7 @@ namespace esphome
       // interval phase offset), then re-arms itself.  This guarantees the first
       // retransmit waits the full interval, leaving the node's deferred ACK a
       // quiet window to arrive first.
-      this->set_timeout("op_retry", kOpRetryIntervalMs, [this]() {
+      this->set_timeout("op_retry", this->ack_wait_ms_(kOpRetryIntervalMs), [this]() {
         if (!this->op_awaiting_ack_)
           return; // acked already; one-shot, nothing to re-arm
         if (++this->op_retry_count_ > kOpMaxRetries)
@@ -2789,6 +2839,7 @@ namespace esphome
       // node proves it by sending a frame we can decrypt.  Until then the hub
       // sends commands in plaintext (see s_pack_operation_message callers).
       this->session_confirmed_ = false;
+      this->relogin_pending_   = true;
 
       // Store the base-nonce on the hub side before sending so it is ready to
       // validate the first encrypted response the node sends back.
@@ -3587,6 +3638,13 @@ namespace esphome
     {
       if (this->parent_ == nullptr)
         return;
+      // See relogin_pending_. Checked before the msgid is taken, so a deferred
+      // push does not burn one; confirm_session_ pushes the schedule again.
+      if (this->relogin_pending_)
+      {
+        ESP_LOGD(TAG, "[%s] ScheduleConfig deferred — session being rebuilt", this->get_name().c_str());
+        return;
+      }
 
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
@@ -3656,7 +3714,7 @@ namespace esphome
         // Arm the retransmit.  The node acks a schedule push (unlike TimeSync);
         // that ack is what cancels this.
         this->sched_push_msgid_ = header.msgid;
-        this->set_timeout("schedule_retry", kSchedRetryMs, [this]() {
+        this->set_timeout("schedule_retry", this->ack_wait_ms_(kSchedRetryMs), [this]() {
           if (this->sched_push_retries_ >= kSchedMaxRetries)
           {
             ESP_LOGE(TAG, "[%s] ScheduleConfig not acknowledged after %u attempts — "
@@ -4237,6 +4295,13 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     {
       if (this->parent_ == nullptr)
         return;
+      // See relogin_pending_: confirm_session_ sends the TimeSync again 750 ms
+      // after the node proves the key.
+      if (this->relogin_pending_)
+      {
+        ESP_LOGD(TAG, "[%s] TimeSync deferred — session being rebuilt", this->get_name().c_str());
+        return;
+      }
       if (this->time == nullptr || !this->time->now().is_valid())
       {
         // Home Assistant time not up yet. Skip rather than send epoch 0 — the
@@ -4356,6 +4421,110 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       {
         ESP_LOGE(TAG, "[%s] Failed to pack TimeSync", this->get_name().c_str());
       }
+    }
+
+    bool LORAListener::acquire_onboarding_()
+    {
+      if (this->onboarding_held_)
+        return true;
+      if (!s_onboarding_gate_.tryAcquire(this))
+      {
+        if (!this->onboarding_waiting_logged_)
+        {
+          this->onboarding_waiting_logged_ = true;
+          ESP_LOGI(TAG, "[%s] Another node is being brought up — waiting for it to finish "
+                        "(%u in line)",
+                   this->get_name().c_str(), (unsigned) s_onboarding_gate_.waiting());
+        }
+        return false;
+      }
+      this->onboarding_held_             = true;
+      this->onboarding_waiting_logged_   = false;
+      this->onboarding_confirmed_        = false;
+      this->onboarding_heard_            = false;
+      this->onboarding_age_ms_           = 0;
+      this->onboarding_since_confirm_ms_ = 0;
+      this->set_timeout("onboarding_poll", onboarding::kPollMs, [this]() { this->onboarding_poll_(); });
+      return true;
+    }
+
+    void LORAListener::release_onboarding_(const char *why)
+    {
+      if (!this->onboarding_held_)
+        return;
+      this->onboarding_held_ = false;
+      this->cancel_timeout("onboarding_poll");
+      s_onboarding_gate_.release(this);
+      ESP_LOGI(TAG, "[%s] Onboarding done (%s, %u s) — next node may start",
+               this->get_name().c_str(), why, (unsigned) (this->onboarding_age_ms_ / 1000));
+    }
+
+    void LORAListener::onboarding_poll_()
+    {
+      if (!this->onboarding_held_)
+        return;
+      this->onboarding_age_ms_ += onboarding::kPollMs;
+      if (this->onboarding_confirmed_)
+        this->onboarding_since_confirm_ms_ += onboarding::kPollMs;
+
+      onboarding::HoldState s;
+      s.age_ms           = this->onboarding_age_ms_;
+      s.confirmed        = this->onboarding_confirmed_;
+      s.since_confirm_ms = this->onboarding_since_confirm_ms_;
+      s.node_heard       = this->onboarding_heard_;
+      s.tx_drain_us      = (this->parent_ != nullptr) ? this->parent_->txDrainUs() : 0;
+      // A schedule push is part of bringing the node up while it can still be
+      // retried. Once the ladder is spent nothing more will be sent, so the
+      // stale msgid (kept to recognise a late ack) must not hold the gate.
+      s.schedule_outstanding = this->sched_push_msgid_ != 0 &&
+                               this->sched_push_retries_ < kSchedMaxRetries;
+
+      switch (onboarding::assess(s))
+      {
+      case onboarding::Verdict::Keep:
+        this->set_timeout("onboarding_poll", onboarding::kPollMs, [this]() { this->onboarding_poll_(); });
+        return;
+      case onboarding::Verdict::Settled:
+        this->release_onboarding_("settled");
+        return;
+      case onboarding::Verdict::NodeSilent:
+        ESP_LOGW(TAG, "[%s] Node did not answer its login — letting the other nodes go first",
+                 this->get_name().c_str());
+        this->release_onboarding_("node silent");
+        return;
+      case onboarding::Verdict::Capped:
+        ESP_LOGW(TAG, "[%s] Onboarding held the gate for %u s without settling — releasing it",
+                 this->get_name().c_str(), (unsigned) (this->onboarding_age_ms_ / 1000));
+        this->release_onboarding_("capped");
+        return;
+      }
+    }
+
+    uint32_t LORAListener::ack_wait_ms_(uint32_t base_ms) const
+    {
+      int64_t drain_ms = (this->parent_ != nullptr) ? this->parent_->txDrainUs() / 1000 : 0;
+      if (drain_ms < 0)
+        drain_ms = 0;
+      if (drain_ms > (int64_t) kMaxAckBacklogMs)
+        drain_ms = kMaxAckBacklogMs;
+      return base_ms + (uint32_t) drain_ms;
+    }
+
+    bool LORAListener::send_downlink(const ::LoraClientOperationMessage *op)
+    {
+      uint8_t *txBuf = nullptr;
+      size_t   len   = 0;
+      // s_pack_operation_message takes a mutable message only because it copies
+      // the struct to strip the inner header; it never writes through the pointer.
+      if (!s_pack_operation_message(const_cast<LoraClientOperationMessage *>(op),
+                                    this->session_confirmed_, &txBuf, &len))
+      {
+        ESP_LOGE(TAG, "[%s] Failed to pack downlink", this->get_name().c_str());
+        return false;
+      }
+      const bool ok = this->parent_->send(txBuf, len);
+      free(txBuf);
+      return ok;
     }
 
     void LORAListener::send_remote_config()

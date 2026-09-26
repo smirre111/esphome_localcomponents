@@ -10,6 +10,8 @@
 #include "esphome/components/lora_client/TxQueue.h"
 // Mode C wake-clock fit.
 #include "esphome/components/lora_client/WakeClockFit.h"
+// One node's login-to-settled window at a time, over the hub's single downlink.
+#include "esphome/components/lora_client/OnboardingGate.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -38,6 +40,7 @@ struct ModeTestReport;              // ModeTest results, taken by pointer
 struct GridSyncRequest;             // a node asking for its grid again, by pointer
 struct PhaseReport;                 // §4.6's promotion evidence, by pointer
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
+struct LoraClientOperationMessage;  // send_downlink takes it by pointer
 
 namespace esphome
 {
@@ -94,6 +97,10 @@ namespace esphome
     {
     public:
       static constexpr size_t MAC_ADDR_STR_LEN = 18; // "AA:BB:CC:DD:EE:FF\0"
+
+      // A listener that goes away must not leave the onboarding gate held by a
+      // pointer nobody will ever release (a host test builds and drops many).
+      ~LORAListener() { s_onboarding_gate_.release(this); }
 
       void setup() override;
       void dump_config() override;
@@ -524,6 +531,16 @@ namespace esphome
       void send_aligned_for_test(const uint8_t *buf, size_t len) {
         this->send_aligned_(buf, len);
       }
+      // The onboarding gate is process-wide, so a test must be able to start
+      // from a free one and see who holds it.
+      static void reset_onboarding_gate_for_test() { s_onboarding_gate_.reset(); }
+      bool onboarding_held_for_test() const { return this->onboarding_held_; }
+      // What confirm_session_ sets, without its pushes: for a test that needs a
+      // confirmed session and will drive the follow-up traffic itself.
+      void mark_session_confirmed_for_test() {
+        this->session_confirmed_ = true;
+        this->relogin_pending_   = false;
+      }
 
       // --- Tracked-delivery state, read-only -------------------------------
       //
@@ -683,6 +700,31 @@ namespace esphome
 
       uint8_t  login_slot_{0};
       static uint8_t s_next_login_slot_;
+
+      // ONBOARDING GATE. The hub has one downlink queue; bringing a node up
+      // costs ~8 frames (~15 s), so two nodes started 3 s apart interleave and
+      // every ack timer in both fires on frames still queued. A node may begin a
+      // login challenge only while it holds this gate. See OnboardingGate.h.
+      static onboarding::Gate s_onboarding_gate_;
+      bool     onboarding_held_{false};
+      bool     onboarding_waiting_logged_{false};   // log the wait once, not per poll
+      bool     onboarding_confirmed_{false};
+      bool     onboarding_heard_{false};
+      uint32_t onboarding_age_ms_{0};
+      uint32_t onboarding_since_confirm_ms_{0};
+      // True when this listener holds the gate, taking it if it is free and this
+      // listener is first in line. False = someone else is onboarding: try later.
+      bool     acquire_onboarding_();
+      void     release_onboarding_(const char *why);
+      void     onboarding_poll_();
+
+      // True from the moment the hub learns a node has restarted (its REGISTER) or
+      // starts a login challenge, until the node proves the new key. The session
+      // it held is gone or about to be, so a TimeSync, ScheduleConfig or GridSync
+      // sent now is either undecryptable (old key) or in the clear (session just
+      // un-confirmed) — and a node that holds a session refuses the latter. Those
+      // three are re-sent by confirm_session_ anyway, so they WAIT rather than go.
+      bool     relogin_pending_{false};
 
       // Grid slot, claimed in declaration order exactly as login_slot_ is, so
       // it is stable across reboots without any extra configuration.
@@ -876,9 +918,26 @@ namespace esphome
       uint32_t      plaintext_refused_{0};
       static constexpr uint8_t  kSchedMaxRetries   = 3;
       static constexpr uint32_t kSchedRetryMs      = 5000;
+      // The most an ack timer is stretched by the transmit backlog. A ceiling
+      // rather than trust: the drain estimate is written from two cores without
+      // a lock, and a torn read must not park a retry for hours.
+      static constexpr uint32_t kMaxAckBacklogMs   = 60000;
+      // `base_ms` from NOW is when an ack should have arrived if the frame just
+      // handed to the tracker were on the air already. It is not: it waits behind
+      // whatever is queued, so the timer is the queue's drain time PLUS the base.
+      // Call it after send(), so the frame just sent is counted as well.
+      uint32_t ack_wait_ms_(uint32_t base_ms) const;
       virtual void send_remote_config();
       uint32_t incrTxMessageId();
       void setRxMessageId(uint32_t msg_id);
+
+      // The ONE way a child node hands a downlink operation to the radio. It is
+      // encrypted whenever the session is confirmed and plaintext only before
+      // that, so a caller cannot forget — packing raw and calling parent_->send()
+      // is what sent a CoverConfig in the clear onto a confirmed session, which
+      // the node refuses. `op` keeps its own header (destaddress, msgid).
+      // Returns false when it could not be packed or the transmit pool refused.
+      bool send_downlink(const ::LoraClientOperationMessage *op);
 
       // F-4: Send a cover operation with delivery tracking.  The operation is
       // stored so it can be retransmitted (with a fresh, incrementing msgid)
@@ -1093,6 +1152,7 @@ namespace esphome
       // on the node's burst-deferred login-ack and piling a redundant LoginMsg
       // burst on top of the register-triggered config bursts.
       void     schedule_login_retry_();
+      void     login_retry_step_();
 
       // ---- F-4 / P1: command ACK / retransmit state (cover ops AND sysops) ----
       // One reusable tracked-delivery state machine backs BOTH cover operations

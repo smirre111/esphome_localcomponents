@@ -901,6 +901,15 @@ namespace esphome
       return this->placed_busy_until_us_;
     }
 
+    int64_t LORATracker::txDrainUs() const
+    {
+      const int64_t now_us = esp_timer_get_time();
+      int64_t end_us = this->queued_air_end_us_;
+      if (this->burst_busy_until_us_ > end_us)
+        end_us = this->burst_busy_until_us_;
+      return (end_us > now_us) ? end_us - now_us : 0;
+    }
+
     // The next T0 for `slot` that is not inside a burst.
     //
     // Not simply "the next T0 after busyUntil": a caller wants the node's own
@@ -1039,6 +1048,18 @@ namespace esphome
           ESP_LOGW(TAG, "Data queue full, dropping data");
           this->return_buffer_to_pool(rx_buffer);
           return false;
+        }
+
+        // Price this frame into the queue: it leaves after whatever is on the air
+        // and after every frame accepted before it. See txDrainUs().
+        {
+          const int64_t now_us = esp_timer_get_time();
+          int64_t start_us = this->queued_air_end_us_;
+          if (this->burst_busy_until_us_ > start_us) start_us = this->burst_busy_until_us_;
+          if (now_us > start_us)                     start_us = now_us;
+          if (policy.earliest_us > start_us)         start_us = policy.earliest_us;
+          this->queued_air_end_us_ = this->burstEndUs_(start_us, policy.copies, policy.stride_ms,
+                                                       copy_len, policy.expects_reply);
         }
 
         // A PLACED frame reserves the channel from the moment it is accepted, so

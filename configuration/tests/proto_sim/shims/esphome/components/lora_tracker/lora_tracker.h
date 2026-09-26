@@ -86,6 +86,11 @@ public:
     uint32_t msUntilNextClearT0(uint8_t slot) const;
     // Test seam: stand a burst in the way of the grid.
     int64_t  busy_until_us{0};
+    // Test seam for txDrainUs(): production prices the frames queued behind the
+    // one on the air; a listener-level test only needs to say how deep the
+    // queue is and check that its ack timers stretch to match.
+    int64_t  tx_drain_us{0};
+    int64_t  txDrainUs() const { return tx_drain_us; }
 
     // Bx's receive stamp, mirrored. A test sets these directly; production
     // derives them from the poll gap in checkReception().

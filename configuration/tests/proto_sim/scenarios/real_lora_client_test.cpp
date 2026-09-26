@@ -11,6 +11,7 @@
 #include "esphome/components/lora_client/lora_client.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
 #include "esphome/components/homeassistant/time/homeassistant_time.h"
+#include "esphome/components/loracover/cover/lora_cover.h"
 
 // The MAC tests build frames with the REAL generated stubs, so the bytes
 // are exactly what goes on the air.
@@ -58,6 +59,9 @@ void attach_encrypted_login_ack(proto_sim::SimRadio& radio,
         if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
         auto m = proto_sim::as_op(f);
         if (!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Login) return;
+        // Only the node the login is ADDRESSED to answers it. With two nodes on
+        // one radio an unfiltered ack answers every login as every node.
+        if (m->header.destAddress != node_addr) return;
 
         const uint32_t base_nonce = m->login.nonce;
         constexpr uint32_t kMsgId = 1;   // node's first post-login-reset tx
@@ -1175,6 +1179,76 @@ TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
     EXPECT_EQ(count_plaintext_config(), 0)
         << "and it must go out ENCRYPTED — a readable ClientConfig on the air "
            "is one the node refuses";
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(RealLoraClient, AProvisionedNodesCoverConfigIsEncryptedToo) {
+    // The ClientConfig half of the deferred push was fixed to go through
+    // s_pack_operation_message; the CoverConfig half was not. The deferred push
+    // replays the stored REGISTER into every child node, LoraCoverComponent
+    // answers a REGISTER with send_remote_config(), and that packed raw — so a
+    // CoverConfig went out in the clear on a CONFIRMED session, and the node's
+    // plaintext gate refused it ("Rejecting PLAINTEXT command (cmd_case=13)").
+    // Measured 2026-09-26 on node 2 after a hub restart. The cover geometry
+    // (durations, slack) never reached a node that had already provisioned, and
+    // config_synced_ said it had.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    esphome::loracov::LoraCoverComponent cover;
+    cover.set_name("rol_cover");
+    cover.set_open_duration(60);
+    cover.set_close_duration(61);
+    cover.set_invert_position(false);
+    cover.set_blind_height_mm(2000.0f);
+    cover.set_axle_diameter_mm(60.0f);
+    cover.set_blind_thickness_mm(8.0f);
+    cover.setup();
+    rol.register_lora_node(&cover);
+
+    // A provisioned node re-registering after a hub reboot: no config wanted now.
+    auto reg = real_helpers::serialize_register(kMacRol2, /*needs_config=*/false);
+    rol.set_response(reg.data(), reg.size());
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(rol.session_confirmed_)
+        << "the plaintext-on-a-confirmed-session case needs a confirmed session";
+    ASSERT_TRUE(rol.config_synced_) << "the deferred push must have run";
+
+    int plaintext_cover_config = 0;
+    int encrypted_cover_config = 0;
+    for (const auto& f : radio.hub_to_node_frames()) {
+        auto plain = proto_sim::as_op(f);
+        if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::CoverConfig)
+            ++plaintext_cover_config;
+        auto inner = decrypt_downlink(f, base);
+        if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::CoverConfig) {
+            ++encrypted_cover_config;
+            EXPECT_EQ(inner->coverconfig.closeTime, 61u);
+        }
+    }
+    EXPECT_EQ(plaintext_cover_config, 0)
+        << "a CoverConfig readable on the air is one a provisioned node refuses";
+    EXPECT_EQ(encrypted_cover_config, 1)
+        << "and it must actually be delivered, encrypted, once the session exists";
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);
@@ -3709,4 +3783,470 @@ TEST(RealLoraClient, AHeardClassANodeIsAwakeOnlyThroughItsReceiveWindows) {
     h.time.set_now(kNow + 4, true);
     EXPECT_GT(h.rol.ms_until_node_awake_for_test(), 0u)
         << "after RX2 a Class A node is asleep again, however recently it spoke";
+}
+
+// ---------------------------------------------------------------------------
+// Ack timers are counted from the AIR, not from the queue.
+//
+// The hub airs one 17-copy burst plus a response window at a time, ~1.85 s. Four
+// timers used to start at send(): login retry, schedule retry, GridSync
+// re-publish and the tracked-op retry. A frame queued behind four others had not
+// left the radio when its 5 s timer expired, so the retransmit joined the same
+// queue — one more burst of airtime spent on a frame already in it. Measured
+// 2026-09-26 with two nodes after a hub restart: 16 bursts back to back for 30 s,
+// every ScheduleConfig "not acknowledged" three times while the node acked each.
+//
+// Each test stands a queue in front of the frame (tracker.tx_drain_us) and
+// asserts the retry does NOT fire at the base delay and DOES fire once the
+// backlog has drained, with an idle-queue control proving the base delay itself
+// is unchanged.
+// ---------------------------------------------------------------------------
+namespace {
+constexpr int64_t kBacklogUs = 9'000'000;   // ~5 bursts queued ahead
+size_t frames_on_air(const real_helpers::RealHubHarness& h) {
+    return h.radio.hub_to_node_frames().size();
+}
+}  // namespace
+
+TEST(AckTimers, AScheduleRetryWaitsOutTheTransmitBacklog) {
+    using namespace real_helpers;
+    for (const int64_t backlog_us : {int64_t{0}, kBacklogUs}) {
+        RealHubHarness h{18, kMacRol2};
+        h.rol.registered_ = true;
+        h.tracker.tx_drain_us = backlog_us;
+
+        h.rol.send_schedule_config();
+        const size_t sent = frames_on_air(h);
+        ASSERT_GT(sent, 0u) << "the schedule push must have gone out";
+
+        h.clock.tick(esphome::lora_tracker::LORAListener::kSchedRetryMs + 100);
+        if (backlog_us == 0) {
+            EXPECT_GT(frames_on_air(h), sent)
+                << "idle queue: the retry is due at the base delay, as before";
+        } else {
+            EXPECT_EQ(frames_on_air(h), sent)
+                << "the frame is still queued behind ~9 s of bursts; retrying now "
+                   "adds a duplicate to the queue it is already in";
+            h.clock.tick(backlog_us / 1000);
+            EXPECT_GT(frames_on_air(h), sent)
+                << "once the backlog has drained the retry must still happen";
+        }
+    }
+}
+
+TEST(AckTimers, ATrackedOpRetryWaitsOutTheTransmitBacklog) {
+    using namespace real_helpers;
+    for (const int64_t backlog_us : {int64_t{0}, kBacklogUs}) {
+        RealHubHarness h{18, kMacRol2};
+        ensure_psa_ready();
+        h.rol.registered_ = true;
+        h.tracker.tx_drain_us = backlog_us;
+
+        h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.5f);
+        h.clock.tick(10);
+        const size_t sent = frames_on_air(h);
+        ASSERT_GT(sent, 0u);
+
+        h.clock.tick(3000 + 50);   // kOpRetryIntervalMs
+        if (backlog_us == 0) {
+            EXPECT_GT(frames_on_air(h), sent) << "idle queue: retry at the base delay";
+        } else {
+            EXPECT_EQ(frames_on_air(h), sent) << "still queued: no duplicate";
+            h.clock.tick(backlog_us / 1000);
+            EXPECT_GT(frames_on_air(h), sent) << "and it retries after the drain";
+        }
+    }
+}
+
+TEST(AckTimers, AGridSyncRepublishWaitsOutTheTransmitBacklog) {
+    using namespace real_helpers;
+    for (const int64_t backlog_us : {int64_t{0}, kBacklogUs}) {
+        RealHubHarness h{18, kMacRol2};
+        h.rol.registered_ = true;
+        h.tracker.tx_drain_us = backlog_us;
+
+        h.rol.enable_timed_mode(true);
+        ASSERT_TRUE(h.tracker.gridStarted());
+        const size_t sent = frames_on_air(h);
+        ASSERT_GT(sent, 0u) << "enabling timed mode publishes a GridSync";
+
+        h.clock.tick(esphome::lora_tracker::LORAListener::kGridSyncRetryMs + 100);
+        if (backlog_us == 0) {
+            EXPECT_GT(frames_on_air(h), sent) << "idle queue: republish at the base delay";
+        } else {
+            EXPECT_EQ(frames_on_air(h), sent) << "still queued: no duplicate GridSync";
+            h.clock.tick(backlog_us / 1000);
+            EXPECT_GT(frames_on_air(h), sent) << "and it republishes after the drain";
+        }
+    }
+}
+
+TEST(AckTimers, ALoginRetryWaitsOutTheTransmitBacklog) {
+    using namespace real_helpers;
+    for (const int64_t backlog_us : {int64_t{0}, kBacklogUs}) {
+        RealHubHarness h{18, kMacRol2};
+        h.tracker.tx_drain_us = backlog_us;
+
+        auto reg = serialize_register(kMacRol2);
+        h.rol.set_response(reg.data(), reg.size());
+        h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 100);
+        const size_t sent = frames_on_air(h);
+        ASSERT_GT(sent, 0u) << "the login challenge must have fired";
+
+        h.clock.tick(esphome::lora_tracker::LORAListener::kLoginRetryBaseMs + 100);
+        if (backlog_us == 0) {
+            EXPECT_GT(frames_on_air(h), sent) << "idle queue: first retry at the base delay";
+        } else {
+            EXPECT_EQ(frames_on_air(h), sent) << "the login is still queued: no retry yet";
+            h.clock.tick(backlog_us / 1000);
+            EXPECT_GT(frames_on_air(h), sent) << "and it retries after the drain";
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Two nodes, one downlink queue: one node's onboarding at a time.
+//
+// Measured 2026-09-26 after a hub restart with nodes 17 and 18: the second
+// login went out 3 s after the first and the two handshakes interleaved for
+// 30 s — 16 bursts back to back, every ScheduleConfig timed out while the node
+// acked it, and a CoverConfig went out in the clear onto a confirmed session.
+// The startup stagger (slot x 3 s) separated only the FIRST login of each node;
+// a whole onboarding is ~8 frames and ~15 s of airtime.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr uint64_t kMacRol1 = 0xA4B75FFE8CE0ULL;
+
+struct TwoNodeHub {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    LORATracker tracker;
+    LORAClient  rol_1;
+    LORAClient  rol_2;
+    RealTimeClock time;
+
+    // `answer_1` / `answer_2`: does that node respond to its login with an
+    // encrypted ClientAvailable, as the real node does?
+    TwoNodeHub(bool answer_1, bool answer_2) {
+        esphome::lora_tracker::LORAListener::reset_onboarding_gate_for_test();
+        esphome::shim_hooks::set_active_clock(&clock);
+        esphome::shim_hooks::reset_nvs();
+        esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+        ensure_psa_ready();
+
+        rol_1.set_name("rol_1"); rol_1.set_short_address(17); rol_1.set_address(kMacRol1);
+        rol_2.set_name("rol_2"); rol_2.set_short_address(18); rol_2.set_address(kMacRol2);
+        for (LORAClient* r : {&rol_1, &rol_2}) {
+            r->set_subnet_address(2);
+            r->set_sleep_duration(21600);
+            r->set_time(&time);
+            tracker.register_client(r);
+        }
+        time.set_now(1787000000, /*valid=*/true);
+        if (answer_1) attach_encrypted_login_ack(radio, rol_1, 17, 2);
+        if (answer_2) attach_encrypted_login_ack(radio, rol_2, 18, 2);
+    }
+    ~TwoNodeHub() {
+        esphome::lora_tracker::LORAListener::reset_onboarding_gate_for_test();
+        esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+        esphome::shim_hooks::set_active_clock(nullptr);
+    }
+
+    // Both nodes announce themselves to the hub in the same instant, as they do
+    // after a hub restart.
+    void bothRegister() {
+        auto r1 = real_helpers::serialize_register(kMacRol1, /*needs_config=*/false);
+        auto r2 = real_helpers::serialize_register(kMacRol2, /*needs_config=*/false);
+        rol_1.set_response(r1.data(), r1.size());
+        rol_2.set_response(r2.data(), r2.size());
+    }
+
+    int loginsTo(uint32_t addr) const {
+        int n = 0;
+        for (const auto& f : radio.hub_to_node_frames()) {
+            auto m = proto_sim::as_op(f);
+            if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login &&
+                m->header.destAddress == addr) ++n;
+        }
+        return n;
+    }
+};
+
+}  // namespace
+
+TEST(OnboardingGateHub, TheSecondNodeDoesNotStartItsLoginWhileTheFirstIsBeingBroughtUp) {
+    TwoNodeHub h(/*answer_1=*/true, /*answer_2=*/true);
+    h.bothRegister();
+
+    // Just past the REGISTER->login delay: the first node's login is out.
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    EXPECT_EQ(h.loginsTo(17), 1) << "the node that registered first goes first";
+    EXPECT_EQ(h.loginsTo(18), 0)
+        << "node 18's login must WAIT: started now it queues behind node 17's "
+           "config, time and schedule pushes and every ack timer in both runs "
+           "on frames that have not left the radio";
+    EXPECT_TRUE(h.rol_1.onboarding_held_for_test());
+    EXPECT_FALSE(h.rol_2.onboarding_held_for_test());
+
+    // It does start once node 17 is settled, and not before.
+    bool second_started = false;
+    bool first_was_settled_by_then = false;
+    for (int i = 0; i < 400 && !second_started; ++i) {
+        h.clock.tick(100);
+        if (h.loginsTo(18) > 0) {
+            second_started = true;
+            first_was_settled_by_then = h.rol_1.session_confirmed_ &&
+                                        !h.rol_1.onboarding_held_for_test();
+        }
+    }
+    ASSERT_TRUE(second_started) << "the second node must not be starved";
+    EXPECT_TRUE(first_was_settled_by_then)
+        << "node 17 had to have confirmed its session and released the gate";
+    EXPECT_TRUE(h.rol_2.onboarding_held_for_test() || h.rol_2.session_confirmed_);
+
+    // ...and both end up with a confirmed session.
+    h.clock.tick(30000);
+    EXPECT_TRUE(h.rol_1.session_confirmed_);
+    EXPECT_TRUE(h.rol_2.session_confirmed_);
+    EXPECT_FALSE(h.rol_1.onboarding_held_for_test());
+    EXPECT_FALSE(h.rol_2.onboarding_held_for_test());
+}
+
+TEST(OnboardingGateHub, ANodeThatNeverAnswersDoesNotHoldTheOtherNodeHostage) {
+    // Node 17 is unplugged. It registered (or the hub restored its state), the
+    // hub logs in to it, and nothing comes back. Node 18 must not wait for a
+    // handshake that is never going to finish.
+    TwoNodeHub h(/*answer_1=*/false, /*answer_2=*/true);
+    h.bothRegister();
+
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    ASSERT_EQ(h.loginsTo(17), 1);
+    ASSERT_EQ(h.loginsTo(18), 0);
+
+    // Not before the node has been given its chance to answer...
+    h.clock.tick(onboarding::kSilentAfterMs / 2);
+    EXPECT_EQ(h.loginsTo(18), 0) << "silence is judged after a fair wait, not at once";
+
+    // ...but well inside the hold cap.
+    h.clock.tick(onboarding::kSilentAfterMs + 4000);
+    EXPECT_GE(h.loginsTo(18), 1)
+        << "node 17 never answered, so node 18 must have been let through";
+    h.clock.tick(30000);
+    EXPECT_TRUE(h.rol_2.session_confirmed_);
+    EXPECT_FALSE(h.rol_1.session_confirmed_);
+}
+
+TEST(OnboardingGateHub, ALoneNodeIsNotDelayedByTheGate) {
+    // The gate must cost a single node nothing: same login, same moment.
+    TwoNodeHub h(/*answer_1=*/false, /*answer_2=*/true);
+    auto r2 = real_helpers::serialize_register(kMacRol2, /*needs_config=*/false);
+    h.rol_2.set_response(r2.data(), r2.size());
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    EXPECT_EQ(h.loginsTo(18), 1) << "no other node is onboarding: no wait";
+    EXPECT_TRUE(h.rol_2.session_confirmed_);
+}
+
+namespace {
+// login_retry_step_ is what the retry timer runs. A probe adds no state; it
+// only lets a test run the step at a moment of its choosing.
+struct RetryProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::login_retry_step_;
+};
+}  // namespace
+
+TEST(OnboardingGateHub, ALoginRetryIsNotSentIntoAnotherNodesOnboarding) {
+    // A retry is a login challenge like any other. Node 17 is mid-onboarding and
+    // holds the gate; node 18's backoff timer fires. Sending it now puts a login
+    // into the very queue the gate protects.
+    TwoNodeHub h(/*answer_1=*/true, /*answer_2=*/false);
+    auto r1 = real_helpers::serialize_register(kMacRol1, /*needs_config=*/false);
+    h.rol_1.set_response(r1.data(), r1.size());
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    ASSERT_TRUE(h.rol_1.onboarding_held_for_test()) << "precondition: node 17 holds the gate";
+
+    h.rol_2.registered_ = true;
+    const int before = h.loginsTo(18);
+    static_cast<RetryProbe&>(h.rol_2).login_retry_step_();
+    EXPECT_EQ(h.loginsTo(18), before)
+        << "no login to 18 while 17 is being brought up";
+    EXPECT_EQ(h.rol_2.login_retry_count_, 0u)
+        << "and the retry that did not happen must not be counted against 18's ladder";
+
+    // Once 17 is done the same step goes through.
+    h.clock.tick(60000);
+    ASSERT_FALSE(h.rol_1.onboarding_held_for_test());
+    h.rol_2.login_acked_ = false;
+    static_cast<RetryProbe&>(h.rol_2).login_retry_step_();
+    EXPECT_GT(h.loginsTo(18), before) << "a free gate lets the retry through";
+}
+
+TEST(OnboardingGateHub, ANodeThatHasBeenHeardKeepsTheGateUntilTheCapNotTheSilenceLimit) {
+    // Node 17 answered its REGISTER but its login is not being acknowledged (a
+    // slow link, not an absent node). It is worth waiting for longer than a node
+    // that never spoke — but not for ever.
+    TwoNodeHub h(/*answer_1=*/false, /*answer_2=*/true);
+    h.bothRegister();
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    ASSERT_EQ(h.loginsTo(17), 1);
+
+    // Any frame from node 17 after its login went out. A second REGISTER is one
+    // the hub's own handler already treats as proof the node is awake.
+    h.clock.tick(2000);
+    auto r1 = real_helpers::serialize_register(kMacRol1, /*needs_config=*/false);
+    h.rol_1.set_response(r1.data(), r1.size());
+
+    h.clock.tick(onboarding::kSilentAfterMs + 3000);
+    EXPECT_EQ(h.loginsTo(18), 0)
+        << "node 17 has been heard since its login; past the silence limit it "
+           "still holds the gate";
+    h.clock.tick(onboarding::kMaxHoldMs);
+    EXPECT_GE(h.loginsTo(18), 1) << "but the cap releases it";
+}
+
+TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheSchedulePushIsUnacknowledged) {
+    // The schedule push is part of bringing a node up: it is one of the frames
+    // in the queue, and its retries are more of them.
+    TwoNodeHub h(/*answer_1=*/true, /*answer_2=*/true);
+    h.bothRegister();
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+
+    // Past confirmation and the settle delay, but the node has not acked the
+    // ScheduleConfig it was sent.
+    h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
+    ASSERT_TRUE(h.rol_1.session_confirmed_);
+    ASSERT_NE(h.rol_1.sched_push_msgid_, 0u) << "precondition: a ScheduleConfig is outstanding";
+    EXPECT_TRUE(h.rol_1.onboarding_held_for_test())
+        << "still bringing node 17 up: its schedule has not landed";
+    EXPECT_EQ(h.loginsTo(18), 0);
+
+    // The node acknowledges it: the gate frees within a poll or two.
+    static_cast<AckProbe&>(h.rol_1).handle_command_ack_(h.rol_1.sched_push_msgid_);
+    h.clock.tick(2 * onboarding::kPollMs + 100);
+    EXPECT_FALSE(h.rol_1.onboarding_held_for_test());
+}
+
+TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheNodesOwnFramesAreStillQueued) {
+    // Confirmed, settled by the clock, schedule acked - but the hub's queue still
+    // holds this node's pushes. Freeing the gate now lets the next node's login
+    // land behind them, which is exactly the pile-up.
+    TwoNodeHub h(/*answer_1=*/true, /*answer_2=*/true);
+    h.bothRegister();
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
+    ASSERT_TRUE(h.rol_1.session_confirmed_);
+    ASSERT_NE(h.rol_1.sched_push_msgid_, 0u);
+
+    h.tracker.tx_drain_us = 20'000'000;
+    static_cast<AckProbe&>(h.rol_1).handle_command_ack_(h.rol_1.sched_push_msgid_);
+    h.clock.tick(10000);
+    EXPECT_TRUE(h.rol_1.onboarding_held_for_test())
+        << "20 s of its own frames are still queued";
+    EXPECT_EQ(h.loginsTo(18), 0);
+
+    h.tracker.tx_drain_us = 0;
+    h.clock.tick(2 * onboarding::kPollMs + 100);
+    EXPECT_FALSE(h.rol_1.onboarding_held_for_test()) << "and it frees once they have gone";
+}
+
+// ---------------------------------------------------------------------------
+// While the session is being rebuilt, housekeeping pushes wait.
+//
+// Measured 2026-09-26, node 2 reset with the hub running: the node's beacon made
+// the hub queue a TimeSync and a ScheduleConfig, its REGISTER arrived 0.2 s
+// later, and the hub's login started before either had been sent. They went
+// out anyway - the TimeSync under the old session (the rebooted node could not
+// decrypt it) and the ScheduleConfig in the CLEAR, because send_login() had
+// already un-confirmed the session (the node refused it: "Rejecting PLAINTEXT
+// command (cmd_case=17) ... this node holds a session"). Three wasted bursts,
+// and the login itself sat 3 s behind them. confirm_session_ pushes all three
+// again once the node has proved the key, so nothing is lost by waiting.
+// ---------------------------------------------------------------------------
+TEST(SessionRebuild, HousekeepingPushesWaitForTheSessionInsteadOfGoingOutInTheClear) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+
+    uint32_t base = 0;
+    h.radio.add_sink([&base](const proto_sim::AirFrame& f) {
+        if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login)
+            base = m->login.nonce;
+    });
+    attach_encrypted_login_ack(h.radio, h.rol, /*node_addr=*/18, /*subnet=*/2);
+
+    // The node has rebooted: its REGISTER starts the hub's login, 4 s from now.
+    auto reg = serialize_register(kMacRol2, /*needs_config=*/false);
+    h.rol.set_response(reg.data(), reg.size());
+    const size_t baseline = h.radio.hub_to_node_frames().size();
+
+    // The pushes a beacon had queued, firing inside that window.
+    h.rol.send_schedule_config();
+    h.rol.send_timesync();
+    h.rol.enable_timed_mode(true);
+    EXPECT_EQ(h.radio.hub_to_node_frames().size(), baseline)
+        << "nothing may leave between the REGISTER and a confirmed session: the "
+           "node just restarted, so an old-session frame cannot be decrypted and "
+           "a plaintext one is refused. Each is a burst of airtime spent to be dropped";
+
+    // Bring the session up. The pushes now go, encrypted.
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    ASSERT_TRUE(h.rol.session_confirmed_);
+    ASSERT_NE(base, 0u);
+    h.clock.tick(4000);
+
+    int plain_schedule = 0, plain_timesync = 0, enc_schedule = 0, enc_timesync = 0;
+    for (const auto& f : h.radio.hub_to_node_frames()) {
+        auto plain = proto_sim::as_op(f);
+        if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::Schedule) ++plain_schedule;
+        if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++plain_timesync;
+        auto inner = decrypt_downlink(f, base);
+        if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::Schedule) ++enc_schedule;
+        if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++enc_timesync;
+    }
+    EXPECT_EQ(plain_schedule, 0) << "a ScheduleConfig in the clear is refused by a node that holds a session";
+    EXPECT_EQ(plain_timesync, 0) << "and so is a TimeSync";
+    EXPECT_GE(enc_schedule, 1) << "the schedule must still be delivered, once the session exists";
+    EXPECT_GE(enc_timesync, 1) << "and the time";
+}
+
+TEST(SessionRebuild, ALoginTheHubStartsItselfHoldsThePushesBackToo) {
+    // No REGISTER here: a hub restart makes the hub log in to every node on its
+    // own. send_login() un-confirms the session, so a push sent now would be in
+    // the clear. The flag has to be raised by the login itself, not only by a
+    // REGISTER, or this path is unguarded.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+
+    h.rol.send_login();
+    const size_t baseline = h.radio.hub_to_node_frames().size();
+    ASSERT_GT(baseline, 0u) << "the login itself must have gone out";
+
+    h.rol.send_schedule_config();
+    h.rol.send_timesync();
+    h.rol.enable_timed_mode(true);
+    EXPECT_EQ(h.radio.hub_to_node_frames().size(), baseline)
+        << "pushes wait for the node to prove the new key";
+}
+
+TEST(SessionRebuild, WithdrawingTheGridIsNotDeferredBecauseItIsTheSafeDirection) {
+    // Only a PUBLISH needs the session (it carries the fleet key). Taking a node
+    // off the grid is the safe direction, needs no key, and must not be held
+    // behind a login that may never complete.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+
+    auto reg = serialize_register(kMacRol2, /*needs_config=*/false);
+    h.rol.set_response(reg.data(), reg.size());
+    const size_t baseline = h.radio.hub_to_node_frames().size();
+
+    h.rol.enable_timed_mode(false);
+    EXPECT_GT(h.radio.hub_to_node_frames().size(), baseline)
+        << "a withdrawn grid must reach the node even while its session is rebuilt";
 }

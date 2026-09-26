@@ -232,15 +232,11 @@ namespace esphome
 
       op_message.coverconfig = &coverconfig;
 
-      uint8_t *txBuf;
-      unsigned len;
-      len = lora_client_operation_message__get_packed_size(&op_message);
-      txBuf = new uint8_t[len];
-      lora_client_operation_message__pack(&op_message, txBuf);
-
-      // this->parent_->sendPacketOnce(txBuf, len);
-      this->parent_->parent_->send(txBuf, len);
-      delete[] txBuf;
+      // Through the listener, so it is ENCRYPTED once a session is confirmed.
+      // This packed raw and called parent_->parent_->send(), which put the
+      // CoverConfig in the clear on a confirmed session, where the node refuses
+      // it: its geometry and durations never reached an already-provisioned node.
+      this->parent_->send_downlink(&op_message);
     }
 
   } // namespace LoraCov

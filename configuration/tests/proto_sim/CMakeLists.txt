@@ -262,8 +262,11 @@ target_link_libraries(real_lora_client PUBLIC proto_sim mbedcrypto)
 # Phase 3 scenario that drives the real LORAListener through the same
 # SimClock/SimRadio harness the model-based tests use.
 add_executable(real_lora_client_test scenarios/real_lora_client_test.cpp)
+# real_lora_cover is declared below; a target name in link libraries is resolved
+# at generate time, so the order here does not matter. The client tests that need
+# a REAL child node (the deferred config push replays REGISTER into it) use it.
 target_link_libraries(real_lora_client_test
-    PRIVATE real_lora_client GTest::gtest GTest::gtest_main)
+    PRIVATE real_lora_client real_lora_cover GTest::gtest GTest::gtest_main)
 gtest_discover_tests(real_lora_client_test)
 
 # ----------------------------------------------------------------------------
@@ -569,6 +572,13 @@ if(EXISTS ${BLINDS_ESP_MAIN}/include/ScheduleText.h)
     target_link_libraries(schedule_text_test PRIVATE GTest::gtest GTest::gtest_main)
     gtest_discover_tests(schedule_text_test)
 endif()
+
+# OnboardingGate.h is hub-only (the node never sees it), so it is included from
+# the hub's own component directory rather than the shared node headers.
+add_executable(onboarding_gate_test scenarios/onboarding_gate_test.cpp)
+target_include_directories(onboarding_gate_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client)
+target_link_libraries(onboarding_gate_test PRIVATE GTest::gtest GTest::gtest_main)
+gtest_discover_tests(onboarding_gate_test)
 
 # FrameCrypto.h is header-only and dependency-free (no PSA) so the AEAD wire
 # format — AAD layout, IV derivation, direction bit — is pinned byte for byte

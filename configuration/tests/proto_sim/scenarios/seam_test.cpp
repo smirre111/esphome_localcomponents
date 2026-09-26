@@ -360,7 +360,10 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
     ASSERT_TRUE(disp.getBaseNonceForTest(1, nonce))
         << "the node must hold the hub's base nonce before anything is encrypted";
     // What the hub's own ack path would set once the node answers the challenge.
-    rol.session_confirmed_ = true;
+    // Through the hook, not by writing the flag: while the session is being
+    // rebuilt the hub holds its GridSync back rather than publish one it cannot
+    // yet encrypt, and confirming the session is what lets it go.
+    rol.mark_session_confirmed_for_test();
 
     // Now the grid. Encrypted, so it carries the key.
     rol.enable_timed_mode(true);

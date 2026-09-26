@@ -1488,3 +1488,47 @@ TEST(RealTrackerTx, DrainingAPlacedFrameReturnsItsBufferForTheNextOne) {
     EXPECT_TRUE(t.send(now_ok.data(), now_ok.size(), placed))
         << "the fired frame's buffer must be back in the pool";
 }
+
+// ---------------------------------------------------------------------------
+// txDrainUs() — how long until everything ACCEPTED has left the radio. An ack
+// timer has to add it to its base delay (see AckTimers in the client tests): the
+// hub airs one 17-copy burst plus a response window at a time, so a frame queued
+// behind four others has not started when a 5 s timer started at send() expires.
+// ---------------------------------------------------------------------------
+TEST(RealTrackerDrain, EveryAcceptedFrameIsPricedAsItsOwnBurstBehindTheOthers) {
+    lorahal::rec().reset();
+    DeferProbe t;
+    t.init();
+    proto_sim_timer_set_now_us(1'000'000);
+    ASSERT_EQ(t.txDrainUs(), 0) << "an idle tracker owes nothing";
+
+    auto frame = packedOperationFrame();
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), TxPolicy{}));
+    const int64_t one = t.txDrainUs();
+    EXPECT_GT(one, 1'400'000)
+        << "a default burst is 17 copies at an 88 ms stride: >= 1.4 s on its own";
+
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), TxPolicy{}));
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), TxPolicy{}));
+    EXPECT_EQ(t.txDrainUs(), 3 * one)
+        << "three frames accepted, none aired: the third leaves after the "
+           "second, which leaves after the first. Reading only the frame on the "
+           "air says 0 here, which is how the retry timers were armed";
+
+    proto_sim_timer_set_now_us(1'000'000 + 3 * one + 1);
+    EXPECT_EQ(t.txDrainUs(), 0) << "and it decays to nothing once they would have left";
+}
+
+TEST(RealTrackerDrain, APlacedFrameIsPricedFromItsMarkNotFromNow) {
+    lorahal::rec().reset();
+    DeferProbe t;
+    t.init();
+    proto_sim_timer_set_now_us(0);
+
+    TxPolicy p{/*copies=*/1};
+    p.earliest_us = 5'000'000;
+    auto frame = packedOperationFrame();
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), p));
+    EXPECT_GT(t.txDrainUs(), 5'000'000)
+        << "the frame cannot leave before its mark, so the backlog reaches past it";
+}

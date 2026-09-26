@@ -303,6 +303,18 @@ namespace esphome
       // The end of the last PLACED frame's burst, from the moment send() accepted
       // it — before sendTask has dequeued it. nextClearT0ForSlotUs clears it too.
       int64_t   placedBusyUntilUs() const;
+      // How long until everything ACCEPTED so far has left the radio, in us —
+      // the burst on the air plus every frame queued behind it, each priced as
+      // its own burst and response window. 0 when idle.
+      //
+      // This is what an ack timer has to add to its base delay. The hub airs one
+      // 17-copy burst plus a response window at a time (~1.85 s), so a frame
+      // queued behind four others has not even STARTED when a 5 s retry timer
+      // started at send() expires: the retransmit joins the back of the same
+      // queue and the backlog only grows. Measured 2026-09-26, two nodes after a
+      // hub restart: 16 bursts back to back for 30 s, every ScheduleConfig
+      // "not acknowledged" three times over while the node was acking each one.
+      int64_t   txDrainUs() const;
       int64_t   nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const;
       // The next T0 for `slot` where a frame of this shape — its guard before,
       // its copies, air time and (if answered) response window after — overlaps
@@ -479,6 +491,10 @@ namespace esphome
       int64_t burst_busy_until_us_{0};
       // The same for frames placed but not yet dequeued. See send().
       int64_t placed_busy_until_us_{0};
+      // When the last frame accepted by send() will have left the radio. Grows by
+      // one burst per accepted frame, so it prices a QUEUE where
+      // burst_busy_until_us_ only knows the frame currently on the air.
+      int64_t queued_air_end_us_{0};
       uint32_t tx_late_placed_{0};
       uint32_t tx_mark_late_{0};
       // Whether the frame sendTask last sent is answered (see postTxHoldMs).
