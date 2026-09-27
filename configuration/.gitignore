@@ -5,3 +5,4 @@ build/
 # ESPHome / PlatformIO build tree.
 .esphome/
 logs/
+loradevices.bench.yml
