@@ -580,6 +580,12 @@ target_include_directories(onboarding_gate_test PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(onboarding_gate_test PRIVATE GTest::gtest GTest::gtest_main)
 gtest_discover_tests(onboarding_gate_test)
 
+# TimeSyncPolicy.h is hub-only, header-only and dependency-free.
+add_executable(timesync_policy_test scenarios/timesync_policy_test.cpp)
+target_include_directories(timesync_policy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client)
+target_link_libraries(timesync_policy_test PRIVATE GTest::gtest GTest::gtest_main)
+gtest_discover_tests(timesync_policy_test)
+
 # FrameCrypto.h is header-only and dependency-free (no PSA) so the AEAD wire
 # format — AAD layout, IV derivation, direction bit — is pinned byte for byte
 # here. Every mistake in it produces the same opaque psa_aead_decrypt: -149.

@@ -364,6 +364,26 @@ namespace esphome
                  (unsigned)this->frame_counter_.rx_message_id,
                  (unsigned)this->frame_counter_.tx_message_id,
                  this->registered_ ? "yes" : "no");
+
+        // finding 2: only an UNCHANGED config skips the REGISTER round trip a
+        // hub boot would otherwise force on every node. A real YAML edit (or a
+        // stub from before this field existed, config_hash == 0 by construction)
+        // leaves config_synced_ false, which is exactly today's behaviour.
+        const uint32_t current_hash = this->currentConfigHash_();
+        if (restore->config_hash == current_hash)
+        {
+          this->config_synced_ = true;
+          ESP_LOGI(TAG, "[%s] Config unchanged since last boot (hash 0x%08x) — "
+                        "REGISTER will not be requested",
+                   this->get_name().c_str(), (unsigned) current_hash);
+        }
+        else
+        {
+          ESP_LOGI(TAG, "[%s] Config hash changed (0x%08x -> 0x%08x) — "
+                        "REGISTER will be requested to push it",
+                   this->get_name().c_str(),
+                   (unsigned) restore->config_hash, (unsigned) current_hash);
+        }
       }
       else
       {
@@ -469,6 +489,25 @@ namespace esphome
       return recovered;
     }
 
+    // FNV-1a-32 over the fields send_remote_config() actually puts in
+    // ClientConfig. Deliberately excludes anything the NODE can change on its
+    // own (battery voltage, position) — only what a YAML edit changes.
+    uint32_t LORAListener::currentConfigHash_() const
+    {
+      uint32_t h = 2166136261u;
+      auto mix = [&h](const void *data, size_t len) {
+        const uint8_t *p = static_cast<const uint8_t *>(data);
+        for (size_t i = 0; i < len; i++) { h ^= p[i]; h *= 16777619u; }
+      };
+      mix(&this->short_address_, sizeof(this->short_address_));
+      mix(&this->subnet_address_, sizeof(this->subnet_address_));
+      mix(&this->sleep_duration_, sizeof(this->sleep_duration_));
+      mix(&this->battery_update_interval_, sizeof(this->battery_update_interval_));
+      const std::string &name = this->get_name();
+      mix(name.data(), name.size());
+      return h;
+    }
+
     void LORAListener::save_state_(bool save)
     {
       if (save)
@@ -480,6 +519,7 @@ namespace esphome
         restore.tx_message_id    = this->frame_counter_.tx_message_id;
         restore.logged_in        = this->registered_;
         restore.last_sleep_epoch = this->last_sleep_epoch_;
+        restore.config_hash      = this->currentConfigHash_();
 
         this->rtc_.save(&restore);
         ESP_LOGD(TAG, "[%s] NVS save — rx_id=%u tx_id=%u logged_in=%s last_sleep=%u",
@@ -4370,6 +4410,22 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                  this->get_name().c_str());
         return;
       }
+
+      // Mode B and plain interactive nodes are unthrottled — this only narrows
+      // an AUTOMATIC-mode node's resync to once a week (TimeSyncPolicy.h). The
+      // first send for a node (last_timesync_sent_us_ == 0) always goes
+      // through: shouldRunAutoMode() cannot evaluate the schedule without it.
+      const int64_t timesync_now_us = esp_timer_get_time();
+      const int64_t elapsed_us = (this->last_timesync_sent_us_ != 0)
+                                     ? timesync_now_us - this->last_timesync_sent_us_
+                                     : -1;
+      if (!timesyncpolicy::shouldSend(this->auto_mode_, elapsed_us))
+      {
+        ESP_LOGD(TAG, "[%s] TimeSync skipped — automatic-mode weekly resync not due yet",
+                 this->get_name().c_str());
+        return;
+      }
+      this->last_timesync_sent_us_ = timesync_now_us;
 
       const auto     now       = this->time->now();
       const uint64_t epoch     = static_cast<uint64_t>(now.timestamp);

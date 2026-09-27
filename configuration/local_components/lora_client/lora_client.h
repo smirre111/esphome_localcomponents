@@ -12,6 +12,8 @@
 #include "esphome/components/lora_client/WakeClockFit.h"
 // One node's login-to-settled window at a time, over the hub's single downlink.
 #include "esphome/components/lora_client/OnboardingGate.h"
+// How often an automatic-mode node needs its wall clock resynced.
+#include "esphome/components/lora_client/TimeSyncPolicy.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -86,6 +88,14 @@ namespace esphome
       uint32_t tx_message_id;
       bool     logged_in;
       uint32_t last_sleep_epoch;  // Unix timestamp when enterSleep() was last called; 0 = unknown
+      // What ClientConfig's fields hashed to when this was saved. A hub reboot
+      // used to reset config_synced_ to false in RAM regardless, so EVERY node
+      // was asked to REGISTER again on the hub's next login — a full round trip
+      // for a node whose config had not changed at all (power-rf-review-
+      // 2026-09-27.md finding 2). Comparing this against the CURRENT hash at
+      // setup() lets an unchanged node skip straight to "already in sync"; a
+      // real YAML edit changes the hash and still forces the push.
+      uint32_t config_hash;
 
       void apply(LORAListener *listener);
 
@@ -536,6 +546,11 @@ namespace esphome
       // from a free one and see who holds it.
       static void reset_onboarding_gate_for_test() { s_onboarding_gate_.reset(); }
       bool onboarding_held_for_test() const { return this->onboarding_held_; }
+      int64_t last_timesync_sent_us_for_test() const { return this->last_timesync_sent_us_; }
+      void reset_timesync_policy_for_test() { this->last_timesync_sent_us_ = 0; }
+      // Simulates the config-confirmed-and-saved moment without driving a full
+      // REGISTER/LOGIN exchange, for the reboot-persistence tests.
+      void save_state_for_test() { this->save_state_(true); }
       // Fire one MAC ping exactly as the esp_timer would.
       void mac_ping_tick_for_test() { mac_ping_timer_cb_(this); }
       // What confirm_session_ sets, without its pushes: for a test that needs a
@@ -709,6 +724,9 @@ namespace esphome
       // every ack timer in both fires on frames still queued. A node may begin a
       // login challenge only while it holds this gate. See OnboardingGate.h.
       static onboarding::Gate s_onboarding_gate_;
+      // TimeSyncPolicy: when this node last received one, esp_timer time.
+      // 0 = never (the sentinel every other "last X" field in this class uses).
+      int64_t  last_timesync_sent_us_{0};
       bool     onboarding_held_{false};
       bool     onboarding_waiting_logged_{false};   // log the wait once, not per poll
       bool     onboarding_confirmed_{false};
@@ -1087,7 +1105,7 @@ namespace esphome
       // of an already-synced, provisioned node skip the config bursts entirely.
       bool     config_synced_{false};
 
-      static constexpr uint8_t  kRestoreStateVersion  = 2;
+      static constexpr uint8_t  kRestoreStateVersion  = 3;   // +config_hash
       static constexpr uint8_t  kMaxLoginRetries      = 24; // 24 × 1 h = 1 day
       static constexpr uint32_t kLoginRetryIntervalMs = 3600000; // 1 h ceiling between login retries
       static constexpr uint32_t kLoginRetryBaseMs     = 5000;    // first retry delay; doubles each retry up to the ceiling
@@ -1107,6 +1125,9 @@ namespace esphome
 
       optional<LORAClientRestoreState> restore_state_();
       void save_state_(bool save);
+      // FNV-1a over the fields ClientConfig actually carries. Pure and
+      // deterministic — same inputs, same hash, on both sides of a reboot.
+      uint32_t currentConfigHash_() const;
 
       // P2: record a wake beacon and publish the derived clock offset.
       void handle_beacon_(const ::NodeWakeBeacon *b);

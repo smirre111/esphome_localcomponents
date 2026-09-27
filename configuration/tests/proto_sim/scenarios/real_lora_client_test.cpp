@@ -4474,3 +4474,275 @@ TEST(MacPingCrypto, EndingAnUnfinishedCryptoRunDoesNotLeakItsRangeIntoTheNextOne
         << "the first run's unused reserved msgids must not leak into a run "
            "that never asked to be encrypted";
 }
+
+TEST(RealLoraClient, AnAutomaticNodesTimeSyncIsThrottledToOnceAWeek) {
+    // power-rf-review-2026-09-27.md finding 1, narrowed to Mode C only per user
+    // decision: Mode B and plain interactive nodes keep today's unthrottled
+    // per-wake TimeSync unchanged; only an automatic-mode node's resync moves
+    // to once a week.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+    proto_sim_timer_set_now_us(1'000'000);
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+    rol.set_auto_mode_default(true);
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    clock.tick(1000);   // past the 750 ms deferred push
+
+    auto count_timesync = [&]() {
+        int n = 0;
+        for (const auto& f : radio.hub_to_node_frames()) {
+            auto inner = decrypt_downlink(f, base);
+            if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++n;
+        }
+        return n;
+    };
+    ASSERT_EQ(count_timesync(), 1) << "the first TimeSync for a node must always go through";
+    ASSERT_GT(rol.last_timesync_sent_us_for_test(), 0);
+
+    // A second wake, well short of a week: no new TimeSync.
+    proto_sim_timer_advance_us(3600LL * 1'000'000);   // 1 hour
+    rol.send_timesync();
+    EXPECT_EQ(count_timesync(), 1) << "an automatic node's resync is not due for a week";
+
+    // Past a week: due again.
+    proto_sim_timer_advance_us(timesyncpolicy::kAutoModeIntervalUs);
+    rol.send_timesync();
+    EXPECT_EQ(count_timesync(), 2) << "a week later the resync is due";
+}
+
+TEST(RealLoraClient, ModeBAndPlainInteractiveTimeSyncIsUnthrottled) {
+    // The user's explicit instruction: leave Mode B (and everything that is
+    // not automatic mode) exactly as it was.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+    proto_sim_timer_set_now_us(1'000'000);
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+    ASSERT_FALSE(rol.get_auto_mode());   // precondition: not automatic
+
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    clock.tick(1000);   // past the 750 ms deferred push
+
+    auto count_timesync = [&]() {
+        int n = 0;
+        for (const auto& f : radio.hub_to_node_frames()) {
+            auto inner = decrypt_downlink(f, base);
+            if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++n;
+        }
+        return n;
+    };
+    ASSERT_EQ(count_timesync(), 1);
+
+    proto_sim_timer_advance_us(1000);   // a fraction of a second later
+    rol.send_timesync();
+    EXPECT_EQ(count_timesync(), 2)
+        << "unchanged behaviour: no throttling outside automatic mode, however soon it repeats";
+}
+
+// ---------------------------------------------------------------------------
+// A hub reboot must not force a REGISTER round trip for a node whose config
+// has not changed (power-rf-review-2026-09-27.md finding 2, user decision:
+// "if a register can be avoided let's avoid").
+//
+// config_synced_ used to be plain in-RAM state, reset to false by every hub
+// process restart regardless of whether anything about the node's config had
+// actually changed -- so send_login()'s request_register = !config_synced_
+// fired on every node, every hub boot. It is now cross-checked against a hash
+// of what ClientConfig actually carries, persisted alongside the rest of this
+// node's NVS-restored state (LORAClientRestoreState, bumped to v3).
+//
+// Two SEPARATE LORAListener objects, deliberately NOT going through
+// RealHubHarness (its constructor calls reset_nvs()) -- the whole point here
+// is that NVS is NOT reset between them, exactly as it is not reset by an
+// esphome process restart on real hardware.
+// ---------------------------------------------------------------------------
+
+TEST(ConfigHashPersistence, AnUnchangedConfigSkipsRegisterAcrossAHubReboot) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();   // the one reset: node 2's FIRST ever boot
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+
+    // Session 1 ("before the reboot"): the node registers, the hub confirms a
+    // session and pushes config, which is what really sets config_synced_ and
+    // saves the hash in production. Reproduced directly here, since driving
+    // the full REGISTER/LOGIN exchange twice is not what this test is about.
+    {
+        LORATracker tracker1;
+        LORAClient  rol1;
+        rol1.set_name("rol");
+        rol1.set_short_address(18);
+        rol1.set_subnet_address(2);
+        rol1.set_sleep_duration(21600);
+        rol1.set_battery_update_interval(3600);
+        rol1.set_address(kMacRol2);
+        tracker1.register_client(&rol1);
+        rol1.setup();
+        ASSERT_FALSE(rol1.config_synced_) << "precondition: nothing persisted yet";
+
+        rol1.registered_    = true;
+        rol1.config_synced_ = true;   // what a real confirmed config push sets
+        rol1.save_state_for_test();
+    }
+
+    // Session 2 ("after the reboot"): a fresh object, same NVS backing, same
+    // config. It must NOT have to wait for REGISTER to know it is in sync.
+    {
+        LORATracker tracker2;
+        LORAClient  rol2;
+        rol2.set_name("rol");
+        rol2.set_short_address(18);
+        rol2.set_subnet_address(2);
+        rol2.set_sleep_duration(21600);
+        rol2.set_battery_update_interval(3600);
+        rol2.set_address(kMacRol2);
+        tracker2.register_client(&rol2);
+        rol2.setup();
+
+        EXPECT_TRUE(rol2.config_synced_)
+            << "an unchanged config must be recognised from the persisted hash alone";
+    }
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(ConfigHashPersistence, AConfigEditIsStillDetectedAndStillPushed) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+
+    {
+        LORATracker tracker1;
+        LORAClient  rol1;
+        rol1.set_name("rol");
+        rol1.set_short_address(18);
+        rol1.set_subnet_address(2);
+        rol1.set_sleep_duration(21600);
+        rol1.set_address(kMacRol2);
+        tracker1.register_client(&rol1);
+        rol1.setup();
+        rol1.registered_    = true;
+        rol1.config_synced_ = true;
+        rol1.save_state_for_test();
+    }
+
+    // Same node, but the YAML now asks for a different sleep duration -- a
+    // real config edit between the two boots.
+    {
+        LORATracker tracker2;
+        LORAClient  rol2;
+        rol2.set_name("rol");
+        rol2.set_short_address(18);
+        rol2.set_subnet_address(2);
+        rol2.set_sleep_duration(43200);   // changed
+        rol2.set_address(kMacRol2);
+        tracker2.register_client(&rol2);
+        rol2.setup();
+
+        EXPECT_FALSE(rol2.config_synced_)
+            << "a real config change must still force the REGISTER round trip";
+    }
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(ConfigHashPersistence, AChangedAddressIsAlsoDetected) {
+    // sleep_duration_ above; every other ClientConfig field gets the same
+    // one-field-changed check so none of them is silently left out of the hash.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+
+    {
+        LORATracker tracker1;
+        LORAClient  rol1;
+        rol1.set_name("rol");
+        rol1.set_short_address(18);
+        rol1.set_subnet_address(2);
+        rol1.set_sleep_duration(21600);
+        rol1.set_address(kMacRol2);
+        tracker1.register_client(&rol1);
+        rol1.setup();
+        rol1.registered_    = true;
+        rol1.config_synced_ = true;
+        rol1.save_state_for_test();
+    }
+    {
+        LORATracker tracker2;
+        LORAClient  rol2;
+        rol2.set_name("rol");
+        rol2.set_short_address(19);   // changed
+        rol2.set_subnet_address(2);
+        rol2.set_sleep_duration(21600);
+        rol2.set_address(kMacRol2);
+        tracker2.register_client(&rol2);
+        rol2.setup();
+
+        EXPECT_FALSE(rol2.config_synced_) << "an address change must also be detected";
+    }
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(ConfigHashPersistence, ANodeWithNothingPersistedIsUnaffected) {
+    // The ordinary first-boot-ever path: restore_state_() fails outright, and
+    // config_synced_ must stay exactly what it always defaulted to.
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    tracker.register_client(&rol);
+    rol.setup();
+
+    EXPECT_FALSE(rol.config_synced_);
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
