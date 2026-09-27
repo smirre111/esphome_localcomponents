@@ -4250,3 +4250,227 @@ TEST(SessionRebuild, WithdrawingTheGridIsNotDeferredBecauseItIsTheSafeDirection)
     EXPECT_GT(h.radio.hub_to_node_frames().size(), baseline)
         << "a withdrawn grid must reach the node even while its session is rebuilt";
 }
+
+// —————————————————————————————————————-
+// MAC-2's cost can only be attributed via turnaround if the ping the hub
+// SENDS is actually encrypted when the operator asks for it. Before this,
+// start_mac_ping had no crypto option at all — build_mac_ping_frame_ packed
+// raw, unconditionally — so a "MAC-1 + MAC-2" turnaround run would have
+// measured MAC-0 no matter what the node's sublayer switches said.
+//
+// The msgid for an encrypted ping cannot be the dedicated ping counter: the
+// AAD/IV are derived from the OUTER header's msgid under this node's base
+// nonce, and reusing a value already used for an ordinary command would be a
+// GCM nonce reuse. So the reserved-block mechanism is tested directly.
+//
+// Uses the REAL protobuf-c structs (as seam_test.cpp and the TimeSync check
+// above do), not the proto_sim:: hand mirror — that mirror's Cmd enum has no
+// MacControl case at all.
+// —————————————————————————————————————-
+namespace {
+struct TxIdProbe : LORAClient {
+    uint32_t txId() const { return this->frame_counter_.tx_message_id; }
+};
+
+// Decrypt a hub->node frame with `base_nonce` and unpack it as the REAL
+// protobuf-c struct. Returns nullptr if the frame is not CMD_ENCRYPTED or the
+// tag does not verify. Caller frees with lora_client_operation_message__free_unpacked.
+LoraClientOperationMessage *decrypt_downlink_real(const std::vector<uint8_t> &bytes,
+                                                  uint32_t base_nonce,
+                                                  uint32_t *out_msgid = nullptr) {
+    LoraClientOperationMessage *outer =
+        lora_client_operation_message__unpack(nullptr, bytes.size(), bytes.data());
+    if (outer == nullptr) return nullptr;
+    if (outer->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED || outer->encrypted == nullptr ||
+        outer->header == nullptr) {
+        lora_client_operation_message__free_unpacked(outer, nullptr);
+        return nullptr;
+    }
+    uint8_t iv[12];
+    proto_sim::derive_gcm_iv_downlink(base_nonce, outer->header->msgid, iv);
+    uint8_t aad[proto_sim::kHeaderAadLen];
+    proto_sim::build_header_aad(outer->header->destaddress, outer->header->destsubnet,
+                                outer->header->senderaddress, outer->header->msgid, aad);
+    auto plain = proto_sim::aes_gcm_decrypt(iv, aad, sizeof(aad),
+                                            outer->encrypted->ciphertext.data,
+                                            outer->encrypted->ciphertext.len,
+                                            outer->encrypted->tag.data,
+                                            outer->encrypted->tag.len);
+    if (out_msgid != nullptr)
+        *out_msgid = outer->header->msgid;
+    lora_client_operation_message__free_unpacked(outer, nullptr);
+    if (!plain) return nullptr;
+    LoraClientOperationMessage *inner =
+        lora_client_operation_message__unpack(nullptr, plain->size(), plain->data());
+    // The inner message carries no header (stripped at encrypt time); the caller
+    // reads the outer msgid via out_msgid where it matters.
+    return inner;
+}
+}  // namespace
+
+TEST(MacPingCrypto, AnEncryptedPingReachesTheNodeAndCarriesItsOwnSeq) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(h.rol.session_confirmed_);
+
+    h.rol.start_mac_ping(/*duration_s=*/5, /*grid_ms=*/1000, /*want_echo=*/true,
+                         /*pad_bytes=*/0, /*crypto=*/true);
+    h.rol.mac_ping_tick_for_test();
+
+    int plaintext_pings = 0, encrypted_pings = 0;
+    uint32_t seq_seen = 0;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        LoraClientOperationMessage *plain =
+            lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
+        if (plain != nullptr) {
+            if (plain->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL)
+                ++plaintext_pings;
+            lora_client_operation_message__free_unpacked(plain, nullptr);
+        }
+        LoraClientOperationMessage *inner = decrypt_downlink_real(f.bytes, base);
+        if (inner != nullptr) {
+            if (inner->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL &&
+                inner->maccontrol != nullptr) {
+                ++encrypted_pings;
+                seq_seen = inner->maccontrol->seq;
+            }
+            lora_client_operation_message__free_unpacked(inner, nullptr);
+        }
+    }
+    EXPECT_EQ(plaintext_pings, 0) << "with crypto requested, the ping must not go out in the clear";
+    EXPECT_EQ(encrypted_pings, 1) << "and it must actually be delivered, encrypted";
+    EXPECT_EQ(seq_seen, 1u) << "the ping's own seq is unaffected by which msgid space it borrows";
+}
+
+TEST(MacPingCrypto, WithoutASessionCryptoFallsBackToPlaintextLikeEveryOtherDownlink) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    ASSERT_FALSE(h.rol.session_confirmed_);
+    const uint32_t txid_before = static_cast<TxIdProbe &>(h.rol).txId();
+
+    h.rol.start_mac_ping(/*duration_s=*/5, /*grid_ms=*/1000, /*want_echo=*/true,
+                         /*pad_bytes=*/0, /*crypto=*/true);
+    EXPECT_EQ(static_cast<TxIdProbe &>(h.rol).txId(), txid_before)
+        << "no session means nothing will ever be encrypted this run, so no "
+           "msgid block may be reserved (and no NVS write made) for it";
+    h.rol.mac_ping_tick_for_test();
+
+    int plaintext_pings = 0;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        LoraClientOperationMessage *m =
+            lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
+        if (m != nullptr) {
+            if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL)
+                ++plaintext_pings;
+            lora_client_operation_message__free_unpacked(m, nullptr);
+        }
+    }
+    EXPECT_EQ(plaintext_pings, 1)
+        << "no base nonce exists without a session, so this cannot be sealed — "
+           "plaintext is the safe fallback, not a stall";
+}
+
+TEST(MacPingCrypto, TheReservedMsgidRangeNeverCollidesWithAnOrdinaryCommand) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_NE(base, 0u);
+    const uint32_t txid_before_reserve = static_cast<TxIdProbe &>(h.rol).txId();
+
+    // A short run at a fast grid: few frames, so the reserved block is small
+    // and easy to reason about, but still nonzero.
+    h.rol.start_mac_ping(/*duration_s=*/2, /*grid_ms=*/500, /*want_echo=*/false,
+                         /*pad_bytes=*/0, /*crypto=*/true);
+    const uint32_t txid_after_reserve = static_cast<TxIdProbe &>(h.rol).txId();
+    EXPECT_GT(txid_after_reserve, txid_before_reserve)
+        << "the WHOLE run's msgids must be reserved at start_mac_ping, before the "
+           "esp_timer callback ever runs — not incrementally per frame, which "
+           "would be an NVS write per frame from that task";
+
+    for (int i = 0; i < 4; ++i)
+        h.rol.mac_ping_tick_for_test();
+
+    // An ORDINARY command, through the normal encrypted path, right after.
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.5f);
+    const uint32_t ordinary_msgid = static_cast<TxIdProbe &>(h.rol).txId();
+    EXPECT_GT(ordinary_msgid, txid_after_reserve)
+        << "an ordinary command sent during (or after) the ping run must land "
+           "STRICTLY past the reserved block — inside it would be the exact "
+           "nonce reuse the reservation exists to prevent";
+
+    // And every ping actually sent decrypts distinctly under the one base
+    // nonce, USING a msgid from the reserved block — not the dedicated ping
+    // counter (which would also start small and decrypt "successfully" against
+    // itself, since encryption and decryption both read whatever msgid the
+    // header actually carries; only comparing it against the reservation
+    // catches the wrong counter being used).
+    int pings_decrypted = 0;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        uint32_t msgid = 0;
+        LoraClientOperationMessage *inner = decrypt_downlink_real(f.bytes, base, &msgid);
+        if (inner != nullptr) {
+            if (inner->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL) {
+                ++pings_decrypted;
+                EXPECT_GT(msgid, txid_before_reserve)
+                    << "an encrypted ping's msgid must come from the RESERVED block, "
+                       "not the dedicated ping counter (which starts at 1 regardless)";
+                EXPECT_LE(msgid, txid_after_reserve);
+            }
+            lora_client_operation_message__free_unpacked(inner, nullptr);
+        }
+    }
+    EXPECT_EQ(pings_decrypted, 4) << "four distinct pings, all decrypting under the one base nonce";
+}
+
+TEST(MacPingCrypto, EndingAnUnfinishedCryptoRunDoesNotLeakItsRangeIntoTheNextOne) {
+    // A crypto run stopped early (or one whose estimate overshot) leaves its
+    // reserved range PARTLY unused. A later plaintext run must not be able to
+    // read as "still encrypting" from that leftover state.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_NE(base, 0u);
+
+    h.rol.start_mac_ping(/*duration_s=*/5, /*grid_ms=*/1000, /*want_echo=*/false,
+                         /*pad_bytes=*/0, /*crypto=*/true);
+    h.rol.mac_ping_tick_for_test();   // one of several reserved frames used
+    h.rol.stop_mac_ping();
+
+    // hub_to_node_frames() returns BY VALUE: snapshot it once rather than
+    // indexing repeated calls, which would index into a fresh temporary each
+    // time and read a dangling reference.
+    const size_t before = h.radio.hub_to_node_frames().size();
+    h.rol.start_mac_ping(/*duration_s=*/5, /*grid_ms=*/1000, /*want_echo=*/false,
+                         /*pad_bytes=*/0, /*crypto=*/false);
+    h.rol.mac_ping_tick_for_test();
+    const auto frames = h.radio.hub_to_node_frames();
+
+    int plaintext = 0, encrypted = 0;
+    for (size_t i = before; i < frames.size(); ++i) {
+        const auto &f = frames[i];
+        LoraClientOperationMessage *m =
+            lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
+        if (m != nullptr) {
+            if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL) ++plaintext;
+            lora_client_operation_message__free_unpacked(m, nullptr);
+        }
+        LoraClientOperationMessage *inner = decrypt_downlink_real(f.bytes, base);
+        if (inner != nullptr) {
+            if (inner->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL) ++encrypted;
+            lora_client_operation_message__free_unpacked(inner, nullptr);
+        }
+    }
+    EXPECT_EQ(plaintext, 1) << "the second run asked for plaintext";
+    EXPECT_EQ(encrypted, 0)
+        << "the first run's unused reserved msgids must not leak into a run "
+           "that never asked to be encrypted";
+}

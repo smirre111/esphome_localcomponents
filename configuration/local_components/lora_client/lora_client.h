@@ -354,7 +354,8 @@ namespace esphome
       // replaced the global setBurstCopies. A burst would defeat the purpose —
       // seventeen copies of one mark is not one mark.
       void start_mac_ping(uint32_t duration_s = 300, uint32_t grid_ms = 1100,
-                          bool want_echo = true, uint32_t pad_bytes = 0);
+                          bool want_echo = true, uint32_t pad_bytes = 0,
+                          bool crypto = false);
       void stop_mac_ping();
       bool mac_ping_active() const { return this->mac_ping_active_; }
 
@@ -825,6 +826,17 @@ namespace esphome
       uint32_t mac_ping_seq_{0};
       // Separate from the session TX id: see build_mac_ping_frame_().
       uint32_t mac_ping_msgid_{0};
+      // MAC-2: when a run asks for the ping to be encrypted, its msgids are a
+      // BLOCK of the real session tx-id space, reserved once in start_mac_ping
+      // (main-loop context, one NVS save) and consumed in RAM by the esp_timer
+      // callback — never incrTxMessageId() itself there, which would be an NVS
+      // write per frame off the ESPHome loop, hundreds per run. The whole range
+      // is reserved before the first frame, so within it a msgid can never also
+      // be used for ordinary traffic — reusing one would replay the IV under
+      // this node's base nonce.
+      bool     mac_ping_crypto_{false};
+      uint32_t mac_ping_crypto_next_msgid_{0};
+      uint32_t mac_ping_crypto_last_msgid_{0};   // 0 = range exhausted
       std::vector<uint8_t> op_frame_;
       uint32_t             op_frame_msgid_{0};
       esp_timer_handle_t mac_ping_timer_{nullptr};

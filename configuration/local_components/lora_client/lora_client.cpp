@@ -1402,7 +1402,11 @@ namespace esphome
       header.destaddress   = this->short_address_;
       header.destsubnet    = this->subnet_address_;
       header.senderaddress = kHubAddress;
-      // A DEDICATED counter, deliberately not incrTxMessageId().
+      header.burstindex    = 0;
+      header.burstcount    = 0;
+
+      // MAC-2 OFF (the default): a DEDICATED counter, deliberately not
+      // incrTxMessageId().
       //
       // Two reasons, both load-bearing. (1) That call advances the session TX
       // id the node's replay window tracks. The node hears only a fraction of
@@ -1413,9 +1417,23 @@ namespace esphome
       // rejected as a "huge jump" until the next LOGIN. (2) incrTxMessageId()
       // persists to NVS, and this runs in an esp_timer task while the ESPHome
       // main loop owns that backend — hundreds of writes per run, off-loop.
-      header.msgid         = ++this->mac_ping_msgid_;
-      header.burstindex    = 0;
-      header.burstcount    = 0;
+      //
+      // MAC-2 ON: the OUTER header's msgid is what AEAD derives the IV and AAD
+      // from (s_pack_operation_message), so it MUST come from the reserved
+      // block start_mac_ping set aside — reusing the dedicated ping counter
+      // here would let a ping's msgid collide with an ordinary command's under
+      // the same base nonce, which is IV reuse. See mac_ping_crypto_'s comment.
+      const bool encrypt_this_one =
+          this->mac_ping_crypto_ && this->session_confirmed_ &&
+          this->mac_ping_crypto_next_msgid_ <= this->mac_ping_crypto_last_msgid_;
+      if (encrypt_this_one)
+        header.msgid = this->mac_ping_crypto_next_msgid_++;
+      else
+        header.msgid = ++this->mac_ping_msgid_;
+      if (this->mac_ping_crypto_ && !encrypt_this_one)
+        ESP_LOGW(TAG, "[%s] MAC ping: reserved msgid range exhausted — this ping "
+                      "is plaintext (the run outran its own estimate)",
+                 this->get_name().c_str());
 
       MacControl mc = MAC_CONTROL__INIT;
       mc.kind     = MAC_CONTROL__KIND__MAC_PING;
@@ -1440,16 +1458,26 @@ namespace esphome
       op_message.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
       op_message.maccontrol = &mc;
 
-      const size_t packed = lora_client_operation_message__get_packed_size(&op_message);
-      if (packed > sizeof(this->mac_ping_frame_))
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      if (!s_pack_operation_message(&op_message, encrypt_this_one, &buf, &len))
       {
-        ESP_LOGE(TAG, "[%s] MAC ping frame too large (%u B) — not sent",
-                 this->get_name().c_str(), (unsigned) packed);
+        ESP_LOGE(TAG, "[%s] MAC ping: failed to pack", this->get_name().c_str());
         this->mac_ping_frame_len_ = 0;
         return;
       }
-      lora_client_operation_message__pack(&op_message, this->mac_ping_frame_);
-      this->mac_ping_frame_len_ = packed;
+      if (len > sizeof(this->mac_ping_frame_))
+      {
+        ESP_LOGE(TAG, "[%s] MAC ping frame too large (%u B) — not sent",
+                 this->get_name().c_str(), (unsigned) len);
+        this->mac_ping_frame_len_ = 0;
+      }
+      else
+      {
+        memcpy(this->mac_ping_frame_, buf, len);
+        this->mac_ping_frame_len_ = len;
+      }
+      free(buf);
     }
 
     void LORAListener::mac_ping_timer_cb_(void *arg)
@@ -1529,7 +1557,8 @@ namespace esphome
     }
 
     void LORAListener::start_mac_ping(uint32_t duration_s, uint32_t grid_ms,
-                                      bool want_echo, uint32_t pad_bytes)
+                                      bool want_echo, uint32_t pad_bytes,
+                                      bool crypto)
     {
       if (this->mac_ping_active_)
         return;
@@ -1538,6 +1567,37 @@ namespace esphome
       this->mac_ping_want_echo_ = want_echo;
       this->mac_ping_pad_bytes_ = pad_bytes;
       this->reset_mac_stats();
+
+      // MAC-2: reserve the whole run's msgids from the SESSION's own tx-id
+      // space, here, in this (main-loop, button-press) call, with exactly one
+      // NVS save — never per-frame from the esp_timer callback. Without a
+      // session there is no base nonce to seal anything under, so crypto
+      // silently falls back to plaintext, matching every other downlink here.
+      this->mac_ping_crypto_ = crypto && this->session_confirmed_;
+      if (crypto && !this->session_confirmed_)
+        ESP_LOGW(TAG, "[%s] MAC ping: no confirmed session — crypto requested but "
+                      "pings will be plaintext", this->get_name().c_str());
+      // A run that does not want crypto must not inherit a PREVIOUS run's
+      // unused reserved range: build_mac_ping_frame_'s encrypt_this_one already
+      // gates on mac_ping_crypto_ first, but clearing the range here removes
+      // the stale values outright rather than leaving them for that gate alone
+      // to keep meaning nothing.
+      if (!this->mac_ping_crypto_)
+      {
+        this->mac_ping_crypto_next_msgid_ = 0;
+        this->mac_ping_crypto_last_msgid_ = 0;
+      }
+      else
+      {
+        const uint32_t ms = (grid_ms > 0) ? grid_ms : 1100;
+        // +2: the START-to-first-tick delay and the ceiling division both round
+        // down against the real cadence; the range is a floor, not a promise.
+        const uint32_t frames = (duration_s * 1000UL) / ms + 2;
+        this->mac_ping_crypto_next_msgid_ = this->incrTxMessageId();       // one NVS save
+        this->frame_counter_.tx_message_id += (frames - 1);                // reserve the rest
+        this->mac_ping_crypto_last_msgid_ = this->frame_counter_.tx_message_id;
+        this->save_state_(true);                                          // ...and persist it
+      }
 
       if (this->mac_ping_timer_ == nullptr)
       {

@@ -3999,7 +3999,8 @@ std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
                                          uint32_t seq = 0,
                                          int32_t arm_offset_us = 0,
                                          bool counter = true,
-                                         bool mac_echo = false) {
+                                         bool mac_echo = false,
+                                         bool crypto = true) {
     ModeTest mt = MODE_TEST__INIT;
     // HW-2: non-zero only for MODE_SWEEP, which deliberately mis-arms its
     // windows. Defaulted so every existing caller builds the frame it did.
@@ -4016,7 +4017,7 @@ std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
     mt.droppowerprofile = false;
     mt.enablecounter    = counter;
     mt.macecho          = mac_echo;   // the hub always sets it; a test that wants the echo says so
-    mt.enablecrypto     = true;
+    mt.enablecrypto     = crypto;
 
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
@@ -4154,12 +4155,32 @@ std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid
     return out;
 }
 
-// Login, then a Mode A ModeTest armed by an ENCRYPTED frame, counter on or off.
-void holdSessionAndArmTest(NodeProbe &disp, bool counter_on) {
+// Login, then a Mode A ModeTest armed by an ENCRYPTED frame, MAC-1/MAC-2 each
+// on or off. crypto_on defaults false: most of the tests below are about the
+// ping/counter mechanics, not encryption, and MAC-2 off is the baseline they
+// were written against.
+void holdSessionAndArmTest(NodeProbe &disp, bool counter_on, bool crypto_on = false) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, 0, counter_on, /*mac_echo=*/true);
+    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, 0, counter_on,
+                                 /*mac_echo=*/true, crypto_on);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+}
+
+// An encrypted MAC ping, built the way a hub with MAC-2 on would send one:
+// the WHOLE operation message (header included) sealed under CMD_ENCRYPTED,
+// exactly like encrypt_op wraps any other command.
+std::vector<uint8_t> build_mac_ping_encrypted(uint32_t seq, bool want_echo, uint32_t msgid,
+                                              uint32_t nonce = kMtNonce) {
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind     = MAC_CONTROL__KIND__MAC_PING;
+    mc.seq      = seq;
+    mc.wantecho = want_echo;
+
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    inner.maccontrol = &mc;
+    return encrypt_op(inner, msgid, nonce);
 }
 
 }  // namespace
@@ -4189,6 +4210,50 @@ TEST_F(RealNodeFixture, APlaintextPingIsAnsweredWhileAnAuthenticatedTestIsArmed)
     EXPECT_EQ(disp.macCounters().ping_rx, 1u)
         << "the frames a test MEASURES need no session; only arming does";
     EXPECT_EQ(disp.macCounters().echo_tx, 1u) << "and MAC-0 answers it";
+}
+
+TEST_F(RealNodeFixture, APlaintextPingIsRefusedWhenMac2IsOn) {
+    // cryptoRequired(cfg, is_mac_control=true) == cfg.crypto_enabled: with MAC-2
+    // on, a MAC control frame must be encrypted like everything else. Before
+    // this the check existed only in MacSublayers.h and had zero callers, so a
+    // plaintext ping was accepted whatever the crypto switch said — the same
+    // shape of gap as yesterday's unwired MAC-1 counter check, and it meant
+    // MAC-2's cost could never be attributed via the turnaround measurement:
+    // the ping the hub sent was never actually encrypted either way.
+    holdSessionAndArmTest(disp, /*counter_on=*/false, /*crypto_on=*/true);
+    ASSERT_TRUE(disp.modeTestActive());
+    ASSERT_TRUE(disp.macSublayers().crypto_enabled);
+
+    auto ping = build_mac_ping(/*seq=*/1, /*want_echo=*/true, /*msgid=*/500);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 0u)
+        << "with MAC-2 on, an unencrypted ping is not the frame the switch asks for";
+    EXPECT_EQ(disp.macCounters().echo_tx, 0u);
+}
+
+TEST_F(RealNodeFixture, AnEncryptedPingIsAnsweredWhenMac2IsOn) {
+    // The other half: with MAC-2 on, a ping sealed the way the hub's downlinks
+    // normally are must still reach MAC-0 and be answered — the switch asks for
+    // encryption, not for refusing the traffic being measured.
+    holdSessionAndArmTest(disp, /*counter_on=*/false, /*crypto_on=*/true);
+    ASSERT_TRUE(disp.macSublayers().crypto_enabled);
+
+    auto ping = build_mac_ping_encrypted(/*seq=*/1, /*want_echo=*/true, /*msgid=*/500);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u) << "an encrypted ping must be accepted";
+    EXPECT_EQ(disp.macCounters().echo_tx, 1u) << "and answered";
+}
+
+TEST_F(RealNodeFixture, APlaintextPingIsStillAnsweredWithMac2Off) {
+    // The MAC-0 baseline the MAC-2-on runs above are measured against, pinned
+    // explicitly rather than left as an unstated default.
+    holdSessionAndArmTest(disp, /*counter_on=*/false, /*crypto_on=*/false);
+    ASSERT_FALSE(disp.macSublayers().crypto_enabled);
+
+    auto ping = build_mac_ping(/*seq=*/1, /*want_echo=*/true, /*msgid=*/500);
+    disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u);
+    EXPECT_EQ(disp.macCounters().echo_tx, 1u);
 }
 
 TEST_F(RealNodeFixture, ThePingExemptionEndsWithTheTest) {
@@ -4270,7 +4335,8 @@ TEST_F(RealNodeFixture, ThePingSequenceRestartsWithEachTest) {
 
     auto off = encrypted_mode_test_off(/*msgid=*/3);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
-    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, 0, true, true);
+    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, 0, true, true,
+                                 /*crypto=*/false);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_TRUE(disp.modeTestActive());
 
