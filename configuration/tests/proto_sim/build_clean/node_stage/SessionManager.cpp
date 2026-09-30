@@ -105,19 +105,45 @@ void SessionManager::clearBaseNonce(uint32_t peer)
 
 void SessionManager::resetCounters()
 {
-    tx_id_ = 0;
-    rx_id_ = 0;
+    tx_id_   = 0;
+    rx_id_   = 0;
+    // A login starts both directions over, so nothing has been seen yet. The
+    // bitmap must go with the mark: bits describing ids under the OLD numbering
+    // would refuse the first frames of the new session.
+    rx_seen_ = 0;
 }
 
 bool SessionManager::acceptRxId(uint32_t msgid)
 {
+    // A forward jump inside the announced window: the ordinary case. Shift the
+    // bitmap by the distance moved so the bits keep describing the same ids,
+    // and mark the new high-water as seen.
     if (msgid > rx_id_ && msgid <= rx_id_ + kMsgIdWindow)
     {
-        rx_id_ = msgid;
+        const uint32_t advance = msgid - rx_id_;
+        rx_seen_ = (advance >= 64u) ? 0u : (rx_seen_ << advance);
+        rx_seen_ |= 1ull;                 // bit 0 is rx_id_, which is now msgid
+        rx_id_   = msgid;
         maybePersist();
         return true;
     }
-    return false;
+
+    // At or below the mark. This is where a REPLAY and a REORDERED frame part
+    // company, and the old ratchet could not tell them apart — it refused both,
+    // which made a retried command undeliverable the moment any other downlink
+    // had advanced the mark. See the header for the sequence.
+    const uint32_t behind = rx_id_ - msgid;   // msgid <= rx_id_ here
+    if (behind >= kReplayWindow)
+        return false;                         // too old to be a reorder
+
+    const uint64_t bit = 1ull << behind;
+    if (rx_seen_ & bit)
+        return false;                         // seen once already: a replay
+
+    rx_seen_ |= bit;
+    // rx_id_ deliberately does NOT move: this frame is behind the mark, and
+    // moving it backwards would let the next replay in.
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +177,10 @@ void SessionManager::load()
     // Restore rx as-is; restore tx with a reservation margin so any tx
     // increments that happened since the last save are never reused.
     rx_id_             = st.rx_id;
+    // Nothing is known to have been seen under the restored mark. Empty is the
+    // safe direction: it refuses reordered frames until the window refills
+    // rather than admitting a replay the previous boot had already answered.
+    rx_seen_           = 0;
     tx_id_             = st.tx_id + kPersistTxMargin;
     last_persisted_tx_ = tx_id_;
     persist_peer_      = st.hub_addr;

@@ -11,6 +11,40 @@ Companion docs: [plan.md](plan.md) (fix backlog) · [activity-log.md](activity-l
 
 ---
 
+## Node modes at a glance (2026-09-29 clarification)
+
+This is DRAFT-labelled, but AUTO/INTERACTIVE, `shouldRunAutoMode()`, `enterSleep()`
+and the mode sysops below are already shipped and live on both nodes — the status
+line above is stale. Added here because I (the assistant) mis-stated this once in
+conversation and the user corrected it; recorded so it doesn't happen again.
+
+- **INTERACTIVE mode is NOT "wake every `sleep_duration`".** An interactive node
+  (`auto_mode: false`) stays awake / radio-reachable indefinitely —
+  `CmdDispatcher::computeSleepSeconds()` returns 0 whenever `shouldRunAutoMode()`
+  is false, i.e. exactly when the node is interactive. It only goes to deep sleep
+  when the hub explicitly sends it `CMD_SLEEP` (`LORAListener::enterSleep()`),
+  which puts it down for exactly `sleep_duration` seconds.
+- **`sleep_duration` is a DURATION, not a cadence** — it's how long the node
+  sleeps once told to, not how often it wakes on its own. Interactive mode does
+  not use it autonomously; only `enterSleep()`'s one-shot command does.
+- **AUTO mode is the opposite of "interactive": it deep-sleeps by default**,
+  waking only for a scheduled event (from `schedule:`) or a periodic check-in
+  wake (`checkin_interval`, so hub-side config edits are never stale for more
+  than that) — `enterSleep()`/`CMD_SLEEP` is explicitly ignored on an auto-mode
+  node (would discard its schedule-derived wake and its session).
+- **The actual nightly sleep both nodes get today is `loradevices.yml`'s
+  `time: on_time` trigger** (23:00 daily → `loracover.on_sleep_start: rol_1` /
+  `rol_2`), calling `enterSleep()` regardless of interactive/auto mode. With
+  `sleep_duration: 21600` (6 h) this is a 23:00→05:00 blackout — this is why an
+  otherwise-interactive node (node 1 is `auto_mode: false`) is still unreachable
+  overnight, and it is intentional, not a testing leftover: it is NOT commented
+  out, confirmed live in `loradevices.yml:73-88` as of this date. It was
+  disabled once for a MAC-0 bench campaign (commit `cfbe988`) and explicitly
+  restored 2026-09-20 — read the comment there before starting a long bench run,
+  it will kill a run mid-flight at 23:00.
+
+---
+
 ## 0. Decisions already taken (from the review round)
 
 | # | Decision | Rationale |

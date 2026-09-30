@@ -21,6 +21,8 @@ from esphome.const import (
 CONF_LINK_RSSI = "link_rssi"
 CONF_MOTOR_CURRENT = "motor_current"
 CONF_CLOCK_OFFSET = "clock_offset"
+CONF_CALIB_ACTUAL_RUN = "battery_calib_actual_run"
+CONF_CALIB_NOMINAL_RUN = "battery_calib_nominal_run"
 
 AUTO_LOAD = ["loracover", "blindsproto"]
 CODEOWNERS = ["@buxtronix"]
@@ -86,6 +88,26 @@ CONFIG_SCHEMA = (
                 icon="mdi:clock-alert-outline",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            # Battery-runtime compensation telemetry (visibility only -- see
+            # docs/battery-runtime-compensation-proposal.md decision 1; the
+            # node runs the fit, the hub only shows it). Published only when
+            # a full move just ended via the current-sense endstop -- the one
+            # combination trusted as ground truth (proposal §2) -- so these
+            # hold their last value between calibration events, not 0.
+            cv.Optional(CONF_CALIB_ACTUAL_RUN): sensor.sensor_schema(
+                unit_of_measurement=UNIT_SECOND,
+                state_class=STATE_CLASS_MEASUREMENT,
+                accuracy_decimals=1,
+                icon="mdi:timer-outline",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_CALIB_NOMINAL_RUN): sensor.sensor_schema(
+                unit_of_measurement=UNIT_SECOND,
+                state_class=STATE_CLASS_MEASUREMENT,
+                accuracy_decimals=1,
+                icon="mdi:timer-outline",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
         }
     )
     .extend(lora_client.LORA_CLIENT_SCHEMA)
@@ -117,3 +139,11 @@ async def to_code(config):
     if current_config := config.get(CONF_MOTOR_CURRENT):
         sens = await sensor.new_sensor(current_config)
         cg.add(var.set_motor_current(sens))
+
+    if actual_run_config := config.get(CONF_CALIB_ACTUAL_RUN):
+        sens = await sensor.new_sensor(actual_run_config)
+        cg.add(var.set_calib_actual_run(sens))
+
+    if nominal_run_config := config.get(CONF_CALIB_NOMINAL_RUN):
+        sens = await sensor.new_sensor(nominal_run_config)
+        cg.add(var.set_calib_nominal_run(sens))

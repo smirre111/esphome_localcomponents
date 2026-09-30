@@ -28,6 +28,15 @@ namespace esphome
       // F-11: link RSSI (hub-side) and motor current (from CoverPosition frame)
       void set_rssi(sensor::Sensor *rssi) { rssi_ = rssi; }
       void set_motor_current(sensor::Sensor *current) { motor_current_ = current; }
+      // Battery-runtime compensation telemetry (visibility only -- the hub
+      // never computes or feeds back a model; see
+      // docs/battery-runtime-compensation-proposal.md decision 1). Raw pair
+      // rather than a pre-divided ratio, matching the wire field's own
+      // reasoning: more useful for later analysis, and proto3's "0 = absent"
+      // convention means these only publish when a calibration event just
+      // happened -- see set_response()'s guard.
+      void set_calib_actual_run(sensor::Sensor *s) { calib_actual_run_ = s; }
+      void set_calib_nominal_run(sensor::Sensor *s) { calib_nominal_run_ = s; }
       // P2: node clock minus hub clock, from the wake beacon.
       void set_clock_offset(sensor::Sensor *offset) { clock_offset_ = offset; }
       void on_clock_offset(float offset_s) override;
@@ -43,6 +52,8 @@ namespace esphome
       sensor::Sensor *voltage_{nullptr};
       sensor::Sensor *rssi_{nullptr};
       sensor::Sensor *motor_current_{nullptr};
+      sensor::Sensor *calib_actual_run_{nullptr};
+      sensor::Sensor *calib_nominal_run_{nullptr};
       sensor::Sensor *clock_offset_{nullptr};
       // sensor::Sensor *illuminance_{nullptr};
       uint8_t current_sensor_;

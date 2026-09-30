@@ -57,10 +57,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/user/esphome_localcomponents/configuration/tests/proto_sim
+CMAKE_SOURCE_DIR = /mnt/c/Development/esphome/configuration/tests/proto_sim
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean
+CMAKE_BINARY_DIR = /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -142,9 +142,9 @@ install/strip/fast: preinstall/fast
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/CMakeFiles /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/CMakeFiles /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -744,6 +744,32 @@ drift_estimator_test/fast:
 .PHONY : drift_estimator_test/fast
 
 #=============================================================================
+# Target rules for targets named sleep_clock_correction_test
+
+# Build rule for target.
+sleep_clock_correction_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sleep_clock_correction_test
+.PHONY : sleep_clock_correction_test
+
+# fast build rule for target.
+sleep_clock_correction_test/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sleep_clock_correction_test.dir/build.make CMakeFiles/sleep_clock_correction_test.dir/build
+.PHONY : sleep_clock_correction_test/fast
+
+#=============================================================================
+# Target rules for targets named wake_clock_fit_test
+
+# Build rule for target.
+wake_clock_fit_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 wake_clock_fit_test
+.PHONY : wake_clock_fit_test
+
+# fast build rule for target.
+wake_clock_fit_test/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/wake_clock_fit_test.dir/build.make CMakeFiles/wake_clock_fit_test.dir/build
+.PHONY : wake_clock_fit_test/fast
+
+#=============================================================================
 # Target rules for targets named schedule_text_test
 
 # Build rule for target.
@@ -755,6 +781,32 @@ schedule_text_test: cmake_check_build_system
 schedule_text_test/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/schedule_text_test.dir/build.make CMakeFiles/schedule_text_test.dir/build
 .PHONY : schedule_text_test/fast
+
+#=============================================================================
+# Target rules for targets named onboarding_gate_test
+
+# Build rule for target.
+onboarding_gate_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 onboarding_gate_test
+.PHONY : onboarding_gate_test
+
+# fast build rule for target.
+onboarding_gate_test/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/onboarding_gate_test.dir/build.make CMakeFiles/onboarding_gate_test.dir/build
+.PHONY : onboarding_gate_test/fast
+
+#=============================================================================
+# Target rules for targets named timesync_policy_test
+
+# Build rule for target.
+timesync_policy_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 timesync_policy_test
+.PHONY : timesync_policy_test
+
+# fast build rule for target.
+timesync_policy_test/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/timesync_policy_test.dir/build.make CMakeFiles/timesync_policy_test.dir/build
+.PHONY : timesync_policy_test/fast
 
 #=============================================================================
 # Target rules for targets named frame_crypto_test
@@ -835,6 +887,45 @@ seam_test/fast:
 .PHONY : seam_test/fast
 
 #=============================================================================
+# Target rules for targets named e2e_test
+
+# Build rule for target.
+e2e_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 e2e_test
+.PHONY : e2e_test
+
+# fast build rule for target.
+e2e_test/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/e2e_test.dir/build.make CMakeFiles/e2e_test.dir/build
+.PHONY : e2e_test/fast
+
+#=============================================================================
+# Target rules for targets named real_lora_interface
+
+# Build rule for target.
+real_lora_interface: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 real_lora_interface
+.PHONY : real_lora_interface
+
+# fast build rule for target.
+real_lora_interface/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/build
+.PHONY : real_lora_interface/fast
+
+#=============================================================================
+# Target rules for targets named real_lora_interface_test
+
+# Build rule for target.
+real_lora_interface_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 real_lora_interface_test
+.PHONY : real_lora_interface_test
+
+# fast build rule for target.
+real_lora_interface_test/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/build
+.PHONY : real_lora_interface_test/fast
+
+#=============================================================================
 # Target rules for targets named gmock
 
 # Build rule for target.
@@ -886,203 +977,329 @@ gtest_main/fast:
 	$(MAKE) $(MAKESILENT) -f _deps/googletest-build/googletest/CMakeFiles/gtest_main.dir/build.make _deps/googletest-build/googletest/CMakeFiles/gtest_main.dir/build
 .PHONY : gtest_main/fast
 
-home/user/blindsesp/main/Scheduler.o: home/user/blindsesp/main/Scheduler.cpp.o
-.PHONY : home/user/blindsesp/main/Scheduler.o
+iface_stage/CmdDispatcher.o: iface_stage/CmdDispatcher.cpp.o
+.PHONY : iface_stage/CmdDispatcher.o
 
 # target to build an object file
-home/user/blindsesp/main/Scheduler.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/scheduler_test.dir/build.make CMakeFiles/scheduler_test.dir/home/user/blindsesp/main/Scheduler.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/auto_mode_policy_test.dir/build.make CMakeFiles/auto_mode_policy_test.dir/home/user/blindsesp/main/Scheduler.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/home/user/blindsesp/main/Scheduler.cpp.o
-.PHONY : home/user/blindsesp/main/Scheduler.cpp.o
+iface_stage/CmdDispatcher.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/CmdDispatcher.cpp.o
+.PHONY : iface_stage/CmdDispatcher.cpp.o
 
-home/user/blindsesp/main/Scheduler.i: home/user/blindsesp/main/Scheduler.cpp.i
-.PHONY : home/user/blindsesp/main/Scheduler.i
+iface_stage/CmdDispatcher.i: iface_stage/CmdDispatcher.cpp.i
+.PHONY : iface_stage/CmdDispatcher.i
 
 # target to preprocess a source file
-home/user/blindsesp/main/Scheduler.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/scheduler_test.dir/build.make CMakeFiles/scheduler_test.dir/home/user/blindsesp/main/Scheduler.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/auto_mode_policy_test.dir/build.make CMakeFiles/auto_mode_policy_test.dir/home/user/blindsesp/main/Scheduler.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/home/user/blindsesp/main/Scheduler.cpp.i
-.PHONY : home/user/blindsesp/main/Scheduler.cpp.i
+iface_stage/CmdDispatcher.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/CmdDispatcher.cpp.i
+.PHONY : iface_stage/CmdDispatcher.cpp.i
 
-home/user/blindsesp/main/Scheduler.s: home/user/blindsesp/main/Scheduler.cpp.s
-.PHONY : home/user/blindsesp/main/Scheduler.s
+iface_stage/CmdDispatcher.s: iface_stage/CmdDispatcher.cpp.s
+.PHONY : iface_stage/CmdDispatcher.s
 
 # target to generate assembly for a file
-home/user/blindsesp/main/Scheduler.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/scheduler_test.dir/build.make CMakeFiles/scheduler_test.dir/home/user/blindsesp/main/Scheduler.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/auto_mode_policy_test.dir/build.make CMakeFiles/auto_mode_policy_test.dir/home/user/blindsesp/main/Scheduler.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/home/user/blindsesp/main/Scheduler.cpp.s
-.PHONY : home/user/blindsesp/main/Scheduler.cpp.s
+iface_stage/CmdDispatcher.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/CmdDispatcher.cpp.s
+.PHONY : iface_stage/CmdDispatcher.cpp.s
 
-home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.o: home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.o
+iface_stage/LoraInterface.o: iface_stage/LoraInterface.cpp.o
+.PHONY : iface_stage/LoraInterface.o
 
 # target to build an object file
-home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/proto_sim.dir/build.make CMakeFiles/proto_sim.dir/home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.o
+iface_stage/LoraInterface.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/LoraInterface.cpp.o
+.PHONY : iface_stage/LoraInterface.cpp.o
 
-home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.i: home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.i
+iface_stage/LoraInterface.i: iface_stage/LoraInterface.cpp.i
+.PHONY : iface_stage/LoraInterface.i
 
 # target to preprocess a source file
-home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/proto_sim.dir/build.make CMakeFiles/proto_sim.dir/home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.i
+iface_stage/LoraInterface.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/LoraInterface.cpp.i
+.PHONY : iface_stage/LoraInterface.cpp.i
 
-home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.s: home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.s
+iface_stage/LoraInterface.s: iface_stage/LoraInterface.cpp.s
+.PHONY : iface_stage/LoraInterface.s
 
 # target to generate assembly for a file
-home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/proto_sim.dir/build.make CMakeFiles/proto_sim.dir/home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.c.s
+iface_stage/LoraInterface.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/LoraInterface.cpp.s
+.PHONY : iface_stage/LoraInterface.cpp.s
 
-home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.o: home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.o
+iface_stage/SessionManager.o: iface_stage/SessionManager.cpp.o
+.PHONY : iface_stage/SessionManager.o
 
 # target to build an object file
-home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.o
+iface_stage/SessionManager.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/SessionManager.cpp.o
+.PHONY : iface_stage/SessionManager.cpp.o
 
-home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.i: home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.i
+iface_stage/SessionManager.i: iface_stage/SessionManager.cpp.i
+.PHONY : iface_stage/SessionManager.i
 
 # target to preprocess a source file
-home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.i
+iface_stage/SessionManager.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/SessionManager.cpp.i
+.PHONY : iface_stage/SessionManager.cpp.i
 
-home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.s: home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.s
+iface_stage/SessionManager.s: iface_stage/SessionManager.cpp.s
+.PHONY : iface_stage/SessionManager.s
 
 # target to generate assembly for a file
-home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.cpp.s
+iface_stage/SessionManager.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/SessionManager.cpp.s
+.PHONY : iface_stage/SessionManager.cpp.s
 
-home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.o: home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.o
+iface_stage/comm_utils.o: iface_stage/comm_utils.c.o
+.PHONY : iface_stage/comm_utils.o
 
 # target to build an object file
-home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.o
+iface_stage/comm_utils.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/comm_utils.c.o
+.PHONY : iface_stage/comm_utils.c.o
 
-home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.i: home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.i
+iface_stage/comm_utils.i: iface_stage/comm_utils.c.i
+.PHONY : iface_stage/comm_utils.i
 
 # target to preprocess a source file
-home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.i
+iface_stage/comm_utils.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/comm_utils.c.i
+.PHONY : iface_stage/comm_utils.c.i
 
-home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.s: home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.s
+iface_stage/comm_utils.s: iface_stage/comm_utils.c.s
+.PHONY : iface_stage/comm_utils.s
 
 # target to generate assembly for a file
-home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.cpp.s
+iface_stage/comm_utils.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/comm_utils.c.s
+.PHONY : iface_stage/comm_utils.c.s
 
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.o: home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.o
+iface_stage/frtosTasks.o: iface_stage/frtosTasks.cpp.o
+.PHONY : iface_stage/frtosTasks.o
 
 # target to build an object file
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_driver.dir/build.make CMakeFiles/real_lora_driver.dir/home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.o
+iface_stage/frtosTasks.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/frtosTasks.cpp.o
+.PHONY : iface_stage/frtosTasks.cpp.o
 
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.i: home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.i
+iface_stage/frtosTasks.i: iface_stage/frtosTasks.cpp.i
+.PHONY : iface_stage/frtosTasks.i
 
 # target to preprocess a source file
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_driver.dir/build.make CMakeFiles/real_lora_driver.dir/home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.i
+iface_stage/frtosTasks.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/frtosTasks.cpp.i
+.PHONY : iface_stage/frtosTasks.cpp.i
 
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.s: home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.s
+iface_stage/frtosTasks.s: iface_stage/frtosTasks.cpp.s
+.PHONY : iface_stage/frtosTasks.s
 
 # target to generate assembly for a file
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_driver.dir/build.make CMakeFiles/real_lora_driver.dir/home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.cpp.s
+iface_stage/frtosTasks.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/iface_stage/frtosTasks.cpp.s
+.PHONY : iface_stage/frtosTasks.cpp.s
 
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.o: home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.o
+mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.o: mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.o
+.PHONY : mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.o
 
 # target to build an object file
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_tracker.dir/build.make CMakeFiles/real_lora_tracker.dir/home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.o
+mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/scheduler_test.dir/build.make CMakeFiles/scheduler_test.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/auto_mode_policy_test.dir/build.make CMakeFiles/auto_mode_policy_test.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.o
+.PHONY : mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.o
 
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.i: home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.i
+mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.i: mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.i
+.PHONY : mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.i
 
 # target to preprocess a source file
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_tracker.dir/build.make CMakeFiles/real_lora_tracker.dir/home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.i
+mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/scheduler_test.dir/build.make CMakeFiles/scheduler_test.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/auto_mode_policy_test.dir/build.make CMakeFiles/auto_mode_policy_test.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.i
+.PHONY : mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.i
 
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.s: home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.s
+mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.s: mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.s
+.PHONY : mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.s
 
 # target to generate assembly for a file
-home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_tracker.dir/build.make CMakeFiles/real_lora_tracker.dir/home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.cpp.s
+mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/scheduler_test.dir/build.make CMakeFiles/scheduler_test.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/auto_mode_policy_test.dir/build.make CMakeFiles/auto_mode_policy_test.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.s
+.PHONY : mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.cpp.s
 
-home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.o: home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.o
+mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.o: mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.o
 
 # target to build an object file
-home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.o
+mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/proto_sim.dir/build.make CMakeFiles/proto_sim.dir/mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.o
 
-home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.i: home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.i
+mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.i: mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.i
 
 # target to preprocess a source file
-home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.i
+mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/proto_sim.dir/build.make CMakeFiles/proto_sim.dir/mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.i
 
-home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.s: home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.s
+mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.s: mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.s
 
 # target to generate assembly for a file
-home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.cpp.s
+mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/proto_sim.dir/build.make CMakeFiles/proto_sim.dir/mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.c.s
 
-home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.o: home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.o
+mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.o: mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.o
 
 # target to build an object file
-home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.o
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.o
+mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.o
 
-home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.i: home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.i
+mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.i: mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.i
 
 # target to preprocess a source file
-home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.i
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.i
+mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.i
 
-home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.s: home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.s
+mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.s: mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.s
 
 # target to generate assembly for a file
-home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.s
-.PHONY : home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.cpp.s
+mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.cpp.s
+
+mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.o: mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.o
+
+# target to build an object file
+mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.o
+
+mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.i: mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.i
+
+# target to preprocess a source file
+mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.i
+
+mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.s: mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.s
+
+# target to generate assembly for a file
+mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_client.dir/build.make CMakeFiles/real_lora_client.dir/mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.cpp.s
+
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.o: mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.o
+
+# target to build an object file
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_driver.dir/build.make CMakeFiles/real_lora_driver.dir/mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.o
+
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.i: mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.i
+
+# target to preprocess a source file
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_driver.dir/build.make CMakeFiles/real_lora_driver.dir/mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.i
+
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.s: mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.s
+
+# target to generate assembly for a file
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_driver.dir/build.make CMakeFiles/real_lora_driver.dir/mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.cpp.s
+
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.o: mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.o
+
+# target to build an object file
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_tracker.dir/build.make CMakeFiles/real_lora_tracker.dir/mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.o
+
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.i: mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.i
+
+# target to preprocess a source file
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_tracker.dir/build.make CMakeFiles/real_lora_tracker.dir/mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.i
+
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.s: mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.s
+
+# target to generate assembly for a file
+mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_tracker.dir/build.make CMakeFiles/real_lora_tracker.dir/mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.cpp.s
+
+mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.o: mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.o
+
+# target to build an object file
+mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.o
+
+mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.i: mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.i
+
+# target to preprocess a source file
+mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.i
+
+mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.s: mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.s
+
+# target to generate assembly for a file
+mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.cpp.s
+
+mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.o: mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.o
+
+# target to build an object file
+mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.o
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.o
+
+mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.i: mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.i
+
+# target to preprocess a source file
+mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.i
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.i
+
+mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.s: mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.s
+
+# target to generate assembly for a file
+mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_cover.dir/build.make CMakeFiles/real_lora_cover.dir/mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.s
+.PHONY : mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.cpp.s
 
 node_stage/CmdDispatcher.o: node_stage/CmdDispatcher.cpp.o
 .PHONY : node_stage/CmdDispatcher.o
@@ -1432,6 +1649,30 @@ scenarios/drift_estimator_test.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/drift_estimator_test.dir/build.make CMakeFiles/drift_estimator_test.dir/scenarios/drift_estimator_test.cpp.s
 .PHONY : scenarios/drift_estimator_test.cpp.s
 
+scenarios/e2e_test.o: scenarios/e2e_test.cpp.o
+.PHONY : scenarios/e2e_test.o
+
+# target to build an object file
+scenarios/e2e_test.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/e2e_test.dir/build.make CMakeFiles/e2e_test.dir/scenarios/e2e_test.cpp.o
+.PHONY : scenarios/e2e_test.cpp.o
+
+scenarios/e2e_test.i: scenarios/e2e_test.cpp.i
+.PHONY : scenarios/e2e_test.i
+
+# target to preprocess a source file
+scenarios/e2e_test.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/e2e_test.dir/build.make CMakeFiles/e2e_test.dir/scenarios/e2e_test.cpp.i
+.PHONY : scenarios/e2e_test.cpp.i
+
+scenarios/e2e_test.s: scenarios/e2e_test.cpp.s
+.PHONY : scenarios/e2e_test.s
+
+# target to generate assembly for a file
+scenarios/e2e_test.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/e2e_test.dir/build.make CMakeFiles/e2e_test.dir/scenarios/e2e_test.cpp.s
+.PHONY : scenarios/e2e_test.cpp.s
+
 scenarios/frame_crypto_test.o: scenarios/frame_crypto_test.cpp.o
 .PHONY : scenarios/frame_crypto_test.o
 
@@ -1455,6 +1696,30 @@ scenarios/frame_crypto_test.s: scenarios/frame_crypto_test.cpp.s
 scenarios/frame_crypto_test.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/frame_crypto_test.dir/build.make CMakeFiles/frame_crypto_test.dir/scenarios/frame_crypto_test.cpp.s
 .PHONY : scenarios/frame_crypto_test.cpp.s
+
+scenarios/frtos_tasks_test.o: scenarios/frtos_tasks_test.cpp.o
+.PHONY : scenarios/frtos_tasks_test.o
+
+# target to build an object file
+scenarios/frtos_tasks_test.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/scenarios/frtos_tasks_test.cpp.o
+.PHONY : scenarios/frtos_tasks_test.cpp.o
+
+scenarios/frtos_tasks_test.i: scenarios/frtos_tasks_test.cpp.i
+.PHONY : scenarios/frtos_tasks_test.i
+
+# target to preprocess a source file
+scenarios/frtos_tasks_test.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/scenarios/frtos_tasks_test.cpp.i
+.PHONY : scenarios/frtos_tasks_test.cpp.i
+
+scenarios/frtos_tasks_test.s: scenarios/frtos_tasks_test.cpp.s
+.PHONY : scenarios/frtos_tasks_test.s
+
+# target to generate assembly for a file
+scenarios/frtos_tasks_test.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/scenarios/frtos_tasks_test.cpp.s
+.PHONY : scenarios/frtos_tasks_test.cpp.s
 
 scenarios/garbage_test.o: scenarios/garbage_test.cpp.o
 .PHONY : scenarios/garbage_test.o
@@ -1720,6 +1985,30 @@ scenarios/motor_policy_test.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/motor_policy_test.dir/build.make CMakeFiles/motor_policy_test.dir/scenarios/motor_policy_test.cpp.s
 .PHONY : scenarios/motor_policy_test.cpp.s
 
+scenarios/onboarding_gate_test.o: scenarios/onboarding_gate_test.cpp.o
+.PHONY : scenarios/onboarding_gate_test.o
+
+# target to build an object file
+scenarios/onboarding_gate_test.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/onboarding_gate_test.dir/build.make CMakeFiles/onboarding_gate_test.dir/scenarios/onboarding_gate_test.cpp.o
+.PHONY : scenarios/onboarding_gate_test.cpp.o
+
+scenarios/onboarding_gate_test.i: scenarios/onboarding_gate_test.cpp.i
+.PHONY : scenarios/onboarding_gate_test.i
+
+# target to preprocess a source file
+scenarios/onboarding_gate_test.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/onboarding_gate_test.dir/build.make CMakeFiles/onboarding_gate_test.dir/scenarios/onboarding_gate_test.cpp.i
+.PHONY : scenarios/onboarding_gate_test.cpp.i
+
+scenarios/onboarding_gate_test.s: scenarios/onboarding_gate_test.cpp.s
+.PHONY : scenarios/onboarding_gate_test.s
+
+# target to generate assembly for a file
+scenarios/onboarding_gate_test.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/onboarding_gate_test.dir/build.make CMakeFiles/onboarding_gate_test.dir/scenarios/onboarding_gate_test.cpp.s
+.PHONY : scenarios/onboarding_gate_test.cpp.s
+
 scenarios/pending_data_test.o: scenarios/pending_data_test.cpp.o
 .PHONY : scenarios/pending_data_test.o
 
@@ -1887,6 +2176,30 @@ scenarios/real_lora_driver_test.s: scenarios/real_lora_driver_test.cpp.s
 scenarios/real_lora_driver_test.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_driver_test.dir/build.make CMakeFiles/real_lora_driver_test.dir/scenarios/real_lora_driver_test.cpp.s
 .PHONY : scenarios/real_lora_driver_test.cpp.s
+
+scenarios/real_lora_interface_test.o: scenarios/real_lora_interface_test.cpp.o
+.PHONY : scenarios/real_lora_interface_test.o
+
+# target to build an object file
+scenarios/real_lora_interface_test.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/scenarios/real_lora_interface_test.cpp.o
+.PHONY : scenarios/real_lora_interface_test.cpp.o
+
+scenarios/real_lora_interface_test.i: scenarios/real_lora_interface_test.cpp.i
+.PHONY : scenarios/real_lora_interface_test.i
+
+# target to preprocess a source file
+scenarios/real_lora_interface_test.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/scenarios/real_lora_interface_test.cpp.i
+.PHONY : scenarios/real_lora_interface_test.cpp.i
+
+scenarios/real_lora_interface_test.s: scenarios/real_lora_interface_test.cpp.s
+.PHONY : scenarios/real_lora_interface_test.s
+
+# target to generate assembly for a file
+scenarios/real_lora_interface_test.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/scenarios/real_lora_interface_test.cpp.s
+.PHONY : scenarios/real_lora_interface_test.cpp.s
 
 scenarios/real_lora_tracker_test.o: scenarios/real_lora_tracker_test.cpp.o
 .PHONY : scenarios/real_lora_tracker_test.o
@@ -2080,6 +2393,30 @@ scenarios/session_manager_test.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/session_manager_test.dir/build.make CMakeFiles/session_manager_test.dir/scenarios/session_manager_test.cpp.s
 .PHONY : scenarios/session_manager_test.cpp.s
 
+scenarios/sleep_clock_correction_test.o: scenarios/sleep_clock_correction_test.cpp.o
+.PHONY : scenarios/sleep_clock_correction_test.o
+
+# target to build an object file
+scenarios/sleep_clock_correction_test.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sleep_clock_correction_test.dir/build.make CMakeFiles/sleep_clock_correction_test.dir/scenarios/sleep_clock_correction_test.cpp.o
+.PHONY : scenarios/sleep_clock_correction_test.cpp.o
+
+scenarios/sleep_clock_correction_test.i: scenarios/sleep_clock_correction_test.cpp.i
+.PHONY : scenarios/sleep_clock_correction_test.i
+
+# target to preprocess a source file
+scenarios/sleep_clock_correction_test.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sleep_clock_correction_test.dir/build.make CMakeFiles/sleep_clock_correction_test.dir/scenarios/sleep_clock_correction_test.cpp.i
+.PHONY : scenarios/sleep_clock_correction_test.cpp.i
+
+scenarios/sleep_clock_correction_test.s: scenarios/sleep_clock_correction_test.cpp.s
+.PHONY : scenarios/sleep_clock_correction_test.s
+
+# target to generate assembly for a file
+scenarios/sleep_clock_correction_test.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sleep_clock_correction_test.dir/build.make CMakeFiles/sleep_clock_correction_test.dir/scenarios/sleep_clock_correction_test.cpp.s
+.PHONY : scenarios/sleep_clock_correction_test.cpp.s
+
 scenarios/sleep_wake_test.o: scenarios/sleep_wake_test.cpp.o
 .PHONY : scenarios/sleep_wake_test.o
 
@@ -2200,6 +2537,30 @@ scenarios/timed_mode_policy_test.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/timed_mode_policy_test.dir/build.make CMakeFiles/timed_mode_policy_test.dir/scenarios/timed_mode_policy_test.cpp.s
 .PHONY : scenarios/timed_mode_policy_test.cpp.s
 
+scenarios/timesync_policy_test.o: scenarios/timesync_policy_test.cpp.o
+.PHONY : scenarios/timesync_policy_test.o
+
+# target to build an object file
+scenarios/timesync_policy_test.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/timesync_policy_test.dir/build.make CMakeFiles/timesync_policy_test.dir/scenarios/timesync_policy_test.cpp.o
+.PHONY : scenarios/timesync_policy_test.cpp.o
+
+scenarios/timesync_policy_test.i: scenarios/timesync_policy_test.cpp.i
+.PHONY : scenarios/timesync_policy_test.i
+
+# target to preprocess a source file
+scenarios/timesync_policy_test.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/timesync_policy_test.dir/build.make CMakeFiles/timesync_policy_test.dir/scenarios/timesync_policy_test.cpp.i
+.PHONY : scenarios/timesync_policy_test.cpp.i
+
+scenarios/timesync_policy_test.s: scenarios/timesync_policy_test.cpp.s
+.PHONY : scenarios/timesync_policy_test.s
+
+# target to generate assembly for a file
+scenarios/timesync_policy_test.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/timesync_policy_test.dir/build.make CMakeFiles/timesync_policy_test.dir/scenarios/timesync_policy_test.cpp.s
+.PHONY : scenarios/timesync_policy_test.cpp.s
+
 scenarios/tx_queue_test.o: scenarios/tx_queue_test.cpp.o
 .PHONY : scenarios/tx_queue_test.o
 
@@ -2223,6 +2584,30 @@ scenarios/tx_queue_test.s: scenarios/tx_queue_test.cpp.s
 scenarios/tx_queue_test.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/tx_queue_test.dir/build.make CMakeFiles/tx_queue_test.dir/scenarios/tx_queue_test.cpp.s
 .PHONY : scenarios/tx_queue_test.cpp.s
+
+scenarios/wake_clock_fit_test.o: scenarios/wake_clock_fit_test.cpp.o
+.PHONY : scenarios/wake_clock_fit_test.o
+
+# target to build an object file
+scenarios/wake_clock_fit_test.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/wake_clock_fit_test.dir/build.make CMakeFiles/wake_clock_fit_test.dir/scenarios/wake_clock_fit_test.cpp.o
+.PHONY : scenarios/wake_clock_fit_test.cpp.o
+
+scenarios/wake_clock_fit_test.i: scenarios/wake_clock_fit_test.cpp.i
+.PHONY : scenarios/wake_clock_fit_test.i
+
+# target to preprocess a source file
+scenarios/wake_clock_fit_test.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/wake_clock_fit_test.dir/build.make CMakeFiles/wake_clock_fit_test.dir/scenarios/wake_clock_fit_test.cpp.i
+.PHONY : scenarios/wake_clock_fit_test.cpp.i
+
+scenarios/wake_clock_fit_test.s: scenarios/wake_clock_fit_test.cpp.s
+.PHONY : scenarios/wake_clock_fit_test.s
+
+# target to generate assembly for a file
+scenarios/wake_clock_fit_test.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/wake_clock_fit_test.dir/build.make CMakeFiles/wake_clock_fit_test.dir/scenarios/wake_clock_fit_test.cpp.s
+.PHONY : scenarios/wake_clock_fit_test.cpp.s
 
 shims/esp_random.o: shims/esp_random.c.o
 .PHONY : shims/esp_random.o
@@ -2380,6 +2765,30 @@ shims_hub/spi_stub.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_driver.dir/build.make CMakeFiles/real_lora_driver.dir/shims_hub/spi_stub.cpp.s
 .PHONY : shims_hub/spi_stub.cpp.s
 
+shims_node/adc_stub.o: shims_node/adc_stub.c.o
+.PHONY : shims_node/adc_stub.o
+
+# target to build an object file
+shims_node/adc_stub.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/adc_stub.c.o
+.PHONY : shims_node/adc_stub.c.o
+
+shims_node/adc_stub.i: shims_node/adc_stub.c.i
+.PHONY : shims_node/adc_stub.i
+
+# target to preprocess a source file
+shims_node/adc_stub.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/adc_stub.c.i
+.PHONY : shims_node/adc_stub.c.i
+
+shims_node/adc_stub.s: shims_node/adc_stub.c.s
+.PHONY : shims_node/adc_stub.s
+
+# target to generate assembly for a file
+shims_node/adc_stub.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/adc_stub.c.s
+.PHONY : shims_node/adc_stub.c.s
+
 shims_node/esp_idf_stubs.o: shims_node/esp_idf_stubs.c.o
 .PHONY : shims_node/esp_idf_stubs.o
 
@@ -2388,6 +2797,7 @@ shims_node/esp_idf_stubs.c.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/shims_node/esp_idf_stubs.c.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/session_manager_test.dir/build.make CMakeFiles/session_manager_test.dir/shims_node/esp_idf_stubs.c.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_seam.dir/build.make CMakeFiles/real_cmd_dispatcher_seam.dir/shims_node/esp_idf_stubs.c.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/esp_idf_stubs.c.o
 .PHONY : shims_node/esp_idf_stubs.c.o
 
 shims_node/esp_idf_stubs.i: shims_node/esp_idf_stubs.c.i
@@ -2398,6 +2808,7 @@ shims_node/esp_idf_stubs.c.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/shims_node/esp_idf_stubs.c.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/session_manager_test.dir/build.make CMakeFiles/session_manager_test.dir/shims_node/esp_idf_stubs.c.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_seam.dir/build.make CMakeFiles/real_cmd_dispatcher_seam.dir/shims_node/esp_idf_stubs.c.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/esp_idf_stubs.c.i
 .PHONY : shims_node/esp_idf_stubs.c.i
 
 shims_node/esp_idf_stubs.s: shims_node/esp_idf_stubs.c.s
@@ -2408,6 +2819,7 @@ shims_node/esp_idf_stubs.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/shims_node/esp_idf_stubs.c.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/session_manager_test.dir/build.make CMakeFiles/session_manager_test.dir/shims_node/esp_idf_stubs.c.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_seam.dir/build.make CMakeFiles/real_cmd_dispatcher_seam.dir/shims_node/esp_idf_stubs.c.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/esp_idf_stubs.c.s
 .PHONY : shims_node/esp_idf_stubs.c.s
 
 shims_node/extern_stubs.o: shims_node/extern_stubs.cpp.o
@@ -2417,6 +2829,7 @@ shims_node/extern_stubs.o: shims_node/extern_stubs.cpp.o
 shims_node/extern_stubs.cpp.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/shims_node/extern_stubs.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_seam.dir/build.make CMakeFiles/real_cmd_dispatcher_seam.dir/shims_node/extern_stubs.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/extern_stubs.cpp.o
 .PHONY : shims_node/extern_stubs.cpp.o
 
 shims_node/extern_stubs.i: shims_node/extern_stubs.cpp.i
@@ -2426,6 +2839,7 @@ shims_node/extern_stubs.i: shims_node/extern_stubs.cpp.i
 shims_node/extern_stubs.cpp.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/shims_node/extern_stubs.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_seam.dir/build.make CMakeFiles/real_cmd_dispatcher_seam.dir/shims_node/extern_stubs.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/extern_stubs.cpp.i
 .PHONY : shims_node/extern_stubs.cpp.i
 
 shims_node/extern_stubs.s: shims_node/extern_stubs.cpp.s
@@ -2435,6 +2849,7 @@ shims_node/extern_stubs.s: shims_node/extern_stubs.cpp.s
 shims_node/extern_stubs.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher.dir/build.make CMakeFiles/real_cmd_dispatcher.dir/shims_node/extern_stubs.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_seam.dir/build.make CMakeFiles/real_cmd_dispatcher_seam.dir/shims_node/extern_stubs.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/extern_stubs.cpp.s
 .PHONY : shims_node/extern_stubs.cpp.s
 
 shims_node/host_clock.o: shims_node/host_clock.c.o
@@ -2446,6 +2861,9 @@ shims_node/host_clock.c.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/session_manager_test.dir/build.make CMakeFiles/session_manager_test.dir/shims_node/host_clock.c.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_test.dir/build.make CMakeFiles/real_cmd_dispatcher_test.dir/shims_node/host_clock.c.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/seam_test.dir/build.make CMakeFiles/seam_test.dir/shims_node/host_clock.c.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/e2e_test.dir/build.make CMakeFiles/e2e_test.dir/shims_node/host_clock.c.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/host_clock.c.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/shims_node/host_clock.c.o
 .PHONY : shims_node/host_clock.c.o
 
 shims_node/host_clock.i: shims_node/host_clock.c.i
@@ -2457,6 +2875,9 @@ shims_node/host_clock.c.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/session_manager_test.dir/build.make CMakeFiles/session_manager_test.dir/shims_node/host_clock.c.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_test.dir/build.make CMakeFiles/real_cmd_dispatcher_test.dir/shims_node/host_clock.c.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/seam_test.dir/build.make CMakeFiles/seam_test.dir/shims_node/host_clock.c.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/e2e_test.dir/build.make CMakeFiles/e2e_test.dir/shims_node/host_clock.c.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/host_clock.c.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/shims_node/host_clock.c.i
 .PHONY : shims_node/host_clock.c.i
 
 shims_node/host_clock.s: shims_node/host_clock.c.s
@@ -2468,7 +2889,34 @@ shims_node/host_clock.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/session_manager_test.dir/build.make CMakeFiles/session_manager_test.dir/shims_node/host_clock.c.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_cmd_dispatcher_test.dir/build.make CMakeFiles/real_cmd_dispatcher_test.dir/shims_node/host_clock.c.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/seam_test.dir/build.make CMakeFiles/seam_test.dir/shims_node/host_clock.c.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/e2e_test.dir/build.make CMakeFiles/e2e_test.dir/shims_node/host_clock.c.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/host_clock.c.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface_test.dir/build.make CMakeFiles/real_lora_interface_test.dir/shims_node/host_clock.c.s
 .PHONY : shims_node/host_clock.c.s
+
+shims_node/lora_hal_stub_node.o: shims_node/lora_hal_stub_node.cpp.o
+.PHONY : shims_node/lora_hal_stub_node.o
+
+# target to build an object file
+shims_node/lora_hal_stub_node.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/lora_hal_stub_node.cpp.o
+.PHONY : shims_node/lora_hal_stub_node.cpp.o
+
+shims_node/lora_hal_stub_node.i: shims_node/lora_hal_stub_node.cpp.i
+.PHONY : shims_node/lora_hal_stub_node.i
+
+# target to preprocess a source file
+shims_node/lora_hal_stub_node.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/lora_hal_stub_node.cpp.i
+.PHONY : shims_node/lora_hal_stub_node.cpp.i
+
+shims_node/lora_hal_stub_node.s: shims_node/lora_hal_stub_node.cpp.s
+.PHONY : shims_node/lora_hal_stub_node.s
+
+# target to generate assembly for a file
+shims_node/lora_hal_stub_node.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/real_lora_interface.dir/build.make CMakeFiles/real_lora_interface.dir/shims_node/lora_hal_stub_node.cpp.s
+.PHONY : shims_node/lora_hal_stub_node.cpp.s
 
 sim/crypto.o: sim/crypto.cpp.o
 .PHONY : sim/crypto.o
@@ -2638,6 +3086,7 @@ help:
 	@echo "... cover_config_test"
 	@echo "... crypto_test"
 	@echo "... drift_estimator_test"
+	@echo "... e2e_test"
 	@echo "... frame_crypto_test"
 	@echo "... garbage_test"
 	@echo "... gmock"
@@ -2654,6 +3103,7 @@ help:
 	@echo "... mode_a_reliability_test"
 	@echo "... mode_test_policy_test"
 	@echo "... motor_policy_test"
+	@echo "... onboarding_gate_test"
 	@echo "... pending_data_test"
 	@echo "... phase_tracker_test"
 	@echo "... proto_sim"
@@ -2667,6 +3117,8 @@ help:
 	@echo "... real_lora_cover_test"
 	@echo "... real_lora_driver"
 	@echo "... real_lora_driver_test"
+	@echo "... real_lora_interface"
+	@echo "... real_lora_interface_test"
 	@echo "... real_lora_tracker"
 	@echo "... real_lora_tracker_test"
 	@echo "... reboot_test"
@@ -2676,36 +3128,54 @@ help:
 	@echo "... scheduler_test"
 	@echo "... seam_test"
 	@echo "... session_manager_test"
+	@echo "... sleep_clock_correction_test"
 	@echo "... sleep_wake_test"
 	@echo "... sweep_analysis_test"
 	@echo "... sysop_test"
 	@echo "... timed_grid_test"
 	@echo "... timed_mode_policy_test"
+	@echo "... timesync_policy_test"
 	@echo "... tx_queue_test"
-	@echo "... home/user/blindsesp/main/Scheduler.o"
-	@echo "... home/user/blindsesp/main/Scheduler.i"
-	@echo "... home/user/blindsesp/main/Scheduler.s"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.o"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.i"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/blindsproto/blinds.pb-c.s"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.o"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.i"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_client/Scheduler.s"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.o"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.i"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_client/lora_client.s"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.o"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.i"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora.s"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.o"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.i"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/lora_tracker/lora_tracker.s"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.o"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.i"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/loracover/cover/lora_cover.s"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.o"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.i"
-	@echo "... home/user/esphome_localcomponents/configuration/local_components/loracover/loracover_base.s"
+	@echo "... wake_clock_fit_test"
+	@echo "... iface_stage/CmdDispatcher.o"
+	@echo "... iface_stage/CmdDispatcher.i"
+	@echo "... iface_stage/CmdDispatcher.s"
+	@echo "... iface_stage/LoraInterface.o"
+	@echo "... iface_stage/LoraInterface.i"
+	@echo "... iface_stage/LoraInterface.s"
+	@echo "... iface_stage/SessionManager.o"
+	@echo "... iface_stage/SessionManager.i"
+	@echo "... iface_stage/SessionManager.s"
+	@echo "... iface_stage/comm_utils.o"
+	@echo "... iface_stage/comm_utils.i"
+	@echo "... iface_stage/comm_utils.s"
+	@echo "... iface_stage/frtosTasks.o"
+	@echo "... iface_stage/frtosTasks.i"
+	@echo "... iface_stage/frtosTasks.s"
+	@echo "... mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.o"
+	@echo "... mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.i"
+	@echo "... mnt/c/Development/PlatformIO/PlatformIO/BlindsESP/main/Scheduler.s"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.o"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.i"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/blindsproto/blinds.pb-c.s"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.o"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.i"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_client/Scheduler.s"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.o"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.i"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_client/lora_client.s"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.o"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.i"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora.s"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.o"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.i"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/lora_tracker/lora_tracker.s"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.o"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.i"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/loracover/cover/lora_cover.s"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.o"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.i"
+	@echo "... mnt/c/Development/esphome/configuration/local_components/loracover/loracover_base.s"
 	@echo "... node_stage/CmdDispatcher.o"
 	@echo "... node_stage/CmdDispatcher.i"
 	@echo "... node_stage/CmdDispatcher.s"
@@ -2748,9 +3218,15 @@ help:
 	@echo "... scenarios/drift_estimator_test.o"
 	@echo "... scenarios/drift_estimator_test.i"
 	@echo "... scenarios/drift_estimator_test.s"
+	@echo "... scenarios/e2e_test.o"
+	@echo "... scenarios/e2e_test.i"
+	@echo "... scenarios/e2e_test.s"
 	@echo "... scenarios/frame_crypto_test.o"
 	@echo "... scenarios/frame_crypto_test.i"
 	@echo "... scenarios/frame_crypto_test.s"
+	@echo "... scenarios/frtos_tasks_test.o"
+	@echo "... scenarios/frtos_tasks_test.i"
+	@echo "... scenarios/frtos_tasks_test.s"
 	@echo "... scenarios/garbage_test.o"
 	@echo "... scenarios/garbage_test.i"
 	@echo "... scenarios/garbage_test.s"
@@ -2784,6 +3260,9 @@ help:
 	@echo "... scenarios/motor_policy_test.o"
 	@echo "... scenarios/motor_policy_test.i"
 	@echo "... scenarios/motor_policy_test.s"
+	@echo "... scenarios/onboarding_gate_test.o"
+	@echo "... scenarios/onboarding_gate_test.i"
+	@echo "... scenarios/onboarding_gate_test.s"
 	@echo "... scenarios/pending_data_test.o"
 	@echo "... scenarios/pending_data_test.i"
 	@echo "... scenarios/pending_data_test.s"
@@ -2805,6 +3284,9 @@ help:
 	@echo "... scenarios/real_lora_driver_test.o"
 	@echo "... scenarios/real_lora_driver_test.i"
 	@echo "... scenarios/real_lora_driver_test.s"
+	@echo "... scenarios/real_lora_interface_test.o"
+	@echo "... scenarios/real_lora_interface_test.i"
+	@echo "... scenarios/real_lora_interface_test.s"
 	@echo "... scenarios/real_lora_tracker_test.o"
 	@echo "... scenarios/real_lora_tracker_test.i"
 	@echo "... scenarios/real_lora_tracker_test.s"
@@ -2829,6 +3311,9 @@ help:
 	@echo "... scenarios/session_manager_test.o"
 	@echo "... scenarios/session_manager_test.i"
 	@echo "... scenarios/session_manager_test.s"
+	@echo "... scenarios/sleep_clock_correction_test.o"
+	@echo "... scenarios/sleep_clock_correction_test.i"
+	@echo "... scenarios/sleep_clock_correction_test.s"
 	@echo "... scenarios/sleep_wake_test.o"
 	@echo "... scenarios/sleep_wake_test.i"
 	@echo "... scenarios/sleep_wake_test.s"
@@ -2844,9 +3329,15 @@ help:
 	@echo "... scenarios/timed_mode_policy_test.o"
 	@echo "... scenarios/timed_mode_policy_test.i"
 	@echo "... scenarios/timed_mode_policy_test.s"
+	@echo "... scenarios/timesync_policy_test.o"
+	@echo "... scenarios/timesync_policy_test.i"
+	@echo "... scenarios/timesync_policy_test.s"
 	@echo "... scenarios/tx_queue_test.o"
 	@echo "... scenarios/tx_queue_test.i"
 	@echo "... scenarios/tx_queue_test.s"
+	@echo "... scenarios/wake_clock_fit_test.o"
+	@echo "... scenarios/wake_clock_fit_test.i"
+	@echo "... scenarios/wake_clock_fit_test.s"
 	@echo "... shims/esp_random.o"
 	@echo "... shims/esp_random.i"
 	@echo "... shims/esp_random.s"
@@ -2865,6 +3356,9 @@ help:
 	@echo "... shims_hub/spi_stub.o"
 	@echo "... shims_hub/spi_stub.i"
 	@echo "... shims_hub/spi_stub.s"
+	@echo "... shims_node/adc_stub.o"
+	@echo "... shims_node/adc_stub.i"
+	@echo "... shims_node/adc_stub.s"
 	@echo "... shims_node/esp_idf_stubs.o"
 	@echo "... shims_node/esp_idf_stubs.i"
 	@echo "... shims_node/esp_idf_stubs.s"
@@ -2874,6 +3368,9 @@ help:
 	@echo "... shims_node/host_clock.o"
 	@echo "... shims_node/host_clock.i"
 	@echo "... shims_node/host_clock.s"
+	@echo "... shims_node/lora_hal_stub_node.o"
+	@echo "... shims_node/lora_hal_stub_node.i"
+	@echo "... shims_node/lora_hal_stub_node.s"
 	@echo "... sim/crypto.o"
 	@echo "... sim/crypto.i"
 	@echo "... sim/crypto.s"

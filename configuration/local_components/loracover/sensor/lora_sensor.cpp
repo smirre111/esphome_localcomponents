@@ -150,6 +150,14 @@ namespace esphome
         // F-11: motor current rides in the position frame (raw ADC counts).
         if (this->motor_current_ != nullptr)
           this->motor_current_->publish_state(position->current);
+        // Battery-runtime compensation telemetry: 0/0 means "no calibration
+        // event in this packet" (proto3 "absent") -- skip the publish rather
+        // than show a misleading 0 s point in the history graph; the sensor
+        // just holds its last real value until the next one.
+        if (this->calib_actual_run_ != nullptr && position->actualruns > 0.0f)
+          this->calib_actual_run_->publish_state(position->actualruns);
+        if (this->calib_nominal_run_ != nullptr && position->nominalruns > 0.0f)
+          this->calib_nominal_run_->publish_state(position->nominalruns);
         this->publish_link_rssi_();
       }
       lora_client_response_message__free_unpacked(rcv_message, NULL);

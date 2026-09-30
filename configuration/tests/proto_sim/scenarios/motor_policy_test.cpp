@@ -237,44 +237,50 @@ TEST(MotorPolicy, PositionIsNotLinearInTime) {
 // When to stop: the current-sense endstop
 // ---------------------------------------------------------------------------
 
-TEST(MotorPolicy, EndstopArmsOnlyNearTheEnd) {
-    // A mid-travel current dip (gravity assist, load variation, commutation
-    // gap) must not read as "reached the end".
-    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_OPENING, 0.50f, false, 0.0f));
-    EXPECT_TRUE (endstopArmed(BLINDS_FULLY_OPENING, 0.90f, false, 0.0f));
-    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_CLOSING, 0.50f, false, 0.0f));
-    EXPECT_TRUE (endstopArmed(BLINDS_FULLY_CLOSING, 0.10f, false, 0.0f));
+// 2026-09-29 REDESIGN: the position-based near-end gate (kEndstopArmPos) is
+// gone -- the current-sense endstop is now the ONLY terminator for a full
+// move (user decision 1/3), armed for the whole move once a short startup
+// blanking window has passed, regardless of position. See MotorPolicy.h's
+// own comment on endstopArmed() and battery-runtime-implementation.md's
+// 2026-09-29 entry for why (bench data showed the position estimate
+// saturating 30-45s before the real current-based end).
+
+TEST(MotorPolicy, EndstopArmedRegardlessOfPositionOnceUnblanked) {
+    // Position no longer gates it at all -- a mid-travel current dip is
+    // caught by the debounce (kZeroCurrentStopCount), not by a position gate.
+    const uint32_t t = kEndstopBlankingMs;
+    EXPECT_TRUE(endstopArmed(BLINDS_FULLY_OPENING, false, t));
+    EXPECT_TRUE(endstopArmed(BLINDS_FULLY_CLOSING, false, t));
 }
 
-TEST(MotorPolicy, TheNearEndGateAppliesInBothDirections) {
-    // It was once armed for the whole of one direction, which let a dip stop
-    // the blind mid-travel.
-    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_OPENING, kEndstopArmPos - 0.01f, false, 0.0f));
-    EXPECT_TRUE (endstopArmed(BLINDS_FULLY_OPENING, kEndstopArmPos,         false, 0.0f));
-    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_CLOSING, (1.0f - kEndstopArmPos) + 0.01f, false, 0.0f));
-    EXPECT_TRUE (endstopArmed(BLINDS_FULLY_CLOSING, (1.0f - kEndstopArmPos),         false, 0.0f));
+TEST(MotorPolicy, EndstopIsDeafForTheBlankingWindowAtMoveStart) {
+    // The current-sense queue still holds stale zero samples from idle, and
+    // the PWM ramps up over ~1s -- without this window a move could stop
+    // before it starts.
+    const uint32_t t = kEndstopBlankingMs;
+    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_OPENING, false, 0));
+    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_CLOSING, false, t - 1));
+    EXPECT_TRUE (endstopArmed(BLINDS_FULLY_CLOSING, false, t));
 }
 
 TEST(MotorPolicy, EndstopNeverArmsForAnIntermediateTarget) {
     // The important one. On a target move a spurious zero would preempt the
     // target stop and snap the blind to the extreme — the user asks for 50 %
-    // and gets fully open.
-    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_OPENING, 0.95f, /*target mode=*/true, 0.5f));
-    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_CLOSING, 0.05f, /*target mode=*/true, 0.5f));
-}
-
-TEST(MotorPolicy, EndstopStillArmsWhenTheTargetIsAnExtreme) {
-    // A target of 1.0 IS a full open, so the endstop is the right terminator.
-    EXPECT_TRUE(endstopArmed(BLINDS_FULLY_OPENING, 0.95f, true, 1.0f));
-    EXPECT_TRUE(endstopArmed(BLINDS_FULLY_CLOSING, 0.05f, true, 0.0f));
+    // and gets fully open. Even a target of an extreme (1.0/0.0) does NOT
+    // re-arm it (2026-09-29): only a genuine full move does, never a target
+    // move regardless of what it targets.
+    const uint32_t t = kEndstopBlankingMs;
+    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_OPENING, /*target mode=*/true, t));
+    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_CLOSING, /*target mode=*/true, t));
 }
 
 TEST(MotorPolicy, EndstopNeverArmsWhileStepping) {
     // A step is short and never reaches an end, so a zero reading during one is
     // noise by definition.
-    EXPECT_FALSE(endstopArmed(BLINDS_STEP_UP,   0.99f, false, 0.0f));
-    EXPECT_FALSE(endstopArmed(BLINDS_STEP_DOWN, 0.01f, false, 0.0f));
-    EXPECT_FALSE(endstopArmed(BLINDS_IDLE,      0.99f, false, 0.0f));
+    const uint32_t t = kEndstopBlankingMs;
+    EXPECT_FALSE(endstopArmed(BLINDS_STEP_UP,   false, t));
+    EXPECT_FALSE(endstopArmed(BLINDS_STEP_DOWN, false, t));
+    EXPECT_FALSE(endstopArmed(BLINDS_IDLE,      false, t));
 }
 
 TEST(MotorPolicy, TheZeroCurrentDebounceIsMoreThanOneSample) {
@@ -372,13 +378,13 @@ TEST(MotorPolicy, OnATargetMoveOnlyTheTargetCanStopIt) {
     // The four terminators overlap, and this is the combination that matters:
     // a 50 % request must be ended by the target, never by the endstop.
     const float pos = 0.95f;
-    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_OPENING, pos, true, 0.5f));
+    EXPECT_FALSE(endstopArmed(BLINDS_FULLY_OPENING, /*target mode=*/true, kEndstopBlankingMs));
     EXPECT_TRUE (targetReached(BLINDS_FULLY_OPENING, pos, true, 0.5f));
 }
 
 TEST(MotorPolicy, OnAFullMoveTheTargetNeverInterferes) {
     const float pos = 0.95f;
-    EXPECT_TRUE (endstopArmed(BLINDS_FULLY_OPENING, pos, false, 0.5f));
+    EXPECT_TRUE (endstopArmed(BLINDS_FULLY_OPENING, /*target mode=*/false, kEndstopBlankingMs));
     EXPECT_FALSE(targetReached(BLINDS_FULLY_OPENING, pos, false, 0.5f));
 }
 

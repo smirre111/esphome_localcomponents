@@ -234,8 +234,8 @@ cover:
     #   open_slack  = un-seal run before travel when opening from fully closed
     #   close_slack = seal run budget after travel reaches 0 on a full close
     # Starting estimates — recalibrate with a stopwatch.
-    open_duration: 38
-    close_duration: 36
+    open_duration: 65
+    close_duration: 55
     open_slack: 7
     close_slack: 7
     blind_height_mm: 2000.0
@@ -272,6 +272,44 @@ button:
     id: rol_2_trigger_ota_button
     # type: trigger_ota
 
+  # ---- Runtime debug toggles (DebugFlags.h, node repo, 2026-09-29) --------
+  # No reflash needed: these flip a persisted flag on the node over LoRa.
+  # idle_current_on/off is sticky (survives reboot); trace_capture_arm is a
+  # one-shot that disarms the current-sense endstop for exactly the next full
+  # open/close so its whole current trace can be read back -- it self-clears,
+  # so it must be pressed again before every capture. Node 1 is field-only
+  # (no serial), so this is the only way to run these captures on it at all.
+  - platform: loracover
+    lora_client_id: rol_1
+    name: "RollladenWohnzimmer1 Debug Idle Current ON"
+    id: rol_1_debug_idle_current_on
+    op: idle_current_on
+  - platform: loracover
+    lora_client_id: rol_1
+    name: "RollladenWohnzimmer1 Debug Idle Current OFF"
+    id: rol_1_debug_idle_current_off
+    op: idle_current_off
+  - platform: loracover
+    lora_client_id: rol_1
+    name: "RollladenWohnzimmer1 Debug Trace Capture Arm"
+    id: rol_1_debug_trace_capture_arm
+    op: trace_capture_arm
+  - platform: loracover
+    lora_client_id: rol_2
+    name: "RollladenWohnzimmer2 Debug Idle Current ON"
+    id: rol_2_debug_idle_current_on
+    op: idle_current_on
+  - platform: loracover
+    lora_client_id: rol_2
+    name: "RollladenWohnzimmer2 Debug Idle Current OFF"
+    id: rol_2_debug_idle_current_off
+    op: idle_current_off
+  - platform: loracover
+    lora_client_id: rol_2
+    name: "RollladenWohnzimmer2 Debug Trace Capture Arm"
+    id: rol_2_debug_trace_capture_arm
+    op: trace_capture_arm
+
   # --- Clock-drift characterisation (bench only) ---------------------------
   # Puts both ends into test mode: the node holds continuous RX, the hub emits
   # a burst every 15 s as a regular ruler. The node then regresses the arrival
@@ -290,273 +328,273 @@ button:
   # is NOT something to leave running. Both ends stop themselves after 5 min,
   # and the node's timeout is independent of the hub — if the hub goes away
   # mid-test the node still exits.
-  - platform: template
-    name: "Drift Test Start (node 2)"
-    id: rol_2_drift_start
-    entity_category: diagnostic
-    on_press:
-      # 1100 ms, deliberately NOT a multiple of the node's 500 ms RX interval.
-      # Commensurate periods phase-lock: a 1000 ms grid against 500 ms windows
-      # keeps a constant phase relationship, so if a frame starts landing in the
-      # node's RX-off gap it does so forever. Observed exactly that — ~300 grid
-      # frames heard, zero. Belt and braces: the node is in continuous RX by the
-      # time the grid starts, so this should not matter.
-      - lambda: 'id(rol_2)->start_drift_test(300, 1100);'
-  - platform: template
-    name: "Drift Test Stop (node 2)"
-    id: rol_2_drift_stop
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->stop_drift_test();'
+  # - platform: template
+  #   name: "Drift Test Start (node 2)"
+  #   id: rol_2_drift_start
+  #   entity_category: diagnostic
+  #   on_press:
+  #     # 1100 ms, deliberately NOT a multiple of the node's 500 ms RX interval.
+  #     # Commensurate periods phase-lock: a 1000 ms grid against 500 ms windows
+  #     # keeps a constant phase relationship, so if a frame starts landing in the
+  #     # node's RX-off gap it does so forever. Observed exactly that — ~300 grid
+  #     # frames heard, zero. Belt and braces: the node is in continuous RX by the
+  #     # time the grid starts, so this should not matter.
+  #     - lambda: 'id(rol_2)->start_drift_test(300, 1100);'
+  # - platform: template
+  #   name: "Drift Test Stop (node 2)"
+  #   id: rol_2_drift_stop
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->stop_drift_test();'
 
-  # --- ModeTest: on-hardware validation of a mode (test-plan.md section 10) ---
-  #
-  # Distinct from the drift test above, which measures ONE thing (relative clock
-  # rate) with the power profile disabled. ModeTest runs under the PRODUCTION
-  # profile by default and reports the frame funnel, the window decisions and
-  # four timing distributions, so a mode's claims can be checked against the
-  # mode as it actually ships. The report is logged by the hub, recomputed from
-  # the node's RAW counters — the node never gets to grade itself.
-  #
-  # The node refuses to arm without a session, refuses MODE_SWEEP unless it is
-  # flagged as a bench node, and owns its own deadline: if the hub disappears
-  # mid-test the node still exits and restores everything, its MODE included.
-  #
-  # Arguments: (duration_s, grid_ms, mode, copies, keepPowerProfile,
-  #             enableCounter, enableCrypto, macEcho, armOffsetUs)
-  # mode: 0 leave alone, 1 A, 2 B, 3 C, 4 SWEEP.
-  - platform: template
-    name: "Mode Test A — MAC-0 baseline (node 2)"
-    id: rol_2_modetest_a
-    entity_category: diagnostic
-    on_press:
-      # 1093 ms, NOT 1100. MEASURED 2026-09-12: at 1100 ms the hub sent 277
-      # marks and the node detected ONE. Phase-locking is governed by the gcd,
-      # not by divisibility — marks land at (k * grid) mod 500, a lattice of
-      # step gcd(grid, 500) that never grows. 1100 gives gcd 100 ms, i.e. five
-      # fixed phases forever; against a 29.44 ms window they cover 147 ms of
-      # the 500 ms interval, so ~71 % of runs hear nothing at all and the rest
-      # hear 1 mark in 5. 1093 gives gcd 1 ms: the phase walks 93 ms per mark
-      # and sweeps every residue. The node now REFUSES the phase-locked case
-      # (ModeTestPolicy.h periodsPhaseLock) instead of measuring an empty
-      # denominator.
-      #
-      # Both sublayers off and macEcho on: this is the baseline every other run
-      # is a delta against. A MAC echo measures RxDone -> TX fire and nothing
-      # else, which is what section 4.3's servable-slot rule needs and cannot
-      # get from a command the application answers.
-      - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, false, false, true);'
-  - platform: template
-    name: "Mode Test A — with MAC-1 counter (node 2)"
-    id: rol_2_modetest_a_counter
-    entity_category: diagnostic
-    on_press:
-      # Identical grid, counter ON. The DIFFERENCE against the baseline is
-      # MAC-1's cost — measured, not estimated. Run them back to back.
-      - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, true, false, true);'
-  - platform: template
-    name: "Mode Test A — with MAC-1 + MAC-2 (node 2)"
-    id: rol_2_modetest_a_crypto
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, true, true, true);'
-  - platform: template
-    name: "Mode Test B — timed windows (node 2)"
-    id: rol_2_modetest_b
-    entity_category: diagnostic
-    on_press:
-      # In MODE_B the incommensurability rule INVERTS: the period must be
-      # exactly the round and phase-locked to the node's slot. That is the mode.
-      - lambda: 'id(rol_2)->start_mode_test(300, 1500, 2, 1, true, false, false, true);'
-  - platform: template
-    name: "Mode Test B — bootstrap burst (node 2)"
-    id: rol_2_modetest_b_burst
-    entity_category: diagnostic
-    on_press:
-      # EIGHT COPIES, and the reason is the measurement of 2026-09-12.
-      #
-      # A node that is not yet promoted listens on a FREE-RUNNING 500 ms window,
-      # and every grid-placed frame sits at a multiple of the 1500 ms round —
-      # so gcd(1500, 500) = 500 and the marks occupy exactly ONE phase mod 500,
-      # forever. Against a 29.44 ms window that is a ~5.9 % chance of the phase
-      # being catchable at all, and if it is not, the node hears no mark for the
-      # whole run: single-copy Mode B measured `detected 2` in 300 s and
-      # returned windows 0/0.
-      #
-      # Eight copies at the 88 ms stride span ~704 ms, which is longer than the
-      # 500 ms window period, so at least one copy ALWAYS lands in a window
-      # whatever the phase. The node backs the copy index out
-      # (drift::kCopySpacingUs) and recovers copy 0's T0, so a caught copy is
-      # still a sample about the MARK — that path exists for exactly this case.
-      #
-      # This is the bootstrap instrument, not a production setting: it is how a
-      # cold node accumulates the 8 in-guard phase samples
-      # phaseTrustworthy() needs before timedRxActive() will arm anything.
-      - lambda: 'id(rol_2)->start_mode_test(300, 1500, 2, 8, true, false, false, true);'
-  - platform: template
-    name: "Mode Test A — long, MAC-0 baseline (node 2)"
-    id: rol_2_modetest_a_long
-    entity_category: diagnostic
-    on_press:
-      # Mode A's MAC-0 numbers: ppm and FER_link. 900 s is the node's cap. At the
-      # measured 5.4-6.5 % free-running catch rate a 1093 ms grid gives ~45
-      # marks, past the >= 30 samples over >= 200 s a rate needs. The 300 s
-      # buttons give ~16, which cannot carry a ppm figure.
-      - lambda: 'id(rol_2)->start_mode_test(900, 1093, 1, 1, true, false, false, true);'
-  - platform: template
-    name: "Mode Test B — long, production profile (node 2)"
-    id: rol_2_modetest_b_long_prod
-    entity_category: diagnostic
-    on_press:
-      # HW-5 and half of HW-3, and the run Mode B's pass line is read from:
-      # |ppm| < 20 under the PRODUCTION profile (auto light sleep, 32.768 kHz
-      # crystal). 900 s is the node's cap (kMaxDurationS). At the free-running
-      # ~6 % catch rate that is ~35 marks over ~900 s — past the >= 30 samples
-      # over >= 200 s the rate needs to mean anything. The 300 s runs gave 12.
-      - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, true, false, false, true);'
-  - platform: template
-    name: "Mode Test B — long, sleep off (node 2)"
-    id: rol_2_modetest_b_long_measuring
-    entity_category: diagnostic
-    on_press:
-      # IDENTICAL to the button above except keepPowerProfile = false: no light
-      # sleep, CPU pinned at 240 MHz. Run back to back with it. Measured
-      # 2026-09-13 under the production profile: phase p50 +8.5 ms, max
-      # +17.6 ms (outside the 14 080 us guard), ppm +58 on 12 samples. If the
-      # bias and the tail vanish here, they are light-sleep wake latency (HW-3's
-      # delta); if the ppm drops toward DriftTest's +8, light sleep is costing
-      # the rate and Mode B fails at the root. Draws ~11 mA while it runs.
-      - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, false, false, false, true);'
-  - platform: template
-    name: "Mode Test Stop (node 2)"
-    id: rol_2_modetest_stop
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->stop_mode_test();'
+  # # --- ModeTest: on-hardware validation of a mode (test-plan.md section 10) ---
+  # #
+  # # Distinct from the drift test above, which measures ONE thing (relative clock
+  # # rate) with the power profile disabled. ModeTest runs under the PRODUCTION
+  # # profile by default and reports the frame funnel, the window decisions and
+  # # four timing distributions, so a mode's claims can be checked against the
+  # # mode as it actually ships. The report is logged by the hub, recomputed from
+  # # the node's RAW counters — the node never gets to grade itself.
+  # #
+  # # The node refuses to arm without a session, refuses MODE_SWEEP unless it is
+  # # flagged as a bench node, and owns its own deadline: if the hub disappears
+  # # mid-test the node still exits and restores everything, its MODE included.
+  # #
+  # # Arguments: (duration_s, grid_ms, mode, copies, keepPowerProfile,
+  # #             enableCounter, enableCrypto, macEcho, armOffsetUs)
+  # # mode: 0 leave alone, 1 A, 2 B, 3 C, 4 SWEEP.
+  # - platform: template
+  #   name: "Mode Test A — MAC-0 baseline (node 2)"
+  #   id: rol_2_modetest_a
+  #   entity_category: diagnostic
+  #   on_press:
+  #     # 1093 ms, NOT 1100. MEASURED 2026-09-12: at 1100 ms the hub sent 277
+  #     # marks and the node detected ONE. Phase-locking is governed by the gcd,
+  #     # not by divisibility — marks land at (k * grid) mod 500, a lattice of
+  #     # step gcd(grid, 500) that never grows. 1100 gives gcd 100 ms, i.e. five
+  #     # fixed phases forever; against a 29.44 ms window they cover 147 ms of
+  #     # the 500 ms interval, so ~71 % of runs hear nothing at all and the rest
+  #     # hear 1 mark in 5. 1093 gives gcd 1 ms: the phase walks 93 ms per mark
+  #     # and sweeps every residue. The node now REFUSES the phase-locked case
+  #     # (ModeTestPolicy.h periodsPhaseLock) instead of measuring an empty
+  #     # denominator.
+  #     #
+  #     # Both sublayers off and macEcho on: this is the baseline every other run
+  #     # is a delta against. A MAC echo measures RxDone -> TX fire and nothing
+  #     # else, which is what section 4.3's servable-slot rule needs and cannot
+  #     # get from a command the application answers.
+  #     - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, false, false, true);'
+  # - platform: template
+  #   name: "Mode Test A — with MAC-1 counter (node 2)"
+  #   id: rol_2_modetest_a_counter
+  #   entity_category: diagnostic
+  #   on_press:
+  #     # Identical grid, counter ON. The DIFFERENCE against the baseline is
+  #     # MAC-1's cost — measured, not estimated. Run them back to back.
+  #     - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, true, false, true);'
+  # - platform: template
+  #   name: "Mode Test A — with MAC-1 + MAC-2 (node 2)"
+  #   id: rol_2_modetest_a_crypto
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->start_mode_test(300, 1093, 1, 1, true, true, true, true);'
+  # - platform: template
+  #   name: "Mode Test B — timed windows (node 2)"
+  #   id: rol_2_modetest_b
+  #   entity_category: diagnostic
+  #   on_press:
+  #     # In MODE_B the incommensurability rule INVERTS: the period must be
+  #     # exactly the round and phase-locked to the node's slot. That is the mode.
+  #     - lambda: 'id(rol_2)->start_mode_test(300, 1500, 2, 1, true, false, false, true);'
+  # - platform: template
+  #   name: "Mode Test B — bootstrap burst (node 2)"
+  #   id: rol_2_modetest_b_burst
+  #   entity_category: diagnostic
+  #   on_press:
+  #     # EIGHT COPIES, and the reason is the measurement of 2026-09-12.
+  #     #
+  #     # A node that is not yet promoted listens on a FREE-RUNNING 500 ms window,
+  #     # and every grid-placed frame sits at a multiple of the 1500 ms round —
+  #     # so gcd(1500, 500) = 500 and the marks occupy exactly ONE phase mod 500,
+  #     # forever. Against a 29.44 ms window that is a ~5.9 % chance of the phase
+  #     # being catchable at all, and if it is not, the node hears no mark for the
+  #     # whole run: single-copy Mode B measured `detected 2` in 300 s and
+  #     # returned windows 0/0.
+  #     #
+  #     # Eight copies at the 88 ms stride span ~704 ms, which is longer than the
+  #     # 500 ms window period, so at least one copy ALWAYS lands in a window
+  #     # whatever the phase. The node backs the copy index out
+  #     # (drift::kCopySpacingUs) and recovers copy 0's T0, so a caught copy is
+  #     # still a sample about the MARK — that path exists for exactly this case.
+  #     #
+  #     # This is the bootstrap instrument, not a production setting: it is how a
+  #     # cold node accumulates the 8 in-guard phase samples
+  #     # phaseTrustworthy() needs before timedRxActive() will arm anything.
+  #     - lambda: 'id(rol_2)->start_mode_test(300, 1500, 2, 8, true, false, false, true);'
+  # - platform: template
+  #   name: "Mode Test A — long, MAC-0 baseline (node 2)"
+  #   id: rol_2_modetest_a_long
+  #   entity_category: diagnostic
+  #   on_press:
+  #     # Mode A's MAC-0 numbers: ppm and FER_link. 900 s is the node's cap. At the
+  #     # measured 5.4-6.5 % free-running catch rate a 1093 ms grid gives ~45
+  #     # marks, past the >= 30 samples over >= 200 s a rate needs. The 300 s
+  #     # buttons give ~16, which cannot carry a ppm figure.
+  #     - lambda: 'id(rol_2)->start_mode_test(900, 1093, 1, 1, true, false, false, true);'
+  # - platform: template
+  #   name: "Mode Test B — long, production profile (node 2)"
+  #   id: rol_2_modetest_b_long_prod
+  #   entity_category: diagnostic
+  #   on_press:
+  #     # HW-5 and half of HW-3, and the run Mode B's pass line is read from:
+  #     # |ppm| < 20 under the PRODUCTION profile (auto light sleep, 32.768 kHz
+  #     # crystal). 900 s is the node's cap (kMaxDurationS). At the free-running
+  #     # ~6 % catch rate that is ~35 marks over ~900 s — past the >= 30 samples
+  #     # over >= 200 s the rate needs to mean anything. The 300 s runs gave 12.
+  #     - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, true, false, false, true);'
+  # - platform: template
+  #   name: "Mode Test B — long, sleep off (node 2)"
+  #   id: rol_2_modetest_b_long_measuring
+  #   entity_category: diagnostic
+  #   on_press:
+  #     # IDENTICAL to the button above except keepPowerProfile = false: no light
+  #     # sleep, CPU pinned at 240 MHz. Run back to back with it. Measured
+  #     # 2026-09-13 under the production profile: phase p50 +8.5 ms, max
+  #     # +17.6 ms (outside the 14 080 us guard), ppm +58 on 12 samples. If the
+  #     # bias and the tail vanish here, they are light-sleep wake latency (HW-3's
+  #     # delta); if the ppm drops toward DriftTest's +8, light sleep is costing
+  #     # the rate and Mode B fails at the root. Draws ~11 mA while it runs.
+  #     - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, false, false, false, true);'
+  # - platform: template
+  #   name: "Mode Test Stop (node 2)"
+  #   id: rol_2_modetest_stop
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->stop_mode_test();'
 
-  # HW-2, the B3 blocker: sweep the ARM instant late in 500 us steps until
-  # reception fails. The failure edge gives T_detect directly, because a window
-  # armed `l` late catches the frame iff l <= G. BENCH NODE ONLY — the node
-  # refuses this outright otherwise, since it deliberately mis-arms windows.
-  #
-  # Run one press per offset and read the funnel in the report. The early edge
-  # (negative offsets) returns G independently, and the two must sum to
-  # N*T_sym - T_detect; SweepAnalysis.h does that arithmetic.
-  #
-  # ⚠️ GRID IS 1093 ms, NOT 1100 (fixed 2026-09-19). These three buttons shipped
-  # at 1100 and were REFUSED on every press: armRefusal() gates the
-  # commensurate check on periodMattersFor(), which is true for MODE_SWEEP as
-  # well as MODE_A, and gcd(1100, 500) = 100 ms is far wider than the 29.44 ms
-  # window — ArmRefusal::CommensurateGrid, measured at "1 of 277 marks heard".
-  # So HW-2 could never have run from this control surface. 1093 gives
-  # gcd = 1 ms, so the phase walks 93 ms per mark and visits every residue.
-  - platform: template
-    name: "Mode Sweep +4 ms (node 2, BENCH ONLY)"
-    id: rol_2_modesweep_p4
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, 4000);'
-  - platform: template
-    name: "Mode Sweep +12 ms (node 2, BENCH ONLY)"
-    id: rol_2_modesweep_p12
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, 12000);'
-  - platform: template
-    name: "Mode Sweep -12 ms (node 2, BENCH ONLY)"
-    id: rol_2_modesweep_m12
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, -12000);'
-  # The sweep the procedure actually asks for: an ARBITRARY offset, so the edge
-  # can be walked in 500 us steps. Three fixed offsets cannot find an edge that
-  # sits near +/-14 080 us; they can only say "inside" or "outside".
-  #
-  # 300 s, NOT 120 — a point must outlast PROMOTION or it measures Mode A.
-  #
-  # Measured 2026-09-19, the first sweep that ever ran: a 120 s point at +4000 us
-  # (well inside the guard) returned `windows 14/1`, `detected 8` of 71 marks.
-  # 8/71 is the Mode A free-running catch rate — RX duty ~6.5 %, grid walking at
-  # gcd 1 ms — so the node was unpromoted for nearly the whole test and armed 14
-  # timed windows only at the tail. The cause is circular and slow: promotion
-  # needs 8 phase samples, samples come only from frames actually CAUGHT, and at
-  # ~6 % that takes ~130 s — longer than the point itself.
-  #
-  # 300 s leaves ~170 s of steady Mode B after the bootstrap. The unpromoted
-  # phase does not dilute the ratio (windowsArmed counts ArmSource::Grid only,
-  # so unarmed marks are simply absent), it only shrinks `armed`.
-  #
-  # ⚠️ `armed >= 8` is NOT sufficient to trust a point. That 14/1 result clears
-  # SweepAnalysis::Point::receives()'s min_armed of 8 and would have been
-  # recorded as a FALSE EDGE at +4 ms. Require `armed` consistent with the run
-  # length (~270 for 300 s) before believing a "no reception" verdict.
-  - platform: template
-    name: "Mode Sweep at offset (node 2, BENCH ONLY)"
-    id: rol_2_modesweep_at_offset
-    entity_category: diagnostic
-    on_press:
-      - lambda: |-
-          id(rol_2)->start_mode_test(300, 1500, 4, 1, true, false, false, true,
-                                     (int32_t) id(rol_2_sweep_offset_us).state);
+  # # HW-2, the B3 blocker: sweep the ARM instant late in 500 us steps until
+  # # reception fails. The failure edge gives T_detect directly, because a window
+  # # armed `l` late catches the frame iff l <= G. BENCH NODE ONLY — the node
+  # # refuses this outright otherwise, since it deliberately mis-arms windows.
+  # #
+  # # Run one press per offset and read the funnel in the report. The early edge
+  # # (negative offsets) returns G independently, and the two must sum to
+  # # N*T_sym - T_detect; SweepAnalysis.h does that arithmetic.
+  # #
+  # # ⚠️ GRID IS 1093 ms, NOT 1100 (fixed 2026-09-19). These three buttons shipped
+  # # at 1100 and were REFUSED on every press: armRefusal() gates the
+  # # commensurate check on periodMattersFor(), which is true for MODE_SWEEP as
+  # # well as MODE_A, and gcd(1100, 500) = 100 ms is far wider than the 29.44 ms
+  # # window — ArmRefusal::CommensurateGrid, measured at "1 of 277 marks heard".
+  # # So HW-2 could never have run from this control surface. 1093 gives
+  # # gcd = 1 ms, so the phase walks 93 ms per mark and visits every residue.
+  # - platform: template
+  #   name: "Mode Sweep +4 ms (node 2, BENCH ONLY)"
+  #   id: rol_2_modesweep_p4
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, 4000);'
+  # - platform: template
+  #   name: "Mode Sweep +12 ms (node 2, BENCH ONLY)"
+  #   id: rol_2_modesweep_p12
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, 12000);'
+  # - platform: template
+  #   name: "Mode Sweep -12 ms (node 2, BENCH ONLY)"
+  #   id: rol_2_modesweep_m12
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->start_mode_test(120, 1500, 4, 1, true, false, false, true, -12000);'
+  # # The sweep the procedure actually asks for: an ARBITRARY offset, so the edge
+  # # can be walked in 500 us steps. Three fixed offsets cannot find an edge that
+  # # sits near +/-14 080 us; they can only say "inside" or "outside".
+  # #
+  # # 300 s, NOT 120 — a point must outlast PROMOTION or it measures Mode A.
+  # #
+  # # Measured 2026-09-19, the first sweep that ever ran: a 120 s point at +4000 us
+  # # (well inside the guard) returned `windows 14/1`, `detected 8` of 71 marks.
+  # # 8/71 is the Mode A free-running catch rate — RX duty ~6.5 %, grid walking at
+  # # gcd 1 ms — so the node was unpromoted for nearly the whole test and armed 14
+  # # timed windows only at the tail. The cause is circular and slow: promotion
+  # # needs 8 phase samples, samples come only from frames actually CAUGHT, and at
+  # # ~6 % that takes ~130 s — longer than the point itself.
+  # #
+  # # 300 s leaves ~170 s of steady Mode B after the bootstrap. The unpromoted
+  # # phase does not dilute the ratio (windowsArmed counts ArmSource::Grid only,
+  # # so unarmed marks are simply absent), it only shrinks `armed`.
+  # #
+  # # ⚠️ `armed >= 8` is NOT sufficient to trust a point. That 14/1 result clears
+  # # SweepAnalysis::Point::receives()'s min_armed of 8 and would have been
+  # # recorded as a FALSE EDGE at +4 ms. Require `armed` consistent with the run
+  # # length (~270 for 300 s) before believing a "no reception" verdict.
+  # - platform: template
+  #   name: "Mode Sweep at offset (node 2, BENCH ONLY)"
+  #   id: rol_2_modesweep_at_offset
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: |-
+  #         id(rol_2)->start_mode_test(300, 1500, 4, 1, true, false, false, true,
+  #                                    (int32_t) id(rol_2_sweep_offset_us).state);
 
-  # --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------------
-  #
-  # The one test mode that had no control at all: start_mac_ping() and
-  # stop_mac_ping() were written and had zero callers, so the mode existed and
-  # could not be run.
-  #
-  # It is the only way to measure TURNAROUND honestly. A MAC control frame is
-  # answered by MAC-0 itself, with no application message in either direction,
-  # so what it times is RxDone -> TX fire and nothing else. Every other exchange
-  # this system has carries a cover operation or a schedule somewhere inside it,
-  # and a turnaround measured that way silently includes application dispatch.
-  #
-  # It is also where stage 0 of the frame funnel comes from. Only the SENDER
-  # knows what it offered, so the node can never compute its own frame-error
-  # rate — it cannot know what it did not hear.
-  #
-  # One copy per mark, not a burst: seventeen copies of one mark is not one
-  # mark. 1100 ms for the same incommensurability reason as the drift test.
-  - platform: template
-    name: "MAC Ping Start (node 2)"
-    id: rol_2_mac_ping_start
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mac_ping(300, 1100, true, 0);'
-  - platform: template
-    name: "MAC Ping Stop (node 2)"
-    id: rol_2_mac_ping_stop
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->stop_mac_ping();'
-  - platform: template
-    name: "MAC Ping Reset Counters (node 2)"
-    id: rol_2_mac_ping_reset
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->reset_mac_stats();'
+  # # --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------------
+  # #
+  # # The one test mode that had no control at all: start_mac_ping() and
+  # # stop_mac_ping() were written and had zero callers, so the mode existed and
+  # # could not be run.
+  # #
+  # # It is the only way to measure TURNAROUND honestly. A MAC control frame is
+  # # answered by MAC-0 itself, with no application message in either direction,
+  # # so what it times is RxDone -> TX fire and nothing else. Every other exchange
+  # # this system has carries a cover operation or a schedule somewhere inside it,
+  # # and a turnaround measured that way silently includes application dispatch.
+  # #
+  # # It is also where stage 0 of the frame funnel comes from. Only the SENDER
+  # # knows what it offered, so the node can never compute its own frame-error
+  # # rate — it cannot know what it did not hear.
+  # #
+  # # One copy per mark, not a burst: seventeen copies of one mark is not one
+  # # mark. 1100 ms for the same incommensurability reason as the drift test.
+  # - platform: template
+  #   name: "MAC Ping Start (node 2)"
+  #   id: rol_2_mac_ping_start
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->start_mac_ping(300, 1100, true, 0);'
+  # - platform: template
+  #   name: "MAC Ping Stop (node 2)"
+  #   id: rol_2_mac_ping_stop
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->stop_mac_ping();'
+  # - platform: template
+  #   name: "MAC Ping Reset Counters (node 2)"
+  #   id: rol_2_mac_ping_reset
+  #   entity_category: diagnostic
+  #   on_press:
+  #     - lambda: 'id(rol_2)->reset_mac_stats();'
 
-number:
-  # HW-2's arm offset, in microseconds. The procedure needs 500 us steps around
-  # a +/-14 080 us guard to find the reception edge; until this existed the only
-  # controls were three fixed offsets, which can bracket the edge but never
-  # locate it. Paired with the "Mode Sweep at offset" button above.
-  #
-  # Range is wider than the guard on purpose: the sweep must reach offsets that
-  # FAIL, or it never sees an edge. A run at an offset outside the guard is
-  # expected to lose marks — that is the measurement, not a fault.
-  - platform: template
-    name: "Mode Sweep arm offset (node 2)"
-    id: rol_2_sweep_offset_us
-    entity_category: config
-    optimistic: true
-    restore_value: true
-    initial_value: 0
-    min_value: -20000
-    max_value: 20000
-    step: 500
-    unit_of_measurement: us
-    mode: box
+# number:
+#   # HW-2's arm offset, in microseconds. The procedure needs 500 us steps around
+#   # a +/-14 080 us guard to find the reception edge; until this existed the only
+#   # controls were three fixed offsets, which can bracket the edge but never
+#   # locate it. Paired with the "Mode Sweep at offset" button above.
+#   #
+#   # Range is wider than the guard on purpose: the sweep must reach offsets that
+#   # FAIL, or it never sees an edge. A run at an offset outside the guard is
+#   # expected to lose marks — that is the measurement, not a fault.
+#   - platform: template
+#     name: "Mode Sweep arm offset (node 2)"
+#     id: rol_2_sweep_offset_us
+#     entity_category: config
+#     optimistic: true
+#     restore_value: true
+#     initial_value: 0
+#     min_value: -20000
+#     max_value: 20000
+#     step: 500
+#     unit_of_measurement: us
+#     mode: box
 
 sensor:
   # --- ModeTest and MAC-ping results, as numbers ---------------------------
@@ -571,395 +609,395 @@ sensor:
   #
   # update_interval is slow on purpose: a report arrives at the END of a run
   # (300 s by default), so polling faster only costs entity churn.
-  - platform: template
-    name: "Mode Test — mode actually run (node 2)"
-    id: rol_2_mt_mode
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    # 1 = A, 2 = B, 4 = SWEEP. DERIVED from what the node applied, not from
-    # what the button asked for: mode was echoed from the request until this
-    # session, so every "Mode Test B" number ever taken described Mode A.
-    lambda: 'return id(rol_2)->mode_test_summary().valid
-                 ? (float) id(rol_2)->mode_test_summary().mode
-                 : NAN;'
-  - platform: template
-    name: "Mode Test — arm refusal (node 2)"
-    id: rol_2_mt_refusal
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    # 0 = armed. Anything else and the run below describes nothing: see
-    # ModeTestPolicy.h's ArmRefusal.
-    lambda: 'return id(rol_2)->mode_test_summary().valid
-                 ? (float) id(rol_2)->mode_test_summary().arm_refusal
-                 : NAN;'
-  - platform: template
-    name: "Mode Test — windows armed (node 2)"
-    id: rol_2_mt_windows_armed
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    # The witness for whether Mode B actually RAN. Enabling timed RX makes the
-    # mode reachable; timedRxActive() re-runs the promotion test at every mark,
-    # so a node whose phase never becomes trustworthy reports mode = 2 over
-    # marks it never armed. This reads 0 when that happened — and WMR cannot
-    # say so, because a zero denominator gives 0 ppm, the same number a
-    # flawless run gives.
-    lambda: 'return id(rol_2)->mode_test_summary().valid
-                 ? (float) id(rol_2)->mode_test_summary().windows_armed
-                 : NAN;'
-  - platform: template
-    name: "Mode Test — windows hit (node 2)"
-    id: rol_2_mt_windows_hit
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return id(rol_2)->mode_test_summary().valid
-                 ? (float) id(rol_2)->mode_test_summary().windows_hit
-                 : NAN;'
-  - platform: template
-    name: "Mode Test — FER link (node 2)"
-    id: rol_2_mt_fer_link
-    entity_category: diagnostic
-    unit_of_measurement: "ppm"
-    update_interval: 30s
-    accuracy_decimals: 0
-    # The honest denominator is the node's own seqFirst..seqLast span, not the
-    # hub's count: dividing by what the hub queued before the node started
-    # listening would report the node's late arrival as packet loss.
-    lambda: 'return id(rol_2)->mode_test_summary().valid
-                 ? (float) id(rol_2)->mode_test_summary().fer_link_ppm
-                 : NAN;'
-  - platform: template
-    name: "Mode Test — window miss rate (node 2)"
-    id: rol_2_mt_wmr
-    entity_category: diagnostic
-    unit_of_measurement: "ppm"
-    update_interval: 30s
-    accuracy_decimals: 0
-    # Read this WITH windows armed above, never alone.
-    lambda: 'return id(rol_2)->mode_test_summary().valid
-                 ? (float) id(rol_2)->mode_test_summary().wmr_ppm
-                 : NAN;'
-  - platform: template
-    name: "Mode Test — phase error p99 (node 2)"
-    id: rol_2_mt_phase_p99
-    entity_category: diagnostic
-    unit_of_measurement: "us"
-    update_interval: 30s
-    accuracy_decimals: 0
-    # Against the guard band of 14080 us. p99 rather than a mean, because the
-    # tail is the thing: a mean would hide exactly the excursions that miss a
-    # window.
-    lambda: 'return id(rol_2)->mode_test_summary().valid
-                 ? (float) id(rol_2)->mode_test_summary().phase_p99_us
-                 : NAN;'
-  - platform: template
-    name: "Mode Test — turnaround p99 (node 2)"
-    id: rol_2_mt_turnaround_p99
-    entity_category: diagnostic
-    unit_of_measurement: "us"
-    update_interval: 30s
-    accuracy_decimals: 0
-    # Section 4.3's servable-slot rule is priced against this.
-    lambda: 'return id(rol_2)->mode_test_summary().valid
-                 ? (float) id(rol_2)->mode_test_summary().turnaround_p99_us
-                 : NAN;'
+  # - platform: template
+  #   name: "Mode Test — mode actually run (node 2)"
+  #   id: rol_2_mt_mode
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # 1 = A, 2 = B, 4 = SWEEP. DERIVED from what the node applied, not from
+  #   # what the button asked for: mode was echoed from the request until this
+  #   # session, so every "Mode Test B" number ever taken described Mode A.
+  #   lambda: 'return id(rol_2)->mode_test_summary().valid
+  #                ? (float) id(rol_2)->mode_test_summary().mode
+  #                : NAN;'
+  # - platform: template
+  #   name: "Mode Test — arm refusal (node 2)"
+  #   id: rol_2_mt_refusal
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # 0 = armed. Anything else and the run below describes nothing: see
+  #   # ModeTestPolicy.h's ArmRefusal.
+  #   lambda: 'return id(rol_2)->mode_test_summary().valid
+  #                ? (float) id(rol_2)->mode_test_summary().arm_refusal
+  #                : NAN;'
+  # - platform: template
+  #   name: "Mode Test — windows armed (node 2)"
+  #   id: rol_2_mt_windows_armed
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # The witness for whether Mode B actually RAN. Enabling timed RX makes the
+  #   # mode reachable; timedRxActive() re-runs the promotion test at every mark,
+  #   # so a node whose phase never becomes trustworthy reports mode = 2 over
+  #   # marks it never armed. This reads 0 when that happened — and WMR cannot
+  #   # say so, because a zero denominator gives 0 ppm, the same number a
+  #   # flawless run gives.
+  #   lambda: 'return id(rol_2)->mode_test_summary().valid
+  #                ? (float) id(rol_2)->mode_test_summary().windows_armed
+  #                : NAN;'
+  # - platform: template
+  #   name: "Mode Test — windows hit (node 2)"
+  #   id: rol_2_mt_windows_hit
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return id(rol_2)->mode_test_summary().valid
+  #                ? (float) id(rol_2)->mode_test_summary().windows_hit
+  #                : NAN;'
+  # - platform: template
+  #   name: "Mode Test — FER link (node 2)"
+  #   id: rol_2_mt_fer_link
+  #   entity_category: diagnostic
+  #   unit_of_measurement: "ppm"
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # The honest denominator is the node's own seqFirst..seqLast span, not the
+  #   # hub's count: dividing by what the hub queued before the node started
+  #   # listening would report the node's late arrival as packet loss.
+  #   lambda: 'return id(rol_2)->mode_test_summary().valid
+  #                ? (float) id(rol_2)->mode_test_summary().fer_link_ppm
+  #                : NAN;'
+  # - platform: template
+  #   name: "Mode Test — window miss rate (node 2)"
+  #   id: rol_2_mt_wmr
+  #   entity_category: diagnostic
+  #   unit_of_measurement: "ppm"
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # Read this WITH windows armed above, never alone.
+  #   lambda: 'return id(rol_2)->mode_test_summary().valid
+  #                ? (float) id(rol_2)->mode_test_summary().wmr_ppm
+  #                : NAN;'
+  # - platform: template
+  #   name: "Mode Test — phase error p99 (node 2)"
+  #   id: rol_2_mt_phase_p99
+  #   entity_category: diagnostic
+  #   unit_of_measurement: "us"
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # Against the guard band of 14080 us. p99 rather than a mean, because the
+  #   # tail is the thing: a mean would hide exactly the excursions that miss a
+  #   # window.
+  #   lambda: 'return id(rol_2)->mode_test_summary().valid
+  #                ? (float) id(rol_2)->mode_test_summary().phase_p99_us
+  #                : NAN;'
+  # - platform: template
+  #   name: "Mode Test — turnaround p99 (node 2)"
+  #   id: rol_2_mt_turnaround_p99
+  #   entity_category: diagnostic
+  #   unit_of_measurement: "us"
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # Section 4.3's servable-slot rule is priced against this.
+  #   lambda: 'return id(rol_2)->mode_test_summary().valid
+  #                ? (float) id(rol_2)->mode_test_summary().turnaround_p99_us
+  #                : NAN;'
 
-  # U-2: windows the node MEANT to open and never did, because its radio was
-  # still busy when the mark came round. Not a ModeTest number — it is counted
-  # continuously and rides every PhaseReport, so it is live rather than
-  # per-run.
-  #
-  # READ IT BESIDE the window miss rate above, never instead of it. A mark that
-  # was never armed is invisible to WMR by construction, because noteMarkArmed()
-  # is what opens a mark at all: a node whose radio is wedged reports a flawless
-  # WMR while hearing nothing. This is the number that says so, and it is why a
-  # perfect miss rate is not on its own evidence of a working link.
-  #
-  # NAN until a PhaseReport has arrived, so "this node has not answered" does
-  # not plot as a flat clean zero. It does NOT distinguish firmware without the
-  # field — rxBusySkips is a proto3 scalar, so absent and 0 are the same bytes
-  # on the air. Nothing is deployed yet, so no such firmware exists to confuse
-  # it with.
-  - platform: template
-    name: "RX windows skipped — radio busy (node 2)"
-    id: rol_2_rx_busy_skips
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return id(rol_2)->node_rx_busy_skips().valid
-                 ? (float) id(rol_2)->node_rx_busy_skips().count
-                 : NAN;'
+  # # U-2: windows the node MEANT to open and never did, because its radio was
+  # # still busy when the mark came round. Not a ModeTest number — it is counted
+  # # continuously and rides every PhaseReport, so it is live rather than
+  # # per-run.
+  # #
+  # # READ IT BESIDE the window miss rate above, never instead of it. A mark that
+  # # was never armed is invisible to WMR by construction, because noteMarkArmed()
+  # # is what opens a mark at all: a node whose radio is wedged reports a flawless
+  # # WMR while hearing nothing. This is the number that says so, and it is why a
+  # # perfect miss rate is not on its own evidence of a working link.
+  # #
+  # # NAN until a PhaseReport has arrived, so "this node has not answered" does
+  # # not plot as a flat clean zero. It does NOT distinguish firmware without the
+  # # field — rxBusySkips is a proto3 scalar, so absent and 0 are the same bytes
+  # # on the air. Nothing is deployed yet, so no such firmware exists to confuse
+  # # it with.
+  # - platform: template
+  #   name: "RX windows skipped — radio busy (node 2)"
+  #   id: rol_2_rx_busy_skips
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return id(rol_2)->node_rx_busy_skips().valid
+  #                ? (float) id(rol_2)->node_rx_busy_skips().count
+  #                : NAN;'
 
-  # T-2: frames the HUB refused because its transmit buffer pool was empty.
-  #
-  # The pool is POOL_SIZE = 5 and the handoff queue is 20, but nothing enters
-  # the queue without a buffer and a PLACED frame holds its buffer from send()
-  # until its mark — so the pool, not the queue, is the real depth. A
-  # fleet-wide push places one frame per node with all 32 marks inside one
-  # round, and the sixth onwards is refused.
-  #
-  # Refusal is handled rather than silent: the node's mark is not consumed, the
-  # schedule push has an ack-driven retry, and BaseNonceExchange keeps the
-  # previous nonce so the session survives. This number is how you find out it
-  # is happening at all — it is tracker-wide, not per node, because the pool is.
-  - platform: template
-    name: "Transmit pool exhausted — frames refused"
-    id: lora_pool_refusals
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(my_lora_tracker)->poolAllocationFailures();'
+  # # T-2: frames the HUB refused because its transmit buffer pool was empty.
+  # #
+  # # The pool is POOL_SIZE = 5 and the handoff queue is 20, but nothing enters
+  # # the queue without a buffer and a PLACED frame holds its buffer from send()
+  # # until its mark — so the pool, not the queue, is the real depth. A
+  # # fleet-wide push places one frame per node with all 32 marks inside one
+  # # round, and the sixth onwards is refused.
+  # #
+  # # Refusal is handled rather than silent: the node's mark is not consumed, the
+  # # schedule push has an ack-driven retry, and BaseNonceExchange keeps the
+  # # previous nonce so the session survives. This number is how you find out it
+  # # is happening at all — it is tracker-wide, not per node, because the pool is.
+  # - platform: template
+  #   name: "Transmit pool exhausted — frames refused"
+  #   id: lora_pool_refusals
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(my_lora_tracker)->poolAllocationFailures();'
 
-  # U-1: whether this node is on ONE copy per frame or seventeen.
-  #
-  # This is what the whole of Mode B buys — a 17x airtime reduction on every
-  # addressed downlink — and until now it was visible only in an ESPHome log
-  # line, so nobody could see whether a fleet was actually getting it.
-  #
-  # Two entities, deliberately. The boolean says what is happening; the reason
-  # below says why, and the reason is the one you act on. "Single shot: no" on
-  # a node you expected to be promoted tells you nothing about whether it needs
-  # a crystal, a longer baseline, or simply more time.
-  - platform: template
-    name: "Single shot active (node 2)"
-    id: rol_2_single_shot
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return id(rol_2)->txPolicyNow() == timedmode::TxPolicy::SingleShot
-                 ? 1.0f : 0.0f;'
+  # # U-1: whether this node is on ONE copy per frame or seventeen.
+  # #
+  # # This is what the whole of Mode B buys — a 17x airtime reduction on every
+  # # addressed downlink — and until now it was visible only in an ESPHome log
+  # # line, so nobody could see whether a fleet was actually getting it.
+  # #
+  # # Two entities, deliberately. The boolean says what is happening; the reason
+  # # below says why, and the reason is the one you act on. "Single shot: no" on
+  # # a node you expected to be promoted tells you nothing about whether it needs
+  # # a crystal, a longer baseline, or simply more time.
+  # - platform: template
+  #   name: "Single shot active (node 2)"
+  #   id: rol_2_single_shot
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return id(rol_2)->txPolicyNow() == timedmode::TxPolicy::SingleShot
+  #                ? 1.0f : 0.0f;'
 
-  # Why it is still bursting, from the same ladder the decision comes out of —
-  # see TimedModePolicy.h's TxRefusal. 0 means it is not.
-  #
-  #  1 no grid           6 rule 4: a single shot went unacked
-  #  2 rebooted          7 no phase report yet
-  #  3 new session       8 not on the external crystal
-  #  4 beacon missed     9 phase baseline too short
-  #  5 firmware unknown 10 phase mean outside the guard band
-  #                     11 phase spread too wide (bimodal)
-  #                     12 the node scored samples outside the guard
-  #                     13 the hub published no resyncMaxS
-  #                     14 the confirmation has gone stale
-  #
-  # The numbers are a wire format now that they are published here: append to
-  # the enum, never renumber.
-  - platform: template
-    name: "Single shot refused — reason (node 2)"
-    id: rol_2_single_shot_refusal
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) (uint8_t) id(rol_2)->txRefusalNow();'
+  # # Why it is still bursting, from the same ladder the decision comes out of —
+  # # see TimedModePolicy.h's TxRefusal. 0 means it is not.
+  # #
+  # #  1 no grid           6 rule 4: a single shot went unacked
+  # #  2 rebooted          7 no phase report yet
+  # #  3 new session       8 not on the external crystal
+  # #  4 beacon missed     9 phase baseline too short
+  # #  5 firmware unknown 10 phase mean outside the guard band
+  # #                     11 phase spread too wide (bimodal)
+  # #                     12 the node scored samples outside the guard
+  # #                     13 the hub published no resyncMaxS
+  # #                     14 the confirmation has gone stale
+  # #
+  # # The numbers are a wire format now that they are published here: append to
+  # # the enum, never renumber.
+  # - platform: template
+  #   name: "Single shot refused — reason (node 2)"
+  #   id: rol_2_single_shot_refusal
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) (uint8_t) id(rol_2)->txRefusalNow();'
 
-  # U-5: the node has missed a check-in the hub PREDICTED it would make.
-  #
-  # The prediction is next_wake_epoch_(), which the hub already computes from
-  # the node's own vendored scheduler so it does not transmit at a sleeping
-  # node — the comparison against what was actually observed is all that was
-  # missing. It gates single-shot (refusal reason 4 above) and is published
-  # here because "this node has gone quiet" is a thing an operator acts on
-  # directly.
-  #
-  # 0 for a node the hub cannot predict — never heard from, or no hub clock.
-  # A prediction that cannot be made must not read as a failure.
-  # Why the node is NOT in Mode B, in its own words. The beacon has carried
-  # demotionReason since B3 and the hub stored it in belief_.node_demotion
-  # (lora_client.cpp:3853) without ever publishing it — the same "carried,
-  # stored, never read" shape as review findings 10 and 12.
-  #
-  # It is the difference between a bench procedure that waits and hopes and one
-  # that checks. HW-2 cost two void points to this: a sweep started inside the
-  # 600 s anti-flap hold (Demotion::RecentlyDemoted = 7) armed NOTHING and
-  # reported windows 0/0, which reads exactly like "no reception at this
-  # offset". That hold was retired 2026-09-20, so this particular trap cannot
-  # recur — but the rule is unchanged and still worth obeying: read this before
-  # pressing, and anything but 0 (None) means the point will be void, whatever
-  # the offset.
-  #
-  # Legend (timedmode::Demotion, TimedModePolicy.h — read from the enum, not
-  # from memory): 0 None, 1 GridDisabled, 2 BadClockSource,
-  # 3 MissedMarks (RETIRED 2026-09-20, never returned),
-  # 4 SyncStale, 5 NoPhase, 6 NotConfirmed (RETIRED 2026-09-14, never returned),
-  # 7 RecentlyDemoted (RETIRED 2026-09-20, never returned).
-  #
-  # The numbers are a wire format: a retired reason keeps its value and stops
-  # being produced. In practice a node is now out of Mode B for one of 1, 2, 4
-  # or 5 — where 4 (SyncStale) is the beacon heartbeat: nothing addressed to it
-  # and no beacon for the published resyncMaxS, ~5.9 min.
-  - platform: template
-    name: "Timed RX — demotion reason (node 2)"
-    id: rol_2_demotion_reason
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->node_demotion_reason();'
+  # # U-5: the node has missed a check-in the hub PREDICTED it would make.
+  # #
+  # # The prediction is next_wake_epoch_(), which the hub already computes from
+  # # the node's own vendored scheduler so it does not transmit at a sleeping
+  # # node — the comparison against what was actually observed is all that was
+  # # missing. It gates single-shot (refusal reason 4 above) and is published
+  # # here because "this node has gone quiet" is a thing an operator acts on
+  # # directly.
+  # #
+  # # 0 for a node the hub cannot predict — never heard from, or no hub clock.
+  # # A prediction that cannot be made must not read as a failure.
+  # # Why the node is NOT in Mode B, in its own words. The beacon has carried
+  # # demotionReason since B3 and the hub stored it in belief_.node_demotion
+  # # (lora_client.cpp:3853) without ever publishing it — the same "carried,
+  # # stored, never read" shape as review findings 10 and 12.
+  # #
+  # # It is the difference between a bench procedure that waits and hopes and one
+  # # that checks. HW-2 cost two void points to this: a sweep started inside the
+  # # 600 s anti-flap hold (Demotion::RecentlyDemoted = 7) armed NOTHING and
+  # # reported windows 0/0, which reads exactly like "no reception at this
+  # # offset". That hold was retired 2026-09-20, so this particular trap cannot
+  # # recur — but the rule is unchanged and still worth obeying: read this before
+  # # pressing, and anything but 0 (None) means the point will be void, whatever
+  # # the offset.
+  # #
+  # # Legend (timedmode::Demotion, TimedModePolicy.h — read from the enum, not
+  # # from memory): 0 None, 1 GridDisabled, 2 BadClockSource,
+  # # 3 MissedMarks (RETIRED 2026-09-20, never returned),
+  # # 4 SyncStale, 5 NoPhase, 6 NotConfirmed (RETIRED 2026-09-14, never returned),
+  # # 7 RecentlyDemoted (RETIRED 2026-09-20, never returned).
+  # #
+  # # The numbers are a wire format: a retired reason keeps its value and stops
+  # # being produced. In practice a node is now out of Mode B for one of 1, 2, 4
+  # # or 5 — where 4 (SyncStale) is the beacon heartbeat: nothing addressed to it
+  # # and no beacon for the published resyncMaxS, ~5.9 min.
+  # - platform: template
+  #   name: "Timed RX — demotion reason (node 2)"
+  #   id: rol_2_demotion_reason
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->node_demotion_reason();'
 
-  # The other half of the same precondition: the node's own answer to "am I
-  # arming timed windows". A sweep point is only a measurement when this is 1
-  # AND the demotion reason is 0; otherwise `windows 0/0` says the node was not
-  # in Mode B, not that the offset failed.
-  - platform: template
-    name: "Timed RX — active per the node (node 2)"
-    id: rol_2_timed_rx_active
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return id(rol_2)->node_timed_rx_active() ? 1.0f : 0.0f;'
+  # # The other half of the same precondition: the node's own answer to "am I
+  # # arming timed windows". A sweep point is only a measurement when this is 1
+  # # AND the demotion reason is 0; otherwise `windows 0/0` says the node was not
+  # # in Mode B, not that the offset failed.
+  # - platform: template
+  #   name: "Timed RX — active per the node (node 2)"
+  #   id: rol_2_timed_rx_active
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return id(rol_2)->node_timed_rx_active() ? 1.0f : 0.0f;'
 
-  # The four inputs phaseTrustworthy() tests. Demotion::NoPhase (5) has TWO
-  # producers that report identically — !phase_valid, and the last sample being
-  # outside the guard — so these are what turn "reason 5" into an attribution.
-  #
-  # phaseTrustworthy fails if: samples < 8, frames < 2, outside_guard != 0, or
-  # spread > 14080 us. Measured 2026-09-19: a warm-up reported phaseErr p50 -605
-  # p99 352 max 2005 over 197 samples — every sample far inside the guard — and
-  # still sat on NoPhase, so the failing clause is spread or the last-sample
-  # test, not a latched outside_guard as first assumed.
-  - platform: template
-    name: "Phase — spread (node 2)"
-    id: rol_2_phase_spread
-    entity_category: diagnostic
-    unit_of_measurement: us
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->node_phase_spread_us();'
-  - platform: template
-    name: "Phase — samples outside guard (node 2)"
-    id: rol_2_phase_outside_guard
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->node_phase_outside_guard();'
-  - platform: template
-    name: "Phase — samples (node 2)"
-    id: rol_2_phase_samples
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->node_phase_samples();'
-  - platform: template
-    name: "Phase — last error (node 2)"
-    id: rol_2_phase_err
-    entity_category: diagnostic
-    unit_of_measurement: us
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->node_phase_err_us();'
+  # # The four inputs phaseTrustworthy() tests. Demotion::NoPhase (5) has TWO
+  # # producers that report identically — !phase_valid, and the last sample being
+  # # outside the guard — so these are what turn "reason 5" into an attribution.
+  # #
+  # # phaseTrustworthy fails if: samples < 8, frames < 2, outside_guard != 0, or
+  # # spread > 14080 us. Measured 2026-09-19: a warm-up reported phaseErr p50 -605
+  # # p99 352 max 2005 over 197 samples — every sample far inside the guard — and
+  # # still sat on NoPhase, so the failing clause is spread or the last-sample
+  # # test, not a latched outside_guard as first assumed.
+  # - platform: template
+  #   name: "Phase — spread (node 2)"
+  #   id: rol_2_phase_spread
+  #   entity_category: diagnostic
+  #   unit_of_measurement: us
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->node_phase_spread_us();'
+  # - platform: template
+  #   name: "Phase — samples outside guard (node 2)"
+  #   id: rol_2_phase_outside_guard
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->node_phase_outside_guard();'
+  # - platform: template
+  #   name: "Phase — samples (node 2)"
+  #   id: rol_2_phase_samples
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->node_phase_samples();'
+  # - platform: template
+  #   name: "Phase — last error (node 2)"
+  #   id: rol_2_phase_err
+  #   entity_category: diagnostic
+  #   unit_of_measurement: us
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->node_phase_err_us();'
 
-  - platform: template
-    name: "Node overdue — missed a predicted check-in (node 2)"
-    id: rol_2_overdue
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return id(rol_2)->node_overdue() ? 1.0f : 0.0f;'
+  # - platform: template
+  #   name: "Node overdue — missed a predicted check-in (node 2)"
+  #   id: rol_2_overdue
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return id(rol_2)->node_overdue() ? 1.0f : 0.0f;'
 
-  # MAC ping, stage 0 of the funnel. pings_offered is the only number in this
-  # system that the HUB alone can know.
-  - platform: template
-    name: "MAC Ping — offered (node 2)"
-    id: rol_2_macping_offered
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->mac_stats().pings_offered;'
-  - platform: template
-    name: "MAC Ping — echoes received (node 2)"
-    id: rol_2_macping_echoes
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->mac_stats().echoes_rx;'
-  # --- Mode C's Class A ledger ---------------------------------------------
-  #
-  # Both halves of this measurement existed and were never added up. The hub
-  # places one reply into RX1 on every check-in (send_timesync ->
-  # send_into_class_a_window_); the node reports that wake's funnel in its NEXT
-  # beacon (prevwakewindows/hits/detected/crcvalid — "Mode C's FER" in the
-  # node's own comment). One lived in a log line, the other in a beacon field.
-  #
-  # Without the pair an empty Class A window is AMBIGUOUS between "nothing was
-  # aimed at it" and "aimed and missed", which is why the 2026-09-21 Mode C run
-  # (`windows 4 hits 1`, `windows 2 hits 1`) could not yield a Class A FER.
-  #
-  # RAW COUNTERS, as with the MAC ping above and the ModeTest report: the node
-  # never grades itself, the hub adds up what each end observed, the operator
-  # divides.
-  #
-  #   hit rate = hits / offered        true FER = 1 - crcValid / detected
-  - platform: template
-    name: "Class A — replies offered (node 2)"
-    id: rol_2_classa_offered
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    # Counted at the PLACEMENT, so it means "the hub aimed a frame at a window
-    # it believed open" — the question an empty window cannot answer alone.
-    lambda: 'return (float) id(rol_2)->class_a_stats().offered;'
-  - platform: template
-    name: "Class A — windows opened (node 2)"
-    id: rol_2_classa_windows
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->class_a_stats().windows;'
-  - platform: template
-    name: "Class A — windows hit (node 2)"
-    id: rol_2_classa_hits
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->class_a_stats().hits;'
-  - platform: template
-    name: "Class A — frames detected (node 2)"
-    id: rol_2_classa_detected
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(rol_2)->class_a_stats().detected;'
-  - platform: template
-    name: "Class A — frames CRC-valid (node 2)"
-    id: rol_2_classa_crcvalid
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    # Stage 2->3 of the funnel. true FER = 1 - this/detected, the figure
-    # mac-layer.md 6.1 calls the only one comparable across modes.
-    lambda: 'return (float) id(rol_2)->class_a_stats().crc_valid;'
+  # # MAC ping, stage 0 of the funnel. pings_offered is the only number in this
+  # # system that the HUB alone can know.
+  # - platform: template
+  #   name: "MAC Ping — offered (node 2)"
+  #   id: rol_2_macping_offered
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->mac_stats().pings_offered;'
+  # - platform: template
+  #   name: "MAC Ping — echoes received (node 2)"
+  #   id: rol_2_macping_echoes
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->mac_stats().echoes_rx;'
+  # # --- Mode C's Class A ledger ---------------------------------------------
+  # #
+  # # Both halves of this measurement existed and were never added up. The hub
+  # # places one reply into RX1 on every check-in (send_timesync ->
+  # # send_into_class_a_window_); the node reports that wake's funnel in its NEXT
+  # # beacon (prevwakewindows/hits/detected/crcvalid — "Mode C's FER" in the
+  # # node's own comment). One lived in a log line, the other in a beacon field.
+  # #
+  # # Without the pair an empty Class A window is AMBIGUOUS between "nothing was
+  # # aimed at it" and "aimed and missed", which is why the 2026-09-21 Mode C run
+  # # (`windows 4 hits 1`, `windows 2 hits 1`) could not yield a Class A FER.
+  # #
+  # # RAW COUNTERS, as with the MAC ping above and the ModeTest report: the node
+  # # never grades itself, the hub adds up what each end observed, the operator
+  # # divides.
+  # #
+  # #   hit rate = hits / offered        true FER = 1 - crcValid / detected
+  # - platform: template
+  #   name: "Class A — replies offered (node 2)"
+  #   id: rol_2_classa_offered
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # Counted at the PLACEMENT, so it means "the hub aimed a frame at a window
+  #   # it believed open" — the question an empty window cannot answer alone.
+  #   lambda: 'return (float) id(rol_2)->class_a_stats().offered;'
+  # - platform: template
+  #   name: "Class A — windows opened (node 2)"
+  #   id: rol_2_classa_windows
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->class_a_stats().windows;'
+  # - platform: template
+  #   name: "Class A — windows hit (node 2)"
+  #   id: rol_2_classa_hits
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->class_a_stats().hits;'
+  # - platform: template
+  #   name: "Class A — frames detected (node 2)"
+  #   id: rol_2_classa_detected
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(rol_2)->class_a_stats().detected;'
+  # - platform: template
+  #   name: "Class A — frames CRC-valid (node 2)"
+  #   id: rol_2_classa_crcvalid
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # Stage 2->3 of the funnel. true FER = 1 - this/detected, the figure
+  #   # mac-layer.md 6.1 calls the only one comparable across modes.
+  #   lambda: 'return (float) id(rol_2)->class_a_stats().crc_valid;'
 
-  - platform: template
-    name: "MAC Ping — echo gaps (node 2)"
-    id: rol_2_macping_gaps
-    entity_category: diagnostic
-    update_interval: 30s
-    accuracy_decimals: 0
-    # Marks with no echo, counted by SEQUENCE rather than by absence: a gap is
-    # a mark the node did not answer, which is not the same as a slow one.
-    lambda: 'return (float) id(rol_2)->mac_stats().echo_seq_gaps;'
+  # - platform: template
+  #   name: "MAC Ping — echo gaps (node 2)"
+  #   id: rol_2_macping_gaps
+  #   entity_category: diagnostic
+  #   update_interval: 30s
+  #   accuracy_decimals: 0
+  #   # Marks with no echo, counted by SEQUENCE rather than by absence: a gap is
+  #   # a mark the node did not answer, which is not the same as a slow one.
+  #   lambda: 'return (float) id(rol_2)->mac_stats().echo_seq_gaps;'
 
-  # HW-10: the hub's RX-stamp uncertainty, as a high-water mark.
-  #
-  # worst_poll_gap_us() was already measured on every poll (lora_tracker.cpp:264)
-  # and printed ONLY by dump_config() at boot — so reading it meant restarting
-  # the hub, which zeroes the counter you came to read. Published here it is
-  # readable while the hub runs, which is what the runbook's "closes when you
-  # have the high-water number" actually needs.
-  #
-  # Expect it to be LARGE during a burst: checkReception() is not called while
-  # lora_tx_busy_, so the gap across a 17-copy burst IS the burst. That is
-  # honest — the hub genuinely was not listening — and not a defect.
-  - platform: template
-    name: "Hub RX stamp — worst poll gap"
-    id: hub_worst_poll_gap
-    entity_category: diagnostic
-    unit_of_measurement: us
-    update_interval: 60s
-    accuracy_decimals: 0
-    lambda: 'return (float) id(my_lora_tracker)->worst_poll_gap_us();'
+  # # HW-10: the hub's RX-stamp uncertainty, as a high-water mark.
+  # #
+  # # worst_poll_gap_us() was already measured on every poll (lora_tracker.cpp:264)
+  # # and printed ONLY by dump_config() at boot — so reading it meant restarting
+  # # the hub, which zeroes the counter you came to read. Published here it is
+  # # readable while the hub runs, which is what the runbook's "closes when you
+  # # have the high-water number" actually needs.
+  # #
+  # # Expect it to be LARGE during a burst: checkReception() is not called while
+  # # lora_tx_busy_, so the gap across a 17-copy burst IS the burst. That is
+  # # honest — the hub genuinely was not listening — and not a defect.
+  # - platform: template
+  #   name: "Hub RX stamp — worst poll gap"
+  #   id: hub_worst_poll_gap
+  #   entity_category: diagnostic
+  #   unit_of_measurement: us
+  #   update_interval: 60s
+  #   accuracy_decimals: 0
+  #   lambda: 'return (float) id(my_lora_tracker)->worst_poll_gap_us();'
 
   # HW-9, hub half. The node half closed from the ModeTest report (tick 100 Hz);
   # the hub half could not, because tickRateHz in that report is a field the
@@ -1012,6 +1050,14 @@ sensor:
     clock_offset:
       name: "RollladenWohnzimmer1 Clock Offset"
       id: rol_1_clock_offset
+    # Battery-runtime compensation telemetry -- visibility only, populated
+    # only when a full move just ended via the current-sense endstop.
+    battery_calib_actual_run:
+      name: "RollladenWohnzimmer1 Battery Calib Actual Run"
+      id: rol_1_calib_actual_run
+    battery_calib_nominal_run:
+      name: "RollladenWohnzimmer1 Battery Calib Nominal Run"
+      id: rol_1_calib_nominal_run
 
   - platform: loracover
     lora_client_id: rol_2
@@ -1038,6 +1084,14 @@ sensor:
     clock_offset:
       name: "RollladenWohnzimmer2 Clock Offset"
       id: rol_2_clock_offset
+    # Battery-runtime compensation telemetry -- visibility only, populated
+    # only when a full move just ended via the current-sense endstop.
+    battery_calib_actual_run:
+      name: "RollladenWohnzimmer2 Battery Calib Actual Run"
+      id: rol_2_calib_actual_run
+    battery_calib_nominal_run:
+      name: "RollladenWohnzimmer2 Battery Calib Nominal Run"
+      id: rol_2_calib_nominal_run
 
 
 switch:
@@ -1058,7 +1112,7 @@ switch:
   # still gates promotion on ppm validity, phase trustworthiness, missed marks
   # and the RTC source.
   - platform: template
-    name: "Timed Mode (Mode B) — node 2"
+    name: "Timed Mode (Mode B) — Node 2"
     id: rol_2_timed_mode
     entity_category: config
     optimistic: true
@@ -1067,6 +1121,17 @@ switch:
       - lambda: 'id(rol_2)->enable_timed_mode(true);'
     turn_off_action:
       - lambda: 'id(rol_2)->enable_timed_mode(false);'
+
+  - platform: template
+    name: "Timed Mode (Mode B) — Node 1"
+    id: rol_1_timed_mode
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: 'id(rol_1)->enable_timed_mode(true);'
+    turn_off_action:
+      - lambda: 'id(rol_1)->enable_timed_mode(false);'
 
   # OPTIMISTIC SINGLE SHOT (node 2). Default OFF, and the default is the point.
   #
@@ -1094,16 +1159,16 @@ switch:
   #
   # A switch rather than automatic, for the same reason Timed Mode above is:
   # it relaxes "any hub uncertainty -> burst", which is the safety argument.
-  - platform: template
-    name: "Optimistic single shot (node 2)"
-    id: rol_2_optimistic_single_shot
-    entity_category: config
-    optimistic: true
-    restore_mode: ALWAYS_OFF
-    turn_on_action:
-      - lambda: 'id(rol_2)->enable_optimistic_single_shot(true);'
-    turn_off_action:
-      - lambda: 'id(rol_2)->enable_optimistic_single_shot(false);'
+  # - platform: template
+  #   name: "Optimistic single shot (node 2)"
+  #   id: rol_2_optimistic_single_shot
+  #   entity_category: config
+  #   optimistic: true
+  #   restore_mode: ALWAYS_OFF
+  #   turn_on_action:
+  #     - lambda: 'id(rol_2)->enable_optimistic_single_shot(true);'
+  #   turn_off_action:
+  #     - lambda: 'id(rol_2)->enable_optimistic_single_shot(false);'
 
   # Per-slot enable switches — part of the SLOT-ENTITY UI, commented out with
   # the rest of it. In the text format a slot is removed by deleting it from

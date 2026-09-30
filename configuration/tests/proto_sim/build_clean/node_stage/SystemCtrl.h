@@ -25,6 +25,14 @@ public:
     void setHostname(const char* name, size_t len) { hostname_.assign(name, len); }
     void setSleepDuration(uint64_t s)              { sleep_s_ = s; }
     void setTimes(uint32_t open_s, uint32_t close_s) { open_s_ = open_s; close_s_ = close_s; }
+    // The stored travel durations, as the production SystemCtrl exposes them
+    // (SystemCtrl.cpp:649/651 -> g_config.motorOpenDuration_s / _close_).
+    // handleCoverConfig reads these to decide what a CoverConfig zero should
+    // fall back to: proto3 cannot tell "unset" from 0, so a zero must keep
+    // what the node already has. Without these the real dispatcher does not
+    // compile against this shim at all.
+    uint32_t getConfigMotorOpenDuration()  const { return open_s_; }
+    uint32_t getConfigMotorCloseDuration() const { return close_s_; }
     void setGeometry(float h, float a, float t)    { h_ = h; a_ = a; t_ = t; geom_ = true; }
     // Slat-slack head/tail times (v1.0.10) and the configurable battery
     // force-send interval (v1.0.12).  interval_s == 0 means "unset" and is
@@ -43,8 +51,12 @@ public:
     // LittleFS persistence — no-ops on host (test inspects the in-RAM
     // setters directly).
     void mountLittleFS()      {}
-    void saveConfiguration()  {}
+    // Counted: every save is a flash write, and a reset during one emptied
+    // config.txt on node 2 (2026-09-15). A test can assert when it must NOT happen.
+    void saveConfiguration()  { save_calls_++; }
     void unmountLittleFS()    {}
+    int  save_calls() const   { return save_calls_; }
+    int  save_calls_{0};
 
     // WiFi / OTA — no-ops.
     void setupWiFi()    {}
@@ -128,6 +140,20 @@ private:
     uint32_t  battery_interval_s_{900};  // production default: 15 min
     int       deepsleep_calls_{0};
 
+public:
+    // --- surface frtosTasks.cpp needs (T-1) ------------------------------
+    // Both record only: the ADC teardown and the deep-sleep entry are the two
+    // things the battery task does on its way out, and neither is protocol.
+    void unloadBatteryMonitoringADC() { adc_unloads_++; }
+    unsigned adcUnloads() const { return adc_unloads_; }
+    void enterDeepSleepTask(void * /*pvParameters*/) { deep_sleep_tasks_++; }
+    unsigned deepSleepTaskCalls() const { return deep_sleep_tasks_; }
+
+private:
+    unsigned adc_unloads_{0};
+    unsigned deep_sleep_tasks_{0};
+
+public:
     // P3 — defaults mirror the production struct Config.
     bool      auto_mode_{false};
     uint32_t  sched_version_{0};

@@ -72,6 +72,16 @@ public:
     float getLastMotorCurrentAmps() const { return last_motor_current_amps_; }
     void  setLastMotorCurrentAmps(float a) { last_motor_current_amps_ = a; }
 
+    // Battery-runtime compensation telemetry (CoverPosition.actualruns/
+    // nominalruns) -- hub-visibility only, see the real MotorCtrl.h's own
+    // comment. Not modelled here (this shim has no motor FSM), just a plain
+    // record so CmdDispatcher.cpp's real code compiles and host tests that
+    // care can set it directly.
+    float getLastActualRunS() const { return last_actual_run_s_; }
+    float getLastNominalRunS() const { return last_nominal_run_s_; }
+    void  setLastActualRunS(float s) { last_actual_run_s_ = s; }
+    void  setLastNominalRunS(float s) { last_nominal_run_s_ = s; }
+
     // --- surface frtosTasks.cpp needs, as of T-1's last increment ---------
     //
     // The motor FSM and the battery supply switch are not protocol, so these
@@ -102,6 +112,8 @@ public:
 
 private:
     float last_motor_current_amps_{0.0f};
+    float last_actual_run_s_{0.0f};
+    float last_nominal_run_s_{0.0f};
 
     unsigned fsm_calls_{0};
     unsigned supply_acquires_{0};

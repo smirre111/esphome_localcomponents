@@ -727,6 +727,51 @@ void   grid_beacon__free_unpacked
   assert(message->base.descriptor == &grid_beacon__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   grid_demote__init
+                     (GridDemote         *message)
+{
+  static const GridDemote init_value = GRID_DEMOTE__INIT;
+  *message = init_value;
+}
+size_t grid_demote__get_packed_size
+                     (const GridDemote *message)
+{
+  assert(message->base.descriptor == &grid_demote__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t grid_demote__pack
+                     (const GridDemote *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &grid_demote__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t grid_demote__pack_to_buffer
+                     (const GridDemote *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &grid_demote__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+GridDemote *
+       grid_demote__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (GridDemote *)
+     protobuf_c_message_unpack (&grid_demote__descriptor,
+                                allocator, len, data);
+}
+void   grid_demote__free_unpacked
+                     (GridDemote *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &grid_demote__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   grid_sync__init
                      (GridSync         *message)
 {
@@ -1130,6 +1175,51 @@ void   cover_position__free_unpacked
   if(!message)
     return;
   assert(message->base.descriptor == &cover_position__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   grid_sync_request__init
+                     (GridSyncRequest         *message)
+{
+  static const GridSyncRequest init_value = GRID_SYNC_REQUEST__INIT;
+  *message = init_value;
+}
+size_t grid_sync_request__get_packed_size
+                     (const GridSyncRequest *message)
+{
+  assert(message->base.descriptor == &grid_sync_request__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t grid_sync_request__pack
+                     (const GridSyncRequest *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &grid_sync_request__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t grid_sync_request__pack_to_buffer
+                     (const GridSyncRequest *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &grid_sync_request__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+GridSyncRequest *
+       grid_sync_request__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (GridSyncRequest *)
+     protobuf_c_message_unpack (&grid_sync_request__descriptor,
+                                allocator, len, data);
+}
+void   grid_sync_request__free_unpacked
+                     (GridSyncRequest *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &grid_sync_request__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
 void   lora_client_response_message__init
@@ -1549,7 +1639,7 @@ const ProtobufCMessageDescriptor base_nonce_exchange__descriptor =
   (ProtobufCMessageInit) base_nonce_exchange__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor phase_report__field_descriptors[7] =
+static const ProtobufCFieldDescriptor phase_report__field_descriptors[10] =
 {
   {
     "samples",
@@ -1635,20 +1725,59 @@ static const ProtobufCFieldDescriptor phase_report__field_descriptors[7] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "rxBusySkips",
+    8,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(PhaseReport, rxbusyskips),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "timedRxActive",
+    9,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(PhaseReport, timedrxactive),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "demotionReason",
+    10,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(PhaseReport, demotionreason),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned phase_report__field_indices_by_name[] = {
+  9,   /* field[9] = demotionReason */
   1,   /* field[1] = errUs */
   3,   /* field[3] = outsideGuard */
   5,   /* field[5] = ppmEstimate */
   6,   /* field[6] = ppmSamples */
   4,   /* field[4] = rtcSlowSrc */
+  7,   /* field[7] = rxBusySkips */
   0,   /* field[0] = samples */
   2,   /* field[2] = spreadUs */
+  8,   /* field[8] = timedRxActive */
 };
 static const ProtobufCIntRange phase_report__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 7 }
+  { 0, 10 }
 };
 const ProtobufCMessageDescriptor phase_report__descriptor =
 {
@@ -1658,7 +1787,7 @@ const ProtobufCMessageDescriptor phase_report__descriptor =
   "PhaseReport",
   "",
   sizeof(PhaseReport),
-  7,
+  10,
   phase_report__field_descriptors,
   phase_report__field_indices_by_name,
   1,  phase_report__number_ranges,
@@ -1780,7 +1909,7 @@ const ProtobufCMessageDescriptor encrypted_payload__descriptor =
   (ProtobufCMessageInit) encrypted_payload__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor time_sync__field_descriptors[4] =
+static const ProtobufCFieldDescriptor time_sync__field_descriptors[5] =
 {
   {
     "epoch",
@@ -1830,17 +1959,30 @@ static const ProtobufCFieldDescriptor time_sync__field_descriptors[4] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "inSlotUplinks",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(TimeSync, inslotuplinks),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned time_sync__field_indices_by_name[] = {
   2,   /* field[2] = dstNext */
   0,   /* field[0] = epoch */
+  4,   /* field[4] = inSlotUplinks */
   3,   /* field[3] = sleepOk */
   1,   /* field[1] = utcOffset */
 };
 static const ProtobufCIntRange time_sync__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 4 }
+  { 0, 5 }
 };
 const ProtobufCMessageDescriptor time_sync__descriptor =
 {
@@ -1850,7 +1992,7 @@ const ProtobufCMessageDescriptor time_sync__descriptor =
   "TimeSync",
   "",
   sizeof(TimeSync),
-  4,
+  5,
   time_sync__field_descriptors,
   time_sync__field_indices_by_name,
   1,  time_sync__number_ranges,
@@ -2076,7 +2218,7 @@ const ProtobufCMessageDescriptor schedule_config__descriptor =
   (ProtobufCMessageInit) schedule_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[13] =
+static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[22] =
 {
   {
     "reason",
@@ -2234,6 +2376,114 @@ static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[13] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "prevBeaconMsgId",
+    27,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevbeaconmsgid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevBeaconT0Ticks",
+    28,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevbeacont0ticks),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "rtcPeriodQ19",
+    29,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, rtcperiodq19),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevWakeWindows",
+    30,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevwakewindows),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevWakeHits",
+    31,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevwakehits),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevWakeDetected",
+    32,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevwakedetected),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevWakeCrcValid",
+    33,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevwakecrcvalid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevSleepRequestedUs",
+    34,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevsleeprequestedus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "prevSleepAppliedUs",
+    35,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT64,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, prevsleepappliedus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned node_wake_beacon__field_indices_by_name[] = {
   6,   /* field[6] = awakeWindow_ms */
@@ -2244,8 +2494,17 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
   2,   /* field[2] = nodeEpoch */
   12,   /* field[12] = phase */
   5,   /* field[5] = position */
+  13,   /* field[13] = prevBeaconMsgId */
+  14,   /* field[14] = prevBeaconT0Ticks */
+  21,   /* field[21] = prevSleepAppliedUs */
+  20,   /* field[20] = prevSleepRequestedUs */
+  19,   /* field[19] = prevWakeCrcValid */
+  18,   /* field[18] = prevWakeDetected */
+  17,   /* field[17] = prevWakeHits */
+  16,   /* field[16] = prevWakeWindows */
   0,   /* field[0] = reason */
   11,   /* field[11] = resetReason */
+  15,   /* field[15] = rtcPeriodQ19 */
   1,   /* field[1] = schedVersion */
   8,   /* field[8] = sessionResume */
   4,   /* field[4] = voltage */
@@ -2254,7 +2513,7 @@ static const ProtobufCIntRange node_wake_beacon__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 26, 12 },
-  { 0, 13 }
+  { 0, 22 }
 };
 const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
 {
@@ -2264,14 +2523,14 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   "NodeWakeBeacon",
   "",
   sizeof(NodeWakeBeacon),
-  13,
+  22,
   node_wake_beacon__field_descriptors,
   node_wake_beacon__field_indices_by_name,
   2,  node_wake_beacon__number_ranges,
   (ProtobufCMessageInit) node_wake_beacon__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_header__field_descriptors[6] =
+static const ProtobufCFieldDescriptor lora_header__field_descriptors[10] =
 {
   {
     "destAddress",
@@ -2345,20 +2604,72 @@ static const ProtobufCFieldDescriptor lora_header__field_descriptors[6] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "onMark",
+    8,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, onmark),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "fireStamped",
+    9,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, firestamped),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "fireRound",
+    10,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, fireround),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "fireOffsetUs",
+    11,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, fireoffsetus),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_header__field_indices_by_name[] = {
   5,   /* field[5] = burstCount */
   4,   /* field[4] = burstIndex */
   0,   /* field[0] = destAddress */
   1,   /* field[1] = destSubnet */
+  9,   /* field[9] = fireOffsetUs */
+  8,   /* field[8] = fireRound */
+  7,   /* field[7] = fireStamped */
   3,   /* field[3] = msgId */
+  6,   /* field[6] = onMark */
   2,   /* field[2] = senderAddress */
 };
 static const ProtobufCIntRange lora_header__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 6, 4 },
-  { 0, 6 }
+  { 0, 10 }
 };
 const ProtobufCMessageDescriptor lora_header__descriptor =
 {
@@ -2368,7 +2679,7 @@ const ProtobufCMessageDescriptor lora_header__descriptor =
   "LoraHeader",
   "",
   sizeof(LoraHeader),
-  6,
+  10,
   lora_header__field_descriptors,
   lora_header__field_indices_by_name,
   2,  lora_header__number_ranges,
@@ -2587,7 +2898,7 @@ const ProtobufCMessageDescriptor mac_control__descriptor =
   (ProtobufCMessageInit) mac_control__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[4] =
+static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[6] =
 {
   {
     "txRound",
@@ -2637,8 +2948,34 @@ static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[4] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "netKeyId",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridBeacon, netkeyid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "mac",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(GridBeacon, mac),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned grid_beacon__field_indices_by_name[] = {
+  5,   /* field[5] = mac */
+  4,   /* field[4] = netKeyId */
   2,   /* field[2] = pendingMask */
   3,   /* field[3] = pendingMaskValid */
   0,   /* field[0] = txRound */
@@ -2647,7 +2984,7 @@ static const unsigned grid_beacon__field_indices_by_name[] = {
 static const ProtobufCIntRange grid_beacon__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 4 }
+  { 0, 6 }
 };
 const ProtobufCMessageDescriptor grid_beacon__descriptor =
 {
@@ -2657,14 +2994,32 @@ const ProtobufCMessageDescriptor grid_beacon__descriptor =
   "GridBeacon",
   "",
   sizeof(GridBeacon),
-  4,
+  6,
   grid_beacon__field_descriptors,
   grid_beacon__field_indices_by_name,
   1,  grid_beacon__number_ranges,
   (ProtobufCMessageInit) grid_beacon__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor grid_sync__field_descriptors[15] =
+#define grid_demote__field_descriptors NULL
+#define grid_demote__field_indices_by_name NULL
+#define grid_demote__number_ranges NULL
+const ProtobufCMessageDescriptor grid_demote__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "GridDemote",
+  "GridDemote",
+  "GridDemote",
+  "",
+  sizeof(GridDemote),
+  0,
+  grid_demote__field_descriptors,
+  grid_demote__field_indices_by_name,
+  0,  grid_demote__number_ranges,
+  (ProtobufCMessageInit) grid_demote__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor grid_sync__field_descriptors[17] =
 {
   {
     "enable",
@@ -2846,12 +3201,38 @@ static const ProtobufCFieldDescriptor grid_sync__field_descriptors[15] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "netKey",
+    16,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, netkey),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "netKeyId",
+    17,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSync, netkeyid),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned grid_sync__field_indices_by_name[] = {
   12,   /* field[12] = armOffsetUs */
   8,   /* field[8] = beaconEveryRounds */
   7,   /* field[7] = beaconSlotIndex */
   0,   /* field[0] = enable */
+  15,   /* field[15] = netKey */
+  16,   /* field[16] = netKeyId */
   13,   /* field[13] = pendingMask */
   14,   /* field[14] = pendingMaskValid */
   4,   /* field[4] = pitchUs */
@@ -2867,7 +3248,7 @@ static const unsigned grid_sync__field_indices_by_name[] = {
 static const ProtobufCIntRange grid_sync__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 15 }
+  { 0, 17 }
 };
 const ProtobufCMessageDescriptor grid_sync__descriptor =
 {
@@ -2877,7 +3258,7 @@ const ProtobufCMessageDescriptor grid_sync__descriptor =
   "GridSync",
   "",
   sizeof(GridSync),
-  15,
+  17,
   grid_sync__field_descriptors,
   grid_sync__field_indices_by_name,
   1,  grid_sync__number_ranges,
@@ -2993,18 +3374,6 @@ static const ProtobufCFieldDescriptor mode_test__field_descriptors[13] =
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "keepPowerProfile",
-    7,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BOOL,
-    0,   /* quantifier_offset */
-    offsetof(ModeTest, keeppowerprofile),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
     "reportEveryS",
     8,
     PROTOBUF_C_LABEL_NONE,
@@ -3076,25 +3445,38 @@ static const ProtobufCFieldDescriptor mode_test__field_descriptors[13] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "dropPowerProfile",
+    14,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(ModeTest, droppowerprofile),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned mode_test__field_indices_by_name[] = {
-  9,   /* field[9] = armOffsetUs */
+  8,   /* field[8] = armOffsetUs */
   4,   /* field[4] = copies */
+  12,   /* field[12] = dropPowerProfile */
   1,   /* field[1] = durationS */
   0,   /* field[0] = enable */
-  10,   /* field[10] = enableCounter */
-  11,   /* field[11] = enableCrypto */
+  9,   /* field[9] = enableCounter */
+  10,   /* field[10] = enableCrypto */
   3,   /* field[3] = gridPeriodMs */
-  6,   /* field[6] = keepPowerProfile */
-  12,   /* field[12] = macEcho */
+  11,   /* field[11] = macEcho */
   2,   /* field[2] = mode */
   5,   /* field[5] = payloadPadTo */
-  7,   /* field[7] = reportEveryS */
-  8,   /* field[8] = seq */
+  6,   /* field[6] = reportEveryS */
+  7,   /* field[7] = seq */
 };
-static const ProtobufCIntRange mode_test__number_ranges[1 + 1] =
+static const ProtobufCIntRange mode_test__number_ranges[2 + 1] =
 {
   { 1, 0 },
+  { 8, 6 },
   { 0, 13 }
 };
 const ProtobufCMessageDescriptor mode_test__descriptor =
@@ -3108,7 +3490,7 @@ const ProtobufCMessageDescriptor mode_test__descriptor =
   13,
   mode_test__field_descriptors,
   mode_test__field_indices_by_name,
-  1,  mode_test__number_ranges,
+  2,  mode_test__number_ranges,
   (ProtobufCMessageInit) mode_test__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
@@ -3215,7 +3597,7 @@ const ProtobufCMessageDescriptor hist__descriptor =
   (ProtobufCMessageInit) hist__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[39] =
+static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[41] =
 {
   {
     "seqFirst",
@@ -3685,6 +4067,30 @@ static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[39] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "residualPpm",
+    58,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_INT32,
+    0,   /* quantifier_offset */
+    offsetof(ModeTestReport, residualppm),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "residualSamples",
+    59,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ModeTestReport, residualsamples),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned mode_test_report__field_indices_by_name[] = {
   7,   /* field[7] = addressed */
@@ -3711,6 +4117,8 @@ static const unsigned mode_test_report__field_indices_by_name[] = {
   24,   /* field[24] = ppmEstimate */
   25,   /* field[25] = ppmSamples */
   19,   /* field[19] = promotions */
+  39,   /* field[39] = residualPpm */
+  40,   /* field[40] = residualSamples */
   28,   /* field[28] = rssiMean */
   27,   /* field[27] = rssiMin */
   33,   /* field[33] = rtcSlowSrc */
@@ -3735,7 +4143,7 @@ static const ProtobufCIntRange mode_test_report__number_ranges[6 + 1] =
   { 30, 20 },
   { 40, 24 },
   { 50, 31 },
-  { 0, 39 }
+  { 0, 41 }
 };
 const ProtobufCMessageDescriptor mode_test_report__descriptor =
 {
@@ -3745,14 +4153,14 @@ const ProtobufCMessageDescriptor mode_test_report__descriptor =
   "ModeTestReport",
   "",
   sizeof(ModeTestReport),
-  39,
+  41,
   mode_test_report__field_descriptors,
   mode_test_report__field_indices_by_name,
   6,  mode_test_report__number_ranges,
   (ProtobufCMessageInit) mode_test_report__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[15] =
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[16] =
 {
   {
     "header",
@@ -3934,6 +4342,18 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "griddemote",
+    24,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientOperationMessage, cmd_case),
+    offsetof(LoraClientOperationMessage, griddemote),
+    &grid_demote__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   7,   /* field[7] = basenonce */
@@ -3942,6 +4362,7 @@ static const unsigned lora_client_operation_message__field_indices_by_name[] = {
   10,   /* field[10] = drifttest */
   1,   /* field[1] = encrypted */
   14,   /* field[14] = gridbeacon */
+  15,   /* field[15] = griddemote */
   12,   /* field[12] = gridsync */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
@@ -3957,7 +4378,7 @@ static const ProtobufCIntRange lora_client_operation_message__number_ranges[3 + 
   { 1, 0 },
   { 9, 1 },
   { 20, 11 },
-  { 0, 15 }
+  { 0, 16 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -3967,7 +4388,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  15,
+  16,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
   3,  lora_client_operation_message__number_ranges,
@@ -4101,7 +4522,7 @@ const ProtobufCMessageDescriptor client_battery__descriptor =
   (ProtobufCMessageInit) client_battery__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor cover_position__field_descriptors[3] =
+static const ProtobufCFieldDescriptor cover_position__field_descriptors[5] =
 {
   {
     "position",
@@ -4139,16 +4560,42 @@ static const ProtobufCFieldDescriptor cover_position__field_descriptors[3] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "actualRunS",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverPosition, actualruns),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "nominalRunS",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverPosition, nominalruns),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cover_position__field_indices_by_name[] = {
+  3,   /* field[3] = actualRunS */
   2,   /* field[2] = current */
+  4,   /* field[4] = nominalRunS */
   0,   /* field[0] = position */
   1,   /* field[1] = voltage */
 };
 static const ProtobufCIntRange cover_position__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 3 }
+  { 0, 5 }
 };
 const ProtobufCMessageDescriptor cover_position__descriptor =
 {
@@ -4158,14 +4605,78 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   "CoverPosition",
   "",
   sizeof(CoverPosition),
-  3,
+  5,
   cover_position__field_descriptors,
   cover_position__field_indices_by_name,
   1,  cover_position__number_ranges,
   (ProtobufCMessageInit) cover_position__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[11] =
+static const ProtobufCFieldDescriptor grid_sync_request__field_descriptors[3] =
+{
+  {
+    "reason",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSyncRequest, reason),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "sSinceAnchorFix",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSyncRequest, ssinceanchorfix),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "refusedSamples",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(GridSyncRequest, refusedsamples),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned grid_sync_request__field_indices_by_name[] = {
+  0,   /* field[0] = reason */
+  2,   /* field[2] = refusedSamples */
+  1,   /* field[1] = sSinceAnchorFix */
+};
+static const ProtobufCIntRange grid_sync_request__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 3 }
+};
+const ProtobufCMessageDescriptor grid_sync_request__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "GridSyncRequest",
+  "GridSyncRequest",
+  "GridSyncRequest",
+  "",
+  sizeof(GridSyncRequest),
+  3,
+  grid_sync_request__field_descriptors,
+  grid_sync_request__field_indices_by_name,
+  1,  grid_sync_request__number_ranges,
+  (ProtobufCMessageInit) grid_sync_request__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[12] =
 {
   {
     "header",
@@ -4299,12 +4810,25 @@ static const ProtobufCFieldDescriptor lora_client_response_message__field_descri
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "gridsyncrequest",
+    23,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(LoraClientResponseMessage, proto_case),
+    offsetof(LoraClientResponseMessage, gridsyncrequest),
+    &grid_sync_request__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_client_response_message__field_indices_by_name[] = {
   7,   /* field[7] = ack */
   2,   /* field[2] = avail */
   8,   /* field[8] = beacon */
   1,   /* field[1] = encrypted */
+  11,   /* field[11] = gridsyncrequest */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
   9,   /* field[9] = maccontrol */
@@ -4319,7 +4843,7 @@ static const ProtobufCIntRange lora_client_response_message__number_ranges[4 + 1
   { 9, 1 },
   { 20, 9 },
   { 22, 10 },
-  { 0, 11 }
+  { 0, 12 }
 };
 const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
 {
@@ -4329,7 +4853,7 @@ const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
   "LoraClientResponseMessage",
   "",
   sizeof(LoraClientResponseMessage),
-  11,
+  12,
   lora_client_response_message__field_descriptors,
   lora_client_response_message__field_indices_by_name,
   4,  lora_client_response_message__number_ranges,
@@ -4522,21 +5046,23 @@ const ProtobufCEnumDescriptor node_mode__descriptor =
   node_mode__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue wake_reason__enum_values_by_number[5] =
+static const ProtobufCEnumValue wake_reason__enum_values_by_number[6] =
 {
   { "WAKE_BOOT", "WAKE_REASON__WAKE_BOOT", 0 },
   { "WAKE_TIMER_EVENT", "WAKE_REASON__WAKE_TIMER_EVENT", 1 },
   { "WAKE_TIMER_CHECKIN", "WAKE_REASON__WAKE_TIMER_CHECKIN", 2 },
   { "WAKE_BUTTON", "WAKE_REASON__WAKE_BUTTON", 3 },
   { "WAKE_UNKNOWN", "WAKE_REASON__WAKE_UNKNOWN", 4 },
+  { "WAKE_MODE_CHANGED", "WAKE_REASON__WAKE_MODE_CHANGED", 5 },
 };
 static const ProtobufCIntRange wake_reason__value_ranges[] = {
-{0, 0},{0, 5}
+{0, 0},{0, 6}
 };
-static const ProtobufCEnumValueIndex wake_reason__enum_values_by_name[5] =
+static const ProtobufCEnumValueIndex wake_reason__enum_values_by_name[6] =
 {
   { "WAKE_BOOT", 0 },
   { "WAKE_BUTTON", 3 },
+  { "WAKE_MODE_CHANGED", 5 },
   { "WAKE_TIMER_CHECKIN", 2 },
   { "WAKE_TIMER_EVENT", 1 },
   { "WAKE_UNKNOWN", 4 },
@@ -4548,9 +5074,9 @@ const ProtobufCEnumDescriptor wake_reason__descriptor =
   "WakeReason",
   "WakeReason",
   "",
-  5,
+  6,
   wake_reason__enum_values_by_number,
-  5,
+  6,
   wake_reason__enum_values_by_name,
   1,
   wake_reason__value_ranges,

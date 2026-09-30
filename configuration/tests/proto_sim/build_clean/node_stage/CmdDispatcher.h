@@ -31,6 +31,7 @@
 #include "AckCache.h"
 #include "ClassAWindows.h"
 #include "TimedModePolicy.h"
+#include "FrameCrypto.h"
 
 // F-39: Old Packet class definition removed 2026-05-25 — dead code.
 
@@ -55,6 +56,17 @@ typedef struct {
     // that one is TX-side). Travels with the frame so the drift estimator sees
     // the interrupt time rather than the time the frame was decrypted.
     int64_t rx_us;
+    // The receive window this frame actually arrived in, for the same reason
+    // rx_us travels here: by the time the dispatcher resolves the frame, the
+    // live generation has moved on. noteFrameArriving() bumps it BEFORE
+    // lora_parsePacket (deliberately — see LoraInterface.cpp), and
+    // noteRadioSlept() bumps it again, so a generation read at dispatch time is
+    // at least two windows ahead of the one that caught this frame.
+    //
+    // Without it a mark could only be booked hit on "addressed to me", with no
+    // way to ask WHICH window heard it — review finding 13, measured as
+    // `armed 189, hit 189` at every sweep offset including both extremes.
+    uint8_t window_gen;
 } rx_buffer_t;
 
     CmdDispatcher(
@@ -93,7 +105,22 @@ typedef struct {
     void sendBatteryVoltage();
     void setBatteryVoltage(float voltage);
     void measureAndSendBatteryVoltage();
+    // LKG battery voltage cache -- the same value sendPosition()/sendBeacon()
+    // read. Used by MotorCtrl to snapshot "voltage at move start" for the
+    // battery-runtime calibration feature; whatever measureAndSendBatteryVoltage()
+    // requested at the PREVIOUS move's end (or the periodic 5-min reading) is
+    // what's fresh here -- a move's own fresh reading is not back yet by the
+    // time it starts (it completes asynchronously on taskBatteryMonitor).
+    float getLastBatteryVoltage() const;
+    // F-41: taskBatteryMonitor raises this while it waits for the pack to
+    // recover from a move and samples the ADC, so checkQueuesIdle() does not
+    // let the node deep-sleep in the middle of a post-move battery update.
+    void setBatteryMeasurementBusy(bool busy);
     void sendRegister();
+    // The deep sleep about to be entered, as wanted and as handed to ESP-IDF
+    // after the crystal correction. Kept across the sleep and reported in the
+    // next wake's beacon (Mode C's wake-timing pass line).
+    void noteDeepSleepRequest(uint64_t requested_us, uint64_t applied_us);
 
     // F-4: Acknowledge a received command (node -> hub) so the hub can stop
     // retransmitting.  Routed through processTxCommand (the single writer of
@@ -155,6 +182,12 @@ typedef struct {
     // reach it either.  The boot REGISTER used to be sent exactly ONCE, so a
     // single lost frame stranded the node permanently — recoverable only by a
     // physical reset.  Retry until the hub provisions us.
+    //
+    // The same holds for a PROVISIONED node without a session: sending
+    // REGISTER drops the base nonce, so if that REGISTER is lost the node
+    // cannot decrypt anything the hub sends. sendRegister() therefore always
+    // arms the retry, and it stops only once the node has an address AND a
+    // base nonce for its hub.
     bool isProvisioned();
     void armRegisterRetry();
     void cancelRegisterRetry();
@@ -307,16 +340,73 @@ typedef struct {
     // Hit: at the address filter, because a window that received a foreign
     // frame, a CRC failure or an unparseable one was NOT hit — the node spent
     // the battery and got nothing it could use.
-    void noteMarkArmed()
+    // A MARK BELONGS TO THE WINDOW IT WAS ARMED FOR (review finding 5,
+    // 2026-09-15). The generation is LoraInterface's window counter, and it is
+    // what stops two different windows resolving one mark:
+    //
+    //   * a mark window that heard a CRC failure or a NEIGHBOUR's frame left the
+    //     mark open, because only an addressed frame closes it as a hit. The next
+    //     window to close empty then booked the miss — a Mode A, beacon or Class A
+    //     window that was never a mark, and a false step toward demotion.
+    //   * that same mark was never counted missed either, so a node hearing its
+    //     neighbour instead of its own frame every round never demoted, while the
+    //     rule below says a miss is "no frame ADDRESSED to me at my mark".
+    //
+    // Arming the NEXT mark resolves the previous one: by then its round is over,
+    // and the dispatcher task has had a full round to deliver a hit for it.
+    // HW-2: a sweep deliberately mis-arms its windows, so the misses it causes
+    // ARE the measurement, not evidence that the grid is stale.
+    //
+    // NO LONGER LOAD-BEARING as of 2026-09-20, and kept deliberately rather
+    // than deleted. It was written because three missed marks demoted the node
+    // and ended the very run being performed; MissedMarks is now retired
+    // (TimedModePolicy.h), so the worst this suppresses is a diagnostic
+    // counter. It stays because HW-2 is blocked mid-investigation and its
+    // disabled witness still asserts consecutiveMissedMarks() == 0 — pulling it
+    // now would disturb an open measurement to save nothing today. DELETE IT
+    // when HW-2 closes, together with that witness.
+    //
+    // The offset is non-zero only for MODE_SWEEP (handleModeTest) and is cleared
+    // on every exit path.
+    bool sweepMisArming_() const
     {
+        return this->mode_test_active_ && this->grid_.params.arm_offset_us != 0;
+    }
+    void noteMarkArmed(uint8_t generation)
+    {
+        if (this->mark_window_open_ && !this->sweepMisArming_())
+        {
+            // Armed, and neither hit nor closed empty: nothing addressed to this
+            // node arrived at that mark. COUNTED, never demoted on — see the
+            // Demotion banner in TimedModePolicy.h.
+            if (this->missed_marks_ < 0xFFFF) this->missed_marks_++;
+        }
         portENTER_CRITICAL(&this->funnel_mux_);
         this->funnel_.noteWindowArmed();
         portEXIT_CRITICAL(&this->funnel_mux_);
         this->mark_window_open_ = true;
+        this->mark_window_gen_  = generation;
     }
-    void noteMarkHit()
+    // `generation` is the window the frame ARRIVED IN, carried with it from the
+    // radio (rx_buffer_t::window_gen). A mark is kept only by a frame its own
+    // window caught — the same rule noteMarkMissed already applies to closing.
+    //
+    // Before this gate existed the hit keyed on "addressed to me" alone, so any
+    // frame heard by ANY window resolved whatever mark was open. Measured
+    // consequence (review finding 13): a sweep deliberately mis-arming its
+    // windows still reported `armed 189, hit 189` at every offset, including
+    // +19 000 us (window opens 760 us AFTER T0) and -20 000 us (38 ms early).
+    // WMR's hit half meant "the node was served", not "this window worked".
+    //
+    // kNoWindowGen: no generation travelled with the frame — every non-radio
+    // path, including host-injected frames. Such a frame cannot show which
+    // window heard it, so it resolves nothing.
+    static constexpr uint8_t kNoWindowGen = 0xFF;
+    void noteMarkHit(uint8_t generation)
     {
         if (!this->mark_window_open_) return;   // not a timed window
+        if (generation == kNoWindowGen) return; // unknown window: proves nothing
+        if (generation != this->mark_window_gen_) return;
         this->mark_window_open_ = false;
         portENTER_CRITICAL(&this->funnel_mux_);
         this->funnel_.noteWindowHit();
@@ -326,12 +416,19 @@ typedef struct {
     // counter the demotion policy keys on — which counts "no frame ADDRESSED to
     // me at my mark", never "nothing received", because a window walked through
     // by another node's burst is not empty and would otherwise reset it.
-    void noteMarkMissed()
+    bool markWindowOpen() const { return this->mark_window_open_; }
+    // `generation` is the window that closed. A window which is not the one the
+    // mark was armed for closes nothing: it was never promised anything.
+    void noteMarkMissed(uint8_t generation)
     {
         if (!this->mark_window_open_) return;
+        if (generation != this->mark_window_gen_) return;
         this->mark_window_open_ = false;
+        // The window still CLOSES during a sweep — the funnel's armed/hit counts
+        // are exactly what the sweep measures — but see sweepMisArming_(): its
+        // own induced misses must not demote it.
+        if (this->sweepMisArming_()) return;
         if (this->missed_marks_ < 0xFFFF) this->missed_marks_++;
-        this->demoteIfMarksMissed_();
     }
 
     // M3 — MAC-1 / MAC-2 as switchable sublayers, for MAC CONTROL FRAMES ONLY
@@ -365,6 +462,84 @@ typedef struct {
     // Everything the mode needs, in one predicate. Uses TimedModePolicy so the
     // node and the hub reason about promotion with the same rules.
     bool timedRxActive() const;
+    // Why the node is not in Mode B right now (a timedmode::Demotion value), or
+    // 0 = None. The node decides; this is carried to the hub in PhaseReport.
+    uint8_t demotionReasonNow() const;
+
+    // Spend an uplink telling the hub our Mode B status changed, if one is due.
+    //
+    // timedRxActive() RAISES the flag (it is const, and the receive task calls
+    // it on every arming pass); this SENDS, from task context, because
+    // setStatus() is a queue push. Called from the arming path right after
+    // timedRxActive(), which is the one place guaranteed to run whenever the
+    // mode could have changed.
+    //
+    // Throttled by timedmode::shouldAnnounceModeChange. Without a floor a
+    // marginal NoPhase <-> None oscillation costs one uplink per transition on
+    // a battery node — reintroducing, as airtime, the flapping cost the
+    // MissedMarks retirement removed.
+    void announceModeChangeIfPending();
+
+    // --- Section 4.3: placing the UPLINK ---------------------------------
+    //
+    // The lead between beginning CAD and the frame's T0: the CAD itself, the
+    // PA ramp, the preamble, and the software in between.
+    //
+    // The two unmeasured terms are passed as ZERO on purpose. d_tx_ramp is
+    // unmeasured (implementation-plan.md section 12.1) and the hub already
+    // passes 0 for it in every placement it makes; d_cad_dispatch — the task
+    // hop, the radio mutex and the register writes ahead of lora_cad() — has
+    // never been measured either. A zero for each makes the uplink LATE by
+    // exactly their sum, which is a knowable error inside a 14 080 us guard; a
+    // number guessed here would be an unknowable one, and would look measured.
+    static constexpr uint32_t kUplinkCadDispatchUs = 0;   // UNMEASURED
+    static constexpr uint32_t kUplinkTxRampUs      = 0;   // UNMEASURED
+    static constexpr int64_t  kUplinkAimLeadUs =
+        (int64_t) loratiming::kUplinkPreambleToT0Us + (int64_t) loratiming::kCadUs
+        + (int64_t) kUplinkCadDispatchUs + (int64_t) kUplinkTxRampUs;
+
+    // When the TX path should BEGIN its CAD so this uplink lands on this node's
+    // mark + ulOffsetUs. 0 means "not aimed" — the caller sends the old way,
+    // with the random backoff.
+    //
+    // `max_wait_us` is the caller's, because the only honest bound on how long
+    // a frame may wait for its mark is the delay that waiting REPLACES, and
+    // that number lives in the transmit path.
+    //
+    // Not const: it maintains the hit/miss counters, which are the only
+    // field-visible evidence that the offset is honoured.
+    int64_t uplinkCadStartUs(int64_t now_us, int64_t max_wait_us);
+    // U-4: the hub's observed in-slot count, as this node last heard it.
+    uint32_t hubInSlotUplinks() const { return this->hub_in_slot_uplinks_; }
+    uint32_t uplinkAimHits() const   { return this->ul_aim_hits_; }
+    uint32_t uplinkAimMisses() const { return this->ul_aim_misses_; }
+
+    // --- Section 4.4: the fleet key and the beacon's MAC -----------------
+    //
+    // Whether this node holds a fleet key at all. It is the switch between two
+    // beacon policies, and the ratchet is deliberate:
+    //
+    //   no key  -> a beacon may still correct the anchor, bounded by the guard,
+    //              and may never touch the pending mask. Exactly what shipped
+    //              before, so a node that never receives a key does not regress.
+    //   a key   -> a beacon must carry a matching id and a valid MAC or it is
+    //              ignored ENTIRELY. Once forgery can be detected, tolerating an
+    //              unsigned beacon would leave the attack open: the guard bounds
+    //              one nudge, not a sequence of them, so an attacker beaconing
+    //              freely walks the anchor 14 ms at a time until the node is off
+    //              the grid.
+    bool hasNetKey() const {
+        return framecrypto::netKeyIsSet(this->net_key_, sizeof(this->net_key_),
+                                        this->net_key_id_);
+    }
+    uint32_t netKeyId() const { return this->net_key_id_; }
+    // Verify a beacon's MAC against the held key. False when there is no key,
+    // when the id does not match, or when the tag is wrong — the caller does
+    // not need to tell those apart, because all three mean "not from our hub".
+    bool beaconMacIsValid(uint32_t net_key_id, uint32_t tx_round,
+                          uint32_t tx_slot, uint32_t pending_mask,
+                          bool pending_mask_valid,
+                          const uint8_t *mac, size_t mac_len) const;
 
     // When to arm for the next mark. Meaningless unless timedRxActive().
     int64_t nextArmInstantUs(int64_t now_us) const;
@@ -372,8 +547,12 @@ typedef struct {
     // clamping rules live in GridState.h with their tests.
     // Delay until the next window worth opening, and which kind it is. See the
     // definition: the beacon window is never skipped, and it is not a mark.
+    // `opened_t0_us` is the T0 of the window already listening, which is never
+    // armed again; `t0_out` receives the T0 this arm is aimed at.
     int64_t nextArmDelayUs(int64_t now_us, int64_t lead_us,
-                           gridstate::WindowKind &kind_out) const;
+                           gridstate::WindowKind &kind_out,
+                           int64_t opened_t0_us = 0,
+                           int64_t *t0_out = nullptr) const;
     // Section 4.4's pending-data bitmap: false means the last beacon said the
     // hub has nothing for this node and that statement has not expired, so the
     // next window can be skipped. Always true when anything is uncertain.
@@ -386,6 +565,11 @@ typedef struct {
     const ackcache::Cache &ackCacheForTest() const { return this->ack_cache_; }
     // B3, for tests: whether adopting a grid switched timed RX on.
     bool timedRxEnabledForTest() const { return this->timed_rx_enabled_; }
+    // Section 4.4, for tests: the pending bitmap as this node currently holds
+    // it. shouldArmNextWindow() answers the question the radio asks, which is
+    // not the same question — a node whose OWN bit is set arms either way, so
+    // it cannot tell "adopted the mask" from "refused it".
+    const pending::Mask &pendingStateForTest() const { return this->pending_; }
     // For tests: the stored base nonce for a peer, i.e. whether a session
     // exists. Read-only; set_base_nonce stays protected.
     bool getBaseNonceForTest(uint32_t peer, uint32_t &out) {
@@ -420,16 +604,27 @@ typedef struct {
     // the .cpp; the sequencing is ClassAWindows.h's.
     void noteUplinkSent(int64_t t_txdone_us, uint32_t uplink_len);
     void noteClassASleepOk(bool ok);
-    void noteClassAWindowResult(bool had_data);
+    // rx_us: the RxDone stamp when a frame arrived (node time), 0 otherwise.
+    // Only used to log where in the window the frame landed.
+    void noteClassAWindowResult(bool had_data, int64_t rx_us = 0);
     classa::WakeAction classAAction() const;
     // 0 means "no window to open" — never "now".
     int64_t classAArmInstantUs() const;
     int64_t classAArmDelayUs(int64_t now_us, int64_t lead_us) const;
+    // The pending window's arm instant and nominal close, from ONE snapshot so
+    // the two can never describe different windows. Both 0 when nothing is
+    // pending.
+    void    classAPendingWindow(int64_t *arm_us, int64_t *close_us) const;
     bool    classAActive() const { return this->classaSnapshot_().active; }
 
     // --- ModeTest (test-plan.md section 10) -------------------------------
     // Section 4.4's broadcast beacon: re-anchor within the guard, sample the
     // phase, adopt the pending bitmap. Carries no geometry — see the banner.
+    // The hub's startup withdrawal. Takes only the header, because the message
+    // has no fields — see blinds.proto. Unauthenticated by design; the handler
+    // carries the two limits that make that safe (broadcast only, and the fleet
+    // key is not cleared).
+    void handleGridDemote(const LoraHeader *outer_header);
     void handleGridBeacon(LoraClientOperationMessage *message_to_process,
                           const LoraHeader *outer_header, int64_t rx_us);
     void handleModeTest(LoraClientOperationMessage *message_to_process,
@@ -448,6 +643,17 @@ typedef struct {
     // hub asked for — the defect this field shipped with.
     uint8_t modeTestReportedMode() const { return this->mt_mode_; }
     uint32_t modeTestLastRefusal() const { return this->mt_last_refusal_; }
+    int32_t  modeTestPpmForTest() const { return this->mt_drift_fit_.ppm(); }
+    int32_t  modeTestResidualPpmForTest() const { return this->mt_residual_fit_.ppm(); }
+    uint32_t modeTestResidualSamplesForTest() const { return this->mt_residual_fit_.n; }
+    uint32_t modeTestPpmSamplesForTest() const { return this->mt_drift_fit_.n; }
+    // What the report will say the test RAN UNDER (`rep.powerProfileProduction`).
+    // Exposed for the same reason modeTestReportedMode is: the field this
+    // derives from spent its life reading as the opposite of its documentation,
+    // and a test is the only thing that keeps a wire default honest.
+    bool modeTestProductionProfile() const {
+        return this->mt_power_profile_production_;
+    }
     // The sample sinks are public so the radio-facing code (LoraInterface, the
     // handler task) can feed them without a friend declaration. They are inert
     // unless a test is running.
@@ -467,8 +673,13 @@ typedef struct {
     // traffic from a neighbour demote the very node this protects.
     void noteMarkOutcome(bool addressed);
     uint32_t consecutiveMissedMarks() const { return this->missed_marks_; }
+    // Ask the hub for this node's grid again when timedmode::syncRequestReason
+    // says so. Called on every addressed frame; public so a test can drive it.
+    void maybeRequestGridSync();
+    uint32_t gridSyncRequests() const { return this->gridsync_requests_; }
 
     const gridstate::State &gridState() const { return this->grid_; }
+    int32_t clockRatePpbForTest() const { return this->clock_rate_ppb_; }
     gridstate::Refusal lastGridRefusal() const { return this->grid_refusal_; }
 
     void setBenchNode(bool v) { this->bench_node_ = v; }
@@ -479,6 +690,24 @@ typedef struct {
     // processes the frame) plus a burst window and one retransmit, short enough
     // that a failed resume still recovers well inside a wake.
     static constexpr uint32_t kResumeFallbackMs = 12000;
+
+    // The hub's largest gap between two frames of one conversation (its
+    // retransmit interval), which the REGISTER this fallback sends has to be
+    // answered within.
+    static constexpr uint32_t kHubInterFrameGapMs = 5000;
+
+    // THE ORDERING THAT MAKES A LOST REPLY SURVIVABLE, as a build error rather
+    // than a comment. The quiet window holds the node awake; inside it the
+    // beacon ladder re-asks twice and, failing that, this fallback re-registers.
+    // A window shorter than the fallback plus one hub gap means the node sleeps
+    // before the escalation can run, so a node that lost three replies in a row
+    // sleeps with session_proven_ false and recovers only on some later wake.
+    // Found while pricing D-2: kQuietWindowMinMs was 10 000 against a 12 000
+    // fallback, so the floor the YAML is allowed to configure was already past
+    // that line even though the shipped default (20 s) was not.
+    static_assert(automode::kQuietWindowMinMs >= kResumeFallbackMs + kHubInterFrameGapMs,
+                  "the quiet window must outlast the REGISTER fallback plus one "
+                  "hub inter-frame gap, or the fallback can never fire");
 
     // ---- beacon retry ladder ----
     // The link is asymmetric: every hub->node message is bursted 17x across a
@@ -508,6 +737,14 @@ typedef struct {
     // Breaks lockstep between two nodes whose beacons just collided: without
     // it they would retry in step and collide again.
     static constexpr uint32_t kBeaconRetryJitterMs = 500;
+
+    // The other half of the ordering: the cheap retries must finish before the
+    // fallback escalates, or a lost reply costs a full re-registration when two
+    // re-beacons would have done. Asserted here rather than above because these
+    // constants are declared after kResumeFallbackMs.
+    static_assert(kResumeFallbackMs > 2 * kBeaconAckMs + 2 * kBeaconRetryJitterMs,
+                  "the beacon retry ladder must finish before the REGISTER "
+                  "fallback, or the cheap retries are skipped");
 
     // ---- deferred auto-sleep ----
     // Entering automatic mode must NEVER sleep the node the instant the
@@ -575,6 +812,26 @@ typedef struct {
     static bool     isClockValid();
     static int32_t  getUtcOffset();
     static uint64_t getDstNext();
+
+    // ---- Mode-announce state that must SURVIVE DEEP SLEEP ----
+    // Same storage class and the same reason as the clock above: a wake keeps
+    // it, a power-on clears it. See the note beside mode_announce_pending_.
+    static uint8_t  lastReasonAnnounced();
+
+    // A COLD BOOT, explicitly. RTC_DATA_ATTR is a no-op on the host, so this is
+    // what a test uses to get a clean slate; on device the same clearing is
+    // what a power-on does for free.
+    static void     resetModeAnnounceState();
+
+    // A DEEP-SLEEP WAKE, explicitly: clears exactly what plain RAM loses and
+    // keeps exactly what RTC_DATA_ATTR retains.
+    //
+    // This exists so the RTC/plain split is the thing under test rather than
+    // something implied by which C++ object a test happens to construct. A
+    // bench that models a wake by building a second dispatcher tests object
+    // lifetime, not the node — and that is how a fix which does nothing on
+    // hardware passed the suite twice (1.1.2, 1.1.3).
+    void            simulateWakeForTest();
     // Format an epoch as LOCAL wall time using the hub-supplied UTC offset.
     static void     formatLocalTime(uint64_t epoch, char *out, size_t out_len);
 
@@ -596,6 +853,20 @@ typedef struct {
     void processRxCommand(void *pvParameter);
     void processSysCommand(void *pvParameter);
     void processTxCommand(void *pvParameter);
+    // The body of that task, as a function. Extracted so it can be RUN: the
+    // task blocks on portMAX_DELAY, so the host suite could not reach the code
+    // that builds every uplink this node sends. Behaviour is unchanged — the
+    // task calls this once per command.
+    void serviceTxCommand(const tx_command_t &txcmd);
+    // One non-blocking iteration of that task. False when the queue was empty,
+    // so a caller can drain to quiescence and still tell "nothing queued" from
+    // "queued, and it produced no frame".
+    //
+    // Public because it is the only way to exercise the real uplink path off
+    // the MCU, and an end-to-end test that mirrored this code instead would be
+    // asserting one side's arithmetic against itself — the mistake §11b's seam
+    // entry exists to record.
+    bool runOneTxCommand();
     // rx_us: the DIO0 arrival instant from the ISR. Defaulted so existing
     // callers (and the host test harness) are unaffected; 0 means "unknown",
     // which the drift estimator skips rather than treating as time zero.
@@ -729,6 +1000,8 @@ protected:
     macfunnel::Counters funnel_{};
     portMUX_TYPE        funnel_mux_ = portMUX_INITIALIZER_UNLOCKED;
     macsublayers::Config sublayers_{};
+    // Highest MAC-ping `seq` accepted while MAC-1 is on; see the counter check.
+    uint32_t mac_ping_seq_hw_{0};
     esp_timer_handle_t   sublayer_restore_timer_{nullptr};
     // True only while dispatching a frame that arrived through the AEAD path.
     // Set per frame in onReceiveNew; a handler must never infer authentication
@@ -750,6 +1023,9 @@ protected:
 #endif
     // A timed window is open, so the next receive outcome belongs to a mark.
     volatile bool        mark_window_open_{false};
+    // Which receive window that mark was armed for (LoraInterface's window
+    // generation). Only that window may close it.
+    volatile uint8_t     mark_window_gen_{0};
 
     // --- ModeTest state ---------------------------------------------------
     bool                    mode_test_active_{false};
@@ -770,6 +1046,12 @@ protected:
     // in telling a burst copy apart from a genuine retry, and the discriminator
     // is time.
     ackcache::Cache         ack_cache_{};
+
+    // Mode C wake clock: the beacon just packed, waiting for its TxDone. Set by
+    // the TX task, consumed by the DIO0 task on the next TxDone; the two are
+    // sequential under the radio semaphore.
+    volatile bool           beacon_tx_pending_{false};
+    uint32_t                beacon_tx_pending_msgid_{0};
 
     // C2 state: where this node's last uplink put its windows, and how far
     // through the RX1 -> RX2 -> sleep sequence it is.
@@ -805,9 +1087,26 @@ protected:
     modetest::Samples       mt_arm_residual_{};
     modetest::Samples       mt_turnaround_{};
     modetest::Samples       mt_one_shot_err_{};
+    // Run-scoped clock-rate fit: each ModeTest mark's T0 against its nearest
+    // mark index times the grid period. The only thing in Mode B that measures
+    // the goal of Mode B — drift_fit_ is fed by DriftTest alone. See
+    // noteModeTestMarkForRate_.
+    drift::LongFit          mt_drift_fit_{};
+    bool                    mt_have_first_t0_{false};
+    int64_t                 mt_first_t0_us_{0};
+    int64_t                 mt_last_k_{0};
+    uint32_t                mt_grid_period_ms_{0};
+    // Residual rate: the drift of the node CORRECTED prediction over the run.
+    // Fed as (predicted span, measured span) from the first mark, so the fit
+    // slope minus one IS the residual rate. Mode B pass line judged on it.
+    drift::LongFit          mt_residual_fit_{};
+    bool                    mt_have_first_pred_{false};
+    int64_t                 mt_first_pred_us_{0};
 
     void        stopModeTest_();
     void        sendModeTestReport_();
+    void        resetModeTestAccumulators_();
+    void        noteModeTestMarkForRate_(int64_t rx_us, const LoraHeader *outer_header);
     static void modeTestExpiredCb_(void *arg);
     static const char *modeTestRefusalName_(modetest::ArmRefusal r);
     phase::Stats         phase_{};
@@ -817,19 +1116,113 @@ protected:
     // T0 from RxDone. Set once per frame in onReceiveNew, on the same task
     // that reads it — unlike drift_rx_us_, which two tasks write.
     int                  last_rx_len_{0};
+    // The receive window the frame being dispatched actually arrived in, taken
+    // from rx_buffer_t::window_gen at the unpack site. Same discipline as
+    // last_rx_len_ above: written once per frame on the task that reads it.
+    //
+    // This is what lets a mark be booked HIT only by the window that armed it
+    // (review finding 13). Sentinel 0xFF = "no generation travelled with this
+    // frame", which is how every non-radio path (host tests, injected frames)
+    // behaves, and it is treated as "do not resolve a mark".
+    uint8_t              last_rx_window_gen_{0xFF};
     gridstate::State     grid_{};
+    // MAC-0 clock discipline. The node clock rate against the hub, ppb, LEARNED
+    // from beacons. Kept here and not only in grid_, because grid_.clear() runs on
+    // every demote, withdrawal and re-adoption, and the rate describes this node
+    // clock, not the grid: losing it would restart the drift from zero each time.
+    int32_t              clock_rate_ppb_{0};
+    // The last accepted beacon round: the start of the span the next beacon
+    // residual is divided by. Cleared on adoption, when the anchor is new.
+    bool                 have_rate_ref_{false};
+    // Where that span starts, as hub-grid microseconds (gridstate::hubInstantUs):
+    // a beacon, a stamped GridSync on a settled clock, or the provisional re-solve.
+    int64_t              rate_ref_hub_us_{0};
     gridstate::Refusal   grid_refusal_{gridstate::Refusal::None};
     bool                 timed_rx_enabled_{false};
+    // Section 4.4's fleet key: what the broadcast beacon is signed under.
+    // Adopted only from an AUTHENTICATED GridSync — a plaintext one may not
+    // install a key, or the construction is decorative. Volatile on purpose:
+    // it is re-published whenever the grid is, and a key that outlived the grid
+    // would authenticate beacons for an anchor that no longer exists.
+    uint8_t              net_key_[framecrypto::kNetKeyBytes]{};
+    uint32_t             net_key_id_{0};
+    // Section 4.3. How often the uplink actually made its mark, and how often
+    // it could not — the field's own answer to HW-7.
+    uint32_t             ul_aim_hits_{0};
+    uint32_t             ul_aim_misses_{0};
     uint32_t             missed_marks_{0};
-    // When the node last demoted itself, for section 4.6's anti-flap hold.
-    int64_t              last_demotion_us_{0};
+    // The msgId of the frame the last phase sample came from, so copies of one
+    // burst count as one frame (phase::Stats::frames).
+    uint32_t             last_phase_msgid_{0};
+    // The demotion reason timedRxActive() last logged, so it logs a change once
+    // rather than on every pass of the receive task. 0xFF = nothing logged yet.
+    mutable uint8_t      last_reason_logged_{0xFF};
+    // The grid was adopted before node time settled (nodeclock::settled()), so its
+    // anchor is not trusted: no phase samples against it, and the first stamped
+    // frame after settling re-solves it.
+    bool                 grid_provisional_{false};
+    // U-4. How many of this node's uplinks the HUB has seen land in its slot,
+    // consecutively, as of the last TimeSync. §4.6's own promotion criterion,
+    // and it cannot be measured here: the placement comes out of this node's
+    // TRANSMIT path and the question is where the frame ARRIVED, so only the
+    // hub can answer it — "a beacon saying I am ready says nothing about where
+    // its window actually landed".
+    //
+    // Starts at 0, which means "not confirmed" and keeps the node in Mode A.
+    // That is the right way round: proto3 omits defaults, so a hub predating
+    // the field reads as unconfirmed and costs airtime rather than a command.
+    // The node can still earn the count from Mode A, because the uplink aim
+    // places its frames on its mark whatever mode it is in.
+    uint32_t             hub_in_slot_uplinks_{0};
     // When a frame addressed to this node last arrived. 0 = never.
     int64_t              last_addressed_us_{0};
+    // When the grid's anchor was last set or corrected (GridSync, beacon, settled
+    // re-solve, trial re-centre), phase samples refused beyond half a pitch since
+    // then, and when this node last asked the hub for its grid. 0 = never.
+    int64_t              last_anchor_fix_us_{0};
+    uint32_t             refused_since_fix_{0};
+    int64_t              last_sync_request_us_{0};
+    uint32_t             gridsync_requests_{0};
+    void                 noteAnchorFixed_();
+    // Telling the hub our Mode B status changed (timedmode::kModeAnnounceMinS).
+    //
+    // The hub learns this ONLY from a PhaseReport, which rides an uplink. An
+    // interactive node never sleeps, never wakes, never beacons, and with no
+    // traffic has nothing to ack — so without this the hub's belief about a
+    // promoted, quiet node is stale indefinitely and it can never grant single
+    // shot. Measured 2026-09-20: 12.6 min in Mode B, hub reporting reason 5.
+    //
+    // Two fields, not one. last_reason_logged_ is what the CONSOLE last saw;
+    // this is what the HUB was last told. They are different audiences and
+    // conflating them would either spam the log or skip an announcement,
+    // depending on which won.
+    //
+    // mutable: the edge is detected inside timedRxActive(), which is const and
+    // already mutates last_reason_logged_ the same way. The uplink itself is
+    // NOT sent from there — announceModeChangeIfPending() does that from the
+    // arming path, because setStatus() is a queue push and belongs in task
+    // context, not behind a const accessor.
+    // WHAT THE HUB WAS LAST TOLD, and WHEN, now live in RTC_DATA_ATTR statics
+    // (s_last_reason_announced / s_last_mode_announce_us in the .cpp) rather
+    // than here. As plain members every deep-sleep wake reset them, so
+    // s_since read 0xFFFFFFFF (the throttle could never suppress) and any
+    // current reason compared unequal to 0xFF (every wake was an edge). The
+    // node therefore announced on EVERY wake and then sent its check-in
+    // beacon too: two uplinks where one carries the same information.
+    // Measured fw 1.1.2 AND 1.1.3, 2026-09-21: 2 MODE_CHANGED + 2
+    // TIMER_CHECKIN across two Mode C wakes.
+    //
+    // Exactly the defect s_lastBatteryVoltage had — a plain member the wake
+    // reset, so every beacon reported v=0.00 for a healthy battery.
+    //
+    // The PENDING FLAG deliberately stays a plain member: it is an intent,
+    // not a fact about the hub. A wake must recompute it from the edge rather
+    // than resurrect an announcement the node already decided about.
+    mutable bool         mode_announce_pending_{false};
     // F-30 login rate limit: when the last accepted LoginMsg arrived, in ms
     // on the monotonic clock. 0 = none yet. A member rather than a
     // function-static so it dies with the dispatcher (see handleLogin).
     uint64_t             last_login_ms_{0};
-    void                 demoteIfMarksMissed_();
     // Per-copy spacing of a hub burst. Taken from the shared LoraTiming.h
     // rather than restated, because "MUST match the hub" in a comment is not a
     // mechanism: this was a bare 88 whose only link to the hub was prose.
@@ -863,6 +1256,8 @@ protected:
     static void interactiveExpiredCb(void *arg);
     esp_timer_handle_t register_retry_timer_{nullptr};
     static void registerRetryCb(void *arg);
+    void startRegisterRetry_();   // arm unconditionally (sendRegister gives up the session)
+    bool hasHubSession_();        // a base nonce for the hub we persist for
     void maybePersist_();
 
     // F-22: Pre-imported PSA key handle — key is imported once at startup.
@@ -909,6 +1304,12 @@ protected:
     // setBatteryVoltage() after each taskBatteryMonitor measurement.
     // lastBatteryVoltage_ moved to a file-scope RTC_DATA_ATTR in
     // CmdDispatcher.cpp — see the comment there.
+
+    // F-41: true while a battery measurement (recovery wait + sampling) is in
+    // progress; checked by checkQueuesIdle() before entering deep sleep.  The
+    // deep-sleep drain-wait has a 120 s hard cap, so a stuck flag cannot keep
+    // the node awake indefinitely.
+    volatile bool batteryMeasurementBusy_{false};
 
     // F-23: rx_memory_pool and its queues made private; external access
     //       through get_free_buffer() / submit_rx_buffer() accessors below.

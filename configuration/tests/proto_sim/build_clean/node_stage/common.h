@@ -3,6 +3,12 @@
 
 #include "driver/gpio.h"
 
+// blinds_syscmd_base_t, MotorCmd_t, BlindsState_t now live in BlindsTypes.h
+// (dependency-free, so MotorPolicy.h can use them on the host without
+// pulling in the ESP-IDF includes above) -- pulled back in here so every
+// existing includer of common.h still gets them exactly as before.
+#include "BlindsTypes.h"
+
 
 #define TICKS_TO_WAIT 1
 
@@ -25,30 +31,6 @@
 #define LORA_POLLING 0
 #define RX_CONT 0
 
-
-typedef uint8_t blinds_syscmd_base_t;
-
-
-
-enum MotorCmd_t
-{
-  MOTCMD_IDLE,
-  MOTCMD_FULL_UP,
-  MOTCMD_FULL_DOWN,
-  MOTCMD_STEP_UP,
-  MOTCMD_STEP_DOWN,
-  MOTCMD_STOP,
-  MOTCMD_TIMER
-};
-
-enum BlindsState_t
-{
-  BLINDS_IDLE,
-  BLINDS_STEP_UP,
-  BLINDS_STEP_DOWN,
-  BLINDS_FULLY_OPENING,
-  BLINDS_FULLY_CLOSING
-};
 
 enum ha_blinds_state_t
 {
@@ -91,6 +73,9 @@ struct BlindsStatusCmd
   // P2: wake beacon — sent on every boot/wake so the hub learns why we woke,
   // what schedule version we hold, and what our clock reads.
   static const blinds_syscmd_base_t SYSCMD_BEACON = '6';
+  // Ask the hub to publish this node's grid again (GridSyncRequest); arg is the
+  // timedmode::SyncRequestReason.
+  static const blinds_syscmd_base_t SYSCMD_GRIDSYNC_REQUEST = '7';
 };
 
 static const gpio_num_t motSupplyEn = gpio_num_t(4); //Is an RTC GPIO in ESP32 WROOM 32UE

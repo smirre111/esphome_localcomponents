@@ -13,6 +13,7 @@
 #include "CmdDispatcher.h"
 #include <esp_private/esp_clk.h>   // esp_clk_cpu_freq(), for the ModeTest report
 #include "FrameCrypto.h"
+#include "MotorPolicy.h"   // keptTravelDurationS: a CoverConfig zero is "unset", not a duration
 #include "utilities.h"
 #include "blinds.pb-c.h"
 #include "comm_utils.h"
@@ -27,6 +28,8 @@
 #include <esp_attr.h>
 #include <sys/time.h>
 #include <time.h>
+#include "NodeClock.h"   // MAC-0 timebase: esp_timer, re-anchored to the crystal across sleep
+#include "BeaconTicks.h" // Mode C wake clock: RTC ticks at a beacon's T0
 
 extern void spawnTaskBatteryMonitor();
 // F-39: spawnTaskBatteryMonitorWithUDP / spawnTaskMotorCurrentMonitorWithUDP
@@ -98,6 +101,55 @@ static constexpr const char *kPersistNvsKey       = "peerstate";
 static RTC_DATA_ATTR bool     s_clock_valid  = false;
 static RTC_DATA_ATTR int32_t  s_utc_offset_s = 0;
 static RTC_DATA_ATTR uint64_t s_dst_next     = 0;
+
+// Mode C, MAC-0: the wake clock (BeaconTicks.h, hub WakeClockFit.h). The RTC
+// tick count at the last beacon's T0 and that beacon's msgid, reported in the
+// NEXT beacon so the hub can pair it with its own receive stamp. RTC_DATA_ATTR:
+// survives deep sleep and is zeroed at power-on — exactly when the RTC counter
+// itself restarts, so a stale count can never outlive the counter it came from.
+static RTC_DATA_ATTR uint32_t s_beacon_msgid      = 0;
+static RTC_DATA_ATTR uint64_t s_beacon_t0_ticks   = 0;
+// The previous wake's receive funnel, saved at deep-sleep entry: Mode C's FER.
+static RTC_DATA_ATTR uint32_t s_prev_wake_windows  = 0;
+static RTC_DATA_ATTR uint32_t s_prev_wake_hits     = 0;
+static RTC_DATA_ATTR uint32_t s_prev_wake_detected = 0;
+static RTC_DATA_ATTR uint32_t s_prev_wake_crcvalid = 0;
+// The deep sleep before this wake, as wanted and as handed to ESP-IDF after the
+// crystal correction (SleepClockCorrection.h deepSleepRequestUs). Mode C's pass
+// line is computed on the hub from these and its wake-clock fit.
+static RTC_DATA_ATTR uint64_t s_prev_sleep_requested_us = 0;
+static RTC_DATA_ATTR uint64_t s_prev_sleep_applied_us   = 0;
+
+// What the HUB was last told about our Mode B status, and when. RTC_DATA_ATTR
+// for the same reason as the clock and the battery cache above: a deep-sleep
+// wake must not forget it, a power-on must.
+//
+// As plain members these were reset by every wake, so the throttle saw
+// s_since = 0xFFFFFFFF and the edge test saw 0xFF — every wake was a
+// first-ever announcement. The node announced, then sent its check-in beacon
+// anyway, spending two uplinks to say one thing. Measured on fw 1.1.2 and
+// again on 1.1.3: 2 MODE_CHANGED + 2 TIMER_CHECKIN across two Mode C wakes.
+static RTC_DATA_ATTR uint8_t s_last_reason_announced = 0xFF;
+static RTC_DATA_ATTR int64_t s_last_mode_announce_us = 0;
+
+uint8_t CmdDispatcher::lastReasonAnnounced() { return s_last_reason_announced; }
+
+void CmdDispatcher::resetModeAnnounceState()
+{
+  s_last_reason_announced = 0xFF;
+  s_last_mode_announce_us = 0;
+}
+
+// A deep-sleep wake: plain RAM is gone, RTC_DATA_ATTR survives.
+//
+// Only the PENDING INTENT is cleared here. s_last_reason_announced and
+// s_last_mode_announce_us are deliberately left alone — that is the whole
+// property, and a test that clears them is modelling a power-on instead.
+void CmdDispatcher::simulateWakeForTest()
+{
+  this->mode_announce_pending_ = false;
+  this->last_reason_logged_    = 0xFF;   // the console's field, also plain RAM
+}
 
 bool     CmdDispatcher::isClockValid()  { return s_clock_valid; }
 int32_t  CmdDispatcher::getUtcOffset()  { return s_utc_offset_s; }
@@ -291,6 +343,293 @@ void CmdDispatcher::setAddress(uint8_t cfgAddress, uint8_t cfgSubnet)
 
 // void CmdDispatcher::setConfig(Config *cfg)
 
+// The BODY of the transmit task, as a function.
+//
+// It used to sit inline in processTxCommand, inside a `for(;;)` blocking on
+// xQueueReceive(portMAX_DELAY) — so the host suite could not run it at all.
+// Section 11b records one consequence: the two lines that assign the phase
+// report into the outgoing message were "not covered end to end". The hole is
+// larger than that note implies, because this is where EVERY uplink this node
+// sends is built, stamped with its msgid and packed.
+//
+// Splitting the body out changes no behaviour: the task still loops, still
+// blocks, and still calls this exactly once per command. What it buys is that a
+// test can drive the real uplink path instead of a hand-written mirror of it.
+void CmdDispatcher::serviceTxCommand(const tx_command_t &txcmd_in)
+{
+  tx_command_t txcmd = txcmd_in;
+
+  ClientBattery state = CLIENT_BATTERY__INIT;
+  ClientAvailable avail = CLIENT_AVAILABLE__INIT;
+  ClientRegister reg = CLIENT_REGISTER__INIT;
+  CoverPosition pos = COVER_POSITION__INIT;
+  CommandAck ack = COMMAND_ACK__INIT;
+  NodeWakeBeacon beacon = NODE_WAKE_BEACON__INIT;
+  // Storage for the phase reports below. Declared here with the rest so its
+  // lifetime covers pack_response_message() at the bottom of the loop — a
+  // block-scoped one would dangle by the time the message is packed.
+  PhaseReport beacon_phase = PHASE_REPORT__INIT;
+  PhaseReport ack_phase    = PHASE_REPORT__INIT;
+  GridSyncRequest gsreq   = GRID_SYNC_REQUEST__INIT;
+
+  LoraClientResponseMessage message = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+
+  const blinds_syscmd_base_t cmd = txcmd.cmd;
+
+    ESP_LOGI(TAG, "TX Command queue processing");
+
+    switch (cmd)
+    {
+    case BlindsStatusCmd::SYSCMD_BATTERY:
+    {
+      ESP_LOGI(TAG, "Sending BATTERY response");
+      // Read from the LKG cache — written by setBatteryVoltage() whenever
+      // taskBatteryMonitor completes a measurement.  No blocking wait needed.
+
+      state.voltage = s_lastBatteryVoltage;
+
+      message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE;
+      message.state = &state;
+    }
+    break;
+
+    case BlindsStatusCmd::SYSCMD_REGISTER:
+    {
+      ESP_LOGI(TAG, "Sending REGISTER response");
+      // When we need to send REGISTER status, reset message ID counter
+      this->session_.resetCounters();
+      // Drop any base nonce restored from NVS (F-5).  We are restarting the
+      // register->login handshake, so the old nonce is stale: keeping it would
+      // cause pack_response_message() to encrypt follow-up messages with a
+      // nonce the hub has already rotated.  CMD_LOGIN reinstalls a fresh one.
+      this->clear_base_nonce(this->destAddress);
+
+      uint8_t mac_arr[6];
+      ESP_ERROR_CHECK(esp_read_mac(mac_arr, ESP_MAC_EFUSE_FACTORY));
+      uint64_t mac = 0;
+      mac |= mac_arr[0];
+      mac <<= 8;
+      mac |= mac_arr[1];
+      mac <<= 8;
+      mac |= mac_arr[2];
+      mac <<= 8;
+      mac |= mac_arr[3];
+      mac <<= 8;
+      mac |= mac_arr[4];
+      mac <<= 8;
+      mac |= mac_arr[5];
+
+      reg.mac_addr = mac;
+      // Tell the hub whether we still need configuration.  Use the PERSISTED
+      // config address (0 = never provisioned) as the signal — getRegistered()
+      // is a RAM-only flag that resets every boot, which would make every wake
+      // look unprovisioned and defeat the hub's config-skip optimisation.
+      reg.needs_config = (this->sysCtrl->getConfigAddress() == 0);
+
+      message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER;
+      message.register_ = &reg;
+    }
+    break;
+    case BlindsStatusCmd::SYSCMD_AVAILABLE:
+    {
+
+      avail.available = true;
+
+      message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL;
+      message.avail = &avail;
+    }
+    break;
+    case BlindsStatusCmd::SYSCMD_BEACON:
+    {
+      // P2: one frame carrying everything the hub needs on a wake — why we
+      // woke, what our clock reads (so the hub can measure our drift without
+      // a serial cable), whether it may skip the login handshake, and the
+      // telemetry the periodic battery timer would otherwise provide.
+      const State st = motCtrl->getState();
+      struct timeval now;
+      gettimeofday(&now, NULL);
+
+      beacon.reason         = static_cast<WakeReason>(txcmd.arg);
+      beacon.schedversion   = sysCtrl->getSchedVersion();
+      beacon.nodeepoch      = s_clock_valid ? static_cast<uint64_t>(now.tv_sec) : 0;
+      beacon.mode           = sysCtrl->getAutoMode() ? NODE_MODE__MODE_AUTO
+                                                     : NODE_MODE__MODE_INTERACTIVE;
+      beacon.voltage        = s_lastBatteryVoltage;
+      beacon.position       = st.position_;
+      beacon.awakewindow_ms = sysCtrl->getPostEventWindow() * 1000u;
+      beacon.nexteventepoch = this->computeNextEvent();
+      // Session resume (I2): tell the hub we still hold a usable AEAD session,
+      // so it can skip the login handshake and save ~4 s of awake radio.  Only
+      // claimable when the restored state is valid AND we actually have a base
+      // nonce for this peer — otherwise our first encrypted reply would fail
+      // the hub's tag check and cost far more than the handshake saved.
+      uint32_t unused_nonce = 0;
+      beacon.sessionresume  = this->session_.hasValidState() &&
+                              this->get_base_nonce(this->destAddress, unused_nonce);
+      beacon.clockvalid     = s_clock_valid;
+      beacon.fwversion      = CmdDispatcher::firmwareVersion();
+      // Why the node BOOTED, as distinct from why it woke. A field node with
+      // no serial cable is otherwise undiagnosable: a cold boot that lost RTC
+      // RAM, a brownout and a clean OTA restart are indistinguishable from
+      // the hub, and all three have been guessed at rather than known.
+      beacon.resetreason    = (uint32_t) esp_reset_reason();
+      this->fillPhaseReport(beacon_phase);
+      beacon.phase          = &beacon_phase;
+      // Mode C wake clock and funnel, both about the PREVIOUS beacon / wake.
+      beacon.prevbeaconmsgid   = s_beacon_msgid;
+      beacon.prevbeacont0ticks = s_beacon_t0_ticks;
+      beacon.rtcperiodq19      = nodeclock::periodQ19();
+      beacon.prevwakewindows   = s_prev_wake_windows;
+      beacon.prevwakehits      = s_prev_wake_hits;
+      beacon.prevwakedetected  = s_prev_wake_detected;
+      beacon.prevwakecrcvalid  = s_prev_wake_crcvalid;
+      beacon.prevsleeprequestedus = s_prev_sleep_requested_us;
+      beacon.prevsleepappliedus   = s_prev_sleep_applied_us;
+
+      ESP_LOGI(TAG, "Sending BEACON (reason=%d resume=%d clock=%d v=%.2f pos=%.2f)",
+               (int) beacon.reason, (int) beacon.sessionresume,
+               (int) beacon.clockvalid, beacon.voltage, beacon.position);
+
+      message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON;
+      message.beacon = &beacon;
+
+      // Refresh the battery cache if it holds nothing.
+      //
+      // s_lastBatteryVoltage is RTC_DATA_ATTR, so it survives deep sleep and
+      // an auto-mode node normally carries a reading between wakes. But a
+      // POWERON clears RTC RAM, and the only things that MEASURE are a 15 min
+      // timer in taskBatteryMonitor and the end of a motor move. An auto-mode
+      // node is awake ~20 s per hour, so that timer can never expire -- the
+      // cache stays 0.00 V forever and every beacon reports it.
+      //
+      // That is a design assumption from interactive mode (always awake, so
+      // the timer always fires) which fails silently in automatic mode.
+      // Observed: every beacon for a full night reporting v=0.00.
+      //
+      // Queued, not awaited: the measurement needs the supply to stabilise,
+      // so it lands in the cache for the NEXT beacon. Self-limiting -- once
+      // there is a reading this stops firing.
+      if (s_lastBatteryVoltage == 0.0f)
+      {
+        ESP_LOGI(TAG, "Battery cache empty — queueing a measurement for the next beacon");
+        this->measureAndSendBatteryVoltage();
+      }
+    }
+    break;
+    case BlindsStatusCmd::SYSCMD_POSITION:
+    {
+      State st = motCtrl->getState();
+
+      pos.position = st.position_;
+      // Battery voltage: LKG cache — no blocking wait, always a valid
+      // (possibly slightly stale) value from the last measurement.
+      pos.voltage  = s_lastBatteryVoltage;
+      // Motor current: LKG ADC value — updated by fsmProcess() on every
+      // current-sensing tick while the motor is running.
+      // Motor current in AMPS, converted by taskMotorCurrentSensing from the
+      // VNH5019 CS reading on every current-sensing tick while the motor runs,
+      // and 0 while it is idle. It was raw ADC counts here until the
+      // battery-voltage branch was merged; the hub's sensor declares amps to
+      // match, and the two halves only make sense together.
+      //
+      // The FSM still consumes RAW counts for its current-sense endstop, which
+      // is deliberate: that threshold was tuned against counts and changing its
+      // units would change stop behaviour.
+      pos.current  = motCtrl->getLastMotorCurrentAmps();
+      // Battery-runtime compensation telemetry -- hub-visibility only, 0/0
+      // (proto3 "absent") unless a full move just ended via the endstop.
+      // See docs/battery-runtime-compensation-proposal.md (hub repo).
+      pos.actualruns  = motCtrl->getLastActualRunS();
+      pos.nominalruns = motCtrl->getLastNominalRunS();
+      message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION;
+      message.position = &pos;
+    }
+    break;
+    case BlindsStatusCmd::SYSCMD_ACK:
+    {
+      ESP_LOGI(TAG, "Sending ACK for msgid %u", (unsigned)txcmd.arg);
+      ack.ack_msg_id = txcmd.arg;
+      ack.status     = ACK_STATUS__ACK_OK;
+      // The carrier that matters — see fillPhaseReport. The hub's belief is
+      // refreshed by the reply to the very command single-shot is decided
+      // for, which is the only cadence that does not cost a keepalive.
+      this->fillPhaseReport(ack_phase);
+      ack.phase      = &ack_phase;
+      message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK;
+      message.ack = &ack;
+    }
+    break;
+    case BlindsStatusCmd::SYSCMD_GRIDSYNC_REQUEST:
+    {
+      // The node asks for its grid again (maybeRequestGridSync). The numbers say
+      // why, so the hub's log shows what the node saw, not only that it asked.
+      const int64_t now_us = nodeclock::nowUs();
+      gsreq.reason          = txcmd.arg;
+      gsreq.ssinceanchorfix = (this->last_anchor_fix_us_ == 0)
+                                  ? 0xFFFFFFFFu
+                                  : (uint32_t) ((now_us - this->last_anchor_fix_us_) / 1000000);
+      gsreq.refusedsamples  = this->refused_since_fix_;
+      ESP_LOGI(TAG, "Sending GRIDSYNC REQUEST (reason %u)", (unsigned) gsreq.reason);
+      message.proto_case      = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST;
+      message.gridsyncrequest = &gsreq;
+    }
+    break;
+    default:
+    {
+
+      ESP_LOGW(TAG, "Unknown TX command: %d", cmd);
+    }
+    }
+
+    LoraHeader header = LORA_HEADER__INIT;
+    header.destaddress = this->destAddress;
+    header.destsubnet = this->destSubnet;
+    header.senderaddress = sysCtrl->getConfigAddress();
+    header.msgid = this->session_.nextTxId();
+    message.header = &header;
+    // The wake clock's stamp belongs to THIS beacon: remember which msgid the
+    // next TxDone is, so noteUplinkSent can file the tick count under it.
+    if (message.proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON)
+    {
+      this->beacon_tx_pending_msgid_ = header.msgid;
+      this->beacon_tx_pending_       = true;
+    }
+
+    // F-5: persist counters periodically so an unexpected reboot resumes the
+    // session without re-login.  Throttled internally to one write per margin.
+    this->maybePersist_();
+
+    uint8_t *out_buf = nullptr;
+    size_t out_len = 0;
+    if (pack_response_message(&message, &out_buf, &out_len))
+    {
+      if (!send_tx_buffer(out_buf, out_len))
+      {
+        ESP_LOGW(TAG, "Failed to transmit response");
+      }
+      free(out_buf);
+    }
+    else
+    {
+      ESP_LOGE(TAG, "Failed to pack response message for transmission");
+    }
+}
+
+// The one-shot the host harness drives: a NON-BLOCKING receive plus one body.
+// Returns false when the queue was empty, so a test can drain to quiescence the
+// way the task does — and so "nothing was queued" is distinguishable from
+// "something was and it produced no frame".
+bool CmdDispatcher::runOneTxCommand()
+{
+  if (txCmdQueueNew == nullptr)
+    return false;
+  tx_command_t txcmd;
+  if (xQueueReceive(txCmdQueueNew, &txcmd, 0) != pdTRUE)
+    return false;
+  this->serviceTxCommand(txcmd);
+  return true;
+}
+
 void CmdDispatcher::processTxCommand(void *pvParameter)
 {
   if (txCmdQueueNew == nullptr)
@@ -299,227 +638,13 @@ void CmdDispatcher::processTxCommand(void *pvParameter)
     return;
   }
 
-  // const TickType_t blockTime = (TickType_t)100; /// FIXME: This is a workaround to avoid blocking indefinitely when waiting for TX commands. In a real implementation, we might want to handle this differently, e.g., by using a non-blocking check or by implementing a timeout mechanism.
   const TickType_t blockTime = portMAX_DELAY;
 
   for (;;) // A Task shall never return or exit.
   {
-    // Feed the task watchdog
-
-    ClientBattery state = CLIENT_BATTERY__INIT;
-    ClientAvailable avail = CLIENT_AVAILABLE__INIT;
-    ClientRegister reg = CLIENT_REGISTER__INIT;
-    CoverPosition pos = COVER_POSITION__INIT;
-    CommandAck ack = COMMAND_ACK__INIT;
-    NodeWakeBeacon beacon = NODE_WAKE_BEACON__INIT;
-    // Storage for the phase reports below. Declared here with the rest so its
-    // lifetime covers pack_response_message() at the bottom of the loop — a
-    // block-scoped one would dangle by the time the message is packed.
-    PhaseReport beacon_phase = PHASE_REPORT__INIT;
-    PhaseReport ack_phase    = PHASE_REPORT__INIT;
-
-    LoraClientResponseMessage message = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-
     tx_command_t txcmd;
-
-    // Receive a message on the created queue.  Block for 10 ticks if a
-    // message is not immediately available.
     if (xQueueReceive(txCmdQueueNew, &(txcmd), blockTime))
-    {
-      const blinds_syscmd_base_t cmd = txcmd.cmd;
-
-      ESP_LOGI(TAG, "TX Command queue processing");
-
-      switch (cmd)
-      {
-      case BlindsStatusCmd::SYSCMD_BATTERY:
-      {
-        ESP_LOGI(TAG, "Sending BATTERY response");
-        // Read from the LKG cache — written by setBatteryVoltage() whenever
-        // taskBatteryMonitor completes a measurement.  No blocking wait needed.
-
-        state.voltage = s_lastBatteryVoltage;
-
-        message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE;
-        message.state = &state;
-      }
-      break;
-
-      case BlindsStatusCmd::SYSCMD_REGISTER:
-      {
-        ESP_LOGI(TAG, "Sending REGISTER response");
-        // When we need to send REGISTER status, reset message ID counter
-        this->session_.resetCounters();
-        // Drop any base nonce restored from NVS (F-5).  We are restarting the
-        // register->login handshake, so the old nonce is stale: keeping it would
-        // cause pack_response_message() to encrypt follow-up messages with a
-        // nonce the hub has already rotated.  CMD_LOGIN reinstalls a fresh one.
-        this->clear_base_nonce(this->destAddress);
-
-        uint8_t mac_arr[6];
-        ESP_ERROR_CHECK(esp_read_mac(mac_arr, ESP_MAC_EFUSE_FACTORY));
-        uint64_t mac = 0;
-        mac |= mac_arr[0];
-        mac <<= 8;
-        mac |= mac_arr[1];
-        mac <<= 8;
-        mac |= mac_arr[2];
-        mac <<= 8;
-        mac |= mac_arr[3];
-        mac <<= 8;
-        mac |= mac_arr[4];
-        mac <<= 8;
-        mac |= mac_arr[5];
-
-        reg.mac_addr = mac;
-        // Tell the hub whether we still need configuration.  Use the PERSISTED
-        // config address (0 = never provisioned) as the signal — getRegistered()
-        // is a RAM-only flag that resets every boot, which would make every wake
-        // look unprovisioned and defeat the hub's config-skip optimisation.
-        reg.needs_config = (this->sysCtrl->getConfigAddress() == 0);
-
-        message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER;
-        message.register_ = &reg;
-      }
-      break;
-      case BlindsStatusCmd::SYSCMD_AVAILABLE:
-      {
-
-        avail.available = true;
-
-        message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL;
-        message.avail = &avail;
-      }
-      break;
-      case BlindsStatusCmd::SYSCMD_BEACON:
-      {
-        // P2: one frame carrying everything the hub needs on a wake — why we
-        // woke, what our clock reads (so the hub can measure our drift without
-        // a serial cable), whether it may skip the login handshake, and the
-        // telemetry the periodic battery timer would otherwise provide.
-        const State st = motCtrl->getState();
-        struct timeval now;
-        gettimeofday(&now, NULL);
-
-        beacon.reason         = static_cast<WakeReason>(txcmd.arg);
-        beacon.schedversion   = sysCtrl->getSchedVersion();
-        beacon.nodeepoch      = s_clock_valid ? static_cast<uint64_t>(now.tv_sec) : 0;
-        beacon.mode           = sysCtrl->getAutoMode() ? NODE_MODE__MODE_AUTO
-                                                       : NODE_MODE__MODE_INTERACTIVE;
-        beacon.voltage        = s_lastBatteryVoltage;
-        beacon.position       = st.position_;
-        beacon.awakewindow_ms = sysCtrl->getPostEventWindow() * 1000u;
-        beacon.nexteventepoch = this->computeNextEvent();
-        // Session resume (I2): tell the hub we still hold a usable AEAD session,
-        // so it can skip the login handshake and save ~4 s of awake radio.  Only
-        // claimable when the restored state is valid AND we actually have a base
-        // nonce for this peer — otherwise our first encrypted reply would fail
-        // the hub's tag check and cost far more than the handshake saved.
-        uint32_t unused_nonce = 0;
-        beacon.sessionresume  = this->session_.hasValidState() &&
-                                this->get_base_nonce(this->destAddress, unused_nonce);
-        beacon.clockvalid     = s_clock_valid;
-        beacon.fwversion      = CmdDispatcher::firmwareVersion();
-        // Why the node BOOTED, as distinct from why it woke. A field node with
-        // no serial cable is otherwise undiagnosable: a cold boot that lost RTC
-        // RAM, a brownout and a clean OTA restart are indistinguishable from
-        // the hub, and all three have been guessed at rather than known.
-        beacon.resetreason    = (uint32_t) esp_reset_reason();
-        this->fillPhaseReport(beacon_phase);
-        beacon.phase          = &beacon_phase;
-
-        ESP_LOGI(TAG, "Sending BEACON (reason=%d resume=%d clock=%d v=%.2f pos=%.2f)",
-                 (int) beacon.reason, (int) beacon.sessionresume,
-                 (int) beacon.clockvalid, beacon.voltage, beacon.position);
-
-        message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON;
-        message.beacon = &beacon;
-
-        // Refresh the battery cache if it holds nothing.
-        //
-        // s_lastBatteryVoltage is RTC_DATA_ATTR, so it survives deep sleep and
-        // an auto-mode node normally carries a reading between wakes. But a
-        // POWERON clears RTC RAM, and the only things that MEASURE are a 15 min
-        // timer in taskBatteryMonitor and the end of a motor move. An auto-mode
-        // node is awake ~20 s per hour, so that timer can never expire -- the
-        // cache stays 0.00 V forever and every beacon reports it.
-        //
-        // That is a design assumption from interactive mode (always awake, so
-        // the timer always fires) which fails silently in automatic mode.
-        // Observed: every beacon for a full night reporting v=0.00.
-        //
-        // Queued, not awaited: the measurement needs the supply to stabilise,
-        // so it lands in the cache for the NEXT beacon. Self-limiting -- once
-        // there is a reading this stops firing.
-        if (s_lastBatteryVoltage == 0.0f)
-        {
-          ESP_LOGI(TAG, "Battery cache empty — queueing a measurement for the next beacon");
-          this->measureAndSendBatteryVoltage();
-        }
-      }
-      break;
-      case BlindsStatusCmd::SYSCMD_POSITION:
-      {
-        State st = motCtrl->getState();
-
-        pos.position = st.position_;
-        // Battery voltage: LKG cache — no blocking wait, always a valid
-        // (possibly slightly stale) value from the last measurement.
-        pos.voltage  = s_lastBatteryVoltage;
-        // Motor current: LKG ADC value — updated by fsmProcess() on every
-        // current-sensing tick while the motor is running.
-        pos.current  = (float)motCtrl->getLastMotorCurrentAdcRaw(); // raw ADC counts — not yet converted to mA
-        message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION;
-        message.position = &pos;
-      }
-      break;
-      case BlindsStatusCmd::SYSCMD_ACK:
-      {
-        ESP_LOGI(TAG, "Sending ACK for msgid %u", (unsigned)txcmd.arg);
-        ack.ack_msg_id = txcmd.arg;
-        ack.status     = ACK_STATUS__ACK_OK;
-        // The carrier that matters — see fillPhaseReport. The hub's belief is
-        // refreshed by the reply to the very command single-shot is decided
-        // for, which is the only cadence that does not cost a keepalive.
-        this->fillPhaseReport(ack_phase);
-        ack.phase      = &ack_phase;
-        message.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK;
-        message.ack = &ack;
-      }
-      break;
-      default:
-      {
-
-        ESP_LOGW(TAG, "Unknown TX command: %d", cmd);
-      }
-      }
-
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress = this->destAddress;
-      header.destsubnet = this->destSubnet;
-      header.senderaddress = sysCtrl->getConfigAddress();
-      header.msgid = this->session_.nextTxId();
-      message.header = &header;
-
-      // F-5: persist counters periodically so an unexpected reboot resumes the
-      // session without re-login.  Throttled internally to one write per margin.
-      this->maybePersist_();
-
-      uint8_t *out_buf = nullptr;
-      size_t out_len = 0;
-      if (pack_response_message(&message, &out_buf, &out_len))
-      {
-        if (!send_tx_buffer(out_buf, out_len))
-        {
-          ESP_LOGW(TAG, "Failed to transmit response");
-        }
-        free(out_buf);
-      }
-      else
-      {
-        ESP_LOGE(TAG, "Failed to pack response message for transmission");
-      }
-    }
+      this->serviceTxCommand(txcmd);
   }
 }
 
@@ -734,6 +859,12 @@ void CmdDispatcher::clear_base_nonce(uint32_t peer_address)
   this->session_.clearBaseNonce(peer_address);
 }
 
+void CmdDispatcher::noteDeepSleepRequest(uint64_t requested_us, uint64_t applied_us)
+{
+  s_prev_sleep_requested_us = requested_us;
+  s_prev_sleep_applied_us   = applied_us;
+}
+
 void CmdDispatcher::sendAvailable()
 {
   blinds_syscmd_base_t cmd = BlindsStatusCmd::SYSCMD_AVAILABLE;
@@ -776,10 +907,22 @@ void CmdDispatcher::setBatteryVoltage(float voltage)
   s_lastBatteryVoltage = voltage;
 }
 
+float CmdDispatcher::getLastBatteryVoltage() const
+{
+  // Same atomicity argument as setBatteryVoltage() above.
+  return s_lastBatteryVoltage;
+}
+
 void CmdDispatcher::sendRegister()
 {
   blinds_syscmd_base_t cmd = BlindsStatusCmd::SYSCMD_REGISTER;
   this->setStatus(cmd);
+  // A REGISTER gives up the session (the TX path clears the base nonce), so
+  // until a LoginMsg installs a new one this node cannot hear the hub. If the
+  // REGISTER is lost nobody else will notice: keep asking. Armed without
+  // armRegisterRetry()'s "already have a session" check, because the nonce is
+  // only cleared later, when the TX task actually sends the frame.
+  this->startRegisterRetry_();
 }
 
 // P2: classify why we are awake.  Deep-sleep wake causes take priority over the
@@ -876,6 +1019,18 @@ void CmdDispatcher::fillPhaseReport(PhaseReport &pr) const
     pr.ppmestimate = this->drift_fit_.ppm();
     pr.ppmsamples  = this->drift_fit_.n;
   }
+  // U-2: the complement of everything above. The fields so far measure the
+  // hub's frames against the marks the node ARMED; a mark that was never armed
+  // is invisible to all of them, WMR included, because noteMarkArmed() is what
+  // opens a mark. So a node whose radio is wedged reports a perfect
+  // window-mark rate while hearing nothing — the one Mode B failure the KPIs
+  // cannot see. LoraInterface has counted it since it was added and nothing
+  // carried it anywhere, which is the second way it stayed unseeable.
+  if (this->loraIf != NULL)
+    pr.rxbusyskips = this->loraIf->rxBusySkips();
+  // The node's own decision, which the hub follows for single-shot.
+  pr.timedrxactive  = this->timedRxActive();
+  pr.demotionreason = this->demotionReasonNow();
 }
 
 // NOTE ON TIMING: the beacon must NOT be sent during the register->login
@@ -949,27 +1104,50 @@ bool CmdDispatcher::isProvisioned()
   return sysCtrl->getConfigAddress() != 0;
 }
 
+// A usable session: a base nonce for the hub this node persists for. Sending
+// REGISTER throws it away (SYSCMD_REGISTER clears it), and only a LoginMsg
+// installs a new one.
+//
+// Why the retry also covers a PROVISIONED node (2026-09-13, node 2, fw 1.0.66):
+// the boot REGISTER hit a busy channel and never reached the hub. The node had
+// already dropped its restored nonce; the hub, never having seen the REGISTER,
+// kept the old session and sent ScheduleConfig and GridSync encrypted under it.
+// The node dropped every one ("No base nonce for peer", DEBUG level), its
+// uplinks went out in the clear and were accepted, and nothing on either side
+// noticed. It stayed deaf until the hub was restarted. A provisioned node
+// without a session is exactly as stranded as an unprovisioned one.
+bool CmdDispatcher::hasHubSession_()
+{
+  uint32_t nonce = 0;
+  return this->session_.getBaseNonce(this->session_.persistPeer(), nonce);
+}
+
 void CmdDispatcher::registerRetryCb(void *arg)
 {
   CmdDispatcher *self = static_cast<CmdDispatcher *>(arg);
   if (self == nullptr)
     return;
 
-  if (self->isProvisioned())
+  if (self->isProvisioned() && self->hasHubSession_())
   {
     self->cancelRegisterRetry();
     return;
   }
 
-  ESP_LOGW(TAG, "Still unprovisioned — re-sending REGISTER");
+  ESP_LOGW(TAG, "%s — re-sending REGISTER",
+           self->isProvisioned() ? "No session with the hub" : "Still unprovisioned");
   self->sendRegister();
 }
 
 void CmdDispatcher::armRegisterRetry()
 {
-  if (this->isProvisioned())
+  if (this->isProvisioned() && this->hasHubSession_())
     return;
+  this->startRegisterRetry_();
+}
 
+void CmdDispatcher::startRegisterRetry_()
+{
   const esp_timer_create_args_t args = {
       .callback              = &CmdDispatcher::registerRetryCb,
       .arg                   = this,
@@ -986,11 +1164,11 @@ void CmdDispatcher::armRegisterRetry()
 
   esp_timer_stop(this->register_retry_timer_);
   // Periodic, not one-shot: the hub may be rebooting, out of range, or busy
-  // with the other node.  There is nothing else a node without an address can
-  // usefully do, so it keeps asking rather than going quiet.
+  // with the other node.  There is nothing else a node without an address or
+  // a session can usefully do, so it keeps asking rather than going quiet.
   esp_timer_start_periodic(this->register_retry_timer_,
                            (uint64_t) kRegisterRetryMs * 1000ULL);
-  ESP_LOGI(TAG, "Unprovisioned — REGISTER retry armed every %u s",
+  ESP_LOGI(TAG, "REGISTER retry armed every %u s until the hub logs us in",
            (unsigned) (kRegisterRetryMs / 1000u));
 }
 
@@ -1674,6 +1852,14 @@ void CmdDispatcher::startBatteryMonitoring()
 // F-39: startBatteryMonitoringWithUDP / startMotorCurrentMonitorWithUDP removed
 //       2026-05-25 — dead code; the UDP monitoring tasks were never used in production.
 
+void CmdDispatcher::setBatteryMeasurementBusy(bool busy)
+{
+  // Plain bool write, read by checkQueuesIdle() from the deep-sleep task. Not
+  // atomic and does not need to be: the only consumer treats any non-false as
+  // "wait", and a torn read of a bool is not a thing on this core.
+  batteryMeasurementBusy_ = busy;
+}
+
 void CmdDispatcher::startMotorCurrentMonitor()
 {
 
@@ -2011,6 +2197,11 @@ void CmdDispatcher::handleTimeSync(LoraClientOperationMessage *message_to_proces
     s_dst_next     = ts->dstnext;
     s_clock_valid  = true;
 
+    // U-4: the hub's own count of this node's in-slot uplinks. Taken from the
+    // hub because it is the only end that can measure it, and stored rather
+    // than acted on here — timedRxActive() reads it at every arming decision.
+    this->hub_in_slot_uplinks_ = ts->inslotuplinks;
+
     char local_str[32];
     this->formatLocalTime(ts->epoch, local_str, sizeof(local_str));
     if (had_clock)
@@ -2068,6 +2259,20 @@ void CmdDispatcher::handleTimeSync(LoraClientOperationMessage *message_to_proces
     // a motor move still running, or interactive mode, means this wake is not
     // over whatever the hub thinks. armAutoSleep() above stays as the fallback
     // for a hub that never sets the flag.
+    // C2: tell the Class A sequence first, and UNCONDITIONALLY.
+    //
+    // sleepOk means the hub's per-node queue is empty, so there is nothing
+    // left for RX1 or RX2 to catch. That is true whether or not this node
+    // then sleeps — a node held awake by a running motor or by interactive
+    // mode still has nothing to listen FOR, and holding the sequence open
+    // costs it the shared one-shot for two windows the hub will not transmit
+    // in.
+    //
+    // Passed straight through rather than gated on the local conditions below:
+    // those decide whether to SLEEP, which is a different question from
+    // whether a reply is still coming.
+    this->noteClassASleepOk(ts->sleepok);
+
     if (ts->sleepok && this->shouldRunAutoMode() && !motCtrl->isBusy())
     {
       // Run any entry that has fallen due FIRST — the same guard autoSleepCb
@@ -2331,9 +2536,35 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
     if (rx_us > 0 && this->grid_.active)
     {
       const int64_t t0 = phase::t0FromRx(rx_us, (uint32_t) this->last_rx_len_);
-      const int64_t predicted = gridstate::nextT0Us(this->grid_, t0 - (int64_t) timedgrid::kRoundUs / 2);
+      // A stamped mark is measured against the instant it declares, so a mark
+      // the hub sent late reads as the node's error (zero), not the hub's.
+      const bool stamped = (outer_header != nullptr) && outer_header->firestamped;
+      const int64_t predicted =
+          stamped ? gridstate::t0ForHubInstantUs(this->grid_, outer_header->fireround,
+                                                 outer_header->fireoffsetus)
+                  : gridstate::nextT0Us(this->grid_, t0 - (int64_t) timedgrid::kRoundUs / 2);
       this->mt_phase_err_.add((int32_t) (t0 - predicted));
+
+      // Residual rate, Mode B marks only (seq 0 is the unplaced START). The
+      // prediction already carries the learned rate, so a node that has
+      // learned it correctly shows a flat residual. A burst copy is backed
+      // out to copy 0 first, as the raw fit does.
+      if (this->mt_mode_ == (uint8_t) modetest::Mode::B && mt->seq != 0)
+      {
+        const uint32_t bi = (outer_header != nullptr && !stamped) ? outer_header->burstindex : 0u;
+        const int64_t t0c = t0 - (int64_t) bi * drift::kCopySpacingUs;
+        const int64_t pred = stamped ? predicted
+                                     : gridstate::nextT0Us(this->grid_, t0c - (int64_t) timedgrid::kRoundUs / 2);
+        if (!this->mt_have_first_pred_)
+        {
+          this->mt_first_pred_us_   = pred;
+          this->mt_have_first_pred_ = true;
+        }
+        this->mt_residual_fit_.add(pred - this->mt_first_pred_us_,
+                                   t0c  - this->mt_first_pred_us_);
+      }
     }
+    this->noteModeTestMarkForRate_(rx_us, outer_header);
   }
 
   if (!mt->enable)
@@ -2345,6 +2576,33 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
 
   if (this->mode_test_active_)
     return;   // already running; the frames are the test, not a re-arm
+
+  // ARM ONLY ON THE START, which is seq 0. Every mark and the STOP carry
+  // seq >= 1, because start_mode_test resets mt_seq_ to 0 immediately before
+  // building the START and each later frame post-increments it.
+  //
+  // MEASURED 2026-09-13: the node ends its test at its own deadline, but the
+  // hub keeps sending marks until duration_s + 5 s. A mark landing in that gap
+  // found mode_test_active_ false and, with nothing here to tell it from a
+  // START, armed a brand-new test — which the hub's STOP then ended ~2 s later.
+  // The bench saw it as a second report, `seq 278..278 exp 1, elapsed 2 s`,
+  // straight after a genuine Mode A run. In Mode A that is cosmetic; in Mode B
+  // a re-armed test rewrites the power profile and timed-RX state for those
+  // seconds, on a node whose previous run just ended.
+  //
+  // Fixed here rather than by trimming the hub's grace period, so a late,
+  // duplicated or replayed mark can never begin a test whatever the hub does.
+  //
+  // AN EARLY MARK MAY START IT, though (modetest::markMayStartTest). Measured
+  // 2026-09-14: node 2 missed the whole START burst while still in Mode A and
+  // ignored every mark after it, so a 900 s run produced nothing.
+  const bool late_start = (mt->seq != 0);
+  if (late_start && !modetest::markMayStartTest(mt->seq))
+  {
+    ESP_LOGW(TAG, "   ModeTest: seq %u with no test running — a late mark, "
+                  "not a START; ignored", (unsigned) mt->seq);
+    return;
+  }
 
   // ---- Arming ----------------------------------------------------------
   modetest::Request req;
@@ -2363,6 +2621,7 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
   ctx.has_adopted_grid = this->grid_.active;
   ctx.battery_mv    = (uint32_t) (s_lastBatteryVoltage * 1000.0f);
   ctx.rx_interval_ms = (uint32_t) this->loraIf->rxWindowPeriodMs();
+  ctx.rx_window_us   = timedgrid::kWindowUs;
 
   // A node that has never reported a voltage would otherwise refuse every test
   // for a battery it has not measured. Unknown is not the same as flat.
@@ -2374,13 +2633,43 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
   if (refusal != modetest::ArmRefusal::None)
   {
     ESP_LOGW(TAG, "   ModeTest: REFUSED (%s)", modeTestRefusalName_(refusal));
+    // Not from a mark: every heard mark of a refused run would send a report.
+    // The START's own refusal, below, is the one the hub reads.
+    if (late_start)
+      return;
+    // REPORT IT. A refusal used to be logged and nothing else, so the hub's
+    // `arm refusal` entity — the number the bench procedure says to read
+    // FIRST — could never show one: it kept the previous run's 0, and a run
+    // that never happened looked like a run whose report was lost. Measured
+    // 2026-09-13: three Mode B presses refused for "no adopted grid", visible
+    // only on the serial console.
+    //
+    // Accumulators reset and mode 0 (not run), so the report describes THIS
+    // request only. Sent unreset it would attach the refusal to the previous
+    // run's mode, counters and histograms — the misreading "read mode actually
+    // run first" exists to prevent.
+    this->resetModeTestAccumulators_();
+    this->mt_mode_ = 0;
+    this->sendModeTestReport_();
     return;
   }
 
-  const uint32_t secs = modetest::testDurationS(mt->durations);
-  if (mt->durations != secs)
+  const uint32_t requested_secs = modetest::testDurationS(mt->durations);
+  if (mt->durations != requested_secs)
     ESP_LOGW(TAG, "   ModeTest: hub asked for %u s, using %u s",
-             (unsigned) mt->durations, (unsigned) secs);
+             (unsigned) mt->durations, (unsigned) requested_secs);
+  // Joined late: end with the hub, not a whole duration after this mark.
+  const uint32_t secs = modetest::remainingDurationS(requested_secs, mt->seq,
+                                                     mt->gridperiodms);
+  if (secs == 0)
+  {
+    ESP_LOGW(TAG, "   ModeTest: seq %u leaves nothing of the run; ignored",
+             (unsigned) mt->seq);
+    return;
+  }
+  if (late_start)
+    ESP_LOGW(TAG, "   ModeTest: START not heard — joining at seq %u, %u s left",
+             (unsigned) mt->seq, (unsigned) secs);
 
   // ---- Save everything this test can disturb ---------------------------
   //
@@ -2396,6 +2685,16 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
   this->mt_saved_.power_profile_production = true;
   this->mt_saved_.valid = true;
 
+  // MEASURE WITH THE RECEIVE PATH QUIET, as DriftTest does. At 115200 baud an
+  // INFO line costs ~10 ms and the RX path prints ~20 of them between the DIO0
+  // interrupt and the handler: the first MAC-ping turnaround ever taken on a
+  // session-holding node read 82 ms, of which ~70 was the UART. That is the
+  // logging, not the MAC, and the servable-slot geometry (HW-7) rests on the
+  // MAC. Restored in stopModeTest_, which every exit path runs.
+  esp_log_level_set("CmdDispatcher",  ESP_LOG_WARN);
+  esp_log_level_set("LoraInterface",  ESP_LOG_WARN);
+  esp_log_level_set("frtosTasks",     ESP_LOG_WARN);
+
   // ---- Apply ------------------------------------------------------------
   // Snapshot the REAL funnel rather than starting a second one.
   //
@@ -2404,13 +2703,12 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
   // matters most, silently empty. A delta against funnel_ cannot drift from
   // the counters the node actually keeps, and "the difference between two runs
   // of the identical grid" is the measurement this mode exists to make anyway.
-  this->mt_funnel_base_ = this->macFunnelSnapshot();
-  this->mt_seq_ = modetest::SeqTracker{};
-  this->mt_phase_err_.clear();
-  this->mt_arm_residual_.clear();
-  this->mt_turnaround_.clear();
-  this->mt_one_shot_err_.clear();
-  this->mt_started_us_ = esp_timer_get_time();
+  this->resetModeTestAccumulators_();
+
+  // The ruler for the run's clock-rate fit. The hub fires marks at this period
+  // (Mode A off its timer; Mode B on the grid's round), so it is the nominal
+  // spacing each mark index stands for.
+  this->mt_grid_period_ms_ = mt->gridperiodms;
 
   // APPLY THE MODE. This is what the handler never did.
   //
@@ -2443,7 +2741,7 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
   // Derived from state, never from the request — see modeApplied.
   this->mt_mode_ = (uint8_t) modetest::modeApplied((modetest::Mode) mt->mode,
                                                    this->timed_rx_enabled_);
-  this->mt_power_profile_production_ = mt->keeppowerprofile;
+  this->mt_power_profile_production_ = !mt->droppowerprofile;
   this->mt_mac_echo_ = mt->macecho;
 
   // BOTH SUBLAYERS DEFAULT OFF for the duration, unlike production. Turning one
@@ -2451,12 +2749,19 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
   // delta instead of an estimate. Restored on every exit path below.
   this->sublayers_.counter_enabled = mt->enablecounter;
   this->sublayers_.crypto_enabled  = mt->enablecrypto;
+  // The hub's ping `seq` restarts with the hub (and with each start_mac_ping), so
+  // a high-water carried in from the previous test would refuse every ping.
+  this->mac_ping_seq_hw_ = 0;
 
-  // keepPowerProfile defaults TRUE on the wire, which is the difference from
-  // DriftTest: this mode measures the node as it ships. The report echoes what
-  // it ran under so a number taken with sleep disabled can never be quoted as a
-  // production number by accident.
-  if (!mt->keeppowerprofile)
+  // The production power profile is what this mode measures — the node as it
+  // ships — and that is now the WIRE default rather than a comment's claim.
+  //
+  // The field used to be `keepPowerProfile`, documented "DEFAULT TRUE". proto3
+  // scalars have no presence, so an omitted field arrived as false and this
+  // branch ran: 240 MHz pinned, light sleep off, and a report labelled as if it
+  // were a production measurement. Inverting the field makes proto3's own zero
+  // the safe answer, so a sender can no longer get it wrong by silence.
+  if (mt->droppowerprofile)
   {
     SystemCtrl::applyPowerProfile(true);   // no light sleep, 240 MHz pinned
     ESP_LOGW(TAG, "   ModeTest: power profile DISABLED — results are NOT "
@@ -2487,7 +2792,13 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
            (unsigned) secs, (unsigned) mt->mode, (unsigned) mt->copies,
            (unsigned) mt->gridperiodms, (int) mt->enablecounter,
            (int) mt->enablecrypto, (int) mt->macecho,
-           (int) mt->keeppowerprofile);
+           (int) !mt->droppowerprofile);
+
+  // The mark that started the run is part of it. Only its sequence is counted:
+  // the phase and rate samples at the top of this handler run for marks of a
+  // test that was already active.
+  if (late_start)
+    this->mt_seq_.note(mt->seq);
 }
 
 // The report carries RAW COUNTERS, not conclusions.
@@ -2498,6 +2809,72 @@ void CmdDispatcher::handleModeTest(LoraClientOperationMessage *message_to_proces
 // mac-layer.md section 6 is recomputed off-node from these numbers. That is
 // independence claim I1, and it is why this function does no arithmetic beyond
 // summarising the timing samples it holds.
+// One definition of "a fresh run's accumulators", shared by arming and by the
+// refusal report, so the two cannot disagree about what a report starts from.
+void CmdDispatcher::resetModeTestAccumulators_()
+{
+  this->mt_funnel_base_ = this->macFunnelSnapshot();
+  this->mt_seq_ = modetest::SeqTracker{};
+  this->mt_phase_err_.clear();
+  this->mt_arm_residual_.clear();
+  this->mt_turnaround_.clear();
+  this->mt_one_shot_err_.clear();
+  this->mt_started_us_ = nodeclock::nowUs();
+  this->mt_drift_fit_.reset();
+  this->mt_have_first_t0_ = false;
+  this->mt_first_t0_us_   = 0;
+  this->mt_last_k_        = 0;
+  this->mt_residual_fit_.reset();
+  this->mt_have_first_pred_ = false;
+  this->mt_first_pred_us_   = 0;
+}
+
+// THE MEASUREMENT MODE B EXISTS FOR: the node's clock rate against the hub's,
+// under whatever power profile the run applied — production means auto light
+// sleep on the 32.768 kHz crystal, which is exactly the clock DriftTest cannot
+// see (it runs with sleep disabled).
+//
+// Nothing fed a rate estimate during a ModeTest before this: drift_fit_ is
+// DriftTest's alone, so every ModeTest report carried ppmEstimate = 0.
+//
+// Ruler: the marks themselves. Each is regressed as T0 against k * period, k
+// being the NEAREST whole number of periods since the run's first heard mark.
+// Nearest rather than seq-derived, so a mark the hub had to place one round
+// later (a busy mark) or a mark this node did not hear leaves a gap instead of
+// shifting every later sample; rounding is safe because drift over a run is
+// milliseconds against a 750 ms half-period at the 1500 ms round.
+//
+// Both axes relative to the first mark. LongFit sums squares in doubles, and
+// absolute microsecond timestamps (~1e10) would cancel badly in its slope.
+//
+// A burst copy is backed out to copy 0, the same correction the phase path
+// makes: copy N arrives N strides late by design, not by drift.
+void CmdDispatcher::noteModeTestMarkForRate_(int64_t rx_us, const LoraHeader *outer_header)
+{
+  if (!this->mode_test_active_ || rx_us <= 0 || this->mt_grid_period_ms_ == 0)
+    return;
+
+  const uint32_t burst_index = (outer_header != nullptr) ? outer_header->burstindex : 0u;
+  const int64_t t0 = phase::t0FromRx(rx_us, (uint32_t) this->last_rx_len_)
+                   - (int64_t) burst_index * drift::kCopySpacingUs;
+  const int64_t period_us = (int64_t) this->mt_grid_period_ms_ * 1000;
+
+  if (!this->mt_have_first_t0_)
+  {
+    this->mt_first_t0_us_   = t0;
+    this->mt_have_first_t0_ = true;
+  }
+  const int64_t since = t0 - this->mt_first_t0_us_;
+  const int64_t k = (since >= 0) ? (since + period_us / 2) / period_us
+                                 : -((-since + period_us / 2) / period_us);
+  if (k < this->mt_last_k_)
+    return;   // a stale or reordered frame; the fit wants monotonic marks
+  if (k == this->mt_last_k_ && this->mt_drift_fit_.n > 0)
+    return;   // a second copy of the same mark: one sample per mark
+  this->mt_last_k_ = k;
+  this->mt_drift_fit_.add(k * period_us, since);
+}
+
 void CmdDispatcher::sendModeTestReport_()
 {
   LoraClientResponseMessage resp = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
@@ -2525,7 +2902,7 @@ void CmdDispatcher::sendModeTestReport_()
   ModeTestReport rep = MODE_TEST_REPORT__INIT;
   rep.seqfirst = this->mt_seq_.first;
   rep.seqlast  = this->mt_seq_.last;
-  rep.elapseds = (uint32_t) ((esp_timer_get_time() - this->mt_started_us_) / 1000000);
+  rep.elapseds = (uint32_t) ((nodeclock::nowUs() - this->mt_started_us_) / 1000000);
   rep.mode     = this->mt_mode_;
   rep.powerprofileproduction = this->mt_power_profile_production_;
 
@@ -2561,6 +2938,14 @@ void CmdDispatcher::sendModeTestReport_()
   rep.counteron  = this->sublayers_.counter_enabled;
   rep.cryptoon   = this->sublayers_.crypto_enabled;
   rep.armrefusal = this->mt_last_refusal_;
+  // Mode B's goal, as numbers. 0 / 0 until three marks have been heard.
+  rep.ppmestimate = this->mt_drift_fit_.ppm();
+  rep.ppmsamples  = this->mt_drift_fit_.n;
+  rep.measuredperiodus = this->mt_drift_fit_.measured_period_us(
+      (uint32_t) (this->mt_last_k_ > 0 ? this->mt_last_k_ : 0));
+  // The rate the CORRECTED prediction still drifts at. Mode B pass line.
+  rep.residualppm     = this->mt_residual_fit_.ppm();
+  rep.residualsamples = this->mt_residual_fit_.n;
 
   resp.header         = &header;
   resp.proto_case     = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT;
@@ -2615,6 +3000,13 @@ void CmdDispatcher::stopModeTest_()
   this->mode_test_active_ = false;
 
   sendModeTestReport_();
+
+  // Verbosity back, unconditionally and before anything that could return: a hub
+  // that disappears mid-test (this runs from the node-owned deadline too) must
+  // not leave the node mute.
+  esp_log_level_set("CmdDispatcher",  ESP_LOG_INFO);
+  esp_log_level_set("LoraInterface",  ESP_LOG_INFO);
+  esp_log_level_set("frtosTasks",     ESP_LOG_INFO);
 
   // Restore EVERYTHING, on every exit path including the node-owned deadline.
   // The mode and slot are the ones DriftTest never had to think about: a node
@@ -2675,14 +3067,38 @@ void CmdDispatcher::handleSchedule(LoraClientOperationMessage *message_to_proces
       entries[count++] = e;
     }
 
-    this->sysCtrl->setSchedule(sc->version, (uint8_t) sc->mode,
-                               sc->interactivetimeout_s, sc->checkininterval_s,
-                               sc->beaconlead_s, sc->posteventwindow_s,
-                               sc->catchupwindow_s, entries, count);
+    // A schedule the node already holds is not written to flash again. The hub
+    // re-sends a ScheduleConfig until it hears the ack, so the same schedule
+    // arrives several times; every copy rewrote config.txt. Measured 2026-09-15
+    // on node 2 (fw 1.0.85): the reset that emptied config.txt came during the
+    // save of such a repeat, 3 s after the first copy had been saved. The
+    // version is the hub's hash of the entries; the scalar fields are compared
+    // too (a zero beacon lead / post-event window means "keep", as in setSchedule).
+    const bool unchanged =
+        sc->version != 0 &&
+        this->sysCtrl->getSchedVersion() == sc->version &&
+        this->sysCtrl->getAutoMode() == (sc->mode != 0) &&
+        this->sysCtrl->getInteractiveTimeout() == sc->interactivetimeout_s &&
+        this->sysCtrl->getCheckinInterval() == sc->checkininterval_s &&
+        this->sysCtrl->getCatchupWindow() == sc->catchupwindow_s &&
+        (sc->beaconlead_s == 0 || this->sysCtrl->getBeaconLead() == sc->beaconlead_s) &&
+        (sc->posteventwindow_s == 0 || this->sysCtrl->getPostEventWindow() == sc->posteventwindow_s);
+    if (unchanged)
+    {
+      ESP_LOGI(TAG, "   CMD SCHEDULE: version=0x%08x already held — not rewritten",
+               (unsigned) sc->version);
+    }
+    else
+    {
+      this->sysCtrl->setSchedule(sc->version, (uint8_t) sc->mode,
+                                 sc->interactivetimeout_s, sc->checkininterval_s,
+                                 sc->beaconlead_s, sc->posteventwindow_s,
+                                 sc->catchupwindow_s, entries, count);
 
-    this->sysCtrl->mountLittleFS();
-    this->sysCtrl->saveConfiguration();
-    this->sysCtrl->unmountLittleFS();
+      this->sysCtrl->mountLittleFS();
+      this->sysCtrl->saveConfiguration();
+      this->sysCtrl->unmountLittleFS();
+    }
 
     ESP_LOGI(TAG, "   CMD SCHEDULE: version=0x%08x mode=%s entries=%u",
              (unsigned) sc->version,
@@ -2731,7 +3147,7 @@ void CmdDispatcher::handleLogin(LoraClientOperationMessage *message_to_process,
     // silently rate-limited the next test's, so a security test looked like it
     // passed while measuring the limiter. Member state, reset with the object.
     static const uint64_t LOGIN_RATE_LIMIT_MS = 5000; // 5 seconds
-    uint64_t now_ms = esp_timer_get_time() / 1000ULL;
+    uint64_t now_ms = nodeclock::nowUs() / 1000ULL;
     if (this->last_login_ms_ != 0 &&
         (now_ms - this->last_login_ms_) < LOGIN_RATE_LIMIT_MS)
     {
@@ -2854,12 +3270,42 @@ void CmdDispatcher::handleCoverConfig(LoraClientOperationMessage *message_to_pro
     ESP_LOGI(TAG, "   CMD CONFIG");
 
     CoverConfig *coverconfig = message_to_process->coverconfig;
-    ESP_LOGI(TAG, "Setting new openduration: %d", (unsigned int)coverconfig->opentime);
-    ESP_LOGI(TAG, "Setting new closeduration: %d", (unsigned int)coverconfig->closetime);
-    this->sysCtrl->setTimes(coverconfig->opentime, coverconfig->closetime);
+
+    // Travel durations: 0 means "not set", exactly as the roll geometry below
+    // and batteryInterval in ClientConfig already treat it. proto3 cannot
+    // distinguish an absent uint32 from a zero one, and a zero is not a slow
+    // blind — it is the absence of a duration.
+    //
+    // MEASURED 2026-09-22 (fw 1.1.4). Node 2's config.txt held
+    // "motorOpenDuration":0,"motorCloseDuration":0 and every move was instant:
+    //
+    //   MOTCMD_FULL_DOWN -> Current position 1.000000 -> 0.000000  (~1 s moving)
+    //
+    // runMsForMove() returns the configured duration for a full move, so a zero
+    // fires the move timer immediately and the FULLY_* TIMER transition SNAPS
+    // the position to an extreme. The blind twitched through the LEDC stop fade
+    // while the reported position teleported to fully closed; on the other node
+    // the same zero made a stop at 80 % report "closed". These two fields were
+    // the only ones in CoverConfig applied unconditionally.
+    const uint32_t open_s =
+        motorpolicy::keptTravelDurationS(coverconfig->opentime,
+                                         this->sysCtrl->getConfigMotorOpenDuration());
+    const uint32_t close_s =
+        motorpolicy::keptTravelDurationS(coverconfig->closetime,
+                                         this->sysCtrl->getConfigMotorCloseDuration());
+
+    if (coverconfig->opentime == 0u || coverconfig->closetime == 0u)
+      ESP_LOGW(TAG, "CoverConfig carried an unset duration (open=%u close=%u) — "
+                    "keeping open=%u close=%u",
+               (unsigned) coverconfig->opentime, (unsigned) coverconfig->closetime,
+               (unsigned) open_s, (unsigned) close_s);
+
+    ESP_LOGI(TAG, "Setting new openduration: %u", (unsigned) open_s);
+    ESP_LOGI(TAG, "Setting new closeduration: %u", (unsigned) close_s);
+    this->sysCtrl->setTimes(open_s, close_s);
     // Push the (travel-only) durations to the motor controller immediately so a
     // runtime CoverConfig takes effect this session, not only after the next boot.
-    this->motCtrl->setRuntime(coverconfig->opentime, coverconfig->closetime);
+    this->motCtrl->setRuntime(open_s, close_s);
 
     // Slat-slack at the bottom end (un-seal head / seal tail).  Applied both to
     // the persisted config and live to the motor controller.  Zero = disabled.
@@ -3049,7 +3495,7 @@ void CmdDispatcher::handleMacControl(LoraClientOperationMessage *message_to_proc
 
   // Timestamp as late as possible before handing the bytes over, so the
   // recorded turnaround contains the work rather than excluding it.
-  const int64_t fire_us = esp_timer_get_time();
+  const int64_t fire_us = nodeclock::nowUs();
   const bool ok = this->send_tx_buffer(out_buf, out_len);
   free(out_buf);
 
@@ -3088,8 +3534,114 @@ void CmdDispatcher::handleMacControl(LoraClientOperationMessage *message_to_proc
 // ---------------------------------------------------------------------------
 bool CmdDispatcher::timedRxActive() const
 {
+  // THE EDGE IS DETECTED BEFORE THE EARLY RETURN, deliberately.
+  //
+  // This comparison sat BELOW `if (!timed_rx_enabled_) return false;` until
+  // 2026-09-21, which made the one transition the hub most needs
+  // unannounceable: when the grid is withdrawn the node's reason becomes
+  // GridDisabled, this function returns immediately, and the reason is never
+  // compared — so the flag is never raised and the hub is never told. It also
+  // left last_reason_announced_ stale across any off/on cycle, so the hub went
+  // on believing a reason the node had already left.
+  //
+  // MEASURED on node 2 that day: Timed Mode withdrawn, 120 s of hub log
+  // captured, not one beacon, and the hub's demotion-reason sensor still
+  // republishing its previous value. The announce fired at boot (grid enabled)
+  // and never again, which is exactly the shape this ordering produces.
+  //
+  // Safe to evaluate here: demotionReasonNow() returns GridDisabled for this
+  // very case as its own first line, so the announced reason is true rather
+  // than a guess, and the call costs one compare when timed RX is off.
+  const uint8_t reason = this->demotionReasonNow();
+
+  // TELL THE HUB, not just the console. Keyed on what the hub was last told
+  // rather than the log's own field: the log fires once per change and the wire
+  // must fire once per change THE HUB HAS NOT BEEN TOLD ABOUT, which are
+  // different whenever the floor suppressed an announcement. Only the flag is
+  // raised here — this is a const accessor the receive task calls on every
+  // arming pass, and transmitting from it would put a queue push behind a
+  // getter.
+  //
+  // s_last_reason_announced is an RTC_DATA_ATTR static, so it SURVIVES a
+  // deep-sleep wake. As a plain member it was reset by every wake, every reason
+  // then compared unequal to 0xFF, and the node announced on each wake before
+  // sending its check-in beacon anyway — two uplinks for one fact.
+  if (reason != s_last_reason_announced)
+    this->mode_announce_pending_ = true;
+
   if (!this->timed_rx_enabled_)
     return false;
+
+  // SAY WHY, once per change. Measured 2026-09-14 on node 2: a run caught 11
+  // frames after grid adoption and never promoted, and nothing on the console
+  // said which rule held it back or what the phase statistics looked like — the
+  // answer could only be guessed at from the next run. The receive task asks
+  // this on every pass, so a line per call would flood; a line per change is the
+  // whole history in a handful of lines.
+  if (reason != this->last_reason_logged_)
+  {
+    this->last_reason_logged_ = reason;
+    const phase::Stats &s = this->phase_;
+    ESP_LOGW(TAG, "   timed RX: reason %u | phase n %u frames %u outside %u "
+                  "min %d max %d last %d us",
+             (unsigned) reason, (unsigned) s.n, (unsigned) s.frames,
+             (unsigned) s.outside_guard, s.n ? (int) s.min_us : 0,
+             s.n ? (int) s.max_us : 0, (int) s.last_us);
+  }
+
+  // The edge detection used to sit HERE as well. When it was hoisted above the
+  // early return on 2026-09-21 the original was left behind, so the function
+  // carried the rule twice — the "two copies that drift" failure this file
+  // warns about elsewhere, and one of them unreachable in exactly the
+  // !timed_rx_enabled_ case the hoist existed to fix. One copy, above.
+
+  return reason == (uint8_t) timedmode::Demotion::None;
+}
+
+// Tell the hub our Mode B status changed, at most once per
+// timedmode::kModeAnnounceMinS.
+//
+// THE LAST STATE WINS, deliberately. The announcement carries the reason as it
+// is NOW, not the one that raised the flag: a node that flickered 0 -> 5 -> 0
+// inside the floor must leave the hub believing 0. Recording the flag-raising
+// reason instead would describe a transition that no longer holds, which is the
+// same "a field that quietly lies" failure this project keeps paying for.
+//
+// The floor is applied to the ANNOUNCEMENT, not to the edge detection, so a
+// change that is suppressed now stays pending and goes out at the next pass
+// past the floor rather than being lost.
+void CmdDispatcher::announceModeChangeIfPending()
+{
+  if (!this->mode_announce_pending_)
+    return;
+
+  const int64_t now_us = nodeclock::nowUs();
+  const uint32_t s_since =
+      (s_last_mode_announce_us == 0)
+          ? 0xFFFFFFFFu
+          : (uint32_t) ((now_us - s_last_mode_announce_us) / 1000000);
+
+  if (!timedmode::shouldAnnounceModeChange(true, s_since))
+    return;   // still pending: the next pass past the floor sends it
+
+  const uint8_t reason = this->demotionReasonNow();
+  this->mode_announce_pending_ = false;
+  s_last_reason_announced      = reason;
+  s_last_mode_announce_us      = (now_us > 0) ? now_us : 1;
+
+  ESP_LOGW(TAG, "   timed RX: announcing mode change to the hub (reason %u) — "
+                "the PhaseReport rides this beacon",
+           (unsigned) reason);
+  this->setStatus(BlindsStatusCmd::SYSCMD_BEACON,
+                  (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED);
+}
+
+// Why the node is not in Mode B (Demotion value), or None. Reported to the hub
+// in every PhaseReport: the node decides, the hub follows.
+uint8_t CmdDispatcher::demotionReasonNow() const
+{
+  if (!this->timed_rx_enabled_)
+    return (uint8_t) timedmode::Demotion::GridDisabled;
 
   timedmode::NodeState ns;
   ns.grid_enabled             = this->grid_.active;
@@ -3098,7 +3650,12 @@ bool CmdDispatcher::timedRxActive() const
                                     : timedmode::RtcSlowSrc::Unknown;
   ns.phase_valid              = phase::phaseTrustworthy(this->phase_, timedgrid::kGuardUs);
   ns.phase_err_us             = this->phase_.last_us;
-  ns.consecutive_missed_marks = this->missed_marks_;
+  // Thin is not wrong: see timedmode::NodeState::in_mode_b. The previous decision
+  // is what timedRxActive() last logged, which is exactly "was it in Mode B".
+  ns.phase_consistent         = (this->phase_.outside_guard == 0) &&
+                                (this->phase_.n == 0 ||
+                                 (uint32_t) this->phase_.spread_us() <= timedgrid::kGuardUs);
+  ns.in_mode_b                = (this->last_reason_logged_ == (uint8_t) timedmode::Demotion::None);
   // These three were hardcoded, and each hardcode disabled a criterion §4.6
   // treats as load-bearing:
   //
@@ -3106,27 +3663,69 @@ bool CmdDispatcher::timedRxActive() const
   //   so resyncMaxS — carried on the wire, validated, stored — had no effect on
   //   the node at all. A node whose hub went quiet held its phase forever.
   //
-  //   s_since_demotion = 0xFFFFFFFF meant the anti-flap hold never applied, so
-  //   a node could demote and re-promote on consecutive marks, stopping and
-  //   restarting the RX timer each time.
-  //
-  // in_slot_uplinks stays hardcoded, and that is still a gap: §4.6 wants an
-  // uplink OBSERVED IN ITS SLOT, not a claim, and nothing measures that yet.
-  // Left as the optimistic value rather than the pessimistic one because the
-  // other two criteria now gate promotion properly; noted in §11a.
-  const int64_t now_us = esp_timer_get_time();
+  //   in_slot_uplinks was hardcoded to the optimistic value, so
+  //   Demotion::NotConfirmed could never fire and §4.6's "an uplink OBSERVED
+  //   IN ITS SLOT, not a claim" was not a criterion at all. It comes from the
+  //   hub on TimeSync now (U-4), and it HAS to: the placement is produced by
+  //   this node's TRANSMIT path and the question is where the frame ARRIVED,
+  //   so a locally measured value would be exactly the self-claim §4.6
+  //   rejects. [2026-09-14: RETIRED as a criterion — the node is the
+  //   authority on its own promotion and a ModeTest sends no uplinks, so the
+  //   count could never be earned on the bench. Still carried and stored as a
+  //   diagnostic; see TimedModePolicy.h demotionReason.]
+  const int64_t now_us = nodeclock::nowUs();
   ns.s_since_addressed_frame =
       (this->last_addressed_us_ == 0)
           ? 0xFFFFFFFFu
           : (uint32_t) ((now_us - this->last_addressed_us_) / 1000000);
-  ns.in_slot_uplinks          = timedmode::kPromotionUplinks;
-  ns.s_since_demotion =
-      (this->last_demotion_us_ == 0)
-          ? 0xFFFFFFFFu
-          : (uint32_t) ((now_us - this->last_demotion_us_) / 1000000);
+  ns.in_slot_uplinks          = this->hub_in_slot_uplinks_;
 
-  return timedmode::modeFor(ns, this->grid_.params.resync_max_s,
-                            timedgrid::kGuardUs) == timedmode::Mode::B;
+  return (uint8_t) timedmode::demotionReason(ns, this->grid_.params.resync_max_s,
+                                             timedgrid::kGuardUs);
+}
+
+// Section 4.3, the node half: aim this uplink at the instant the hub told us to
+// reply at, rather than "whenever CAD says the channel is clear".
+//
+// ulOffsetUs was published, validated and stored and never once READ, so every
+// uplink went out after an unconditional random 29-290 ms backoff and the hub's
+// in-slot measurement could not succeed by anything but luck. This is the
+// function that closes that: the TX task asks for a CAD start instant, and gets
+// one whenever the node is genuinely on the grid.
+//
+// Everything that makes the aim WRONG is refused here rather than approximated:
+//
+//   * no grid, or no offset published — there is no mark to aim at;
+//   * timed RX off — the node is in Mode A and its slot means nothing;
+//   * phase not trustworthy — the anchor is the thing the aim is measured from.
+//     Aiming off an anchor we do not believe is worse than not aiming: a random
+//     backoff lands somewhere harmless, a confident wrong instant lands on
+//     another node's slot.
+//
+// Returns 0 for "not aimed", which the caller reads as "send the old way".
+int64_t CmdDispatcher::uplinkCadStartUs(int64_t now_us, int64_t max_wait_us)
+{
+  if (!this->grid_.active || !this->timed_rx_enabled_)
+    return 0;
+  if (!phase::phaseTrustworthy(this->phase_, timedgrid::kGuardUs))
+    return 0;
+
+  const gridstate::UplinkAim aim =
+      gridstate::aimUplink(this->grid_, now_us, kUplinkAimLeadUs, max_wait_us);
+  if (!aim.aimed)
+  {
+    // Counted, not logged. A node whose turnaround exceeds the published offset
+    // misses EVERY mark, and that is HW-7's number showing itself in the field
+    // — the one place it can be seen without a scope. A silent fallback would
+    // look exactly like the offset working.
+    if (this->ul_aim_misses_ < 0xFFFFFFFFu)
+      this->ul_aim_misses_++;
+    return 0;
+  }
+
+  if (this->ul_aim_hits_ < 0xFFFFFFFFu)
+    this->ul_aim_hits_++;
+  return aim.cad_start_us;
 }
 
 int64_t CmdDispatcher::nextArmInstantUs(int64_t now_us) const
@@ -3138,7 +3737,8 @@ int64_t CmdDispatcher::nextArmInstantUs(int64_t now_us) const
 }
 
 int64_t CmdDispatcher::nextArmDelayUs(int64_t now_us, int64_t lead_us,
-                                      gridstate::WindowKind &kind_out) const
+                                      gridstate::WindowKind &kind_out,
+                                      int64_t opened_t0_us, int64_t *t0_out) const
 {
   // Two kinds of window now: this node's private mark, and section 4.4's
   // broadcast beacon. The caller needs to know which, because a beacon window
@@ -3150,9 +3750,13 @@ int64_t CmdDispatcher::nextArmDelayUs(int64_t now_us, int64_t lead_us,
   // The skip permission applies to the private window only. See
   // gridstate::nextWindow: a node that skipped the beacon as well could never
   // hear the thing that grants and revokes the permission.
-  const bool skip_own = !this->shouldArmNextWindow(now_us);
+  //
+  // Asked about the window the search will actually land on — past the one
+  // already open — not about the round `now` sits in.
+  const int64_t from_us = gridstate::nextWindowSearchFromUs(now_us, opened_t0_us);
+  const bool skip_own = !this->shouldArmNextWindow(from_us);
   return gridstate::nextWindowArmDelayUs(this->grid_, now_us, lead_us,
-                                         skip_own, kind_out);
+                                         skip_own, kind_out, opened_t0_us, t0_out);
 }
 
 // Whether the window for the NEXT mark is worth opening at all.
@@ -3200,6 +3804,23 @@ void CmdDispatcher::noteUplinkSent(int64_t t_txdone_us, uint32_t uplink_len)
   // ADOPTED a grid is on Mode B even during the interval where its phase is not
   // yet trustworthy and the arming has fallen back to Mode A. Class A jumping
   // into that gap is exactly the mode fight this gate exists to prevent.
+  // Mode C wake clock: the RTC tick count at this beacon's T0. Read here, in
+  // task context, and walked back to T0 — rtc_time_get() busy-waits for a
+  // slow-clock edge and does not belong in the ISR that stamped TxDone. The ISR
+  // stamp is node time, so "now" must be node time too.
+  if (this->beacon_tx_pending_)
+  {
+    this->beacon_tx_pending_ = false;
+    const uint64_t ticks_now = nodeclock::rtcTicks();
+    if (ticks_now != 0 && t_txdone_us > 0)
+    {
+      s_beacon_t0_ticks = beaconticks::ticksAtT0(ticks_now, nodeclock::nowUs(), t_txdone_us,
+                                                 loratiming::t0ToRxDoneUs(uplink_len),
+                                                 nodeclock::periodQ19());
+      s_beacon_msgid    = this->beacon_tx_pending_msgid_;
+    }
+  }
+
   const bool auto_mode = (this->sysCtrl != nullptr) && this->sysCtrl->getAutoMode();
   if (!auto_mode || this->grid_.active)
   {
@@ -3235,10 +3856,33 @@ void CmdDispatcher::noteUplinkSent(int64_t t_txdone_us, uint32_t uplink_len)
 // not sleep early.
 void CmdDispatcher::noteClassASleepOk(bool ok)
 {
+  // UNDER THE MUTEX, like every other writer of classa_. This function wrote
+  // the struct bare while it sat uncalled, and classa_ is cross-core by
+  // construction: noteUplinkSent and noteClassAWindowResult run on the DIO0
+  // interrupt task, and this runs on the receive task, out of handleTimeSync.
+  // The header says as much three lines above the member.
+  portENTER_CRITICAL(&this->classa_mux_);
   this->classa_.state.sleep_ok = ok;
+
+  // AND THE INVARIANT: "active" means there is a window still to open.
+  //
+  // §11a recorded that wiring this would break that invariant. It does not —
+  // the invariant says what to do. sleep_ok is the second way for nextAction()
+  // to return Sleep, so it needs the same clearing rule noteClassAWindowResult
+  // already applies for the first. Left active, the node would hold the shared
+  // one-shot for a sequence that has no window left, and armNextRxWindow would
+  // keep taking the Class A branch and rely on a delay of 0 to fall through to
+  // the mode that actually applies — which is precisely the "both worked, and
+  // neither was true" state the invariant was introduced to end.
+  //
+  // A stale flag cannot leak into the next sequence: noteUplinkSent assigns a
+  // fresh WakeState for every uplink.
+  if (classa::nextAction(this->classa_.state) == classa::WakeAction::Sleep)
+    this->classa_.active = false;
+  portEXIT_CRITICAL(&this->classa_mux_);
 }
 
-void CmdDispatcher::noteClassAWindowResult(bool had_data)
+void CmdDispatcher::noteClassAWindowResult(bool had_data, int64_t rx_us)
 {
   portENTER_CRITICAL(&this->classa_mux_);
   if (!this->classa_.active)
@@ -3246,6 +3890,10 @@ void CmdDispatcher::noteClassAWindowResult(bool had_data)
     portEXIT_CRITICAL(&this->classa_mux_);
     return;
   }
+  // Which window this result closes, and the origin it was placed from, taken
+  // under the lock for the log line below.
+  const int     window_no = this->classa_.state.rx1_done ? 2 : 1;
+  const int64_t t0_uplink = this->classa_.t0_uplink_us;
   if (!this->classa_.state.rx1_done)
   {
     this->classa_.state.rx1_done     = true;
@@ -3267,6 +3915,30 @@ void CmdDispatcher::noteClassAWindowResult(bool had_data)
   if (classa::nextAction(this->classa_.state) == classa::WakeAction::Sleep)
     this->classa_.active = false;
   portEXIT_CRITICAL(&this->classa_mux_);
+
+  // Mode C's window funnel. The sequence above was advanced and nothing
+  // counted it: every auto-mode wake reported windows 0 / hits 0 while its RX
+  // windows plainly opened (measured 2026-09-14 on node 2, three check-ins).
+  // Counted after the Class A lock is released — the funnel has its own.
+  //
+  // "Hit" here is what the radio saw in a Class A window: a frame arrived
+  // (RxDone), whether or not it later turned out to be addressed to this node.
+  // Timed windows count their hit at the address filter instead; the Class A
+  // result is reported from the radio event, before any of that is known.
+  this->noteWindowResult(had_data);
+
+  // Which window, and for a frame how long after this node's own uplink T0 it
+  // completed. RX1 is placed at T0_uplink + 1 s, RX2 at + 2 s, so the offset
+  // says directly whether a reply landed in the window it was aimed at. Added
+  // because every Mode C wake counted two windows and one hit while the node log
+  // showed a single reply at the RX1 instant: an RX1 that closed empty just
+  // before a late reply would look exactly like that, and nothing at INFO level
+  // said which window closed when.
+  if (had_data && rx_us > 0)
+    ESP_LOGI(TAG, "Class A RX%d: frame, RxDone %+lld us after T0_uplink",
+             window_no, (long long) (rx_us - t0_uplink));
+  else
+    ESP_LOGI(TAG, "Class A RX%d: %s", window_no, had_data ? "frame" : "empty (timeout)");
 }
 
 classa::WakeAction CmdDispatcher::classAAction() const
@@ -3305,6 +3977,31 @@ int64_t CmdDispatcher::classAArmInstantUs() const
 // clamping rule as the grid's: never zero or negative, because a window whose
 // instant has already passed is still worth opening — lateness inside the guard
 // band is survivable and silence is not.
+void CmdDispatcher::classAPendingWindow(int64_t *arm_us, int64_t *close_us) const
+{
+  int64_t arm = 0, close = 0;
+  const ClassAState s = this->classaSnapshot_();
+  if (s.active)
+  {
+    switch (classa::nextAction(s.state))
+    {
+      case classa::WakeAction::OpenRx1:
+        arm   = classa::rx1OpenUs(s.t0_uplink_us);
+        close = classa::rx1CloseUs(s.t0_uplink_us);
+        break;
+      case classa::WakeAction::OpenRx2:
+        arm   = classa::rx2OpenUs(s.t0_uplink_us);
+        close = classa::rx2CloseUs(s.t0_uplink_us);
+        break;
+      case classa::WakeAction::Sleep:
+      default:
+        break;
+    }
+  }
+  if (arm_us) *arm_us = arm;
+  if (close_us) *close_us = close;
+}
+
 int64_t CmdDispatcher::classAArmDelayUs(int64_t now_us, int64_t lead_us) const
 {
   const int64_t arm = this->classAArmInstantUs();
@@ -3338,36 +4035,131 @@ void CmdDispatcher::noteMarkOutcome(bool addressed)
     this->missed_marks_ = 0;
   else
     this->missed_marks_++;
-  this->demoteIfMarksMissed_();
 }
 
-// The demotion body, reachable from BOTH counting paths.
+// demoteIfMarksMissed_() stood here until 2026-09-20.
 //
-// It used to live inside noteMarkOutcome, which has no callers — so when the
-// radio paths were split onto noteMarkArmed/Hit/Missed, the counter kept
-// incrementing and nothing ever acted on it. grid_.active stayed true forever
-// and the node held a grid it should have abandoned.
-void CmdDispatcher::demoteIfMarksMissed_()
-{
-  if (this->missed_marks_ < timedmode::kMaxMissedMarks || !this->grid_.active)
-    return;
+// It demoted the node after kMaxMissedMarks empty marks, reset the phase
+// evidence, and stamped last_demotion_us_ for the 600 s anti-flap hold. All
+// three are retired together — see the Demotion banner in TimedModePolicy.h:
+// the criterion measured HUB SILENCE, not link health, so 4.5 s of ordinary
+// quiet demoted a healthy node, and the hold existed only to rate-limit the
+// resulting flap.
+//
+// TWO SIDE EFFECTS WENT WITH IT, and neither is missed:
+//
+//   phase_.reset() — a SyncStale demotion no longer throws the evidence away,
+//   so when a beacon clears the staleness the node returns to Mode B on the
+//   samples it already has instead of re-earning eight. That is faster
+//   recovery, and the samples were never wrong: the anchor they were measured
+//   against is the one the beacon just confirmed.
+//
+//   requestRearm() — the receive task re-evaluates on its own next pass
+//   (~470 ms) because timedRxActive() is recomputed every time it arms. There
+//   was never a state change here that the task could not see for itself.
+//
+// The grid is still KEPT on every path, which was this function's other job
+// (fw 1.0.89): nothing clears grid_.active now except the hub withdrawing it
+// by GridSync(enable=false) or GridDemote.
 
-  // Demotion is unilateral and immediate — rule 1 of the asymmetry. Dropping to
-  // Mode A is always safe; staying in a window that is no longer where the hub
-  // transmits is not.
-  ESP_LOGW(TAG, "   timed RX: %u consecutive missed marks — demoting to Mode A",
-           (unsigned) this->missed_marks_);
+// The hub's startup withdrawal: drop back to Mode A.
+//
+// Unauthenticated, by design, and this is the whole justification: Mode A is
+// three receive windows per round against Mode B's one, so the frame can only
+// make this node listen MORE. That is the same rule the beacon exemption rests
+// on, and a demote satisfies it more cleanly than a beacon does — a beacon can
+// also nudge the anchor, while this can only throw one away.
+//
+// Two things it deliberately does NOT do.
+//
+// It does not clear the fleet key. A node with no key accepts UNSIGNED beacons
+// again — bounded per beacon, but the guard bounds ONE nudge and not a
+// sequence, so anything in radio range could walk the anchor away 14 ms at a
+// time. Letting an unauthenticated frame strip the key would hand that attack
+// back for the price of one packet. Keeping a stale key costs nothing: the
+// netKeyId check already refuses a beacon signed under a different generation,
+// so a key that outlived its grid is inert rather than dangerous, and a node in
+// Mode A is not using beacon phase for anything.
+//
+// It is not accepted addressed to this node. A broadcast is what the hub
+// actually sends — after a restart it does not yet know which nodes exist — and
+// requiring it means an attacker cannot pick one node out of the fleet.
+void CmdDispatcher::handleGridDemote(const LoraHeader *outer_header)
+{
+  const bool broadcast = (outer_header != nullptr) &&
+                         (outer_header->destaddress == loraIf->broadcastAddressing);
+  if (!broadcast)
+  {
+    ESP_LOGW(TAG, "   GridDemote: not a broadcast — ignored");
+    return;
+  }
+
+  if (!this->grid_.active)
+    return;   // already in Mode A; every node in range hears this frame
+
+  ESP_LOGW(TAG, "   GridDemote: grid WITHDRAWN by the hub — back to Mode A");
   this->grid_.clear();
   this->phase_.reset();
   this->expected_t0_us_ = 0;
-  this->missed_marks_   = 0;
+  if (this->loraIf != nullptr)
+    this->loraIf->requestRearm();   // back to the free-running window now
+  // net_key_ / net_key_id_ are deliberately left alone. See the banner.
+}
 
-  // Leave timed RX ENABLED. The node is out of Mode B either way, because
-  // timedRxActive() consults grid_.active — but keeping the flag set means a
-  // later GridSync re-adopts without needing anything else to happen. Clearing
-  // it here would recreate the original bug in a subtler form: a flag nothing
-  // sets again.
-  this->last_demotion_us_ = esp_timer_get_time();
+// Section 4.4. Is this beacon from our hub?
+//
+// AES-CMAC under the fleet key, and psa_mac_verify rather than compute-then-
+// memcmp: the library compares in constant time, and a timing oracle on a MAC
+// comparison is the classic way to forge one tag byte at a time.
+//
+// The truncated tag on the air is 8 bytes. PSA verifies a truncated MAC through
+// PSA_ALG_TRUNCATED_MAC, which is the same construction the AEAD already uses
+// for its shortened tag — asking it to verify 8 bytes against the full
+// algorithm would simply fail on length.
+bool CmdDispatcher::beaconMacIsValid(uint32_t net_key_id, uint32_t tx_round,
+                                     uint32_t tx_slot, uint32_t pending_mask,
+                                     bool pending_mask_valid,
+                                     const uint8_t *mac, size_t mac_len) const
+{
+  if (!this->hasNetKey())
+    return false;
+  // A beacon signed under a key we do not hold. The hub has rotated and this
+  // node has not yet had the GridSync carrying the new one; refusing is right,
+  // and the node then coasts on resyncMaxS until its next addressed frame.
+  if (net_key_id != this->net_key_id_)
+    return false;
+  if (mac == nullptr || mac_len != framecrypto::kBeaconMacBytes)
+    return false;
+
+  uint8_t input[framecrypto::kBeaconMacInputBytes];
+  framecrypto::buildBeaconMacInput(net_key_id, tx_round, tx_slot, pending_mask,
+                                   pending_mask_valid, input);
+
+  const psa_algorithm_t alg =
+      PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, framecrypto::kBeaconMacBytes);
+
+  psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_VERIFY_MESSAGE);
+  psa_set_key_algorithm(&attrs, alg);
+  psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&attrs, framecrypto::kNetKeyBytes * 8);
+  psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
+
+  // Imported per beacon rather than held in a slot. A beacon is one frame every
+  // 350 s, so the import is free, and a slot held across a key rotation would
+  // verify the new hub's beacons with the old hub's key — silently.
+  psa_key_id_t kid = PSA_KEY_ID_NULL;
+  psa_status_t st = psa_import_key(&attrs, this->net_key_,
+                                   sizeof(this->net_key_), &kid);
+  if (st != PSA_SUCCESS)
+  {
+    ESP_LOGE(TAG, "   beacon MAC: psa_import_key failed: %d", (int) st);
+    return false;
+  }
+
+  st = psa_mac_verify(kid, alg, input, sizeof(input), mac, mac_len);
+  psa_destroy_key(kid);
+  return st == PSA_SUCCESS;
 }
 
 void CmdDispatcher::handleGridSync(LoraClientOperationMessage *message_to_process,
@@ -3390,6 +4182,17 @@ void CmdDispatcher::handleGridSync(LoraClientOperationMessage *message_to_proces
     this->grid_.clear();
     this->phase_.reset();
     this->expected_t0_us_ = 0;
+    if (this->loraIf != nullptr)
+      this->loraIf->requestRearm();   // back to the free-running window now
+    // THE KEY STAYS, and the earlier reasoning here was wrong.
+    //
+    // It read "a key that outlived its grid would let a stale beacon look
+    // valid". It would not: the netKeyId check refuses a beacon signed under a
+    // different generation, so a stale key is inert. What clearing it actually
+    // does is put the node back on the NO-KEY policy, where unsigned beacons
+    // are accepted — and the guard band bounds one anchor nudge, not a
+    // sequence of them, so that is the walk the key was added to close. A
+    // withdrawal must not be a way to re-open it.
     return;
   }
 
@@ -3441,11 +4244,65 @@ void CmdDispatcher::handleGridSync(LoraClientOperationMessage *message_to_proces
   const int64_t t0_copy0 =
       t0_measured - (int64_t) burst_index * drift::kCopySpacingUs;
 
+  // Section 4.4's fleet key, adopted ONLY from an authenticated frame.
+  //
+  // GridSync is encrypted whenever a session exists and plaintext otherwise, so
+  // this gate is what stops a bootstrap frame — or anything in radio range
+  // imitating one — from installing the key the whole beacon scheme rests on.
+  // A plaintext GridSync that carried a key would make the MAC decorative.
+  //
+  // Adopted BEFORE the grid is marked active, so there is no window in which a
+  // node is on the grid holding the previous grid's key.
+  if (this->frame_authenticated_ && gs->netkey.len == framecrypto::kNetKeyBytes
+      && gs->netkeyid != 0)
+  {
+    memcpy(this->net_key_, gs->netkey.data, framecrypto::kNetKeyBytes);
+    this->net_key_id_ = gs->netkeyid;
+    ESP_LOGI(TAG, "   GridSync: fleet key adopted (id %08x)",
+             (unsigned) gs->netkeyid);
+  }
+  else if (this->net_key_id_ != 0)
+  {
+    // A grid published without a key, by a hub that has one no longer or never
+    // had one. Forgetting is the safe direction: a key that outlived its grid
+    // would authenticate beacons for an anchor that no longer exists, and the
+    // no-key policy below is exactly what shipped before this existed.
+    memset(this->net_key_, 0, sizeof(this->net_key_));
+    this->net_key_id_ = 0;
+    ESP_LOGW(TAG, "   GridSync: no fleet key on this grid — beacons unsigned");
+  }
+
   this->grid_.active     = true;
   this->grid_.params     = p;
-  this->grid_.anchor_us  = gridstate::solveAnchorUs(t0_copy0, gs->txround,
-                                                    gs->txslot, p);
+  // The learned clock rate survives re-adoption: it describes this node clock,
+  // and a hub reboot or a new slot does not change that. The anchor is solved
+  // with it so the grid it seeds predicts on the node clock from the first mark.
+  this->grid_.rate_ppb   = this->clock_rate_ppb_;
+  // A stamped copy says where it really went out, which is what the anchor has
+  // to agree with; the placement (txround/txslot) is only what was intended.
+  // Measured 2026-09-14: GridSyncs that left ~320 ms and ~10 ms after their mark
+  // moved every mark the node armed by exactly that.
+  this->grid_.anchor_us  =
+      (outer_header != nullptr && outer_header->firestamped)
+          ? gridstate::solveAnchorFromHubInstantUs(t0_measured, outer_header->fireround,
+                                                   outer_header->fireoffsetus, p,
+                                                   this->clock_rate_ppb_)
+          : gridstate::solveAnchorUs(t0_copy0, gs->txround, gs->txslot, p,
+                                     this->clock_rate_ppb_);
   this->grid_.last_round = gs->txround;
+  // A new anchor starts a new rate span. A stamped GridSync on a settled clock put
+  // the anchor exactly where the hub declares it went out, so that instant IS the
+  // span's start and the FIRST beacon learns the rate. Measured 2026-09-15 on node
+  // 2 (fw 1.0.76): with the span left to the first beacon, the rate came only at
+  // the second, 12 min after the grid, and phase drifted +10 ppm to 5.3 ms first.
+  // An unstamped or boot-minute anchor carries its own error into the span, so it
+  // still waits for a beacon.
+  const bool gs_ref = outer_header != nullptr && outer_header->firestamped
+                   && nodeclock::settled();
+  this->have_rate_ref_   = gs_ref;
+  this->rate_ref_hub_us_ = gs_ref ? gridstate::hubInstantUs(p, outer_header->fireround,
+                                                            outer_header->fireoffsetus)
+                                  : 0;
 
   // The pending-data bitmap, if this GridSync carried one. `valid` comes from
   // the explicit flag, never from the bits: a zeroed field is indistinguishable
@@ -3460,7 +4317,17 @@ void CmdDispatcher::handleGridSync(LoraClientOperationMessage *message_to_proces
   // Phase measurement starts from a clean slate: samples taken against the
   // previous anchor describe a grid that no longer exists.
   this->phase_.reset();
+  this->noteAnchorFixed_();
   this->expected_t0_us_ = gridstate::nextT0Us(this->grid_, rx_us);
+  // A NEW anchor has to earn promotion again: nothing measured it yet. Forget the
+  // previous decision so the thin-evidence allowance does not carry over to it.
+  this->last_reason_logged_ = 0xFF;
+  // Adopted before node time settled: keep the grid (it is what makes the node
+  // listen at its marks at all) but trust neither its anchor nor samples against
+  // it until a stamped frame on a settled clock re-solves it.
+  this->grid_provisional_ = !nodeclock::settled();
+  if (this->grid_provisional_)
+    ESP_LOGW(TAG, "   GridSync: node clock not settled yet — anchor provisional");
 
   // Adopting a grid is what enables timed RX.
   //
@@ -3486,6 +4353,19 @@ void CmdDispatcher::handleGridSync(LoraClientOperationMessage *message_to_proces
            (long long) this->grid_.anchor_us,
            (long long) this->expected_t0_us_,
            (unsigned) p.beacon_slot, (unsigned) p.beacon_every_rounds);
+
+  // A new anchor and a new pending mask: re-arm against them now.
+  if (this->loraIf != nullptr)
+    this->loraIf->requestRearm();
+
+  // Confirm the adoption. The hub re-publishes a GridSync until this arrives.
+  // Measured 2026-09-15 on node 2: the one GridSync sent after a login was lost
+  // while the node spent the burst in CAD retries, nothing re-sent it, and the
+  // node sat in Mode A for 13 minutes. Once per GridSync: the burst's other
+  // copies carry the same msgid and stop at the replay check. A REFUSED GridSync
+  // returned above and is not confirmed.
+  if (outer_header != nullptr)
+    this->sendCommandAck(outer_header->msgid);
 }
 
 // ---------------------------------------------------------------------------
@@ -3502,14 +4382,16 @@ void CmdDispatcher::handleGridSync(LoraClientOperationMessage *message_to_proces
 //      That error is drift, and correcting the anchor by it is the whole
 //      mechanism — a node that only reset a staleness timer would keep the
 //      accumulated error and eventually miss its own window.
-//   2. The correction is BOUNDED by the guard band. A beacon is broadcast, so
-//      it cannot be encrypted per session, and an unbounded correction would
-//      let anything in radio range walk the anchor away. Real drift is orders
-//      of magnitude smaller: one round at +/-20 ppm is 30 us against a 14080 us
-//      guard.
-//   3. The pending bitmap is adopted only after the frame has proved it is on
-//      OUR grid. A mask taken from a frame whose timing made no sense would be
-//      a stranger telling this node to stop listening.
+//   2. The correction is BOUNDED by the guard band, and stays bounded even for
+//      an AUTHENTICATED beacon. The MAC says the frame came from our hub; it
+//      says nothing about the hub being right, and any compromised node holds
+//      the same fleet key. Real drift is orders of magnitude smaller than the
+//      bound anyway — one round at +/-20 ppm is 30 us against a 14080 us guard
+//      — so the clamp costs nothing and removes a whole class of outcome.
+//   3. The pending bitmap is adopted only from a frame that has proved BOTH
+//      that it is on our grid and that it came from our hub. Timing alone is
+//      not enough: a mask is an instruction to stop listening, and a stranger
+//      who can hear the grid can also transmit on it.
 //
 // Deliberately NOT done here: adopting geometry. A beacon carries no slot
 // assignment, no pitch, no cadence — those are GridSync's, and a broadcast that
@@ -3541,6 +4423,39 @@ void CmdDispatcher::handleGridBeacon(LoraClientOperationMessage *message_to_proc
   if (rx_us <= 0)
     return;
 
+  // Section 4.4. Is this beacon ours to act on at all?
+  //
+  // The ratchet, and it is deliberately a ratchet rather than a flag:
+  //
+  //   NO KEY HELD -> proceed exactly as before. A beacon may correct the anchor
+  //     within the guard band and may never touch the pending mask. A node that
+  //     never receives a key therefore does not regress, which is what makes
+  //     this safe to ship ahead of the hubs.
+  //
+  //   A KEY HELD -> the beacon must carry a matching id and a valid MAC, or it
+  //     is ignored ENTIRELY: no re-anchor, no phase sample, no mask, no
+  //     staleness reset. Tolerating an unsigned beacon once forgery is
+  //     detectable would leave the whole attack open, because an attacker would
+  //     simply omit the MAC. And the guard band does not save us there: it
+  //     bounds ONE nudge, not a sequence, so anything in radio range could walk
+  //     a node 14 ms per beacon until it is off the grid.
+  //
+  // Refusing costs a node nothing worse than the behaviour it had before the
+  // beacon existed: it coasts on resyncMaxS and re-syncs off its next addressed
+  // frame.
+  const bool authenticated =
+      this->hasNetKey() &&
+      this->beaconMacIsValid(gb->netkeyid, gb->txround, gb->txslot,
+                             gb->pendingmask, gb->pendingmaskvalid,
+                             gb->mac.data, gb->mac.len);
+  if (this->hasNetKey() && !authenticated)
+  {
+    ESP_LOGW(TAG, "   GridBeacon: bad MAC or wrong key id (%08x, ours %08x) — "
+                  "ignored", (unsigned) gb->netkeyid,
+             (unsigned) this->net_key_id_);
+    return;
+  }
+
   // One copy, not a burst: a beacon that repeated would occupy the slots after
   // it, which is exactly what the beacon slot's clearance rule exists to stop.
   // burstIndex is read anyway rather than assumed, because assuming it is what
@@ -3555,46 +4470,98 @@ void CmdDispatcher::handleGridBeacon(LoraClientOperationMessage *message_to_proc
       gridstate::beaconT0ForRound(this->grid_, gb->txround);
   const int64_t err = t0_measured - predicted;
 
-  if (!gridstate::reanchorIsSane(err, timedgrid::kGuardUs))
+  // MAC-0 clock discipline. The capture for re-anchoring and learning is half a
+  // slot pitch, not the guard.
+  //
+  // REFUTED 2026-09-13: this used to reject anything outside the guard as "not
+  // drift — a foreign frame or a node that has already lost the grid". Measured
+  // under the production profile the node clock runs +60 ppm against the hub,
+  // ~21 ms per 5.8 min beacon interval: outside the guard, and drift. The rule
+  // threw away exactly the beacons that could have corrected it. Beyond half a
+  // pitch the frame is nearer a neighbouring slot than our mark, and is refused.
+  if (!gridstate::beaconErrLearnable(err, this->grid_.params.pitch_us))
   {
-    // Not drift. Either a foreign frame or a node that has already lost the
-    // grid; chasing it would move the anchor to wherever the interference was.
-    // Demotion is the phase tracker's job and it is already counting.
-    ESP_LOGW(TAG, "   GridBeacon: %lld us off our own beacon mark — outside the "
-                  "guard, not re-anchoring", (long long) err);
+    ESP_LOGW(TAG, "   GridBeacon: %lld us off our own beacon mark — beyond half "
+                  "a slot pitch, not re-anchoring", (long long) err);
     return;
   }
 
-  this->grid_.anchor_us += err;
+  // Learn the rate. The previous accepted beacon re-anchored the error to zero,
+  // so this error is the residual drift over the hub-clock span since then.
+  const int64_t beacon_hub_us =
+      gridstate::beaconHubInstantUs(this->grid_.params, gb->txround);
+  if (this->have_rate_ref_ && beacon_hub_us > this->rate_ref_hub_us_)
+  {
+    const int64_t span_us = beacon_hub_us - this->rate_ref_hub_us_;
+    const int32_t residual_ppb = gridstate::residualRatePpb(err, span_us);
+    if (residual_ppb != 0)
+    {
+      this->clock_rate_ppb_ = gridstate::clampRatePpb(
+          (int64_t) this->clock_rate_ppb_ + (int64_t) residual_ppb);
+      this->grid_.rate_ppb  = this->clock_rate_ppb_;
+      // A new rate is a new prediction. Samples taken under the old one describe
+      // a grid that no longer exists, and one of them outside the guard would
+      // latch outside_guard for the rest of the run.
+      this->phase_.reset();
+      ESP_LOGI(TAG, "   GridBeacon: clock rate %+d ppb (residual %+d ppb over %lld s)",
+               (int) this->clock_rate_ppb_, (int) residual_ppb,
+               (long long) (span_us / 1000000));
+    }
+  }
+
+  // Re-solve the anchor so the CURRENT rate predicts exactly the beacon just
+  // measured. With an unchanged rate this is anchor += err; after a rate update
+  // the prediction of this very round has moved, and += err would be wrong.
+  const int64_t beacon_offset_us =
+      gridstate::beaconT0ForRound(this->grid_, gb->txround) - this->grid_.anchor_us;
+  this->grid_.anchor_us  = t0_measured - beacon_offset_us;
   this->grid_.last_round = gb->txround;
+  // Re-anchored on a settled clock: the boot-minute anchor is gone.
+  if (nodeclock::settled())
+    this->grid_provisional_ = false;
+  this->rate_ref_hub_us_ = beacon_hub_us;
+  this->have_rate_ref_   = true;
+  this->noteAnchorFixed_();
 
   // The beacon is the frame the node's phase tracking exists to measure: it is
   // the only one guaranteed to arrive on a known mark whether or not this node
   // has traffic. Sampling it is what lets phaseTrustworthy() mean something on
   // an idle node.
-  phase::Sample sample;
-  sample.t0_measured_us = t0_measured;
-  sample.t0_expected_us = predicted;
-  phase::commit(this->phase_, sample, timedgrid::kGuardUs);
+  //
+  // Only a beacon inside the GUARD is a promotion sample: learning may use the
+  // wider capture above, promotion may not. The rest of this handler still runs
+  // for a learnable beacon outside the guard — it carries a valid pending mask
+  // and proves the node was heard.
+  if (gridstate::reanchorIsSane(err, timedgrid::kGuardUs))
+  {
+    phase::Sample sample;
+    sample.t0_measured_us = t0_measured;
+    sample.t0_expected_us = predicted;
+    phase::commit(this->phase_, sample, timedgrid::kGuardUs);
+  }
 
-  // Section 4.4 Tier 3, and the one thing a plaintext beacon may NOT do.
+  // Section 4.4 Tier 3, and the one thing an unauthenticated beacon may NOT do.
   //
   // A clear bit is an instruction to stop listening for up to a beacon interval
   // — 5.8 minutes at the default cadence — so honouring it from an
   // unauthenticated frame would hand anyone in radio range a cheap way to
   // silence the fleet: far cheaper than jamming, and invisible, because a node
   // that skips wrongly reports nothing. The rule is that an unauthenticated
-  // frame may make this node listen MORE and never less, so the mask is taken
-  // only from an authenticated beacon, and a plaintext one clears validity —
-  // which means LISTEN.
+  // frame may make this node listen MORE and never less.
   //
-  // Today that is every beacon, because a broadcast cannot be sealed with a
-  // per-node session key. Tier 3's saving therefore needs a fleet key, and
-  // until there is one the beacon is worth having for PHASE alone — which is
-  // the part that decides whether Mode B is worth being in.
+  // The gate used to be frame_authenticated_, which is the AEAD flag — and it
+  // is false for every broadcast by construction, so the branch could never be
+  // taken and Tier 3's saving was unreachable rather than merely unused. It is
+  // now the beacon's OWN authenticator: an AES-CMAC under the fleet key, which
+  // is what a one-to-many frame can carry and a per-node session key cannot.
+  //
+  // Note what this does NOT change: the hub still publishes all-set, because a
+  // cleared bit is a promise it cannot keep for an interactive node. Being able
+  // to authenticate the mask and being willing to clear a bit are two separate
+  // decisions, and only the first is made here.
   this->pending_.beacon_round        = gb->txround;
   this->pending_.beacon_every_rounds = this->grid_.params.beacon_every_rounds;
-  if (this->frame_authenticated_)
+  if (authenticated)
   {
     this->pending_.bits  = gb->pendingmask;
     this->pending_.valid = gb->pendingmaskvalid;
@@ -3608,13 +4575,18 @@ void CmdDispatcher::handleGridBeacon(LoraClientOperationMessage *message_to_proc
   // The staleness clock. A beacon IS the hub, heard on a mark this node
   // predicted, so it is exactly the evidence resyncMaxS asks for — and it is
   // the reason a node with no traffic of its own can stay in Mode B at all.
-  this->last_addressed_us_ = esp_timer_get_time();
+  this->last_addressed_us_ = nodeclock::nowUs();
   this->expected_t0_us_    = gridstate::nextT0Us(this->grid_, rx_us);
 
   ESP_LOGD(TAG, "   GridBeacon: round %u, re-anchored by %+lld us, mask %08x "
                 "valid %d",
            (unsigned) gb->txround, (long long) err,
            (unsigned) gb->pendingmask, (int) gb->pendingmaskvalid);
+
+  // The mask and the anchor just changed; the receive task may already be
+  // asleep on a one-shot aimed under the old ones (see requestRearm).
+  if (this->loraIf != nullptr)
+    this->loraIf->requestRearm();
 }
 
 void CmdDispatcher::dispatchCommand(LoraClientOperationMessage *message_to_process,
@@ -3661,6 +4633,10 @@ void CmdDispatcher::dispatchCommand(LoraClientOperationMessage *message_to_proce
     break;
   // Section 4.4's broadcast beacon. Also MAC-layer: it never reaches an
   // application handler, and it addresses the whole fleet rather than a node.
+  case LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE:
+    handleGridDemote(outer_header);
+    break;
+
   case LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON:
     handleGridBeacon(message_to_process, outer_header, this->drift_rx_us_);
     break;
@@ -3806,19 +4782,22 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
   // evidence that the node is being served: it cannot be acted on. Counting it
   // as a mark hit reset missed_marks_ and last_addressed_us_, and after a hub
   // reboot the hub's plaintext bursts occupy most of every round, so they walk
-  // through a node's stale window and reset the counter essentially every time.
-  // demoteIfMarksMissed_ needs three CONSECUTIVE misses and would never get
-  // them: a node that was in Mode B when the hub restarted stayed pinned to a
-  // dead anchor indefinitely, arming windows at marks that no longer exist,
-  // while its own diagnostics reported a healthy link. Demotion has to rest on
-  // the node's own evidence, not on an instruction it may never receive.
+  // through a node's stale window and reset BOTH essentially every time. A node
+  // that was in Mode B when the hub restarted stayed pinned to a dead anchor
+  // indefinitely, arming windows at marks that no longer exist, while its own
+  // diagnostics reported a healthy link.
+  //
+  // The gate matters MORE since 2026-09-20, not less. Demotion now rests
+  // entirely on last_addressed_us_ (Demotion::SyncStale, the beacon heartbeat),
+  // so a refused frame resetting that clock is the only way left for the node
+  // to be talked out of noticing its own deafness.
   bool mark_hit_pending = false;
 
   if (message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG)
   {
+    const bool unicast = (outer_header->destaddress == sysCtrl->getConfigAddress());
     const bool mine =
-        (outer_header->destaddress == sysCtrl->getConfigAddress()) ||
-        (outer_header->destaddress == loraIf->broadcastAddressing);
+        unicast || (outer_header->destaddress == loraIf->broadcastAddressing);
     // M2 stage 5, BOTH outcomes. Counting only the rejects left `addressed`
     // permanently zero, so the stage 4->5 pass rate read as 100 % loss; and
     // the plaintext path did not count at all, so `foreign` under-counted too.
@@ -3827,7 +4806,17 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
     // to ME", never on "something arrived": a window walked through by another
     // node's burst is not empty, and counting it as a hit would stop a node
     // that is being served nothing from ever demoting.
-    if (mine)
+    //
+    // UNICAST ONLY (2026-09-20). This used to accept `mine`, which includes the
+    // BROADCAST address — and GridBeacon and GridDemote are broadcast
+    // (lora_tracker.cpp, header.destaddress = broadcastAddressing). So every
+    // beacon closed whatever grid mark happened to be open, inflating
+    // windows_hit by ~1 per 233 rounds and resetting missed_marks_ on a frame
+    // that says nothing about whether THIS node's window worked. The phase path
+    // has always refused CMD_GRIDBEACON explicitly for the same reason; the hit
+    // path never did. A mark is a promise to send something to THIS node, so
+    // only a frame addressed to this node can keep it.
+    if (unicast)
       mark_hit_pending = true;
     if (!mine)
     {
@@ -3835,47 +4824,8 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
       return false;
     }
 
-    // B2: COMMIT the phase sample here and nowhere else.
-    //
-    // The arrival instant was captured early, before parsing, which is right
-    // for drift — a drift measurement only cares when a frame arrived. It is
-    // wrong for phase: on a shared channel most frames a node hears are aimed
-    // at a slot 46.875 ms from its own, so stamping them makes phaseErrUs
-    // bimodal (a cluster at 0, a cluster at one pitch) and its mean describes
-    // nothing. Capture early, commit late.
-    //
-    // Only with a grid: an expected T0 of 0 would turn every error into the
-    // node's whole uptime.
-    if (this->grid_.active && this->drift_rx_us_ != 0)
-    {
-      const int64_t measured =
-          phase::t0FromRx(this->drift_rx_us_, (uint32_t) this->last_rx_len_);
-
-      // Predict the mark this frame belongs to, from the grid, EVERY TIME.
-      //
-      // expected_t0_us_ used to be assigned once at grid adoption and never
-      // advanced (setExpectedT0Us had no caller anywhere). Every sample after
-      // the first was therefore measured against a mark one round further in
-      // the past: sample 2 read +1.5 s, sample 3 +3.0 s, and so on.
-      // phaseTrustworthy() requires zero samples outside the guard, so it went
-      // permanently false on the SECOND addressed frame and timedRxActive()
-      // reported NoPhase forever. Mode B could never be entered, and the
-      // beacon's phaseErrUs — gated at "±2 ms in the field" — reported
-      // multi-second values. The failure was silent and looked like a clock
-      // fault.
-      //
-      // The nearest mark, not the next one: a frame that arrives a hair EARLY
-      // belongs to the mark ahead of it, and nextT0Us would charge it a whole
-      // round of error.
-      const int64_t next_t0 = gridstate::nextT0Us(this->grid_, measured);
-      const int64_t prev_t0 = next_t0 - (int64_t) this->grid_.params.round_us;
-      const int64_t expected =
-          ((next_t0 - measured) <= (measured - prev_t0)) ? next_t0 : prev_t0;
-
-      this->expected_t0_us_ = expected;   // reported in the beacon
-      const phase::Sample sample{measured, expected};
-      phase::commit(this->phase_, sample, timedgrid::kGuardUs);
-    }
+    // The phase sample is COMMITTED further down, past the plaintext gate.
+    // See the block guarded by mark_hit_pending.
   }
 
   // if message is for this device, or broadcast, print details:
@@ -3962,25 +4912,81 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
   // was written, so the reasoning is here rather than in the handler:
   //
   //   * It CANNOT be encrypted. One broadcast serves 32 nodes and the sessions
-  //     are per-node, so there is no key it could be sealed with short of a
-  //     fleet key, which is a protocol change and not this one.
-  //   * Its effects are bounded by the node's own arithmetic, not by trust. The
-  //     anchor moves only by what fits inside the guard band
-  //     (gridstate::reanchorIsSane), and its OTHER effect — the pending bitmap —
-  //     is refused outright from a plaintext beacon in the handler, because an
-  //     unauthenticated frame must never be able to make a node listen LESS.
-  //   * Replay is answered by the same arithmetic. A replayed beacon carries
-  //     the round it was minted for, so its predicted mark is rounds in the
-  //     past and the error is orders of magnitude outside the guard.
+  //     are per-node, so there is no key it could be SEALED with. It is now
+  //     SIGNED instead, which is the part a one-to-many key can do: an AES-CMAC
+  //     under the fleet key, checked in handleGridBeacon. Exempting it from
+  //     this gate is therefore still right — the gate asks "was this
+  //     encrypted?", and the beacon's answer is permanently no.
+  //   * Its effects are bounded by the node's own arithmetic as well as by the
+  //     MAC. The anchor moves only by what fits inside the guard band
+  //     (gridstate::reanchorIsSane) even for a beacon that verifies, because a
+  //     MAC proves the sender held the fleet key and every node holds it too.
+  //   * Replay is answered by the same arithmetic, which is why the MAC carries
+  //     no timestamp. A replayed beacon declares the round it was minted for,
+  //     so its predicted mark is rounds in the past and the error is orders of
+  //     magnitude outside the guard.
   //
-  // What remains, and is recorded in 11b with the phase samples it belongs
-  // with: an attacker transmitting real beacons at the right instants can nudge
-  // the anchor by up to a guard band each time.
-  if (!was_encrypted &&
+  // What that leaves — and it is the gap the MAC was added to close: an
+  // attacker transmitting real beacons at the right instants could nudge the
+  // anchor by up to a guard band EACH TIME, and the guard bounds one nudge
+  // rather than a sequence. A node that holds a fleet key now refuses an
+  // unsigned beacon outright, so the walk is closed for a keyed node. A node
+  // that holds none still has it, which is the pre-existing behaviour and is
+  // recorded in 11b.
+  //
+  // CMD_GRIDDEMOTE is the second exemption, and it is the cleanest of the
+  // three. It CANNOT be encrypted for the same reason the beacon cannot — one
+  // broadcast, 32 per-node sessions — and it is the frame the hub sends when it
+  // has just restarted and holds no session at all. Its only effect is to throw
+  // an anchor away, so it satisfies "may make this node listen MORE and never
+  // less" outright: Mode A is three windows per round against Mode B's one, and
+  // it is the mode the fleet ships in. It carries no fields, so there is
+  // nothing for a sender to choose; the handler additionally requires a
+  // BROADCAST and refuses to clear the fleet key, which is what stops it being
+  // a way to re-open the anchor walk the key closed.
+  // A MAC PING while an authenticated ModeTest is running is the fourth
+  // exemption, and the narrowest. The frames a test MEASURES are deliberately
+  // unauthenticated (mac-layer.md section 4: only ARMING must be); before this
+  // the gate refused every hub ping on a node that held a session, so the
+  // turnaround histogram (HW-7, MAC-1's cost in time) had `n 0` in every run
+  // ever taken. Exactly a PING, and only while `mode_test_active_` - which an
+  // encrypted, authenticated ModeTest arms and a node-owned deadline ends - so
+  // outside a test a plaintext frame still cannot make this node transmit.
+  // MAC_CONFIG, the frame that changes what the node enforces, stays refused.
+  //
+  // Also gated on MAC-2: `cryptoRequired(sublayers_, is_mac_control=true)` is
+  // `sublayers_.crypto_enabled`, and until now nothing anywhere called it — the
+  // switch had zero effect on this gate, so MAC-2's cost could never be
+  // attributed via the turnaround measurement, because the hub's ping was never
+  // actually encrypted either way (see build_mac_ping_frame_'s comment on the
+  // hub). With MAC-2 on, this exemption no longer covers a PLAINTEXT ping: only
+  // an ENCRYPTED one reaches MAC-0, the same way every other downlink does
+  // (`was_encrypted` true, which already bypasses this whole gate below).
+  const bool ping_during_test =
+      this->mode_test_active_ &&
+      !macsublayers::cryptoRequired(this->sublayers_, /*is_mac_control=*/true) &&
+      message_to_process->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL &&
+      message_to_process->maccontrol != nullptr &&
+      message_to_process->maccontrol->kind == MAC_CONTROL__KIND__MAC_PING;
+
+  if (!was_encrypted && !ping_during_test &&
       message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN &&
-      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON)
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON &&
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE)
   {
-    if (this->session_.hasValidState() || this->session_proven_)
+    // AN UNPROVISIONED NODE'S BOOTSTRAP. Its config (LittleFS) and its session
+    // (NVS) are stored apart, and the config can be lost alone. Measured
+    // 2026-09-15 on node 2 (fw 1.0.85): a reset during a config save left
+    // config.txt empty — address 0 — while NVS still restored the session. The
+    // node sent REGISTER with needs_config, the hub pushed ClientConfig in the
+    // clear as that asks, and the node refused it here, every minute, for good.
+    // A session belongs to a provisioning; with no address there is none to
+    // protect, so the frames that provision a node pass. Nothing else does.
+    const bool unprovisioned_bootstrap =
+        this->sysCtrl != nullptr && this->sysCtrl->getConfigAddress() == 0 &&
+        (message_to_process->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG ||
+         message_to_process->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG);
+    if ((this->session_.hasValidState() || this->session_proven_) && !unprovisioned_bootstrap)
     {
       ESP_LOGW(TAG, "Rejecting PLAINTEXT command (cmd_case=%d) claiming peer %u — this node holds a session",
                static_cast<int>(message_to_process->cmd_case), (unsigned)outer_header->senderaddress);
@@ -3991,12 +4997,192 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
   // Only now, past every gate: this frame is one the node will actually act on.
   if (mark_hit_pending)
   {
-    this->noteMarkHit();
+    // The HIT is window-scoped: only the window that armed the mark may keep it.
+    this->noteMarkHit(this->last_rx_window_gen_);
+    // The two RESETS below are deliberately NOT window-scoped, and that is not
+    // an oversight. They answer a different question from "did my window work":
+    //   missed_marks_      — is the hub serving this node AT ALL? A unicast
+    //                        frame proves it is, whichever window heard it, so
+    //                        demoting on top of that would be wrong.
+    //   last_addressed_us_ — feeds Demotion::SyncStale, which bounds how long
+    //                        the node may hold an anchor with nothing arriving
+    //                        for it. Again: arrival is the evidence, not aim.
+    // Both are reached only when mark_hit_pending is set, which is now UNICAST
+    // only — so a broadcast beacon no longer resets either one.
     this->missed_marks_ = 0;
-    // Feeds Demotion::SyncStale — how long the node has gone without hearing
-    // anything meant for it, which is what resyncMaxS bounds.
-    this->last_addressed_us_ = esp_timer_get_time();
+    this->last_addressed_us_ = nodeclock::nowUs();
   }
+
+  // B2: COMMIT the phase sample here and nowhere else.
+  //
+  // The arrival instant was captured early, before parsing, which is right for
+  // drift — a drift measurement only cares when a frame arrived. It is wrong
+  // for phase: on a shared channel most frames a node hears are aimed at a slot
+  // 46.875 ms from its own, so stamping them makes phaseErrUs bimodal (a
+  // cluster at 0, a cluster at one pitch) and its mean describes nothing.
+  // Capture early, commit late.
+  //
+  // PAST THE PLAINTEXT GATE, which is where it moved (11b). It used to sit up
+  // with the address filter, so anything in radio range could feed the fit that
+  // decides whether this node trusts its own anchor. Bounded — poisoning it
+  // drives outside_guard up and DEMOTES the node rather than desynchronising it
+  // silently — but a bound is not a reason to accept the input. On a node with
+  // no session nothing changes: the gate does not fire there, which is the same
+  // bootstrap carve-out ClientConfig has.
+  //
+  // Only with a grid: an expected T0 of 0 would turn every error into the
+  // node's whole uptime.
+  //
+  // ONLY A FRAME THE HUB PLACED ON THIS NODE'S MARK (header onMark). Measured
+  // 2026-09-14 on node 2: two 900 s Mode B production runs armed no window
+  // (windows 0/0) while every ModeTest mark read inside the guard (p99
+  // 9 377 us). The ModeTest START is unplaced; it arrived 463 ms off the mark,
+  // was committed here as a phase error, latched outside_guard, and
+  // phaseTrustworthy() — which requires zero samples outside — kept the node
+  // on NoPhase for the whole run. Any unplaced downlink did the same in
+  // production: a Mode A burst, a TimeSync, a Class A reply aimed at RX1. Their
+  // arrival says where the hub happened to send, not where the node's mark is.
+  //
+  // OR ANY COPY THAT DECLARES ITS FIRE INSTANT (fireStamped), placed or not. The
+  // declaration is the expectation, so a LOGIN burst is as good a sample as a
+  // mark, and a late frame measures nothing false. This is what brings the eight
+  // samples promotion needs from ~23 s per lucky mark catch down to the first
+  // bursts after a login.
+  if (mark_hit_pending && (outer_header->firestamped || outer_header->onmark) &&
+      this->grid_.active && this->drift_rx_us_ != 0 &&
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON)
+  {
+    // BACK OUT THE BURST COPY, as handleGridSync and handleGridBeacon already
+    // do. The declaration and the marks describe COPY 0; copies are one 88 ms
+    // stride apart. Stamping copy N as if it were copy 0 commits an error of
+    // N x 88 ms against a 14 080 us guard, and phaseTrustworthy() requires ZERO
+    // samples outside the guard — so a single heard retransmission made the
+    // node distrust its own anchor permanently. It is not a rare case either:
+    // until the hub promotes to single-shot it sends seventeen copies, and a
+    // node that has not promoted yet is sweeping a free-running window, so the
+    // copy it hears first is usually not copy 0.
+    // A stamped copy declares its OWN instant, so there is nothing to back out.
+    const bool stamped = outer_header->firestamped;
+    const uint32_t burst_index = stamped ? 0u : outer_header->burstindex;
+    const int64_t measured =
+        phase::t0FromRx(this->drift_rx_us_, (uint32_t) this->last_rx_len_)
+        - (int64_t) burst_index * drift::kCopySpacingUs;
+
+    // A PROVISIONAL grid — adopted before node time settled — takes no samples:
+    // measured 2026-09-14, an anchor from 10-14 s after boot left every later
+    // mark 8 ms off. Once the clock has settled, the first stamped frame
+    // re-solves the anchor from the instant it declares, exactly as a stamped
+    // GridSync would, and sampling starts from there.
+    bool sample_it = true;
+    if (this->grid_provisional_)
+    {
+      sample_it = false;
+      if (stamped && nodeclock::settled())
+      {
+        const int64_t before = this->grid_.anchor_us;
+        this->grid_.anchor_us = gridstate::solveAnchorFromHubInstantUs(
+            measured, outer_header->fireround, outer_header->fireoffsetus,
+            this->grid_.params, this->clock_rate_ppb_);
+        this->grid_provisional_ = false;
+        // Exact at this frame's declared instant: the rate span starts here.
+        this->have_rate_ref_   = true;   // re-solve starts the span
+        this->rate_ref_hub_us_ = gridstate::hubInstantUs(
+            this->grid_.params, outer_header->fireround, outer_header->fireoffsetus);
+        this->phase_.reset();
+        this->noteAnchorFixed_();
+        ESP_LOGW(TAG, "   grid anchor re-solved on a settled clock: moved %+lld us",
+                 (long long) (this->grid_.anchor_us - before));
+        if (this->loraIf != nullptr)
+          this->loraIf->requestRearm();
+      }
+    }
+
+    // Predict the mark this frame belongs to, from the grid, EVERY TIME.
+    //
+    // expected_t0_us_ used to be assigned once at grid adoption and never
+    // advanced (setExpectedT0Us had no caller anywhere). Every sample after the
+    // first was therefore measured against a mark one round further in the
+    // past: sample 2 read +1.5 s, sample 3 +3.0 s, and so on.
+    // phaseTrustworthy() requires zero samples outside the guard, so it went
+    // permanently false on the SECOND addressed frame and timedRxActive()
+    // reported NoPhase forever. Mode B could never be entered, and the beacon's
+    // phaseErrUs — gated at "±2 ms in the field" — reported multi-second
+    // values. The failure was silent and looked like a clock fault.
+    //
+    // The nearest mark, not the next one: a frame that arrives a hair EARLY
+    // belongs to the mark ahead of it, and nextT0Us would charge it a whole
+    // round of error.
+    const int64_t next_t0 = gridstate::nextT0Us(this->grid_, measured);
+    const int64_t prev_t0 = next_t0 - (int64_t) this->grid_.params.round_us;
+    const int64_t nearest_mark =
+        ((next_t0 - measured) <= (measured - prev_t0)) ? next_t0 : prev_t0;
+    const int64_t expected =
+        stamped ? gridstate::t0ForHubInstantUs(this->grid_, outer_header->fireround,
+                                               outer_header->fireoffsetus)
+                : nearest_mark;
+
+    this->expected_t0_us_ = nearest_mark;   // reported in the beacon: a MARK
+    const phase::Sample sample{measured, expected};
+    // Copies of one frame share its timing; see phase::Stats::frames.
+    const bool new_frame = (outer_header->msgid != this->last_phase_msgid_);
+    this->last_phase_msgid_ = outer_header->msgid;
+    // Further than half a slot pitch from its own instant is not drift and not
+    // this frame's mark — the rule beacons already use. Measured 2026-09-15 on
+    // node 2 (fw 1.0.88): one sample right after the anchor re-solve read
+    // +86 841 us, latched outside_guard, and held promotion off for 830 s until a
+    // rate update reset the statistics. Refused, not committed.
+    if (sample_it &&
+        !gridstate::beaconErrLearnable(measured - expected, this->grid_.params.pitch_us))
+    {
+      ESP_LOGW(TAG, "   phase sample refused: err %lld us (len %u, msgid %u) is beyond half "
+                    "a slot pitch", (long long) (measured - expected),
+               (unsigned) this->last_rx_len_, (unsigned) outer_header->msgid);
+      sample_it = false;
+      if (this->refused_since_fix_ < 0xFFFFFFFFu)
+        this->refused_since_fix_++;
+    }
+    if (sample_it)
+    {
+      phase::commit(this->phase_, sample, timedgrid::kGuardUs, new_frame);
+      // One line per sample, with the frame LENGTH. It is what found the boot-
+      // minute anchor (2026-09-14): marks read -8 ms against a GridSync adopted
+      // 10 s after boot, and ~0 against the same GridSync adopted at 297 s.
+      // Few frames per minute reach here.
+      ESP_LOGI(TAG, "   phase sample: len %u stamped %d err %d us (n %u frames %u outside %u)",
+               (unsigned) this->last_rx_len_, (int) stamped, (int) this->phase_.last_us,
+               (unsigned) this->phase_.n, (unsigned) this->phase_.frames,
+               (unsigned) this->phase_.outside_guard);
+
+      // A kept grid, re-centred on the trial's own evidence
+      // (timedmode::trialRecenterUs): samples that agree off-centre describe a
+      // shifted anchor. Measured 2026-09-15 on node 2 (fw 1.0.92): after ~17
+      // minutes in Mode A the node re-promoted 8-11 ms off its marks.
+      const int32_t shift = timedmode::trialRecenterUs(
+          this->last_reason_logged_ == (uint8_t) timedmode::Demotion::None,
+          this->grid_provisional_, this->phase_.n, this->phase_.frames,
+          this->phase_.mean_us(), this->phase_.spread_us(),
+          timedgrid::kGuardUs, this->grid_.params.pitch_us);
+      if (shift != 0)
+      {
+        const uint32_t on_samples = this->phase_.n;
+        this->grid_.anchor_us += shift;
+        // The shift is not drift over the rate span the next beacon divides by;
+        // counting it there would teach the node a false rate. Start a new span.
+        this->have_rate_ref_ = false;
+        // The samples describe the anchor that was just moved.
+        this->phase_.reset();
+        this->noteAnchorFixed_();
+        ESP_LOGW(TAG, "   grid anchor re-centred on %u samples: moved %+d us",
+                 (unsigned) on_samples, (int) shift);
+        if (this->loraIf != nullptr)
+          this->loraIf->requestRearm();
+      }
+    }
+  }
+
+  // A node holding a grid it can no longer trust asks for it again
+  // (maybeRequestGridSync). Per addressed frame: no timer, no extra wake.
+  this->maybeRequestGridSync();
 
   // -------------------------------------------------------------------------
   // Message ID check — applied to all messages except CMD_LOGIN.
@@ -4034,9 +5220,16 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
   // link to the hub until its next login — the same counter pollution the
   // address filter was moved up to prevent, arriving by a different door. Its
   // replay protection is its timing: see the plaintext gate above.
+  // CMD_GRIDDEMOTE is exempt for exactly the beacon's reason: it is a broadcast,
+  // so it belongs to no per-node sequence, and running it through this check
+  // would ratchet every node's rx counter onto the hub's broadcast numbering
+  // and wedge the link until the next login. A replayed demote simply demotes
+  // an already-demoted node, which is idempotent and in the safe direction, so
+  // there is nothing for the counter to protect here.
   if (message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN &&
       message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG &&
-      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON)
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON &&
+      message_to_process->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE)
   {
     ESP_LOGI(TAG, "   Message ID check");
     // Accept only a forward jump within a bounded window.  msgid increments by 1
@@ -4054,7 +5247,31 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
     // also skip the destAddress/destSubnet refresh below, so an echo would be
     // addressed to whatever peer was seen last — the hub would record 100 %
     // ping loss from a node that is answering perfectly.
-    if (macsublayers::counterCheckRequired(this->sublayers_, is_mac_control))
+    // MAC-1 for a MAC CONTROL frame is not the session's replay window. A ping's
+    // msgid is a separate counter the session never saw, so the window would
+    // refuse every ping once the counter is on; and ratcheting the SESSION's
+    // window from an unauthenticated frame would let anyone in range wedge the
+    // link. A ping is sequenced by its own `seq`: strictly increasing, gaps
+    // allowed (a lost frame is a hole, not a violation). Only PINGs carry one;
+    // other control frames are authenticated and are not sequenced here.
+    const bool is_ping =
+        is_mac_control && message_to_process->maccontrol != nullptr &&
+        message_to_process->maccontrol->kind == MAC_CONTROL__KIND__MAC_PING;
+    if (is_ping && this->sublayers_.counter_enabled)
+    {
+      const uint32_t seq = message_to_process->maccontrol->seq;
+      const bool ping_ok = seq > this->mac_ping_seq_hw_;
+      if (ping_ok)
+        this->mac_ping_seq_hw_ = seq;
+      this->noteFrameCounter(ping_ok);
+      if (!ping_ok)
+      {
+        ESP_LOGW(TAG, "   MAC ping seq %u is not above %u - duplicate or replay, ignoring",
+                 (unsigned) seq, (unsigned) this->mac_ping_seq_hw_);
+        return false;
+      }
+    }
+    else if (!is_mac_control && macsublayers::counterCheckRequired(this->sublayers_, false))
     {
     const bool accepted = this->session_.acceptRxId(outer_header->msgid);
     // M2 stage 6 (MAC-1). In Mode A a rejection here is usually one of the
@@ -4077,7 +5294,7 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
       // is time. Sixteen of the seventeen copies of a Mode A burst are
       // duplicates and must stay silent — answering them all would be sixteen
       // uplinks per command on a battery node, worse than the bug.
-      const int64_t now_us = esp_timer_get_time();
+      const int64_t now_us = nodeclock::nowUs();
       const ackcache::Decision d =
           ackcache::classify(this->ack_cache_, outer_header->msgid, now_us);
 
@@ -4091,10 +5308,10 @@ bool CmdDispatcher::admitFrame(LoraClientOperationMessage *message_to_process,
         ESP_LOGW(TAG, "   Duplicate msgid %u after %lld ms — the ack was lost, "
                       "re-acking (%u of %u)",
                  (unsigned) outer_header->msgid,
-                 (long long) ((now_us - this->ack_cache_.first_seen_us) / 1000),
-                 (unsigned) (this->ack_cache_.reacks + 1),
+                 (long long) ((now_us - this->ack_cache_.firstSeenUs()) / 1000),
+                 (unsigned) (this->ack_cache_.reacks() + 1),
                  (unsigned) ackcache::kMaxReAcks);
-        ackcache::noteReAck(this->ack_cache_, now_us);
+        ackcache::noteReAck(this->ack_cache_, outer_header->msgid, now_us);
         this->sendCommandAck(outer_header->msgid);
       }
       else
@@ -4229,6 +5446,12 @@ void CmdDispatcher::onReceiveNew(uint8_t *rxBuf, int packetSize, int64_t rx_us)
     // same way. Both are uint32_t, so the shallow copy stays sufficient.
     saved_header.burstindex    = rcv_message->header->burstindex;
     saved_header.burstcount    = rcv_message->header->burstcount;
+    // And whether it was placed on this node's mark — the phase commit's gate.
+    saved_header.onmark        = rcv_message->header->onmark;
+    // And where this copy's T0 really is on the hub grid, when the hub said so.
+    saved_header.firestamped   = rcv_message->header->firestamped;
+    saved_header.fireround     = rcv_message->header->fireround;
+    saved_header.fireoffsetus  = rcv_message->header->fireoffsetus;
   }
   LoraHeader *outer_header = &saved_header;
   // Encryption is now inferred from the oneof case (no header flag).  Captured
@@ -4266,7 +5489,7 @@ void CmdDispatcher::onReceiveNew(uint8_t *rxBuf, int packetSize, int64_t rx_us)
     // air time — still better than an anchor computed from zero, which would
     // put the burst's end in the past and defer nothing.
     const uint32_t len    = (uint32_t) this->last_rx_len_;
-    const int64_t  rxdone = (rx_us > 0) ? rx_us : esp_timer_get_time();
+    const int64_t  rxdone = (rx_us > 0) ? rx_us : nodeclock::nowUs();
     const int64_t  t0_this = phase::t0FromRx(rxdone, len);
     const int64_t  t0_last =
         t0_this + static_cast<int64_t>(remaining) * kBurstTxIntervalMs * 1000;
@@ -4456,6 +5679,11 @@ void CmdDispatcher::loraCommandProcTask(void *pvParameters)
       ESP_LOGI(TAG, "Processing buffer %p with %d bytes (timestamp: %lu)",
                rx_buffer, rx_buffer->length, rx_buffer->timestamp);
 
+      // Which window caught this frame, for the mark-hit gate in admitFrame.
+      // Set here rather than passed down: admitFrame takes no buffer, and this
+      // is the same discipline last_rx_len_ already uses — written once per
+      // frame, on the task that reads it.
+      this->last_rx_window_gen_ = rx_buffer->window_gen;
       onReceiveNew(rx_buffer->data, rx_buffer->length, rx_buffer->rx_us);
       // Simulate processing time
       vTaskDelay(50 / portTICK_PERIOD_MS);
@@ -4481,6 +5709,16 @@ void CmdDispatcher::enterDeepsleep()
   //       still persist the final counters/nonce so an unexpected reboot during
   //       the wake window (before login completes) can resume cleanly.
   this->savePersistentState();
+  // Mode C's FER: this wake's receive funnel, for the next wake's beacon. The
+  // counters live in RAM and start at zero on every boot, so at deep-sleep entry
+  // they describe exactly this wake.
+  {
+    const macfunnel::Counters c = this->macFunnelSnapshot();
+    s_prev_wake_windows  = c.windows_armed;
+    s_prev_wake_hits     = c.windows_hit;
+    s_prev_wake_detected = c.detected;
+    s_prev_wake_crcvalid = c.crc_valid;
+  }
   ESP_LOGI(TAG, "Entering deep sleep — state persisted; nonce renegotiated on wakeup");
   sysCtrl->enterDeepsleep();
 }
@@ -4488,6 +5726,50 @@ void CmdDispatcher::enterDeepsleep()
 // ---------------------------------------------------------------------------
 // F-4: Acknowledge a received command.
 // ---------------------------------------------------------------------------
+void CmdDispatcher::noteAnchorFixed_()
+{
+  // 0 means never, so a fix at the clock's first microsecond still counts.
+  const int64_t now_us = nodeclock::nowUs();
+  this->last_anchor_fix_us_ = (now_us > 0) ? now_us : 1;
+  this->refused_since_fix_  = 0;
+}
+
+// Keeping a kept grid honest, the half the node's own samples cannot do: ask the
+// hub for the grid again. See timedmode::syncRequestReason for when and
+// GridSyncRequest for why. Measured 2026-09-15 on node 2 (fw 1.0.92): after ~17
+// minutes in Mode A the node came back 11 ms off its marks.
+void CmdDispatcher::maybeRequestGridSync()
+{
+  const int64_t now_us = nodeclock::nowUs();
+  timedmode::SyncRequestState s;
+  s.timed_rx_enabled   = this->timed_rx_enabled_;
+  s.grid_active        = this->grid_.active;
+  s.in_mode_b          = (this->last_reason_logged_ == (uint8_t) timedmode::Demotion::None);
+  // Not "a login happened": the request must go out encrypted, which needs the
+  // session state and the base nonce both.
+  s.session            = this->canResumeSession();
+  s.resync_max_s       = this->grid_.params.resync_max_s;
+  s.s_since_anchor_fix = (this->last_anchor_fix_us_ == 0)
+                             ? 0xFFFFFFFFu
+                             : (uint32_t) ((now_us - this->last_anchor_fix_us_) / 1000000);
+  s.refused_since_fix  = this->refused_since_fix_;
+  s.s_since_request    = (this->last_sync_request_us_ == 0)
+                             ? 0xFFFFFFFFu
+                             : (uint32_t) ((now_us - this->last_sync_request_us_) / 1000000);
+  const timedmode::SyncRequestReason reason = timedmode::syncRequestReason(s);
+  if (reason == timedmode::SyncRequestReason::None)
+    return;
+
+  this->last_sync_request_us_ = (now_us > 0) ? now_us : 1;
+  if (this->gridsync_requests_ < 0xFFFFFFFFu)
+    this->gridsync_requests_++;
+  ESP_LOGW(TAG, "   GridSync request: reason %u, anchor %u s old, %u samples refused "
+                "(%u since boot)",
+           (unsigned) reason, (unsigned) s.s_since_anchor_fix,
+           (unsigned) s.refused_since_fix, (unsigned) this->gridsync_requests_);
+  this->setStatus(BlindsStatusCmd::SYSCMD_GRIDSYNC_REQUEST, (uint32_t) reason);
+}
+
 void CmdDispatcher::sendCommandAck(uint32_t ack_msg_id)
 {
   // B4: remember what we just answered, so a retransmit of the SAME command can
@@ -4498,9 +5780,10 @@ void CmdDispatcher::sendCommandAck(uint32_t ack_msg_id)
   // so a handler added later cannot forget to do it. Re-acks re-enter this
   // function, so guard against a re-ack resetting the very counters that bound
   // it — note() only on a first acceptance.
-  const int64_t now_ack_us = esp_timer_get_time();
-  if (!this->ack_cache_.valid || this->ack_cache_.msgid != ack_msg_id)
-    this->ack_cache_.note(ack_msg_id, now_ack_us);
+  const int64_t now_ack_us = nodeclock::nowUs();
+  // note() is idempotent per msgid now that the cache holds several, so the
+  // old guard against a re-ack refreshing its own budget lives inside it.
+  this->ack_cache_.note(ack_msg_id, now_ack_us);
 
   // F-4: msgid travels with the queued command (tx_command_t.arg), so it can no
   // longer be overwritten by a concurrent dispatch before the TX task reads it.
@@ -4559,6 +5842,23 @@ bool CmdDispatcher::checkQueuesIdle()
   if (motCtrl->isBusy())
   {
     printf("Motor still running - deferring deep sleep\n");
+    return false;
+  }
+
+  // F-41: a battery measurement queued or in progress also counts as busy.
+  // Sleeping now would drop the post-move battery update, and the node would
+  // then keep reporting the previous load-sagged value on its next wake — the
+  // cache is echoed by every battery AND position frame until the next
+  // measurement, so cutting one short is not a lost sample but a wrong value
+  // repeated.
+  if (motCtrl->motorBatteryQueue != NULL && uxQueueMessagesWaiting(motCtrl->motorBatteryQueue) > 0)
+  {
+    printf("Battery measurement pending\n");
+    return false;
+  }
+  if (this->batteryMeasurementBusy_)
+  {
+    printf("Battery measurement in progress\n");
     return false;
   }
 

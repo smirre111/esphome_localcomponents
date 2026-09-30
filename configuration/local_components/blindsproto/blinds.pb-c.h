@@ -96,7 +96,19 @@ typedef enum _ClientOperation {
    * ScheduleConfig.mode — these two must be kept consistent by the hub.
    */
   CLIENT_OPERATION__CMD_MODE_AUTO = 5,
-  CLIENT_OPERATION__CMD_MODE_INTERACTIVE = 6
+  CLIENT_OPERATION__CMD_MODE_INTERACTIVE = 6,
+  /*
+   * 2026-09-29: runtime, on-demand debug toggles for motor/endstop
+   * diagnostics that used to be hand-edited `constexpr bool` flags in
+   * MotorCtrl.cpp before every capture session. Same tracked/acked sysop
+   * path as CMD_MODE_*, so a dropped toggle recovers. Persisted node-side
+   * (DebugFlags.h / NVS), survives reboot -- except TRACE_CAPTURE_ARM,
+   * which is one-shot by design (see DebugFlags.h) and never needs an
+   * explicit OFF command.
+   */
+  CLIENT_OPERATION__CMD_DEBUG_IDLE_CURRENT_ON = 7,
+  CLIENT_OPERATION__CMD_DEBUG_IDLE_CURRENT_OFF = 8,
+  CLIENT_OPERATION__CMD_DEBUG_TRACE_CAPTURE_ARM = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(CLIENT_OPERATION)
 } ClientOperation;
 /*
@@ -1376,10 +1388,28 @@ struct  CoverPosition
   float position;
   float voltage;
   float current;
+  /*
+   * Battery-runtime compensation telemetry (hub repo:
+   * docs/battery-runtime-compensation-proposal.md) -- visibility only, the
+   * hub never computes or feeds back a model (decision 1). Set only for a
+   * FULL move that stopped via the current-sense endstop (the one
+   * ground-truth combination, proposal §2); 0/0 otherwise, which proto3's
+   * own "zero means absent" convention already reads correctly. A raw pair
+   * rather than a pre-divided ratio, since it's more useful for later
+   * analysis and the receiver can always divide.
+   */
+  /*
+   * elapsed time to the endstop firing
+   */
+  float actualruns;
+  /*
+   * the RAW factory open/close duration in force
+   */
+  float nominalruns;
 };
 #define COVER_POSITION__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&cover_position__descriptor) \
-    , 0, 0, 0 }
+    , 0, 0, 0, 0, 0 }
 
 
 /*

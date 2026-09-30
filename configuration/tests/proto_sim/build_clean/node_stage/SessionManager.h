@@ -75,9 +75,44 @@ public:
     // A login resets both directions; the hub does the same in send_login().
     void resetCounters();
 
-    // Replay filter. Advances rx and returns true when the id is a forward jump
-    // inside the window; returns false (and changes nothing) otherwise.
+    // Replay filter — a SLIDING WINDOW, not a high-water mark.
+    //
+    // It was a bare ratchet: accept only `msgid > rx_id_`, within kMsgIdWindow.
+    // That is correct against replay and wrong about REORDERING, and the two
+    // are not the same thing. Found end to end (e2e_test,
+    // ACommandLostOnAirIsRetriedUntilItLands):
+    //
+    //   1. the hub sends a cover op as msgid 2, and it is lost on air;
+    //   2. the login-confirm path then delivers TimeSync (3) and
+    //      ScheduleConfig (4), which arrive, so rx_id_ ratchets to 4;
+    //   3. the hub retries the cover op — and pack-once means the retry is the
+    //      BYTE-IDENTICAL frame, still msgid 2;
+    //   4. `2 > 4` is false, so the node rejects a frame it has never seen.
+    //
+    // The command is then undeliverable: four retries, all refused, and the hub
+    // tears down a session that was working. Pack-once is not the bug — it
+    // exists because re-packing minted a fresh msgid and the node executed the
+    // command twice — but it makes a ratchet untenable, because a retry can no
+    // longer be "forward".
+    //
+    // The textbook fix, and what DTLS and IPsec use: keep the high-water mark
+    // AND a bitmap of which ids inside the window have actually been seen. An
+    // id below the mark is accepted exactly once — a genuine replay finds its
+    // bit already set and is still refused. AckCache is a one-entry
+    // approximation of this bitmap and stays, because it answers a different
+    // question: whether to ANSWER a duplicate, not whether to accept it.
+    //
+    // Returns true and records the id when it is admissible; returns false and
+    // changes nothing otherwise.
     bool acceptRxId(uint32_t msgid);
+
+    // How far below the high-water mark a frame may still be accepted once.
+    // 64 covers any realistic reordering on this link — the hub has at most a
+    // handful of frames in flight per node — while keeping the bitmap a single
+    // word. Deliberately much smaller than kMsgIdWindow, which bounds a
+    // forward jump: an attacker replaying something old gets 64 ids of reach,
+    // not 1024.
+    static constexpr uint32_t kReplayWindow = 64;
 
     // ---- the peer we persist for ------------------------------------------
     //
@@ -104,6 +139,11 @@ private:
     PeerCounter peers_[MAX_PEERS]{};
     uint32_t    tx_id_{0};
     uint32_t    rx_id_{0};
+    // Which ids at or below rx_id_ have been seen: bit n is (rx_id_ - n).
+    // Bit 0 is rx_id_ itself. NOT persisted — after a reboot an empty bitmap
+    // plus the restored high-water simply refuses reordered frames until the
+    // window refills, which is exactly the behaviour that shipped before.
+    uint64_t    rx_seen_{0};
     uint32_t    last_persisted_tx_{0};
     uint32_t    persist_peer_{0xFF};
     bool        valid_state_{false};

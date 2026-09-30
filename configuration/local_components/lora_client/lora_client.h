@@ -122,6 +122,15 @@ namespace esphome
       void set_battery_update_interval(uint32_t seconds) { this->battery_update_interval_ = seconds; }
       void enterSleep();
       void triggerOTA();
+      // Runtime, on-demand debug toggles (DebugFlags.h on the node side,
+      // 2026-09-29). One thin wrapper for all three -- unlike enterSleep()/
+      // triggerOTA() these carry no node-side precondition the hub needs to
+      // reason about, so there is nothing here worth a dedicated method per
+      // op. `op` is a raw ClientOperation value (CLIENT_OPERATION__CMD_DEBUG_*)
+      // rather than the enum type itself, for the same reason send_tracked_
+      // sysop_() below takes int32_t: this header deliberately does not
+      // include blinds.pb-c.h (see the forward-declare note near the top).
+      void sendDebugSysop(int32_t op);
       virtual void set_response(uint8_t *data, size_t len);
 
       // void send_remote_address();

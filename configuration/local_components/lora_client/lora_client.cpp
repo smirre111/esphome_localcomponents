@@ -2803,6 +2803,15 @@ namespace esphome
       this->send_tracked_sysop_(CLIENT_OPERATION__CMD_OTA);
     }
 
+    void LORAListener::sendDebugSysop(int32_t op)
+    {
+      ESP_LOGI("LORAListener", "Device %s: debug sysop %d", this->address_str(), (int) op);
+      // Same tracked/acked path as every other sysop -- a dropped toggle
+      // recovers via the hub's own retransmit rather than silently not
+      // taking effect. See DebugFlags.h (node repo) for what each op does.
+      this->send_tracked_sysop_(op);
+    }
+
 
     uint32_t LORAListener::incrTxMessageId()
     {

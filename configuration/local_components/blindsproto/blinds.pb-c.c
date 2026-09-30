@@ -4522,7 +4522,7 @@ const ProtobufCMessageDescriptor client_battery__descriptor =
   (ProtobufCMessageInit) client_battery__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor cover_position__field_descriptors[3] =
+static const ProtobufCFieldDescriptor cover_position__field_descriptors[5] =
 {
   {
     "position",
@@ -4560,16 +4560,42 @@ static const ProtobufCFieldDescriptor cover_position__field_descriptors[3] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "actualRunS",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverPosition, actualruns),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "nominalRunS",
+    5,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FLOAT,
+    0,   /* quantifier_offset */
+    offsetof(CoverPosition, nominalruns),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cover_position__field_indices_by_name[] = {
+  3,   /* field[3] = actualRunS */
   2,   /* field[2] = current */
+  4,   /* field[4] = nominalRunS */
   0,   /* field[0] = position */
   1,   /* field[1] = voltage */
 };
 static const ProtobufCIntRange cover_position__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 3 }
+  { 0, 5 }
 };
 const ProtobufCMessageDescriptor cover_position__descriptor =
 {
@@ -4579,7 +4605,7 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   "CoverPosition",
   "",
   sizeof(CoverPosition),
-  3,
+  5,
   cover_position__field_descriptors,
   cover_position__field_indices_by_name,
   1,  cover_position__number_ranges,
@@ -4864,7 +4890,7 @@ const ProtobufCEnumDescriptor cov_operation__descriptor =
   cov_operation__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue client_operation__enum_values_by_number[7] =
+static const ProtobufCEnumValue client_operation__enum_values_by_number[10] =
 {
   { "CMD_ENABLE_WIFI", "CLIENT_OPERATION__CMD_ENABLE_WIFI", 0 },
   { "CMD_DISABLE_WIFI", "CLIENT_OPERATION__CMD_DISABLE_WIFI", 1 },
@@ -4873,12 +4899,18 @@ static const ProtobufCEnumValue client_operation__enum_values_by_number[7] =
   { "CMD_SLEEP", "CLIENT_OPERATION__CMD_SLEEP", 4 },
   { "CMD_MODE_AUTO", "CLIENT_OPERATION__CMD_MODE_AUTO", 5 },
   { "CMD_MODE_INTERACTIVE", "CLIENT_OPERATION__CMD_MODE_INTERACTIVE", 6 },
+  { "CMD_DEBUG_IDLE_CURRENT_ON", "CLIENT_OPERATION__CMD_DEBUG_IDLE_CURRENT_ON", 7 },
+  { "CMD_DEBUG_IDLE_CURRENT_OFF", "CLIENT_OPERATION__CMD_DEBUG_IDLE_CURRENT_OFF", 8 },
+  { "CMD_DEBUG_TRACE_CAPTURE_ARM", "CLIENT_OPERATION__CMD_DEBUG_TRACE_CAPTURE_ARM", 9 },
 };
 static const ProtobufCIntRange client_operation__value_ranges[] = {
-{0, 0},{0, 7}
+{0, 0},{0, 10}
 };
-static const ProtobufCEnumValueIndex client_operation__enum_values_by_name[7] =
+static const ProtobufCEnumValueIndex client_operation__enum_values_by_name[10] =
 {
+  { "CMD_DEBUG_IDLE_CURRENT_OFF", 8 },
+  { "CMD_DEBUG_IDLE_CURRENT_ON", 7 },
+  { "CMD_DEBUG_TRACE_CAPTURE_ARM", 9 },
   { "CMD_DISABLE_WIFI", 1 },
   { "CMD_ENABLE_WIFI", 0 },
   { "CMD_MODE_AUTO", 5 },
@@ -4894,9 +4926,9 @@ const ProtobufCEnumDescriptor client_operation__descriptor =
   "ClientOperation",
   "ClientOperation",
   "",
-  7,
+  10,
   client_operation__enum_values_by_number,
-  7,
+  10,
   client_operation__enum_values_by_name,
   1,
   client_operation__value_ranges,

@@ -1,5 +1,5 @@
-if(EXISTS "/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/real_lora_client_test[1]_tests.cmake")
-  include("/home/user/esphome_localcomponents/configuration/tests/proto_sim/build_clean/real_lora_client_test[1]_tests.cmake")
+if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/real_lora_client_test[1]_tests.cmake")
+  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/real_lora_client_test[1]_tests.cmake")
 else()
   add_test(real_lora_client_test_NOT_BUILT real_lora_client_test_NOT_BUILT)
 endif()

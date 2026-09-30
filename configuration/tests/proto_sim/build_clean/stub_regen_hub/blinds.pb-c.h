@@ -31,6 +31,7 @@ typedef struct LoraHeader LoraHeader;
 typedef struct DriftTest DriftTest;
 typedef struct MacControl MacControl;
 typedef struct GridBeacon GridBeacon;
+typedef struct GridDemote GridDemote;
 typedef struct GridSync GridSync;
 typedef struct ModeTest ModeTest;
 typedef struct Hist Hist;
@@ -40,6 +41,7 @@ typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
 typedef struct ClientBattery ClientBattery;
 typedef struct CoverPosition CoverPosition;
+typedef struct GridSyncRequest GridSyncRequest;
 typedef struct LoraClientResponseMessage LoraClientResponseMessage;
 
 
@@ -161,7 +163,27 @@ typedef enum _WakeReason {
    * physical button -> switches to interactive
    */
   WAKE_REASON__WAKE_BUTTON = 3,
-  WAKE_REASON__WAKE_UNKNOWN = 4
+  WAKE_REASON__WAKE_UNKNOWN = 4,
+  /*
+   * NOT A WAKE AT ALL — the node's Mode B status changed, and it is telling
+   * the hub unprompted.
+   * The PhaseReport that says whether a node is in Mode B rides an UPLINK: a
+   * wake beacon or a CommandAck. An interactive node never sleeps, so it
+   * never wakes, so it never beacons; with no traffic it has nothing to ack.
+   * So the hub's belief about a promoted, QUIET node is stale indefinitely,
+   * and txRefusalFor can never clear NoPhaseReport for exactly the node that
+   * most deserves single shot — Mode B's 17->1 airtime saving is unreachable
+   * in the quiet regime Mode B exists for.
+   * Measured 2026-09-20 on node 2: 12.6 minutes provably in Mode B (reason 0
+   * on its own console, 2.44 % RX, one window per round) while the hub
+   * reported demotion reason 5 and refusal 7 throughout.
+   * A distinct value rather than reusing WAKE_TIMER_CHECKIN: this project has
+   * twice been bitten by a field that quietly lies (fwversion reporting 0,
+   * mode echoing the request rather than what was applied), and a beacon
+   * claiming a check-in that never happened is the same defect in a new
+   * place. Appended, never renumbered — the hub's name table is positional.
+   */
+  WAKE_REASON__WAKE_MODE_CHANGED = 5
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(WAKE_REASON)
 } WakeReason;
 
@@ -331,10 +353,31 @@ struct  PhaseReport
    * 0 => ppmEstimate carries no information
    */
   uint32_t ppmsamples;
+  /*
+   * Windows the node MEANT to open and never did, because the radio was
+   * still busy when the mark came round. Counted since boot.
+   * It belongs beside the phase numbers because it is their complement: the
+   * fields above measure the hub's transmissions against the marks the node
+   * ARMED, and an unarmed mark is invisible to all of them — WMR included,
+   * since noteMarkArmed() is what opens a mark at all. So a node can report
+   * a perfect window-mark rate while hearing nothing, which is the one Mode B
+   * failure the KPIs cannot see. The count was kept on the node and never
+   * carried, which made it unseeable in a different way.
+   */
+  uint32_t rxbusyskips;
+  /*
+   * THE NODE'S DECISION (2026-09-14): whether it is in Mode B right now —
+   * arming one timed window per round — and, when not, the Demotion value
+   * that says why. Only the node knows whether its own phase error is small
+   * enough; the hub follows this rather than re-judging the numbers above.
+   * proto3 false = not in Mode B, so an older node keeps the hub bursting.
+   */
+  protobuf_c_boolean timedrxactive;
+  uint32_t demotionreason;
 };
 #define PHASE_REPORT__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&phase_report__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  CommandAck
@@ -418,10 +461,30 @@ struct  TimeSync
    * never the one that drops a command.
    */
   protobuf_c_boolean sleepok;
+  /*
+   * U-4: how many of this node's uplinks the HUB has seen land inside its
+   * slot, consecutively. The node's own promotion criterion
+   * (NodeState::in_slot_uplinks, Demotion::NotConfirmed) requires it and had
+   * no way to know it, so it was hardcoded optimistic and the criterion could
+   * never fire.
+   * It has to come from here rather than be measured locally, and that is the
+   * whole point of the field: §4.6 rejects a node's own claim as evidence —
+   * "a beacon saying I am ready says nothing about where its window actually
+   * landed" — because the placement is produced by the node's TRANSMIT path
+   * and the question is about where the frame ARRIVED. Only the hub can
+   * answer that.
+   * Proto3 omits defaults, so a hub predating this field sends 0, which the
+   * node reads as "not confirmed" and stays in Mode A. That is the correct
+   * direction to fail: the policy is a list of reasons to fall BACK, so an
+   * unset field costs airtime rather than a command. Note the node can still
+   * EARN the count from Mode A — the uplink aim places its frames on its mark
+   * regardless of mode, which is what makes this measurable at all.
+   */
+  uint32_t inslotuplinks;
 };
 #define TIME_SYNC__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&time_sync__descriptor) \
-    , 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0 }
 
 
 /*
@@ -557,10 +620,45 @@ struct  NodeWakeBeacon
    * owns: 1=POWERON 3=SW 4=INT_WDT 5=TASK_WDT 6=WDT 7=DEEPSLEEP 8=BROWNOUT.
    */
   uint32_t resetreason;
+  /*
+   * --- Mode C, MAC-0: the wake clock ------------------------------------
+   * A Class A node wakes on the RTC timer, which counts the 32 kHz crystal
+   * through deep sleep; ESP-IDF converts the requested sleep to ticks with the
+   * NOMINAL period, so every scheduled wake inherits the crystal's error. The
+   * hub measures it: this beacon reports the RTC tick count at the PREVIOUS
+   * beacon's T0 (the counter runs through sleep and resets only at power-on),
+   * and the hub pairs it with its own receive stamp of that beacon, matched by
+   * msgId. Hub us against ticks x nominal period is the wake clock's rate.
+   * 0 / 0 = no previous beacon since power-on.
+   */
+  uint32_t prevbeaconmsgid;
+  uint64_t prevbeacont0ticks;
+  /*
+   * The node's measured crystal period (Q19 us per tick), for the report: the
+   * rate the hub fits should equal the crystal error this implies.
+   */
+  uint32_t rtcperiodq19;
+  /*
+   * Class A funnel of the PREVIOUS wake, taken at deep-sleep entry: receive
+   * windows opened and hit, frames detected and CRC-valid. Mode C's FER.
+   */
+  uint32_t prevwakewindows;
+  uint32_t prevwakehits;
+  uint32_t prevwakedetected;
+  uint32_t prevwakecrcvalid;
+  /*
+   * Mode C's pass line (wake-timing error |ppm| < 20): the deep sleep before
+   * THIS wake, as the node wanted it and as it was handed to ESP-IDF after the
+   * node's crystal correction. The hub converts the handed-over value through
+   * its own wake-clock fit to the real sleep in hub time, and compares it with
+   * the request. Equal values = no correction applied. 0 = unknown (power-on).
+   */
+  uint64_t prevsleeprequestedus;
+  uint64_t prevsleepappliedus;
 };
 #define NODE_WAKE_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
-    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0 }
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 struct  LoraHeader
@@ -580,10 +678,41 @@ struct  LoraHeader
    */
   uint32_t burstindex;
   uint32_t burstcount;
+  /*
+   * Copy 0 of this frame was PLACED on the destination node's grid mark
+   * (hub -> node). Only such a frame is a phase measurement: the node commits
+   * a phase sample for it and for nothing else. An unplaced frame — a Mode A
+   * burst, the ModeTest START, a Class A reply aimed at RX1/RX2 — lands
+   * anywhere in the round, and one sample from it latches outside_guard and
+   * keeps the node out of Mode B until its grid is re-adopted. Measured
+   * 2026-09-14: the ModeTest START landed 463 ms off the mark, and two 900 s
+   * Mode B runs armed no window at all.
+   * Stamped with burstIndex, after encryption, outside the AAD — the same
+   * standing as burstIndex. Flipping it on a genuine frame can only add a bad
+   * sample (which demotes) or withhold a good one; it cannot move the anchor.
+   */
+  protobuf_c_boolean onmark;
+  /*
+   * WHERE THIS COPY'S T0 ACTUALLY IS on the hub's grid (hub -> node), stamped
+   * at transmission: round index since the hub's grid anchor, and the offset
+   * into that round in microseconds. Every copy carries its own instant, so
+   * the node needs neither the burst index nor a placement to use it.
+   * It makes EVERY heard copy of EVERY hub frame a phase sample — a LOGIN or
+   * a Mode A burst as much as a placed mark — and it makes a late frame
+   * harmless, because a late frame declares the instant it really went out.
+   * Measured 2026-09-14 on node 2: a GridSync sent ~320 ms (and, in another
+   * run, ~10 ms) after the mark it was placed on moved the node's whole grid by
+   * that much, and promotion waited ~23 s per lucky mark catch.
+   * fireStamped says the two numbers mean something: proto3 zero is a real
+   * instant (round 0, offset 0). Outside the AAD, like burstIndex.
+   */
+  protobuf_c_boolean firestamped;
+  uint32_t fireround;
+  uint32_t fireoffsetus;
 };
 #define LORA_HEADER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_header__descriptor) \
-    , 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*
@@ -711,10 +840,21 @@ struct  MacControl
  * Mode B and no measurable battery saving. The beacon is the mechanism that
  * keeps a node in the mode, which is why section 4.4 says it ships WITH the
  * one-window change rather than after it.
- * It is broadcast and unauthenticated by construction — one frame for 32 nodes
- * cannot be encrypted per session — so the node bounds what it may do: a
- * re-anchor is accepted only within the guard band (gridstate::reanchorIsSane),
- * which is far more than real drift and far less than a slot.
+ * It is broadcast, so it cannot be ENCRYPTED per session — one frame serves 32
+ * nodes — but nothing in it is secret either: the round, the slot and the
+ * pending bitmap are all public. What it needs is AUTHENTICITY, and that is
+ * what `mac` carries: an AES-CMAC over the beacon's own fields under a fleet
+ * key the hub hands each node inside its already-encrypted GridSync.
+ * A deterministic MAC rather than the AEAD the rest of the link uses. Extending
+ * AES-GCM to a one-to-many key would need a shared base nonce AND a counter
+ * that never repeats under it, which a hub reboot restarts while every node
+ * still holds the old key — so the counter would have to be persisted, and the
+ * failure mode for getting that wrong is not graceful. Two AAD-only tags under
+ * one nonce give an attacker GHASH(H,A1) XOR GHASH(H,A2), solvable for the hash
+ * subkey, after which beacons can be forged at will. CMAC has no nonce to reuse.
+ * FRESHNESS IS NOT THE MAC'S JOB. A replayed beacon declares the round it was
+ * minted for, so its predicted mark is rounds in the past and the node's
+ * reanchorIsSane refuses it. The MAC only has to stop forgery.
  */
 struct  GridBeacon
 {
@@ -738,10 +878,58 @@ struct  GridBeacon
    */
   uint32_t pendingmask;
   protobuf_c_boolean pendingmaskvalid;
+  /*
+   * Which fleet key this beacon is signed under. Minted with the key when the
+   * grid starts, so it is a random id rather than a counter — a counter would
+   * need NVS on a hub whose anchor is already gone after a restart.
+   * A node holding a DIFFERENT id refuses the beacon outright rather than
+   * guessing: the hub has rotated and this node has not yet had the GridSync
+   * carrying the new key, so it coasts on resyncMaxS until its next addressed
+   * frame — which is exactly the pre-beacon behaviour, and safe.
+   */
+  uint32_t netkeyid;
+  /*
+   * AES-CMAC over framecrypto::buildBeaconMacInput(), truncated to 8 bytes to
+   * match the AEAD tag budget already on this link.
+   */
+  ProtobufCBinaryData mac;
 };
 #define GRID_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&grid_beacon__descriptor) \
-    , 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, {0,NULL} }
+
+
+/*
+ * The hub's startup withdrawal, and the one frame that carries NOTHING.
+ * After a restart the hub's anchor is gone while every node still holds the old
+ * one, so every node has to be told to drop back to Mode A. That frame used to
+ * be GridSync{enable=false} sent to the broadcast address — and it could never
+ * work: s_pack_operation_message encrypts only when a session exists, and on a
+ * fresh boot none does, so it went out in the clear and every node holding a
+ * session resumed from NVS refused it under the plaintext gate. The one frame
+ * that must not be missed, dropped by exactly the nodes it is aimed at.
+ * So it is its own type, exempt from that gate. What makes the exemption safe
+ * is the same rule the beacon's rests on: an unauthenticated frame may make a
+ * node listen MORE and never less. Mode A is three windows per round against
+ * Mode B's one — the safe direction, and the mode the fleet ships in.
+ * IT HAS NO FIELDS, deliberately. A demote has exactly one meaning, so there is
+ * nothing for a sender to choose and nothing for an attacker to set. Exempting
+ * GridSync{enable=false} instead would have put a payload field inside the
+ * gate's decision, and `enable=true` installs a slot assignment, the grid
+ * geometry, armOffsetUs and the fleet key. Presence in the oneof is the whole
+ * message.
+ * What it must NOT do, and the node enforces both: it may not clear the fleet
+ * key (a node with no key accepts UNSIGNED beacons again, which re-opens the
+ * anchor walk the key was added to close), and it is accepted only as a
+ * BROADCAST, so a targeted attacker has to take the whole fleet with it.
+ */
+struct  GridDemote
+{
+  ProtobufCMessage base;
+};
+#define GRID_DEMOTE__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_demote__descriptor) \
+     }
 
 
 struct  GridSync
@@ -818,10 +1006,29 @@ struct  GridSync
    */
   uint32_t pendingmask;
   protobuf_c_boolean pendingmaskvalid;
+  /*
+   * --- The fleet key (section 4.4 Tier 3) --------------------------------
+   * The key the broadcast beacon is signed under, and the id it is signed
+   * with. 16 bytes, AES-128, minted when the grid starts and re-minted on
+   * every hub restart — which costs nothing, because a restart already
+   * invalidates the anchor and forces this frame to be re-published anyway.
+   * The key's lifetime is therefore exactly the grid's.
+   * This needs no new bootstrap secret, which is what makes it cheap: every
+   * node already has a per-node AEAD session, so the fleet key rides an
+   * ordinary encrypted downlink and rotates the same way. The node adopts it
+   * ONLY from an authenticated GridSync — a plaintext one may not install a
+   * key, or the whole construction is decorative.
+   * Residual, stated rather than implied: any compromised node holds this key
+   * and can forge beacons for the fleet. That is inherent to one-to-many
+   * authentication without per-node signatures, and it is why the guard-band
+   * clamp on re-anchoring stays even for an authenticated beacon.
+   */
+  ProtobufCBinaryData netkey;
+  uint32_t netkeyid;
 };
 #define GRID_SYNC__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&grid_sync__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0,NULL}, 0 }
 
 
 /*
@@ -864,12 +1071,6 @@ struct  ModeTest
    */
   uint32_t payloadpadto;
   /*
-   * DEFAULT TRUE, and the difference from DriftTest. The report echoes it so
-   * a number measured with sleep disabled can never be quoted later as a
-   * production number.
-   */
-  protobuf_c_boolean keeppowerprofile;
-  /*
    * partial reports; 0 = final only
    */
   uint32_t reporteverys;
@@ -901,6 +1102,17 @@ struct  ModeTest
    * MAC-0 replies, no application round trip
    */
   protobuf_c_boolean macecho;
+  /*
+   * The difference from DriftTest, in the polarity proto3 can express.
+   * FALSE — the default, and what an omitting sender gets — means the node
+   * runs under its PRODUCTION power profile: light sleep on, CPU scaled. That
+   * is the whole point of this mode; a number measured with sleep disabled is
+   * not a production number, and the report echoes what it actually ran under
+   * so one can never be quoted as the other by accident.
+   * TRUE deliberately disables it, which is a bench act and reads like one at
+   * the call site.
+   */
+  protobuf_c_boolean droppowerprofile;
 };
 #define MODE_TEST__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&mode_test__descriptor) \
@@ -1018,10 +1230,20 @@ struct  ModeTestReport
    * Why an arm was refused, when it was. 0 = it was not.
    */
   uint32_t armrefusal;
+  /*
+   * MAC-0 clock discipline, Mode B only. The rate the node's CORRECTED
+   * prediction still drifts at: a run-scoped fit of (measured T0 minus the
+   * rate-corrected predicted T0) over the run's marks. Mode B's pass line,
+   * |residualPpm| < 20, is judged on this; ppmEstimate above stays the RAW
+   * node-vs-hub rate, a hardware finding with no pass line. 0 / 0 until three
+   * marks were heard with a grid active.
+   */
+  int32_t residualppm;
+  uint32_t residualsamples;
 };
 #define MODE_TEST_REPORT__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&mode_test_report__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 typedef enum {
@@ -1039,6 +1261,7 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC = 21,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST = 22,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON = 23,
+  LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE = 24,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
 } LoraClientOperationMessage__CmdCase;
@@ -1069,6 +1292,12 @@ struct  LoraClientOperationMessage
      * traffic, which is the safe direction.
      */
     GridBeacon *gridbeacon;
+    /*
+     * The startup withdrawal. A node that does not know this field ignores
+     * it and falls back on its own demotion criteria, which is the safe
+     * direction and what happens today.
+     */
+    GridDemote *griddemote;
     /*
      * The timed-window grid (B3). A node that does not know this field
      * ignores it and stays in Mode A, which is the safe direction.
@@ -1147,14 +1376,67 @@ struct  CoverPosition
   float position;
   float voltage;
   float current;
+  /*
+   * Battery-runtime compensation telemetry (hub repo:
+   * docs/battery-runtime-compensation-proposal.md) -- visibility only, the
+   * hub never computes or feeds back a model (decision 1). Set only for a
+   * FULL move that stopped via the current-sense endstop (the one
+   * ground-truth combination, proposal §2); 0/0 otherwise, which proto3's
+   * own "zero means absent" convention already reads correctly. A raw pair
+   * rather than a pre-divided ratio, since it's more useful for later
+   * analysis and the receiver can always divide.
+   */
+  /*
+   * elapsed time to the endstop firing
+   */
+  float actualruns;
+  /*
+   * the RAW factory open/close duration in force
+   */
+  float nominalruns;
 };
 #define COVER_POSITION__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&cover_position__descriptor) \
+    , 0, 0, 0, 0, 0 }
+
+
+/*
+ * A node asks the hub to publish its grid again (node -> hub).
+ * A demotion keeps the grid (fw 1.0.89), and a node out of Mode B hears no
+ * beacon, so nothing corrects its anchor while its crystal drifts. Measured
+ * 2026-09-15 on node 2 (fw 1.0.92): after ~17 minutes in Mode A the node came back
+ * 11 ms off its marks against a 14.08 ms guard. The node re-centres what its own
+ * samples can see; this frame is for what they cannot — an anchor older than the
+ * published resyncMaxS, or samples refused as more than half a pitch off.
+ * ADVICE, NOT A COMMAND. The hub answers only while timed mode is on, not while a
+ * GridSync is still awaiting its ack, and not within a minute of its last one
+ * (timedmode::hubAnswersSyncRequest), so a flood of these costs at most one burst
+ * a minute. A node that does not know this field never sends it.
+ */
+struct  GridSyncRequest
+{
+  ProtobufCMessage base;
+  /*
+   * timedmode::SyncRequestReason
+   */
+  uint32_t reason;
+  /*
+   * seconds since the node last corrected its anchor
+   */
+  uint32_t ssinceanchorfix;
+  /*
+   * samples refused beyond half a pitch since then
+   */
+  uint32_t refusedsamples;
+};
+#define GRID_SYNC_REQUEST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_sync_request__descriptor) \
     , 0, 0, 0 }
 
 
 typedef enum {
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET = 0,
+  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST = 23,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL = 10,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER = 11,
   LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE = 12,
@@ -1185,6 +1467,10 @@ struct  LoraClientResponseMessage
      * above are absent.  Field 9 keeps a 1-byte tag.
      */
     EncryptedPayload *encrypted;
+    /*
+     * The node asks for its grid again. See GridSyncRequest.
+     */
+    GridSyncRequest *gridsyncrequest;
     LoginMsg *login;
     /*
      * MAC-layer echo. Emitted by MAC-0 in reply to a MacControl ping,
@@ -1514,6 +1800,25 @@ GridBeacon *
 void   grid_beacon__free_unpacked
                      (GridBeacon *message,
                       ProtobufCAllocator *allocator);
+/* GridDemote methods */
+void   grid_demote__init
+                     (GridDemote         *message);
+size_t grid_demote__get_packed_size
+                     (const GridDemote   *message);
+size_t grid_demote__pack
+                     (const GridDemote   *message,
+                      uint8_t             *out);
+size_t grid_demote__pack_to_buffer
+                     (const GridDemote   *message,
+                      ProtobufCBuffer     *buffer);
+GridDemote *
+       grid_demote__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_demote__free_unpacked
+                     (GridDemote *message,
+                      ProtobufCAllocator *allocator);
 /* GridSync methods */
 void   grid_sync__init
                      (GridSync         *message);
@@ -1685,6 +1990,25 @@ CoverPosition *
 void   cover_position__free_unpacked
                      (CoverPosition *message,
                       ProtobufCAllocator *allocator);
+/* GridSyncRequest methods */
+void   grid_sync_request__init
+                     (GridSyncRequest         *message);
+size_t grid_sync_request__get_packed_size
+                     (const GridSyncRequest   *message);
+size_t grid_sync_request__pack
+                     (const GridSyncRequest   *message,
+                      uint8_t             *out);
+size_t grid_sync_request__pack_to_buffer
+                     (const GridSyncRequest   *message,
+                      ProtobufCBuffer     *buffer);
+GridSyncRequest *
+       grid_sync_request__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_sync_request__free_unpacked
+                     (GridSyncRequest *message,
+                      ProtobufCAllocator *allocator);
 /* LoraClientResponseMessage methods */
 void   lora_client_response_message__init
                      (LoraClientResponseMessage         *message);
@@ -1754,6 +2078,9 @@ typedef void (*MacControl_Closure)
 typedef void (*GridBeacon_Closure)
                  (const GridBeacon *message,
                   void *closure_data);
+typedef void (*GridDemote_Closure)
+                 (const GridDemote *message,
+                  void *closure_data);
 typedef void (*GridSync_Closure)
                  (const GridSync *message,
                   void *closure_data);
@@ -1780,6 +2107,9 @@ typedef void (*ClientBattery_Closure)
                   void *closure_data);
 typedef void (*CoverPosition_Closure)
                  (const CoverPosition *message,
+                  void *closure_data);
+typedef void (*GridSyncRequest_Closure)
+                 (const GridSyncRequest *message,
                   void *closure_data);
 typedef void (*LoraClientResponseMessage_Closure)
                  (const LoraClientResponseMessage *message,
@@ -1814,6 +2144,7 @@ extern const ProtobufCMessageDescriptor drift_test__descriptor;
 extern const ProtobufCMessageDescriptor mac_control__descriptor;
 extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
 extern const ProtobufCMessageDescriptor grid_beacon__descriptor;
+extern const ProtobufCMessageDescriptor grid_demote__descriptor;
 extern const ProtobufCMessageDescriptor grid_sync__descriptor;
 extern const ProtobufCMessageDescriptor mode_test__descriptor;
 extern const ProtobufCEnumDescriptor    mode_test__mode__descriptor;
@@ -1824,6 +2155,7 @@ extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;
 extern const ProtobufCMessageDescriptor client_battery__descriptor;
 extern const ProtobufCMessageDescriptor cover_position__descriptor;
+extern const ProtobufCMessageDescriptor grid_sync_request__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_response_message__descriptor;
 
 PROTOBUF_C__END_DECLS
