@@ -1,7 +1,0 @@
-add_test([=[Race.StaleRetryDoubleFireKeepsNoncesAligned]=]  /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/race_test [==[--gtest_filter=Race.StaleRetryDoubleFireKeepsNoncesAligned]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[Race.StaleRetryDoubleFireKeepsNoncesAligned]=]  PROPERTIES WORKING_DIRECTORY /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[Race.StaggerProducesDistinctFireTimes]=]  /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/race_test [==[--gtest_filter=Race.StaggerProducesDistinctFireTimes]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[Race.StaggerProducesDistinctFireTimes]=]  PROPERTIES WORKING_DIRECTORY /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[Race.BothNodesActOnSharedAddressIsDocumentedBehaviour]=]  /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/race_test [==[--gtest_filter=Race.BothNodesActOnSharedAddressIsDocumentedBehaviour]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[Race.BothNodesActOnSharedAddressIsDocumentedBehaviour]=]  PROPERTIES WORKING_DIRECTORY /mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-set(  race_test_TESTS Race.StaleRetryDoubleFireKeepsNoncesAligned Race.StaggerProducesDistinctFireTimes Race.BothNodesActOnSharedAddressIsDocumentedBehaviour)

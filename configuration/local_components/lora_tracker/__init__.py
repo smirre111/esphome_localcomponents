@@ -38,6 +38,13 @@ CONF_LORA_TRACKER_ID = "lora_tracker_id"
 
 # CONF_SHORT_ADDRESS = "short_address"
 # CONF_SUBNET_ADDRESS = "subnet_address"
+
+# Tier-1 key sourcing (docs/mac-separation-implementation-plan.md): the fleet
+# AES key as a YAML config value, normally resolved via !secret, rather than
+# a literal in lora_client.cpp. Default matches the node's Kconfig default
+# (BLINDS_LORA_FLEET_KEY) so an existing setup with no secrets.yaml entry for
+# this keeps working unchanged.
+CONF_FLEET_KEY = "fleet_key"
 # CONF_SLEEP_DURATION = "sleep_duration"
 # CONF_TIME_ID = "time_id"  # New config key for time component
 
@@ -169,6 +176,7 @@ CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(LORATracker),
+            cv.Optional(CONF_FLEET_KEY, default="LoRaHome"): cv.string_strict,
         }
     )
 )
@@ -277,6 +285,10 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     add_idf_sdkconfig_option("CONFIG_BT_ENABLED", True)
+    # Tier-1 key sourcing: turn the YAML value into a compile-time #define,
+    # so lora_client.cpp's component source never has to contain the real
+    # secret — only a named, obviously-a-placeholder dev fallback.
+    cg.add_define("LORA_FLEET_KEY", config[CONF_FLEET_KEY])
 
     # # Register LORA listener feature if any of the automation triggers are used
     # if (config.get(CONF_ON_SLEEP_START) ):

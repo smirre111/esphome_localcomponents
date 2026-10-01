@@ -258,6 +258,14 @@ target_include_directories(real_lora_client
         ${PROTOBUF_C_INCLUDE_DIRS}
 )
 target_link_libraries(real_lora_client PUBLIC proto_sim mbedcrypto)
+# Tier-1 (docs/mac-separation-implementation-plan.md): lora_client.cpp now
+# sources its key from LORA_FLEET_KEY (normally lora_tracker's cg.add_define
+# from YAML) rather than a bare literal. MUST match
+# shims_node/sdkconfig.h's CONFIG_BLINDS_LORA_FLEET_KEY and
+# sim/crypto.cpp's kKeyString exactly, or cross-encryption between this real
+# hub code and the sim/node sides fails to decrypt. Test-only value, never
+# the real fleet key.
+target_compile_definitions(real_lora_client PRIVATE LORA_FLEET_KEY="ProtoSimTestKeyNotReal")
 
 # Phase 3 scenario that drives the real LORAListener through the same
 # SimClock/SimRadio harness the model-based tests use.

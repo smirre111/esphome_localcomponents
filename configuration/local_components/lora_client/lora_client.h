@@ -28,6 +28,7 @@
 #include <esp_bt_defs.h> //For esp_bd_addr_t
 
 #include <array>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -879,6 +880,13 @@ namespace esphome
       // rather than trusting that fix to hold.
       uint32_t    class_a_last_prev_msgid_{0};
 
+      // N-3 (hub side): the last resetReason this listener has already acted
+      // on, so a run of beacons from the SAME boot (every Mode-C wake reports
+      // the same value) only advances tx_message_id once per actual reboot,
+      // not once per beacon. 0xFFFFFFFF never matches a real IDF reset-reason
+      // code, so the very first beacon always counts as "new".
+      uint32_t    last_handled_reset_reason_{0xFFFFFFFFu};
+
      public:
 
       // ---- P2: wake beacon ----
@@ -1043,7 +1051,15 @@ namespace esphome
       LORATracker *parent_{nullptr};
 
     protected:
-      time::RealTimeClock *time;
+      // Was uninitialized (same latent-UB pattern as registered_'s old
+      // declaration below) — a LORAListener constructed without set_time()
+      // read this as a wild non-null pointer and setup() dereferenced it
+      // (now()/add_on_time_sync_callback()), crashing once session_tx_mutex_
+      // shifted the object's layout enough to turn the garbage value into an
+      // unmapped address. Every production lora_client instance always sets
+      // time_id, so this never fired on hardware, but nullptr is the only
+      // safe default for a pointer nothing has set yet.
+      time::RealTimeClock *time{nullptr};
 
       // Group 1: 8-byte types
       uint64_t address_uint64_{0};
@@ -1056,11 +1072,23 @@ namespace esphome
       uint8_t  subnet_address_{0};
       uint64_t sleep_duration_{86400}; // Default to 24 hours
       uint32_t battery_update_interval_{900}; // Battery force-send interval [s]; default 15 min
-      bool     registered_;
+      // Was uninitialized (relying on incidental zero memory to read as
+      // false) — found when adding session_tx_mutex_ shifted this object's
+      // layout and three MacPing tests started reading registered_ as true
+      // garbage. A node is not registered until handle_register_ sets this.
+      bool     registered_{false};
 
       // uint32_t rx_message_id_{0};
       // uint32_t tx_message_id_{0};
       FrameCounter frame_counter_{0, 0};
+      // Guards frame_counter_.tx_message_id allocation and this listener's
+      // entry in s_base_nonce_map. mode_test_timer_cb_/drift_timer_cb_
+      // increment tx_message_id and seal frames from the esp_timer ("Tmr
+      // Svc") task, concurrently with the ESPHome main loop doing the same
+      // for ordinary traffic — previously unsynchronized, which could hand
+      // out a duplicate (nonce, msgId) pair. mutable so it can be taken from
+      // const accessors if that's ever needed.
+      mutable std::mutex session_tx_mutex_;
 
       // C2: when THIS node's most recent admitted uplink left the air (T0, the
       // SFD end), and how uncertain that stamp is. Captured in admit_frame_,

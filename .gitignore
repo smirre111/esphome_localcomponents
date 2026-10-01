@@ -23,3 +23,12 @@ __pycache__/
 # Host test harness build dirs
 tests/**/build/
 tests/**/cmake-build*/
+
+# Tier-1 (docs/mac-separation-implementation-plan.md): both of these are
+# currently untracked but were NOT gitignored — one `git add -A` away from
+# publishing a complete, file:line exploitation roadmap (the plan doc) and
+# internal project notes (CLAUDE.md) to this public repo.
+CLAUDE.md
+**/CLAUDE.md
+docs/mac-separation-implementation-plan.md
+**/docs/mac-separation-implementation-plan.md

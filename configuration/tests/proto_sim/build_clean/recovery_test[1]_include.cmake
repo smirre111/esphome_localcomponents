@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/recovery_test[1]_tests.cmake")
-  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/recovery_test[1]_tests.cmake")
-else()
-  add_test(recovery_test_NOT_BUILT recovery_test_NOT_BUILT)
-endif()

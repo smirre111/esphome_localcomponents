@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/class_a_windows_test[1]_tests.cmake")
-  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/class_a_windows_test[1]_tests.cmake")
-else()
-  add_test(class_a_windows_test_NOT_BUILT class_a_windows_test_NOT_BUILT)
-endif()

@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/timed_mode_policy_test[1]_tests.cmake")
-  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/timed_mode_policy_test[1]_tests.cmake")
-else()
-  add_test(timed_mode_policy_test_NOT_BUILT timed_mode_policy_test_NOT_BUILT)
-endif()

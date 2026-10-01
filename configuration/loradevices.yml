@@ -49,6 +49,8 @@ logger:
 
 # Enable Home Assistant API
 api:
+  encryption:
+    key: !secret api_encryption_key
 
 ota:
   platform: esphome
@@ -63,6 +65,7 @@ wifi:
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     ssid: "${devicename}-AP"
+    password: !secret wifi_ap_password
 
 captive_portal:
 
@@ -92,10 +95,14 @@ time:
 # Enable Web server
 web_server:
   port: 80
+  auth:
+    username: !secret web_server_username
+    password: !secret web_server_password
 
 
 lora_tracker:
   id: my_lora_tracker
+  fleet_key: !secret lora_fleet_key
 
 
 lora_client:

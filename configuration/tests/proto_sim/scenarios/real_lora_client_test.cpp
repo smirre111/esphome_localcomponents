@@ -2611,6 +2611,11 @@ TEST(MacPing, EchoIsCountedAndConsumedNotForwarded) {
     using namespace real_helpers;
     RealHubHarness h{2, kMacRol2};
     ensure_psa_ready();
+    // Was passing on uninitialized-memory luck (registered_ had no default
+    // initializer) until the LORAListener layout shifted and it started
+    // reading false — see lora_client.h's fix. Set it explicitly, same as
+    // the placement tests above.
+    h.rol.registered_ = true;
 
     h.rol.start_mac_ping(300, 1100);
     ASSERT_EQ(h.rol.mac_stats().echoes_rx, 0u);
@@ -2644,6 +2649,7 @@ TEST(MacPing, MissingMarksAreCountedAsGapsBySeq) {
     using namespace real_helpers;
     RealHubHarness h{2, kMacRol2};
     ensure_psa_ready();
+    h.rol.registered_ = true;
     h.rol.start_mac_ping(300, 1100);
 
     auto feed_echo = [&](uint32_t seq, uint32_t msgid) {
@@ -2678,6 +2684,7 @@ TEST(MacPing, FirstEchoIsNotAGapEvenIfItsSeqIsHigh) {
     using namespace real_helpers;
     RealHubHarness h{2, kMacRol2};
     ensure_psa_ready();
+    h.rol.registered_ = true;
     h.rol.start_mac_ping(300, 1100);
 
     ::LoraHeader hdr = LORA_HEADER__INIT;

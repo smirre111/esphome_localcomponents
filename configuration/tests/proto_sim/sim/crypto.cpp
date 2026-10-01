@@ -14,7 +14,13 @@ namespace proto_sim {
 
 namespace {
 
-constexpr const char* kKeyString = "LoRaKey1";
+// Tier-1 (docs/mac-separation-implementation-plan.md): intentionally NOT
+// the real fleet key. This string only has to agree with itself here and in
+// crypto_test.cpp's KeyDerivationIsStable pin — it exists to catch
+// accidental drift in the DERIVATION MECHANISM (SHA-256, truncated to 16
+// bytes), not to track the real deployed secret's value. It is fine for
+// this to be public, since it never was the real one.
+constexpr const char* kKeyString = "ProtoSimTestKeyNotReal";
 
 void u32_be(uint32_t v, uint8_t* out) {
     out[0] = (v >> 24) & 0xFF;

@@ -14,3 +14,13 @@
 #define CONFIG_SCK_GPIO  5
 #define CONFIG_MISO_GPIO 19
 #define CONFIG_MOSI_GPIO 27
+
+// --- LoRa fleet key (Tier-1, docs/mac-separation-implementation-plan.md) --
+//
+// comm_utils.c's derive_aes_gcm_key() now reads this instead of a bare
+// literal. MUST match sim/crypto.cpp's kKeyString exactly, or every
+// real_cmd_dispatcher_test.cpp/real_lora_client_test.cpp scenario that
+// cross-encrypts between the sim harness and this real production code
+// fails to decrypt. Intentionally the same test-only, non-production value
+// as sim/crypto.cpp — never the real fleet key.
+#define CONFIG_BLINDS_LORA_FLEET_KEY "ProtoSimTestKeyNotReal"

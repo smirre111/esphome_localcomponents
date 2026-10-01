@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/frame_crypto_test[1]_tests.cmake")
-  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/frame_crypto_test[1]_tests.cmake")
-else()
-  add_test(frame_crypto_test_NOT_BUILT frame_crypto_test_NOT_BUILT)
-endif()

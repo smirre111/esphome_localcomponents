@@ -29,7 +29,15 @@
 // Crypto constants — kept identical to BlindsESP/main/CmdDispatcher.cpp
 // so both sides of the link derive the same key and use the same parameters.
 // ---------------------------------------------------------------------------
-static constexpr const char    *kLoRaAesGcmKey  = "LoRaKey1";
+// Tier-1 key sourcing: LORA_FLEET_KEY is a compile-time #define from
+// lora_tracker's `fleet_key` YAML option (normally !secret-resolved), so
+// this component's tracked source never contains the real deployed value —
+// only this named, obviously-a-placeholder dev fallback.
+#ifdef LORA_FLEET_KEY
+static constexpr const char    *kLoRaAesGcmKey  = LORA_FLEET_KEY;
+#else
+static constexpr const char    *kLoRaAesGcmKey  = "LoRaHome";
+#endif
 static constexpr size_t         kAesGcmKeyBytes = 16;
 static constexpr size_t         kAesGcmIvBytes  = 12;
 static constexpr size_t         kAesGcmTagBytes = 8;  // truncated AES-GCM tag (slim on-air)
@@ -44,10 +52,14 @@ static psa_key_id_t s_aes_gcm_key_id = PSA_KEY_ID_NULL;
 // Only the base nonce is tracked per peer; the AES-GCM frame counter is the
 // same value as the protobuf LoraHeader.msgid — one unified counter per
 // direction, used for both replay protection and nonce derivation.
+// This map is shared across every LORAListener instance (lora_client is
+// MULTI_CONF), so a per-listener mutex cannot fully protect it; guard every
+// access with this one global mutex instead.
 static std::map<uint32_t, uint32_t> s_base_nonce_map;
+static std::mutex                   s_base_nonce_map_mutex;
 
 // ---------------------------------------------------------------------------
-// Derive the 16-byte AES-GCM key via SHA-256("LoRaKey1")[0:16].
+// Derive the 16-byte AES-GCM key via SHA-256("LoRaHome")[0:16].
 // Mirrors derive_aes_gcm_key() in BlindsESP CmdDispatcher.cpp.
 // ---------------------------------------------------------------------------
 static bool s_derive_aes_gcm_key(uint8_t key_out[kAesGcmKeyBytes])
@@ -130,6 +142,7 @@ static bool s_build_header_aad(const LoraHeader *h, uint8_t *aad, size_t *aad_le
 // IV = base_nonce(peer)[4 BE] || (counter | direction)[8 BE].
 static bool s_derive_gcm_nonce(uint32_t peer_address, uint64_t frame_counter, uint8_t nonce_out[12])
 {
+  std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
   auto it = s_base_nonce_map.find(peer_address);
   if (it == s_base_nonce_map.end()) return false;
   // deriveIv() also refuses a zero base nonce, which the hub did not check —
@@ -231,7 +244,12 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
   // Send plaintext when the caller hasn't confirmed the session (encrypt==false)
   // or no base nonce exists yet.  This keeps a node that never established
   // encryption controllable and avoids emitting ciphertext it cannot decrypt.
-  if (!encrypt || s_base_nonce_map.find(dest) == s_base_nonce_map.end())
+  bool has_base_nonce;
+  {
+    std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+    has_base_nonce = s_base_nonce_map.find(dest) != s_base_nonce_map.end();
+  }
+  if (!encrypt || !has_base_nonce)
   {
     *out_len = lora_client_operation_message__get_packed_size(plain);
     *out     = static_cast<uint8_t *>(malloc(*out_len));
@@ -1189,11 +1207,21 @@ namespace esphome
         }
         this->config_synced_ = true;
       }
+      // U2 (Tier-1 interim mitigation, round 12): clear pending_login_nonce_
+      // unconditionally on every confirm, not only on the first ack. Three
+      // call paths reach send_login() while login_acked_ is already true
+      // (config_sync_relogin, the node-LOGIN path, the missing-nonce path),
+      // and each of those previously skipped this clear, so the next
+      // send_login() reused the still-pending nonce under a reset msgid —
+      // real GCM base-nonce reuse. This alone does not fully close the
+      // issue (send_login's own unconditional tx/rx reset is the deeper
+      // bug; Tier 3's session redesign is the real fix) but removes this
+      // specific repeat-clear gap cheaply in the meantime.
+      this->pending_login_nonce_ = 0;
       if (!this->login_acked_)
       {
         this->login_acked_         = true;
         this->login_retry_count_   = 0;
-        this->pending_login_nonce_ = 0;
         this->cancel_timeout("login_retry");
         ESP_LOGI(TAG, "[%s] Login acknowledged by node (encrypted session confirmed)",
                  this->get_name().c_str());
@@ -1319,7 +1347,12 @@ namespace esphome
         // still holds its own in NVS. Re-provisioning by a route the node
         // refuses would leave a whole provisioned fleet unreachable until it was
         // re-flashed.
-        if (s_base_nonce_map.find(sender) == s_base_nonce_map.end())
+        bool sender_has_base_nonce;
+        {
+          std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+          sender_has_base_nonce = s_base_nonce_map.find(sender) != s_base_nonce_map.end();
+        }
+        if (!sender_has_base_nonce)
         {
           ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", sender);
           this->send_login();
@@ -1634,8 +1667,11 @@ namespace esphome
         // down against the real cadence; the range is a floor, not a promise.
         const uint32_t frames = (duration_s * 1000UL) / ms + 2;
         this->mac_ping_crypto_next_msgid_ = this->incrTxMessageId();       // one NVS save
-        this->frame_counter_.tx_message_id += (frames - 1);                // reserve the rest
-        this->mac_ping_crypto_last_msgid_ = this->frame_counter_.tx_message_id;
+        {
+          std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+          this->frame_counter_.tx_message_id += (frames - 1);               // reserve the rest
+          this->mac_ping_crypto_last_msgid_ = this->frame_counter_.tx_message_id;
+        }
         this->save_state_(true);                                          // ...and persist it
       }
 
@@ -2815,6 +2851,10 @@ namespace esphome
 
     uint32_t LORAListener::incrTxMessageId()
     {
+      // mode_test_timer_cb_/drift_timer_cb_ call this from the esp_timer
+      // task concurrently with the main loop's ordinary traffic — a bare
+      // ++ here could hand out the same tx_message_id twice.
+      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
       uint32_t val = ++this->frame_counter_.tx_message_id;
       // Persist the updated tx id so reboots don't reuse IDs
       this->save_state_(true);
@@ -2890,7 +2930,10 @@ namespace esphome
         return;
       }
 
-      s_base_nonce_map[this->short_address_] = base;
+      {
+        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+        s_base_nonce_map[this->short_address_] = base;
+      }
       ESP_LOGI(TAG, "Sent BaseNonceExchange (base=0x%08x) to peer %u",
                (unsigned)base, (unsigned)this->short_address_);
     }
@@ -2942,8 +2985,11 @@ namespace esphome
       this->plaintext_hwm_      = 0;
       this->have_plaintext_hwm_ = false;
 
-      this->frame_counter_.tx_message_id = 0;
-      this->frame_counter_.rx_message_id = 0;
+      {
+        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+        this->frame_counter_.tx_message_id = 0;
+        this->frame_counter_.rx_message_id = 0;
+      }
       // New login challenge: the encrypted session is not confirmed until the
       // node proves it by sending a frame we can decrypt.  Until then the hub
       // sends commands in plaintext (see s_pack_operation_message callers).
@@ -2952,7 +2998,10 @@ namespace esphome
 
       // Store the base-nonce on the hub side before sending so it is ready to
       // validate the first encrypted response the node sends back.
-      s_base_nonce_map[this->short_address_] = base;
+      {
+        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+        s_base_nonce_map[this->short_address_] = base;
+      }
 
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
@@ -3953,6 +4002,24 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
         this->class_a_stats_.hits      += b->prevwakehits;
         this->class_a_stats_.detected  += b->prevwakedetected;
         this->class_a_stats_.crc_valid += b->prevwakecrcvalid;
+      }
+
+      // N-3 (hub side): a non-deep-sleep reset means the node's SessionManager
+      // restored rx_id_ with a +16 margin and a fully-seen bitmap over it (see
+      // BlindsESP's SessionManager::load()) — the node will refuse to accept
+      // any downlink msgid inside that margin. Advance this listener's own
+      // downlink counter to match, once per actual reboot (not once per
+      // beacon — DEEPSLEEP wakes report the same reason on every beacon).
+      if (b->resetreason != this->last_handled_reset_reason_)
+      {
+        this->last_handled_reset_reason_ = b->resetreason;
+        if (b->resetreason != 8 /* DEEPSLEEP */)
+        {
+          this->frame_counter_.tx_message_id += 16;
+          ESP_LOGI(TAG, "[%s] Node reset (%s, non-deep-sleep) — advancing tx_message_id by 16 to %u",
+                   this->get_name().c_str(), s_reset_reason_name(b->resetreason),
+                   (unsigned) this->frame_counter_.tx_message_id);
+        }
       }
 
       // §4.6's promotion evidence. handle_beacon_ runs only for a DECRYPTED

@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/air_channel_test[1]_tests.cmake")
-  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/air_channel_test[1]_tests.cmake")
-else()
-  add_test(air_channel_test_NOT_BUILT air_channel_test_NOT_BUILT)
-endif()

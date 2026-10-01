@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/boot_policy_test[1]_tests.cmake")
-  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/boot_policy_test[1]_tests.cmake")
-else()
-  add_test(boot_policy_test_NOT_BUILT boot_policy_test_NOT_BUILT)
-endif()

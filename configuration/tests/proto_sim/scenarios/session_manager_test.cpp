@@ -239,10 +239,46 @@ TEST(SessionManager, ASessionSurvivesSaveAndLoad) {
     uint32_t out = 0;
     ASSERT_TRUE(b.getBaseNonce(kHub, out));
     EXPECT_EQ(out, kNonce);
-    EXPECT_EQ(b.rxId(), 3u);
+    EXPECT_EQ(b.rxId(), 3u + SessionManager::kRxPersistMargin)
+        << "N-3: rx is restored with its own margin too, with the whole "
+           "margin marked already-seen (see the fully-set-bitmap test below) "
+           "so a reboot cannot let any id at or below the old mark replay";
     EXPECT_EQ(b.txId(), 7u + SessionManager::kPersistTxMargin)
         << "tx is restored with a reservation margin so increments that were "
            "never persisted can never be reused";
+}
+
+// N-3: an empty rx_seen_ bitmap after a reboot used to let every id at or
+// below the restored high-water mark replay once (rx_id_ restored as-is,
+// rx_seen_ reset to 0 — a false "unseen"). Restoring with a margin AND a
+// fully-set bitmap over it closes that: every id up to the new mark reads
+// as already-seen, so none of them can be replayed, while genuine new ids
+// above the mark are unaffected.
+TEST(SessionManager, RestoredMarginIsFullySeenSoNothingInItCanBeReplayed) {
+    proto_sim_nvs_reset();
+    {
+        SessionManager a;
+        a.setPersistPeer(kHub);
+        a.setBaseNonce(kHub, kNonce);
+        ASSERT_TRUE(a.acceptRxId(3));
+        a.save();
+    }
+
+    SessionManager b;
+    b.load();
+    ASSERT_TRUE(b.hasValidState());
+    const uint32_t restored = 3u + SessionManager::kRxPersistMargin;
+    ASSERT_EQ(b.rxId(), restored);
+
+    // Every id from 1 up to the restored mark must be refused — exactly what
+    // a reboot-and-replay attempt (or a genuine hub retry of an old frame)
+    // would send.
+    for (uint32_t id = 1; id <= restored; ++id)
+        EXPECT_FALSE(b.acceptRxId(id)) << "id " << id << " is within the "
+            "restored margin and must read as already-seen";
+
+    // A genuinely new id above the mark still works.
+    EXPECT_TRUE(b.acceptRxId(restored + 1));
 }
 
 TEST(SessionManager, SavingWithoutASessionWritesNothing) {

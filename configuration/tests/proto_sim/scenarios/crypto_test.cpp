@@ -7,7 +7,7 @@
 //     plaintext.
 //   * Node→hub responses (CoverPosition, ClientAvailable, ClientBattery)
 //     ARE encrypted once a base_nonce has been negotiated via LoginMsg.
-//   * Key: SHA-256("LoRaKey1")[0:16]
+//   * Key: SHA-256("LoRaHome")[0:16]
 //   * IV:  base_nonce_BE[4] ‖ frame_counter_BE[8]   (frame_counter = msgid)
 //   * AAD: 20-byte header (destAddress, destSubnet, senderAddress, msgId,
 //          encrypted) each as 4-byte BE.
@@ -171,20 +171,24 @@ TEST_F(CryptoFixture, TamperedAadFailsAuth) {
     SUCCEED() << "AAD-mismatched frame silently dropped by AEAD verify.";
 }
 
-// E_AdditionalSanity: the SHA-256("LoRaKey1")[0:16] derivation matches
-// the constant bytes the production firmware uses. Pin them to detect
-// any accidental key-string change.
+// E_AdditionalSanity: sim/crypto.cpp's key DERIVATION MECHANISM (SHA-256,
+// truncated to the first 16 bytes) matches what production firmware does —
+// not that the VALUE matches the real deployed secret. Tier-1
+// (docs/mac-separation-implementation-plan.md) deliberately decoupled this
+// test-only key ("ProtoSimTestKeyNotReal", sim/crypto.cpp) from the real
+// fleet key, so this file can stay public without being the real secret.
+// Pin the bytes to detect any accidental drift in the mechanism or string.
 TEST(CryptoKey, KeyDerivationIsStable) {
     const uint8_t* k = aes_gcm_key();
-    // SHA-256("LoRaKey1") first 16 bytes, computed once and pinned:
+    // SHA-256("ProtoSimTestKeyNotReal") first 16 bytes, computed once and pinned:
     static constexpr uint8_t kExpected[16] = {
-        0x52, 0x61, 0xad, 0x8e, 0xd4, 0xed, 0x76, 0xbc,
-        0xb4, 0x8f, 0xa2, 0x75, 0x25, 0x2e, 0x36, 0xa4,
+        0xab, 0xfd, 0xd2, 0x7c, 0x60, 0x30, 0x8b, 0x65,
+        0x54, 0x95, 0x43, 0x6c, 0xef, 0x9f, 0x7c, 0x5f,
     };
     for (int i = 0; i < 16; ++i) {
         EXPECT_EQ(k[i], kExpected[i])
             << "Key byte " << i << " drifted — "
-               "SHA-256(\"LoRaKey1\")[0:16] must remain stable.";
+               "SHA-256(\"ProtoSimTestKeyNotReal\")[0:16] must remain stable.";
     }
 }
 

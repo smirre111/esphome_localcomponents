@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/cover_config_test[1]_tests.cmake")
-  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/cover_config_test[1]_tests.cmake")
-else()
-  add_test(cover_config_test_NOT_BUILT cover_config_test_NOT_BUILT)
-endif()

@@ -1,5 +1,0 @@
-if(EXISTS "/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/grid_state_test[1]_tests.cmake")
-  include("/mnt/c/Development/esphome/configuration/tests/proto_sim/build_clean/grid_state_test[1]_tests.cmake")
-else()
-  add_test(grid_state_test_NOT_BUILT grid_state_test_NOT_BUILT)
-endif()
