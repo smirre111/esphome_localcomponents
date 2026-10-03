@@ -4089,9 +4089,9 @@ constexpr uint32_t kFleetKeyId = 0x5EED0001u;
 
 std::array<uint8_t, framecrypto::kBeaconMacBytes>
 beacon_mac(uint32_t key_id, uint32_t round, uint32_t slot, uint32_t mask,
-           bool mask_valid, const uint8_t *key = kFleetKey) {
+           bool mask_valid, const uint8_t *key = kFleetKey, uint32_t burst_index = 0) {
     uint8_t input[framecrypto::kBeaconMacInputBytes];
-    framecrypto::buildBeaconMacInput(key_id, round, slot, mask, mask_valid, input);
+    framecrypto::buildBeaconMacInput(key_id, round, slot, mask, mask_valid, burst_index, input);
 
     psa_crypto_init();
     psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
@@ -4126,7 +4126,8 @@ beacon_mac(uint32_t key_id, uint32_t round, uint32_t slot, uint32_t mask,
 // DecryptedDownlinkProvesSessionEndToEnd above. `disp` must already hold a
 // session from a LOGIN carrying hub_nonce == `nonce`.
 std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, LoraClientOperationMessage &inner,
-                                uint32_t msgid, uint32_t nonce = kMtNonce) {
+                                uint32_t msgid, uint32_t nonce = kMtNonce,
+                                uint32_t burst_index = 0, bool on_mark = true) {
     size_t plain_len = lora_client_operation_message__get_packed_size(&inner);
     std::vector<uint8_t> plain(plain_len);
     lora_client_operation_message__pack(&inner, plain.data());
@@ -4146,7 +4147,8 @@ std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, LoraClientOperationMessage 
     fields.dest_subnet    = kSubnet;
     fields.sender_address = kHubAddr;
     fields.msgid          = msgid;
-    fields.on_mark        = true;   // placed, as the hub places a session downlink
+    fields.burst_index    = burst_index;
+    fields.on_mark        = on_mark;   // placed, as the hub places a session downlink
     uint8_t prefix[framecrypto::kEtmPrefixBytes];
     framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(ciphertext.size()), prefix);
     std::vector<uint8_t> mac_input(prefix, prefix + sizeof(prefix));
@@ -4161,7 +4163,8 @@ std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, LoraClientOperationMessage 
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = msgid;
-    hdr.onmark        = true;   // placed, as the hub places a session downlink
+    hdr.burstindex    = burst_index;
+    hdr.onmark        = on_mark;   // placed, as the hub places a session downlink
 
     EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
     ep.tag.data        = tag;
@@ -4178,6 +4181,18 @@ std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, LoraClientOperationMessage 
     std::vector<uint8_t> frame(frame_len);
     lora_client_operation_message__pack(&outer, frame.data());
     return frame;
+}
+
+// Encrypted CMD_SYSOP with caller-controlled burstIndex/onMark, for tests
+// that need to simulate stamped phase samples on a node that holds a
+// session (post-Tier-3, a plaintext SYSOP is refused once one does).
+std::vector<uint8_t> encrypted_sysop(CmdDispatcher &disp, uint32_t msgid, ClientOperation what,
+                                     uint32_t burst_index = 0, bool on_mark = true,
+                                     uint32_t nonce = kMtNonce) {
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    inner.sysop    = what;
+    return encrypt_op(disp, inner, msgid, nonce, burst_index, on_mark);
 }
 
 std::vector<uint8_t> encrypted_mode_test(CmdDispatcher &disp, ModeTest__Mode mode, uint32_t msgid,
@@ -5210,6 +5225,61 @@ TEST_F(RealNodeFixture, AGridDemoteDoesNotRatchetTheReplayCounter) {
     disp.onReceiveNew(gs2.data(), static_cast<int>(gs2.size()));
     EXPECT_TRUE(disp.gridState().active)
         << "the demote must not have moved the rx counter";
+}
+
+// GridDemote hardening (mac-separation-implementation-plan.md): rate-limited
+// honor, since authenticating this frame would need the hub to persist
+// netKey at rest for marginal benefit on a home-scale system.
+TEST_F(RealNodeFixture, ARepeatedGridDemoteWithinTheRateLimitIsIgnored) {
+    proto_sim_timer_reset();
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    auto demote = build_grid_demote();
+    disp.onReceiveNew(demote.data(), static_cast<int>(demote.size()));
+    ASSERT_FALSE(disp.gridState().active) << "precondition: the first demote is honored";
+
+    auto gs2 = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/3, /*with_key=*/true);
+    disp.onReceiveNew(gs2.data(), static_cast<int>(gs2.size()));
+    ASSERT_TRUE(disp.gridState().active) << "precondition: the grid is held again";
+
+    // Well within the rate limit — e.g. a repeated attacker broadcast, or a
+    // duplicate of the hub's own startup demote.
+    disp.onReceiveNew(demote.data(), static_cast<int>(demote.size()));
+    EXPECT_TRUE(disp.gridState().active)
+        << "a second demote inside the rate-limit window must be ignored";
+
+    // Past CmdDispatcher::kGridDemoteRateLimitMs (1 hour; private, so
+    // restated here rather than referenced).
+    proto_sim_timer_advance_us(3'600'000LL * 1000 + 1000);
+    disp.onReceiveNew(demote.data(), static_cast<int>(demote.size()));
+    EXPECT_FALSE(disp.gridState().active)
+        << "past the rate-limit window, a demote is honored again";
+}
+
+// Demote-on-authenticated-LOGIN: a fresh session implies the hub rebooted,
+// which is itself a legitimate, AUTHENTICATED reason to demote — and unlike
+// the broadcast GridDemote, it needs no rate limit.
+TEST_F(RealNodeFixture, AFreshAuthenticatedLoginDemotesAHeldGrid) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active) << "precondition: the node holds a grid";
+
+    // A SECOND login, with a different hub_nonce — a genuinely new session,
+    // not the hub's own retry of the first (CmdLoginRetryOfTheSameSession...
+    // covers that case separately, and it must NOT demote).
+    proto_sim_timer_advance_us(6'000'000);   // past the 5 s login rate limit
+    auto login2 = pack_login_op(/*msgid=*/1, 0xABCDEF01u);
+    disp.onReceiveNew(login2.data(), static_cast<int>(login2.size()));
+
+    EXPECT_FALSE(disp.gridState().active)
+        << "a fresh, authenticated session must demote any grid held under "
+           "the previous one";
 }
 
 TEST_F(RealNodeFixture, AKeyedNodeAdoptsTheMaskFromASignedBeacon) {
@@ -6306,12 +6376,19 @@ TEST_F(RealNodeFixture, AWakeWithAnUnchangedReasonSpendsOneUplinkNotTwo) {
 TEST_F(RealNodeFixture, ANodeWithAStaleAnchorAsksTheHubForItsGrid) {
     disp.setTimedRxEnabled(true);
     proto_sim_timer_set_now_us(1'000'000);
-    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/700);
+    // LOGIN before GridSync, as production always orders them (a session
+    // must exist before the hub can send an ENCRYPTED GridSync, and a
+    // GridSync now has to BE encrypted once a session exists) — a fresh,
+    // authenticated LOGIN demotes any held grid (hub-reboot heuristic,
+    // mac-separation-implementation-plan.md's GridDemote hardening), so
+    // doing it the other way around here would demote the grid this test
+    // means to establish.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 900'000);
+    drainTx(disp);
+    auto g = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
     disp.onReceiveNew(g.data(), static_cast<int>(g.size()), 1'000'000);
     ASSERT_TRUE(disp.gridState().active);
-    auto login = pack_login_op(/*msgid=*/701, /*nonce=*/0xABCDEF01);
-    disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 1'100'000);
-    drainTx(disp);
 
     disp.maybeRequestGridSync();
     EXPECT_TRUE(gridSyncRequests(disp).empty()) << "a fresh anchor needs nothing";
@@ -6345,23 +6422,26 @@ TEST_F(RealNodeFixture, WithoutASessionTheNodeDoesNotAskForItsGrid) {
 TEST_F(RealNodeFixture, SamplesRefusedAsTooFarOffMakeTheNodeAsk) {
     disp.setTimedRxEnabled(true);
     proto_sim_timer_set_now_us(1'000'000);
-    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/740);
+    // LOGIN before GridSync — see ANodeWithAStaleAnchorAsksTheHubForItsGrid's
+    // comment: a fresh LOGIN now demotes any held grid, so it must come
+    // first here too, or it would demote the grid this test needs to keep.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 900'000);
+    drainTx(disp);
+    auto g = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
     disp.onReceiveNew(g.data(), static_cast<int>(g.size()), 1'000'000);
     ASSERT_TRUE(disp.gridState().active);
 
     // More than half a pitch off: the re-centre cannot use them.
     const int64_t far = (int64_t) timedgrid::kSlotPitchUs / 2 + 5'000;
     for (uint32_t i = 0; i < timedmode::kRefusedSamplesForSyncRequest; ++i) {
-        auto f = pack_sysop_op(741 + i, CLIENT_OPERATION__CMD_STATUS);
+        auto f = encrypted_sysop(disp, 3 + i, CLIENT_OPERATION__CMD_STATUS);
         disp.onReceiveNew(f.data(), static_cast<int>(f.size()),
                           rxOnMark(disp, f.size(),
                                    2'000'000 + (int64_t) i * (int64_t) timedgrid::kRoundUs, far));
     }
     ASSERT_EQ(disp.phaseStats().n, 0u) << "precondition: both refused";
 
-    auto login = pack_login_op(/*msgid=*/750, /*nonce=*/0xABCDEF01);
-    disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 9'000'000);
-    drainTx(disp);
     disp.maybeRequestGridSync();
     const auto asked = gridSyncRequests(disp);
     ASSERT_EQ(asked.size(), 1u) << "the anchor is fresh, but its samples say it is lost";

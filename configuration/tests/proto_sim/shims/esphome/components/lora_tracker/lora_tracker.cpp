@@ -43,6 +43,7 @@ void LORATracker::startGrid() {
 // would assert only that two mirrors of the same mistake agree.
 bool LORATracker::beaconMac(uint32_t tx_round, uint32_t tx_slot,
                             uint32_t pending_mask, bool pending_mask_valid,
+                            uint32_t burst_index,
                             uint8_t *out, size_t out_len) const {
     if (out == nullptr || out_len != framecrypto::kBeaconMacBytes) return false;
     if (!framecrypto::netKeyIsSet(net_key_, sizeof(net_key_), net_key_id_))
@@ -50,7 +51,8 @@ bool LORATracker::beaconMac(uint32_t tx_round, uint32_t tx_slot,
 
     uint8_t input[framecrypto::kBeaconMacInputBytes];
     framecrypto::buildBeaconMacInput(net_key_id_, tx_round, tx_slot,
-                                     pending_mask, pending_mask_valid, input);
+                                     pending_mask, pending_mask_valid,
+                                     burst_index, input);
 
     psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
     psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE);

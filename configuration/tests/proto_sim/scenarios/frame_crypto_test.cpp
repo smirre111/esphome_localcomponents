@@ -198,29 +198,32 @@ TEST(FrameCrypto, TagAndKeySizesMatchTheHub) {
 
 TEST(FrameCrypto, BeaconMacInputIsFixedLengthAndDomainSeparated) {
     uint8_t in[kBeaconMacInputBytes];
-    buildBeaconMacInput(0x11223344u, 0x55667788u, 31u, 0xDEADBEEFu, true, in);
+    buildBeaconMacInput(0x11223344u, 0x55667788u, 31u, 0xDEADBEEFu, true, 0u, in);
 
     // The domain tag comes first, so this key can never be made to authenticate
     // anything but a beacon — a fleet key that also signed, say, a config frame
-    // would let a compromised node repurpose it.
+    // would let a compromised node repurpose it. "GB2", not "GB1": bumped when
+    // burstIndex was added, so an old-firmware verifier can't be fooled into
+    // checking a shorter input against a longer one by coincidence.
     EXPECT_EQ(in[0], 'G');
     EXPECT_EQ(in[1], 'B');
-    EXPECT_EQ(in[2], '1');
+    EXPECT_EQ(in[2], '2');
 
     const uint8_t want[kBeaconMacInputBytes] = {
-        'G', 'B', '1',
+        'G', 'B', '2',
         0x11, 0x22, 0x33, 0x44,      // netKeyId, big-endian like every other
         0x55, 0x66, 0x77, 0x88,      // txRound
         0x00, 0x00, 0x00, 0x1F,      // txSlot
         0xDE, 0xAD, 0xBE, 0xEF,      // pendingMask
         0x01,                        // pendingMaskValid
+        0x00, 0x00, 0x00, 0x00,      // burstIndex
     };
     EXPECT_EQ(memcmp(in, want, sizeof(want)), 0);
 
     // Fixed length is the property, not a convenience. With variable-length
     // fields two different beacons could serialise to the same bytes and share
-    // a tag; at 20 bytes there is no boundary to shift.
-    EXPECT_EQ(kBeaconMacInputBytes, 20u);
+    // a tag; at 24 bytes there is no boundary to shift.
+    EXPECT_EQ(kBeaconMacInputBytes, 24u);
 }
 
 TEST(FrameCrypto, TheValidityFlagIsCoveredByTheMac) {
@@ -228,8 +231,8 @@ TEST(FrameCrypto, TheValidityFlagIsCoveredByTheMac) {
     // that omitted it would let an attacker turn "listen" into a real all-clear
     // without touching a signed byte.
     uint8_t a[kBeaconMacInputBytes], b[kBeaconMacInputBytes];
-    buildBeaconMacInput(1, 2, 3, 0, /*valid=*/false, a);
-    buildBeaconMacInput(1, 2, 3, 0, /*valid=*/true,  b);
+    buildBeaconMacInput(1, 2, 3, 0, /*valid=*/false, 0u, a);
+    buildBeaconMacInput(1, 2, 3, 0, /*valid=*/true,  0u, b);
     EXPECT_NE(memcmp(a, b, sizeof(a)), 0);
 }
 
@@ -238,17 +241,21 @@ TEST(FrameCrypto, EveryBeaconFieldChangesTheMacInput) {
     // the cheapest useful forgery: replay a real beacon's round with an
     // all-clear mask and the fleet stops listening.
     uint8_t base[kBeaconMacInputBytes];
-    buildBeaconMacInput(1, 2, 3, 4, true, base);
+    buildBeaconMacInput(1, 2, 3, 4, true, 0u, base);
 
     uint8_t v[kBeaconMacInputBytes];
-    buildBeaconMacInput(9, 2, 3, 4, true, v);
+    buildBeaconMacInput(9, 2, 3, 4, true, 0u, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "netKeyId";
-    buildBeaconMacInput(1, 9, 3, 4, true, v);
+    buildBeaconMacInput(1, 9, 3, 4, true, 0u, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "txRound";
-    buildBeaconMacInput(1, 2, 9, 4, true, v);
+    buildBeaconMacInput(1, 2, 9, 4, true, 0u, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "txSlot";
-    buildBeaconMacInput(1, 2, 3, 9, true, v);
+    buildBeaconMacInput(1, 2, 3, 9, true, 0u, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "pendingMask";
+    buildBeaconMacInput(1, 2, 3, 4, true, 9u, v);
+    EXPECT_NE(memcmp(base, v, sizeof(v)), 0)
+        << "burstIndex — review-2026-09-15 finding 2: an outer-header field "
+           "this handler trusts, previously unauthenticated";
 }
 
 TEST(FrameCrypto, AZeroKeyOrZeroIdIsNotAKey) {

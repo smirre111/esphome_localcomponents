@@ -407,7 +407,7 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
     const uint32_t mask  = pending::allListening();
 
     uint8_t mac[framecrypto::kBeaconMacBytes];
-    ASSERT_TRUE(tracker.beaconMac(round, slot, mask, true, mac, sizeof(mac)))
+    ASSERT_TRUE(tracker.beaconMac(round, slot, mask, true, /*burst_index=*/0u, mac, sizeof(mac)))
         << "a hub that cannot sign sends no beacon at all";
 
     LoraHeader hdr = LORA_HEADER__INIT;

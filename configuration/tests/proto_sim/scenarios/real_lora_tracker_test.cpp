@@ -1176,6 +1176,7 @@ TEST(RealTrackerBeacon, ABeaconIsQueuedOnceAndPlacedOnItsOwnMark) {
     ASSERT_TRUE(t.beaconMac(msg->gridbeacon->txround, msg->gridbeacon->txslot,
                             msg->gridbeacon->pendingmask,
                             msg->gridbeacon->pendingmaskvalid,
+                            msg->header->burstindex,
                             expect, sizeof(expect)));
     EXPECT_EQ(memcmp(expect, msg->gridbeacon->mac.data, sizeof(expect)), 0);
 

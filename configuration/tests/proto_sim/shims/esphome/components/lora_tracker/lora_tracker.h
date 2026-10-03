@@ -127,7 +127,8 @@ public:
     const uint8_t *netKey() const   { return net_key_; }
     uint32_t       netKeyId() const { return net_key_id_; }
     bool beaconMac(uint32_t tx_round, uint32_t tx_slot, uint32_t pending_mask,
-                   bool pending_mask_valid, uint8_t *out, size_t out_len) const;
+                   bool pending_mask_valid, uint32_t burst_index,
+                   uint8_t *out, size_t out_len) const;
     uint8_t  net_key_[framecrypto::kNetKeyBytes]{};
     uint32_t net_key_id_{0};
 
