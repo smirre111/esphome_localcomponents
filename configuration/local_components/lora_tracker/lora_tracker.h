@@ -243,7 +243,7 @@ namespace esphome
       // hub that HAS a key is indistinguishable on the air from a forgery.
       bool      beaconMac(uint32_t tx_round, uint32_t tx_slot,
                           uint32_t pending_mask, bool pending_mask_valid,
-                          uint8_t *out, size_t out_len) const;
+                          uint32_t burst_index, uint8_t *out, size_t out_len) const;
 
       // How many queued frames were dropped at the front because a newer
       // generation had superseded them. Diagnostic, and the only visible sign

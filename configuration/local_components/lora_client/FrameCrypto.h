@@ -137,25 +137,37 @@ inline bool deriveIv(uint32_t base_nonce, uint64_t counter, uint8_t out[kIvBytes
 // different beacons could otherwise serialise to the same bytes. The domain tag
 // so this key can never be made to authenticate anything but a beacon.
 //
-//   input = "GB1" || netKeyId_BE32 || txRound_BE32 || txSlot_BE32
-//           || pendingMask_BE32 || pendingMaskValid_u8            (20 bytes)
+//   input = "GB2" || netKeyId_BE32 || txRound_BE32 || txSlot_BE32
+//           || pendingMask_BE32 || pendingMaskValid_u8 || burstIndex_BE32
+//                                                          (24 bytes)
+//
+// burstIndex (mac-separation-implementation-plan.md's review-2026-09-15
+// finding 2) is an OUTER LoraHeader field, not part of the GridBeacon message
+// body — so it sat outside this MAC entirely until now, even though
+// handleGridBeacon reads it to back out the copy's offset before computing
+// t0_measured. A beacon is always sent as burstIndex 0 (one copy, not a
+// burst), so an attacker able to alter just the plaintext outer header of an
+// otherwise-genuine beacon frame could nudge t0_measured by any multiple of
+// drift::kCopySpacingUs while the inner MAC still verified. Domain tag
+// bumped to "GB2" (not "GB1") so an old-firmware verifier cannot be fooled
+// into checking a shorter input against a longer one by coincidence.
 // ---------------------------------------------------------------------------
 
 static constexpr size_t kNetKeyBytes     = 16;  // AES-128, like the session key
 static constexpr size_t kBeaconMacBytes  = 8;   // truncated, same budget as the
                                                 // AEAD tag already on this link
-static constexpr size_t kBeaconMacInputBytes = 20;
+static constexpr size_t kBeaconMacInputBytes = 24;
 
 inline void buildBeaconMacInput(uint32_t net_key_id, uint32_t tx_round,
                                 uint32_t tx_slot, uint32_t pending_mask,
-                                bool pending_mask_valid,
+                                bool pending_mask_valid, uint32_t burst_index,
                                 uint8_t out[kBeaconMacInputBytes])
 {
     // The domain tag. Three bytes rather than four so the whole input stays a
-    // round 20; it is a separator, not a length.
+    // round number; it is a separator, not a length.
     out[0] = 'G';
     out[1] = 'B';
-    out[2] = '1';
+    out[2] = '2';
     u32be(net_key_id,  out + 3);
     u32be(tx_round,    out + 7);
     u32be(tx_slot,     out + 11);
@@ -165,6 +177,7 @@ inline void buildBeaconMacInput(uint32_t net_key_id, uint32_t tx_round,
     // attacker flip "listen" to "a real all-clear" without touching a signed
     // byte.
     out[19] = pending_mask_valid ? 1u : 0u;
+    u32be(burst_index, out + 20);
 }
 
 // A key of all zeroes is not a key — it is an unset field, or a proto3 default

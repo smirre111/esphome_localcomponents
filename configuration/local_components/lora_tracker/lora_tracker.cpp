@@ -647,7 +647,7 @@ namespace esphome
     // agreeing.
     bool LORATracker::beaconMac(uint32_t tx_round, uint32_t tx_slot,
                                 uint32_t pending_mask, bool pending_mask_valid,
-                                uint8_t *out, size_t out_len) const
+                                uint32_t burst_index, uint8_t *out, size_t out_len) const
     {
       if (out == nullptr || out_len != framecrypto::kBeaconMacBytes)
         return false;
@@ -657,7 +657,8 @@ namespace esphome
 
       uint8_t input[framecrypto::kBeaconMacInputBytes];
       framecrypto::buildBeaconMacInput(this->net_key_id_, tx_round, tx_slot,
-                                       pending_mask, pending_mask_valid, input);
+                                       pending_mask, pending_mask_valid,
+                                       burst_index, input);
 
       psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
       psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE);
@@ -764,13 +765,17 @@ namespace esphome
       gb.pendingmask      = pending::allListening();
       gb.pendingmaskvalid = true;
 
-      // Signed over exactly the fields above, plus the key id, so a node can
-      // tell "this hub" from "something in radio range". No timestamp: a
-      // replayed beacon declares its own round, so its predicted mark is rounds
-      // in the past and the node's reanchorIsSane already refuses it.
+      // Signed over exactly the fields above, plus the key id and the OUTER
+      // header's burstIndex (always 0 here — one copy, not a burst), so a
+      // node can tell "this hub" from "something in radio range" AND catch
+      // an attacker altering just the plaintext outer header of an otherwise-
+      // genuine beacon to make the node back out a bogus copy offset
+      // (review-2026-09-15 finding 2). No timestamp: a replayed beacon
+      // declares its own round, so its predicted mark is rounds in the past
+      // and the node's reanchorIsSane already refuses it.
       uint8_t mac[framecrypto::kBeaconMacBytes];
       if (!this->beaconMac(gb.txround, gb.txslot, gb.pendingmask,
-                           gb.pendingmaskvalid, mac, sizeof(mac)))
+                           gb.pendingmaskvalid, header.burstindex, mac, sizeof(mac)))
       {
         // No beacon rather than an unsigned one. A hub that HAS a key and emits
         // an unsigned beacon is indistinguishable on the air from an attacker,
