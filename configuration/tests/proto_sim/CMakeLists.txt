@@ -337,6 +337,13 @@ add_library(real_lora_tracker STATIC
     ${SHIM_DIR}/esphome/core/component.cpp
     ${SHIM_DIR}/esp_random.c
     ${SHIM_DIR}/esp_timer_stub.c
+    # Tier 3: this target has no real LORAListener (its hub-client side is
+    # never linked here — see the shim tracker real_lora_client uses
+    # instead, the mirror image of this target), but
+    # LORATracker::sendPacketBurst() now calls
+    # LORAListener::sealBurstCopyTag() directly. See the stub file's own
+    # comment for why always-false is correct here.
+    ${SHIM_DIR}/esphome/components/lora_client/lora_client_seal_stub.cpp
 )
 # NODE_SHIM_DIR comes LAST of the header dirs on purpose: it carries a lora.h
 # of its own (the node's driver stub), and the hub's production lora.h must

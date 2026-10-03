@@ -46,6 +46,8 @@ struct GridSyncRequest;             // a node asking for its grid again, by poin
 struct PhaseReport;                 // §4.6's promotion evidence, by pointer
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
 struct LoraClientOperationMessage;  // send_downlink takes it by pointer
+struct EncryptedPayload;            // Tier 3: sealBurstCopyTag takes it by pointer
+struct LoraHeader;                  // Tier 3: sealBurstCopyTag takes it by pointer
 
 namespace esphome
 {
@@ -1093,6 +1095,26 @@ namespace esphome
       };
 
     public:
+      // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
+      // recompute this frame's Encrypt-then-CMAC tag over its JUST-STAMPED
+      // header fields (burstIndex/burstCount/onMark/fireStamped/fireRound/
+      // fireOffsetUs) plus the already-sealed ciphertext, and overwrite
+      // `enc->tag` in place (same length, no realloc). Called by
+      // LORATracker::sendPacketBurst() once per copy, after stamping and
+      // before packing — this is what the plan's "per-copy sealing" step
+      // actually is: the ciphertext is sealed once (at
+      // pack_response_message/encrypt time), only the tag is per-copy.
+      // Returns false (caller must not send this copy) if this listener
+      // has no session keys yet.
+      //
+      // KNOWN SIMPLIFICATION (not invariant I3's full "captured SessionRef,
+      // drop on generation mismatch"): this always uses the CURRENT
+      // k_mac_key_id_/session_id rather than a snapshot taken when the
+      // frame was sealed, so a re-login mid-burst could retag later copies
+      // under a different key than the ciphertext was sealed with. Rare
+      // (a session change inside one ~1.4s burst) and not yet closed.
+      bool sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header);
+
       uint8_t  short_address_{0};
       uint8_t  subnet_address_{0};
       uint64_t sleep_duration_{86400}; // Default to 24 hours

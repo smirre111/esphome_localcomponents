@@ -2,6 +2,7 @@
 
 #include "FrameCrypto.h"
 
+#include <mbedtls/aes.h>
 #include <mbedtls/cipher.h>
 #include <mbedtls/cmac.h>
 #include <mbedtls/gcm.h>
@@ -100,6 +101,109 @@ void compute_register_mic(uint64_t mac_addr, bool needs_config,
     uint8_t full[16];
     cmac_full(k_auth_key(), input, sizeof(input), full);
     std::memcpy(out, full, framecrypto::kSessionCmacTagBytes);
+}
+
+namespace {
+
+// K_enc/K_mac derivation, mirroring CmdDispatcher::deriveSessionKeys_() /
+// LORAListener::deriveSessionKeys_(): CMAC(K_root, buildSessionKeyKdfInput(
+// half, ...)), half 0x01 for K_enc, 0x02 for K_mac.
+void derive_session_key(uint8_t half, uint32_t session_id, uint32_t node_nonce,
+                        uint8_t hub_addr, uint8_t node_addr, uint8_t out16[16]) {
+    uint8_t input[framecrypto::kKdfInputBytes];
+    framecrypto::buildSessionKeyKdfInput(half, session_id, node_nonce, hub_addr, node_addr, input);
+    cmac_full(aes_gcm_key(), input, sizeof(input), out16);
+}
+
+// mbedtls_aes_crypt_ctr starts from nc_off=0 / a fresh stream_block every
+// call here — correct for a single one-shot buffer, same as production's
+// psa_cipher multi-part API used exactly once per frame.
+void ctr_crypt(const uint8_t key[16], const uint8_t iv[16],
+               const uint8_t *in, size_t len, uint8_t *out) {
+    mbedtls_aes_context ctx;
+    mbedtls_aes_init(&ctx);
+    mbedtls_aes_setkey_enc(&ctx, key, 128);
+    size_t nc_off = 0;
+    uint8_t stream_block[16] = {0};
+    uint8_t nonce_counter[16];
+    std::memcpy(nonce_counter, iv, 16);
+    mbedtls_aes_crypt_ctr(&ctx, len, &nc_off, nonce_counter, stream_block, in, out);
+    mbedtls_aes_free(&ctx);
+}
+
+}  // namespace
+
+EtmResult encrypt_then_cmac_seal(uint32_t session_id, uint32_t node_nonce,
+                                 uint8_t hub_addr, uint8_t node_addr, bool downlink,
+                                 const framecrypto::EtmHeaderFields &fields,
+                                 const uint8_t *plain, size_t plain_len) {
+    EtmResult result;
+    result.ciphertext.resize(plain_len);
+
+    uint8_t k_enc[16];
+    derive_session_key(0x01, session_id, node_nonce, hub_addr, node_addr, k_enc);
+    uint8_t ctr_block[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(session_id, node_addr, downlink, fields.msgid,
+                                      /*block_idx=*/0, ctr_block);
+    ctr_crypt(k_enc, ctr_block, plain, plain_len, result.ciphertext.data());
+
+    uint8_t k_mac[16];
+    derive_session_key(0x02, session_id, node_nonce, hub_addr, node_addr, k_mac);
+    uint8_t prefix[framecrypto::kEtmPrefixBytes];
+    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(plain_len), prefix);
+    std::vector<uint8_t> mac_input(sizeof(prefix) + plain_len);
+    std::memcpy(mac_input.data(), prefix, sizeof(prefix));
+    std::memcpy(mac_input.data() + sizeof(prefix), result.ciphertext.data(), plain_len);
+    uint8_t full_tag[16];
+    cmac_full(k_mac, mac_input.data(), mac_input.size(), full_tag);
+    std::memcpy(result.tag, full_tag, framecrypto::kSessionCmacTagBytes);
+
+    return result;
+}
+
+std::optional<std::vector<uint8_t>>
+encrypt_then_cmac_open(uint32_t session_id, uint32_t node_nonce,
+                       uint8_t hub_addr, uint8_t node_addr, bool downlink,
+                       const framecrypto::EtmHeaderFields &fields,
+                       const uint8_t *cipher, size_t cipher_len,
+                       const uint8_t *tag, size_t tag_len) {
+    uint8_t k_mac[16];
+    derive_session_key(0x02, session_id, node_nonce, hub_addr, node_addr, k_mac);
+    uint8_t prefix[framecrypto::kEtmPrefixBytes];
+    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(cipher_len), prefix);
+    std::vector<uint8_t> mac_input(sizeof(prefix) + cipher_len);
+    std::memcpy(mac_input.data(), prefix, sizeof(prefix));
+    std::memcpy(mac_input.data() + sizeof(prefix), cipher, cipher_len);
+    uint8_t full_tag[16];
+    cmac_full(k_mac, mac_input.data(), mac_input.size(), full_tag);
+    if (tag_len > sizeof(full_tag) || std::memcmp(full_tag, tag, tag_len) != 0)
+        return std::nullopt;
+
+    uint8_t k_enc[16];
+    derive_session_key(0x01, session_id, node_nonce, hub_addr, node_addr, k_enc);
+    uint8_t ctr_block[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(session_id, node_addr, downlink, fields.msgid,
+                                      /*block_idx=*/0, ctr_block);
+    std::vector<uint8_t> plain(cipher_len);
+    ctr_crypt(k_enc, ctr_block, cipher, cipher_len, plain.data());
+    return plain;
+}
+
+void encrypt_then_cmac_retag(uint32_t session_id, uint32_t node_nonce,
+                             uint8_t hub_addr, uint8_t node_addr, bool downlink,
+                             const framecrypto::EtmHeaderFields &fields,
+                             const uint8_t *ciphertext, size_t ciphertext_len,
+                             uint8_t out_tag[framecrypto::kSessionCmacTagBytes]) {
+    uint8_t k_mac[16];
+    derive_session_key(0x02, session_id, node_nonce, hub_addr, node_addr, k_mac);
+    uint8_t prefix[framecrypto::kEtmPrefixBytes];
+    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(ciphertext_len), prefix);
+    std::vector<uint8_t> mac_input(sizeof(prefix) + ciphertext_len);
+    std::memcpy(mac_input.data(), prefix, sizeof(prefix));
+    std::memcpy(mac_input.data() + sizeof(prefix), ciphertext, ciphertext_len);
+    uint8_t full_tag[16];
+    cmac_full(k_mac, mac_input.data(), mac_input.size(), full_tag);
+    std::memcpy(out_tag, full_tag, framecrypto::kSessionCmacTagBytes);
 }
 
 // These delegate to the production header rather than re-deriving the layout.

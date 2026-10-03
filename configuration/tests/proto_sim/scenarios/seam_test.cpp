@@ -365,6 +365,20 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
     // yet encrypt, and confirming the session is what lets it go.
     rol.mark_session_confirmed_for_test();
 
+    // Tier 3: session_confirmed_ alone no longer means the hub can encrypt —
+    // it also needs K_enc/K_mac, derived only from the node's real
+    // session-opening uplink (handle_encrypted_'s sessionnonce check). Drive
+    // that uplink across the seam the same way BothSidesDeriveIdentical...
+    // does, or the GridSync below packs with no session keys and the hub
+    // drops it on the floor ("No session keys derived yet").
+    while (disp.runOneTxCommand()) {}
+    auto early_uplinks = lif.drain_tx_queue();
+    ASSERT_FALSE(early_uplinks.empty())
+        << "handleLogin's sendWakeBeacon() must have transmitted";
+    rol.set_response(early_uplinks.front().data(), early_uplinks.front().size());
+    ASSERT_EQ(rol.sessionGenerationForTest(), 1u)
+        << "the session-opening uplink must have derived the hub's session keys";
+
     // Now the grid. Encrypted, so it carries the key.
     rol.enable_timed_mode(true);
     const auto gridsync = lastDownlink();
@@ -623,6 +637,17 @@ TEST_F(Seam, ARealMacPingReachesANodeThatHoldsASession) {
     uint32_t nonce = 0;
     ASSERT_TRUE(disp.getBaseNonceForTest(1, nonce)) << "precondition: the node holds a session";
     rol.mark_session_confirmed_for_test();
+
+    // Tier 3: the ModeTest frame below is encrypted, which needs the hub's
+    // K_enc/K_mac — derived only from the node's real session-opening uplink,
+    // not from session_confirmed_ alone. See TheHubsRealBeaconVerifiesOnTheRealNode.
+    while (disp.runOneTxCommand()) {}
+    auto early_uplinks = lif.drain_tx_queue();
+    ASSERT_FALSE(early_uplinks.empty())
+        << "handleLogin's sendWakeBeacon() must have transmitted";
+    rol.set_response(early_uplinks.front().data(), early_uplinks.front().size());
+    ASSERT_EQ(rol.sessionGenerationForTest(), 1u)
+        << "the session-opening uplink must have derived the hub's session keys";
 
     // A ping is answered only while an AUTHENTICATED ModeTest is armed (the frames
     // a test measures need no session; arming does). Arm it the way the hub does:

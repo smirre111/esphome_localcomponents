@@ -146,29 +146,51 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
 
     auto* r = shim_hooks::active_radio();
     if (!r) return true;
-    proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode,
-                          std::vector<uint8_t>(data, data + len)};
-
-    // Production stamps LoraHeader.onMark in sendPacketBurst's per-copy
-    // re-stamp; mirrored here, or a seam test would deliver a placed frame the
-    // node refuses to measure. Same rule: never for an unplaced frame.
-    if (policy.on_mark && policy.earliest_us > 0) {
-        if (::LoraClientOperationMessage* m =
-                lora_client_operation_message__unpack(NULL, len, data)) {
-            if (m->header != nullptr) {
-                m->header->onmark = 1;
-                f.bytes.resize(lora_client_operation_message__get_packed_size(m));
-                lora_client_operation_message__pack(m, f.bytes.data());
-            }
-            lora_client_operation_message__free_unpacked(m, NULL);
-        }
-    }
 
     const int n = expand_bursts
                       ? (policy.copies > 0 ? policy.copies : default_copies)
                       : 1;
-    for (int i = 0; i < n; ++i)
+    for (int i = 0; i < n; ++i) {
+        std::vector<uint8_t> bytes(data, data + len);
+
+        // Production stamps LoraHeader.onMark, burstIndex/burstCount in
+        // sendPacketBurst's per-copy re-stamp, THEN (Tier 3) retags an
+        // encrypted frame's CMAC over those just-stamped fields —
+        // sendPacketBurst's own ciphertext/tag was only a placeholder at
+        // pack time. This shim never really bursts (expand_bursts is almost
+        // always false), but it still has to redo that retag once, or every
+        // encrypted downlink the shim sends fails CMAC on the other end.
+        if (::LoraClientOperationMessage* m =
+                lora_client_operation_message__unpack(NULL, len, data)) {
+            if (m->header != nullptr) {
+                if (policy.on_mark && policy.earliest_us > 0) {
+                    m->header->onmark = 1;
+                }
+                if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED &&
+                    m->encrypted != nullptr) {
+                    m->header->burstindex = i;
+                    m->header->burstcount = n;
+                    LORAClient *dest = nullptr;
+                    for (auto *c : clients_) {
+                        if (c->short_address_ == m->header->destaddress) {
+                            dest = c;
+                            break;
+                        }
+                    }
+                    if (dest == nullptr || !dest->sealBurstCopyTag(m->encrypted, m->header)) {
+                        lora_client_operation_message__free_unpacked(m, NULL);
+                        continue;   // drop this copy, matching production's skip_copy
+                    }
+                }
+                bytes.resize(lora_client_operation_message__get_packed_size(m));
+                lora_client_operation_message__pack(m, bytes.data());
+            }
+            lora_client_operation_message__free_unpacked(m, NULL);
+        }
+
+        proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode, bytes};
         r->send(f);
+    }
     return true;
 }
 

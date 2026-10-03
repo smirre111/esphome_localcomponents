@@ -38,6 +38,14 @@ namespace {
 
 constexpr uint64_t kMacRol2 = 0xE08CFE5F9EC4ULL;
 
+// Tier 3 (mac-separation-implementation-plan.md section 2(b)): the
+// deterministic node_nonce every session-establishing helper in this file
+// uses (attach_encrypted_login_ack, and anything built on drive_session()).
+// A real node mints this with esp_random(); a fixed, known value is what a
+// test needs to re-derive the same K_enc/K_mac later (e.g. decrypt_downlink
+// verifying what the hub sent).
+constexpr uint32_t kTestNodeNonce = 0xACE55001u;
+
 // Production initialises PSA Crypto in LORAListener::setup(). These scenarios
 // construct the listener directly and never call setup() (it would also restore
 // NVS and schedule its own logins, which each scenario controls itself), so PSA
@@ -65,30 +73,41 @@ void attach_encrypted_login_ack(proto_sim::SimRadio& radio,
 
         const uint32_t base_nonce = m->login.nonce;
         constexpr uint32_t kMsgId = 1;   // node's first post-login-reset tx
-
+        // Tier 3: this IS the session-opening uplink for this test's
+        // purposes (the real node's first post-login uplink is the wake
+        // beacon, which this simplified ack stands in for) — it must carry
+        // sessionNonce, or the hub never derives K_enc/K_mac and nothing
+        // past this point can decrypt.
         proto_sim::LoraClientResponseMessage inner;
         inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
         inner.header.destSubnet    = subnet;
         inner.header.senderAddress = node_addr;
         inner.header.msgId         = kMsgId;
+        inner.header.sessionNonce  = kTestNodeNonce;
         inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Avail;
         inner.avail.available      = true;
 
         // Payload-only plaintext (the inner header is stripped; the receiver
-        // uses the outer one), AAD from the outer header, IV from base||msgid.
+        // uses the outer one). Encrypt-then-CMAC seals once (CTR) and tags
+        // over the outer header's fields (burst/fire fields all 0/false —
+        // uplinks never burst) plus the ciphertext.
         auto plain = proto_sim::serialize_resp_payload(inner);
-        uint8_t aad[proto_sim::kHeaderAadLen];
-        proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
-                                    inner.header.senderAddress, inner.header.msgId, aad);
-        uint8_t iv[12];
-        proto_sim::derive_gcm_iv(base_nonce, kMsgId, iv);
-        auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
-                                              plain.data(), plain.size());
+        framecrypto::EtmHeaderFields fields{};
+        fields.downlink       = false;
+        fields.session_id     = base_nonce;
+        fields.dest_address   = inner.header.destAddress;
+        fields.dest_subnet    = inner.header.destSubnet;
+        fields.sender_address = inner.header.senderAddress;
+        fields.msgid          = inner.header.msgId;
+        auto enc = proto_sim::encrypt_then_cmac_seal(base_nonce, kTestNodeNonce,
+                                                     esphome::lora_tracker::kHubAddress, node_addr,
+                                                     /*downlink=*/false, fields,
+                                                     plain.data(), plain.size());
 
         proto_sim::LoraClientResponseMessage outer;
         outer.header               = inner.header;
         outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-        outer.encrypted.tag        = enc.tag;
+        outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
         outer.encrypted.ciphertext = enc.ciphertext;
 
         auto ack_bytes = proto_sim::serialize_resp(outer);
@@ -1037,21 +1056,57 @@ decrypt_downlink(const proto_sim::AirFrame& f, uint32_t base_nonce) {
     if (!outer || outer->cmd != proto_sim::LoraClientOperationMessage::Cmd::Encrypted)
         return std::nullopt;
 
-    // Downlink: the direction bit is OR'd into the nonce counter so hub->node
-    // and node->hub can never reuse an IV under the shared base nonce.
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv_downlink(base_nonce, outer->header.msgId, iv);
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(outer->header.destAddress, outer->header.destSubnet,
-                                outer->header.senderAddress, outer->header.msgId, aad);
+    // Tier 3: Encrypt-then-CMAC. node_addr is the destination (this is a
+    // downlink TO the node); node_nonce is the fixed value every
+    // session-establishing helper in this file used.
+    framecrypto::EtmHeaderFields fields{};
+    fields.downlink       = true;
+    fields.session_id     = base_nonce;
+    fields.dest_address   = outer->header.destAddress;
+    fields.dest_subnet    = outer->header.destSubnet;
+    fields.sender_address = outer->header.senderAddress;
+    fields.msgid          = outer->header.msgId;
+    fields.burst_index    = outer->header.burstIndex;
+    fields.burst_count    = outer->header.burstCount;
+    fields.on_mark        = outer->header.onMark;
+    fields.fire_stamped   = outer->header.fireStamped;
+    fields.fire_round     = outer->header.fireRound;
+    fields.fire_offset_us = outer->header.fireOffsetUs;
 
-    auto plain = proto_sim::aes_gcm_decrypt(iv, aad, sizeof(aad),
-                                            outer->encrypted.ciphertext.data(),
-                                            outer->encrypted.ciphertext.size(),
-                                            outer->encrypted.tag.data(),
-                                            outer->encrypted.tag.size());
+    auto plain = proto_sim::encrypt_then_cmac_open(
+        base_nonce, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
+        static_cast<uint8_t>(outer->header.destAddress), /*downlink=*/true, fields,
+        outer->encrypted.ciphertext.data(), outer->encrypted.ciphertext.size(),
+        outer->encrypted.tag.data(), outer->encrypted.tag.size());
     if (!plain) return std::nullopt;
     return proto_sim::deserialize_op(plain->data(), plain->size());
+}
+
+// Tier 3: seal an uplink the way the node would, post-session-establishment
+// (sessionNonce stays 0 — only the session-OPENING uplink carries it, and
+// every test using this has already gone through attach_encrypted_login_ack/
+// drive_session for that). Collects the boilerplate every "build a real
+// encrypted uplink by hand" test in this file repeats.
+proto_sim::EtmResult seal_uplink_like_node(uint32_t base_nonce,
+                                           const proto_sim::LoraHeader &header,
+                                           const std::vector<uint8_t> &plain) {
+    framecrypto::EtmHeaderFields fields{};
+    fields.downlink       = false;
+    fields.session_id     = base_nonce;
+    fields.dest_address   = header.destAddress;
+    fields.dest_subnet    = header.destSubnet;
+    fields.sender_address = header.senderAddress;
+    fields.msgid          = header.msgId;
+    fields.burst_index    = header.burstIndex;
+    fields.burst_count    = header.burstCount;
+    fields.on_mark        = header.onMark;
+    fields.fire_stamped   = header.fireStamped;
+    fields.fire_round     = header.fireRound;
+    fields.fire_offset_us = header.fireOffsetUs;
+    return proto_sim::encrypt_then_cmac_seal(
+        base_nonce, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
+        static_cast<uint8_t>(header.senderAddress), /*downlink=*/false, fields,
+        plain.data(), plain.size());
 }
 
 // Drive REGISTER -> login -> encrypted ACK, leaving the session confirmed.
@@ -1311,17 +1366,11 @@ TEST(RealLoraClient, ADecryptedBeaconIsWhatCarriesThePhaseReport) {
     inner.beacon.phase.timedRxActive = true;   // the node's own decision: in Mode B
 
     auto plain = proto_sim::serialize_resp_payload(inner);
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
-                                inner.header.senderAddress, inner.header.msgId, aad);
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
-    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
-                                          plain.data(), plain.size());
+    auto enc = seal_uplink_like_node(base, inner.header, plain);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
     outer.encrypted.ciphertext = enc.ciphertext;
     auto frame = proto_sim::serialize_resp(outer);
     rol.set_response(frame.data(), frame.size());
@@ -1508,17 +1557,11 @@ TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
     inner.avail.available      = true;
 
     auto plain = proto_sim::serialize_resp_payload(inner);
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
-                                inner.header.senderAddress, inner.header.msgId, aad);
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
-    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
-                                          plain.data(), plain.size());
+    auto enc = seal_uplink_like_node(base, inner.header, plain);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
     outer.encrypted.ciphertext = enc.ciphertext;
     auto real_frame = proto_sim::serialize_resp(outer);
     rol.set_response(real_frame.data(), real_frame.size());
@@ -1914,17 +1957,11 @@ TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
         bmsg.beacon.phase.samples    = 0;      // nothing measured yet this wake
 
         auto bplain = proto_sim::serialize_resp_payload(bmsg);
-        uint8_t baad[proto_sim::kHeaderAadLen];
-        proto_sim::build_header_aad(bmsg.header.destAddress, bmsg.header.destSubnet,
-                                    bmsg.header.senderAddress, bmsg.header.msgId, baad);
-        uint8_t biv[12];
-        proto_sim::derive_gcm_iv(base, bmsg.header.msgId, biv);
-        auto benc = proto_sim::aes_gcm_encrypt(biv, baad, sizeof(baad),
-                                               bplain.data(), bplain.size());
+        auto benc = seal_uplink_like_node(base, bmsg.header, bplain);
         proto_sim::LoraClientResponseMessage bouter;
         bouter.header               = bmsg.header;
         bouter.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-        bouter.encrypted.tag        = benc.tag;
+        bouter.encrypted.tag        = std::vector<uint8_t>(benc.tag, benc.tag + framecrypto::kSessionCmacTagBytes);
         bouter.encrypted.ciphertext = benc.ciphertext;
         auto bframe = proto_sim::serialize_resp(bouter);
         rol.set_response(bframe.data(), bframe.size());
@@ -1951,17 +1988,11 @@ TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
     inner.ack.phase.timedRxActive = true;   // the node's own decision: in Mode B
 
     auto plain = proto_sim::serialize_resp_payload(inner);
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
-                                inner.header.senderAddress, inner.header.msgId, aad);
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
-    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
-                                          plain.data(), plain.size());
+    auto enc = seal_uplink_like_node(base, inner.header, plain);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
     outer.encrypted.ciphertext = enc.ciphertext;
     auto frame = proto_sim::serialize_resp(outer);
     rol.set_response(frame.data(), frame.size());
@@ -2022,17 +2053,11 @@ TEST(RealLoraClient, AnAckWithNoPhaseReportLeavesTheBeliefAlone) {
     inner.ack.phasePresent     = false;
 
     auto plain = proto_sim::serialize_resp_payload(inner);
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
-                                inner.header.senderAddress, inner.header.msgId, aad);
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
-    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
-                                          plain.data(), plain.size());
+    auto enc = seal_uplink_like_node(base, inner.header, plain);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
     outer.encrypted.ciphertext = enc.ciphertext;
     auto frame = proto_sim::serialize_resp(outer);
     rol.set_response(frame.data(), frame.size());
@@ -2217,17 +2242,12 @@ void send_encrypted_uplink(LORAClient& listener, uint32_t base_nonce,
     inner.header.msgId         = msgid;
 
     auto plain = proto_sim::serialize_resp_payload(inner);
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
-                                inner.header.senderAddress, inner.header.msgId, aad);
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv_uplink(base_nonce, msgid, iv);
-    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad), plain.data(), plain.size());
+    auto enc = seal_uplink_like_node(base_nonce, inner.header, plain);
 
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
     outer.encrypted.ciphertext = enc.ciphertext;
 
     auto bytes = proto_sim::serialize_resp(outer);
@@ -3483,17 +3503,11 @@ TEST(PlacedDownlinks, ARefusedBaseNonceExchangeLeavesTheSessionWorking) {
     inner.beacon.phase.outsideGuard = 0;
 
     auto plain = proto_sim::serialize_resp_payload(inner);
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(inner.header.destAddress, inner.header.destSubnet,
-                                inner.header.senderAddress, inner.header.msgId, aad);
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv(base, inner.header.msgId, iv);
-    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad),
-                                          plain.data(), plain.size());
+    auto enc = seal_uplink_like_node(base, inner.header, plain);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = enc.tag;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
     outer.encrypted.ciphertext = enc.ciphertext;
     auto frame = proto_sim::serialize_resp(outer);
     h.rol.set_response(frame.data(), frame.size());
@@ -4293,16 +4307,24 @@ LoraClientOperationMessage *decrypt_downlink_real(const std::vector<uint8_t> &by
         lora_client_operation_message__free_unpacked(outer, nullptr);
         return nullptr;
     }
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv_downlink(base_nonce, outer->header->msgid, iv);
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(outer->header->destaddress, outer->header->destsubnet,
-                                outer->header->senderaddress, outer->header->msgid, aad);
-    auto plain = proto_sim::aes_gcm_decrypt(iv, aad, sizeof(aad),
-                                            outer->encrypted->ciphertext.data,
-                                            outer->encrypted->ciphertext.len,
-                                            outer->encrypted->tag.data,
-                                            outer->encrypted->tag.len);
+    framecrypto::EtmHeaderFields fields{};
+    fields.downlink       = true;
+    fields.session_id     = base_nonce;
+    fields.dest_address   = outer->header->destaddress;
+    fields.dest_subnet    = outer->header->destsubnet;
+    fields.sender_address = outer->header->senderaddress;
+    fields.msgid          = outer->header->msgid;
+    fields.burst_index    = outer->header->burstindex;
+    fields.burst_count    = outer->header->burstcount;
+    fields.on_mark        = outer->header->onmark;
+    fields.fire_stamped   = outer->header->firestamped;
+    fields.fire_round     = outer->header->fireround;
+    fields.fire_offset_us = outer->header->fireoffsetus;
+    auto plain = proto_sim::encrypt_then_cmac_open(
+        base_nonce, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
+        static_cast<uint8_t>(outer->header->destaddress), /*downlink=*/true, fields,
+        outer->encrypted->ciphertext.data, outer->encrypted->ciphertext.len,
+        outer->encrypted->tag.data, outer->encrypted->tag.len);
     if (out_msgid != nullptr)
         *out_msgid = outer->header->msgid;
     lora_client_operation_message__free_unpacked(outer, nullptr);

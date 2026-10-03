@@ -88,4 +88,45 @@ void compute_register_mic(uint64_t mac_addr, bool needs_config,
                           uint32_t dest, uint32_t subnet, uint32_t sender,
                           uint32_t msgid, uint8_t out[framecrypto::kSessionCmacTagBytes]);
 
+// ---------------------------------------------------------------------------
+// Tier 3: payload confidentiality/authenticity, replacing the AES-GCM
+// helpers above. Derives K_enc/K_mac the same way production does — via
+// AES-CMAC(K_root, framecrypto::buildSessionKeyKdfInput(...)) — from the
+// four values that determine them (session_id/node_nonce/hub_addr/
+// node_addr), so test scaffolding that knows those four values can build
+// or open a frame the real hub/node under test will actually accept.
+// ---------------------------------------------------------------------------
+
+struct EtmResult {
+    std::vector<uint8_t> ciphertext;
+    uint8_t tag[framecrypto::kSessionCmacTagBytes];
+};
+
+// Encrypts once (CTR, blockIdx 0) and tags over the given header fields —
+// mirrors Mac2::sealNew conceptually: one ciphertext, one tag, both derived
+// from the SAME (session_id, node_nonce, hub_addr, node_addr) the real
+// deriveSessionKeys_() on each side would use.
+EtmResult encrypt_then_cmac_seal(uint32_t session_id, uint32_t node_nonce,
+                                 uint8_t hub_addr, uint8_t node_addr, bool downlink,
+                                 const framecrypto::EtmHeaderFields &fields,
+                                 const uint8_t *plain, size_t plain_len);
+
+// Verifies the tag (constant-time, via PSA) THEN decrypts. Returns
+// std::nullopt on tag mismatch, mirroring aes_gcm_decrypt's shape.
+std::optional<std::vector<uint8_t>>
+encrypt_then_cmac_open(uint32_t session_id, uint32_t node_nonce,
+                       uint8_t hub_addr, uint8_t node_addr, bool downlink,
+                       const framecrypto::EtmHeaderFields &fields,
+                       const uint8_t *cipher, size_t cipher_len,
+                       const uint8_t *tag, size_t tag_len);
+
+// Recomputes ONLY the tag over the given (already-sealed) ciphertext and
+// header fields — for tests that build a burst copy the way the real
+// tracker's per-copy retagging does (LORAListener::sealBurstCopyTag()).
+void encrypt_then_cmac_retag(uint32_t session_id, uint32_t node_nonce,
+                             uint8_t hub_addr, uint8_t node_addr, bool downlink,
+                             const framecrypto::EtmHeaderFields &fields,
+                             const uint8_t *ciphertext, size_t ciphertext_len,
+                             uint8_t out_tag[framecrypto::kSessionCmacTagBytes]);
+
 } // namespace proto_sim

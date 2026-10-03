@@ -152,6 +152,9 @@ struct LoraHeader {
     bool     fireStamped{false};
     uint32_t fireRound{0};
     uint32_t fireOffsetUs{0};
+    // Tier 3 (mac-separation-implementation-plan.md section 2(b)): present
+    // only on the session-opening uplink (proto field 12), zero otherwise.
+    uint32_t sessionNonce{0};
 };
 
 struct LoraCoverOperation {

@@ -65,6 +65,17 @@ static psa_key_id_t s_k_auth_key_id = PSA_KEY_ID_NULL;
 static std::map<uint32_t, uint32_t> s_base_nonce_map;
 static std::mutex                   s_base_nonce_map_mutex;
 
+// Tier 3: per-peer K_enc/K_mac, mirroring s_base_nonce_map's shape — needed
+// because s_pack_operation_message() below is a free function (no `this`)
+// called from many sites that only know the destination address. The
+// authoritative copies live on the LORAListener itself
+// (k_enc_key_id_/k_mac_key_id_, written by deriveSessionKeys_()); these
+// maps are kept in sync with them at the same time, same reasoning as why
+// s_base_nonce_map exists alongside each listener's own session state.
+static std::map<uint32_t, psa_key_id_t> s_k_enc_map;
+static std::map<uint32_t, psa_key_id_t> s_k_mac_map;
+static std::mutex                       s_session_keys_mutex;
+
 // ---------------------------------------------------------------------------
 // Derive the 16-byte AES-GCM key via SHA-256("LoRaHome")[0:16].
 // Mirrors derive_aes_gcm_key() in BlindsESP CmdDispatcher.cpp.
@@ -373,36 +384,90 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
     return false;
   lora_client_operation_message__pack(&inner_msg, inner);
 
-  // Outer header mirrors the inner addressing + msgid.  AAD covers only these
-  // four header fields, so the tracker's burst re-stamping of burstIndex/
-  // burstCount does not invalidate the GCM tag.  Encryption is signalled by the
-  // `encrypted` oneof case, not a header flag.
+  // Outer header mirrors the inner addressing + msgid. Encryption is
+  // signalled by the `encrypted` oneof case, not a header flag.
+  //
+  // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
+  // Encrypt-then-CMAC replaces AES-GCM. The ciphertext is sealed ONCE,
+  // here, under K_enc via CTR; the tag written here is only a PLACEHOLDER —
+  // the real tag, which DOES cover burstIndex/burstCount/onMark/
+  // fireStamped/fireRound/fireOffsetUs, is computed per copy by
+  // LORAListener::sealBurstCopyTag() inside the tracker's send loop, once
+  // those fields are actually stamped.
   LoraHeader outer      = LORA_HEADER__INIT;
   outer.destaddress     = plain->header->destaddress;
   outer.destsubnet      = plain->header->destsubnet;
   outer.senderaddress   = plain->header->senderaddress;
   outer.msgid           = plain->header->msgid;
 
-  uint8_t  iv[12];
-  uint64_t counter = static_cast<uint64_t>(outer.msgid) | kDownlinkNonceFlag;
-  uint8_t  aad[20];
-  size_t   aad_len = 0;
-  uint8_t *cipher  = static_cast<uint8_t *>(malloc(inner_len));
-  uint8_t  tag[kAesGcmTagBytes];
-  if (!cipher ||
-      !s_derive_gcm_nonce(dest, counter, iv) ||
-      !s_build_header_aad(&outer, aad, &aad_len) ||
-      !s_encrypt_payload_gcm(iv, aad, aad_len, inner, inner_len, cipher, tag, kAesGcmTagBytes))
+  psa_key_id_t enc_key_id = PSA_KEY_ID_NULL;
+  {
+    std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+    auto it = s_k_enc_map.find(dest);
+    if (it != s_k_enc_map.end()) enc_key_id = it->second;
+  }
+  uint32_t session_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+    auto it = s_base_nonce_map.find(dest);
+    if (it != s_base_nonce_map.end()) session_id = it->second;
+  }
+  if (enc_key_id == PSA_KEY_ID_NULL || session_id == 0)
+  {
+    ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
+    free(inner);
+    return false;
+  }
+
+  uint8_t ctr_block[framecrypto::kCtrBlockBytes];
+  framecrypto::buildCtrInitialBlock(session_id, dest, /*downlink=*/true, outer.msgid,
+                                    /*block_idx=*/0, ctr_block);
+
+  uint8_t *cipher = static_cast<uint8_t *>(malloc(inner_len));
+  if (!cipher)
   {
     free(inner);
-    free(cipher);
     return false;
+  }
+  {
+    psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
+    bool ok = psa_cipher_encrypt_setup(&op, enc_key_id, PSA_ALG_CTR) == PSA_SUCCESS;
+    if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
+    size_t out_total = 0, part_len = 0;
+    if (ok)
+    {
+      ok = psa_cipher_update(&op, inner, inner_len, cipher, inner_len, &part_len) == PSA_SUCCESS;
+      out_total += part_len;
+    }
+    if (ok)
+    {
+      size_t finish_len = 0;
+      ok = psa_cipher_finish(&op, cipher + out_total, inner_len - out_total, &finish_len) == PSA_SUCCESS;
+      out_total += finish_len;
+      ok = ok && (out_total == inner_len);
+    }
+    else
+    {
+      psa_cipher_abort(&op);
+    }
+    if (!ok)
+    {
+      free(inner);
+      free(cipher);
+      return false;
+    }
   }
   free(inner);
 
+  // Placeholder tag — see the comment above. Must be the right LENGTH
+  // (kSessionCmacTagBytes) since sealBurstCopyTag() overwrites in place
+  // without resizing. lora_client_operation_message__pack() below copies
+  // these bytes into *out immediately, so this local's lifetime is fine.
+  uint8_t placeholder_tag[framecrypto::kSessionCmacTagBytes] = {0};
+
   EncryptedPayload enc     = ENCRYPTED_PAYLOAD__INIT;
-  enc.tag.data             = tag;
-  enc.tag.len              = kAesGcmTagBytes;
+  enc.tag.data             = placeholder_tag;
+  enc.tag.len              = sizeof(placeholder_tag);
   enc.ciphertext.data      = cipher;
   enc.ciphertext.len       = inner_len;
 
@@ -1524,9 +1589,65 @@ namespace esphome
       if (this->k_mac_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_mac_key_id_);
       this->k_enc_key_id_ = new_enc_id;
       this->k_mac_key_id_ = new_mac_id;
+      {
+        std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+        s_k_enc_map[this->short_address_] = new_enc_id;
+        s_k_mac_map[this->short_address_] = new_mac_id;
+      }
       ++this->session_generation_;
       ESP_LOGI(TAG, "[%s] Session keys derived (generation=%u)", this->get_name().c_str(),
                (unsigned) this->session_generation_);
+      return true;
+    }
+
+    bool LORAListener::sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header)
+    {
+      if (this->k_mac_key_id_ == PSA_KEY_ID_NULL || enc == nullptr || header == nullptr)
+        return false;
+
+      uint32_t session_id = 0;
+      {
+        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+        auto it = s_base_nonce_map.find(this->short_address_);
+        if (it == s_base_nonce_map.end()) return false;
+        session_id = it->second;
+      }
+
+      framecrypto::EtmHeaderFields etm{};
+      etm.downlink       = true;
+      etm.session_id     = session_id;
+      etm.dest_address   = header->destaddress;
+      etm.dest_subnet    = header->destsubnet;
+      etm.sender_address = header->senderaddress;
+      etm.msgid          = header->msgid;
+      etm.burst_index    = header->burstindex;
+      etm.burst_count    = header->burstcount;
+      etm.on_mark        = header->onmark;
+      etm.fire_stamped   = header->firestamped;
+      etm.fire_round     = header->fireround;
+      etm.fire_offset_us = header->fireoffsetus;
+
+      uint8_t prefix[framecrypto::kEtmPrefixBytes];
+      framecrypto::buildEtmCmacPrefix(etm, static_cast<uint16_t>(enc->ciphertext.len), prefix);
+
+      std::vector<uint8_t> mac_input(sizeof(prefix) + enc->ciphertext.len);
+      memcpy(mac_input.data(), prefix, sizeof(prefix));
+      memcpy(mac_input.data() + sizeof(prefix), enc->ciphertext.data, enc->ciphertext.len);
+
+      uint8_t tag[framecrypto::kSessionCmacTagBytes];
+      size_t tag_len = 0;
+      if (psa_mac_compute(this->k_mac_key_id_, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(tag)),
+                          mac_input.data(), mac_input.size(),
+                          tag, sizeof(tag), &tag_len) != PSA_SUCCESS ||
+          tag_len != sizeof(tag))
+        return false;
+
+      // enc->tag already has kSessionCmacTagBytes allocated (sealed at pack
+      // time with a placeholder) — overwrite in place, no resize.
+      if (enc->tag.data != nullptr && enc->tag.len == sizeof(tag))
+        memcpy(enc->tag.data, tag, sizeof(tag));
+      else
+        return false;
       return true;
     }
 
@@ -1546,8 +1667,6 @@ namespace esphome
         // The IV must equal base_nonce || (uint64_t)msgid; if it doesn't the
         // GCM tag will also fail, but checking up-front avoids the decrypt cost.
         uint32_t sender      = rcv_message->header ? rcv_message->header->senderaddress : 0;
-        uint64_t frame_counter = static_cast<uint64_t>(
-            rcv_message->header ? rcv_message->header->msgid : 0u);
 
         // If we don't have a base nonce for this peer (e.g. recovery after reboot),
         // re-provision one, send it, and discard this packet — the node will restart
@@ -1579,26 +1698,81 @@ namespace esphome
           return;
         }
 
-        // Lightweight format: the IV is NOT on the wire — derive it locally from
-        // base_nonce(peer) || (uint64) msgid.  If the sender used a different
-        // msgid/nonce the GCM tag verification below fails, so the old explicit
-        // IV memcmp is redundant.
-        uint8_t iv[12];
-        if (!s_derive_gcm_nonce(sender, frame_counter, iv))
+        // Tier 3 (mac-separation-implementation-plan.md section 2(b)): if
+        // this IS the session-opening uplink (sessionNonce present), derive
+        // K_enc/K_mac from it NOW, before the key-availability check below —
+        // otherwise the very first such frame would need the keys it exists
+        // to establish. Safe to do before verifying anything: deriving from
+        // a forged sessionNonce only ever produces a key under which THIS
+        // forged frame's own tag will fail to verify a moment later: it
+        // doesn't move any committed state and there's nothing to do with a
+        // wrong key the CMAC check right after doesn't immediately reject.
+        uint32_t session_id = 0;
         {
-          ESP_LOGE(TAG, "Failed to derive GCM nonce for peer %u", sender);
-          return;
+          std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+          session_id = s_base_nonce_map[sender];
+        }
+        if (rcv_message->header && rcv_message->header->sessionnonce != 0 &&
+            this->k_enc_key_id_ == PSA_KEY_ID_NULL)
+        {
+          this->deriveSessionKeys_(session_id, rcv_message->header->sessionnonce);
         }
 
-        uint8_t aad[20];
-        size_t aad_len = 0;
-        if (!s_build_header_aad(rcv_message->header, aad, &aad_len))
+        // Encrypt-then-CMAC replaces AES-GCM. Verify the tag BEFORE
+        // decrypting — a tampered ciphertext or header field fails the
+        // check without ever running the cipher over attacker-controlled
+        // bytes. Node uplinks never burst, so burstIndex/burstCount/
+        // onMark/fireStamped/fireRound/fireOffsetUs are always 0/false on
+        // this path (whatever the node actually sealed).
+        if (this->k_enc_key_id_ == PSA_KEY_ID_NULL || this->k_mac_key_id_ == PSA_KEY_ID_NULL)
         {
-          ESP_LOGE(TAG, "Failed to build AAD for encrypted response");
+          ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", sender);
           return;
         }
 
         size_t cipher_len = enc->ciphertext.len;
+
+        framecrypto::EtmHeaderFields etm{};
+        etm.downlink       = false;
+        etm.session_id     = session_id;
+        etm.dest_address   = rcv_message->header ? rcv_message->header->destaddress   : 0;
+        etm.dest_subnet    = rcv_message->header ? rcv_message->header->destsubnet    : 0;
+        etm.sender_address = sender;
+        etm.msgid          = rcv_message->header ? rcv_message->header->msgid         : 0;
+        etm.burst_index    = rcv_message->header ? rcv_message->header->burstindex    : 0;
+        etm.burst_count    = rcv_message->header ? rcv_message->header->burstcount    : 0;
+        etm.on_mark        = rcv_message->header ? rcv_message->header->onmark        : false;
+        etm.fire_stamped   = rcv_message->header ? rcv_message->header->firestamped   : false;
+        etm.fire_round     = rcv_message->header ? rcv_message->header->fireround     : 0;
+        etm.fire_offset_us = rcv_message->header ? rcv_message->header->fireoffsetus  : 0;
+
+        uint8_t cmac_prefix[framecrypto::kEtmPrefixBytes];
+        framecrypto::buildEtmCmacPrefix(etm, static_cast<uint16_t>(cipher_len), cmac_prefix);
+
+        uint8_t *mac_input = static_cast<uint8_t *>(malloc(sizeof(cmac_prefix) + cipher_len));
+        if (!mac_input)
+        {
+          ESP_LOGE(TAG, "Memory allocation failed for MAC input");
+          return;
+        }
+        memcpy(mac_input, cmac_prefix, sizeof(cmac_prefix));
+        memcpy(mac_input + sizeof(cmac_prefix), enc->ciphertext.data, cipher_len);
+
+        const bool mac_ok = psa_mac_verify(this->k_mac_key_id_,
+                                           PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, enc->tag.len),
+                                           mac_input, sizeof(cmac_prefix) + cipher_len,
+                                           enc->tag.data, enc->tag.len) == PSA_SUCCESS;
+        free(mac_input);
+        if (!mac_ok)
+        {
+          ESP_LOGE(TAG, "Encrypt-then-CMAC verification failed");
+          return;
+        }
+
+        uint8_t ctr_block[framecrypto::kCtrBlockBytes];
+        framecrypto::buildCtrInitialBlock(session_id, sender, /*downlink=*/false,
+                                          etm.msgid, /*block_idx=*/0, ctr_block);
+
         uint8_t *plaintext = static_cast<uint8_t *>(malloc(cipher_len));
         if (!plaintext)
         {
@@ -1606,46 +1780,42 @@ namespace esphome
           return;
         }
 
-        if (!s_decrypt_payload_gcm(nullptr,        // key unused — PSA slot used instead
-                                 iv,
-                                 aad,
-                                 aad_len,
-                                 enc->ciphertext.data,
-                                 cipher_len,
-                                 enc->tag.data,
-                                 enc->tag.len,
-                                 plaintext))
         {
-          ESP_LOGE(TAG, "AES-GCM decryption/authentication failed");
-          free(plaintext);
-          return;
+          psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
+          bool ok = psa_cipher_decrypt_setup(&op, this->k_enc_key_id_, PSA_ALG_CTR) == PSA_SUCCESS;
+          if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
+          size_t out_total = 0, part_len = 0;
+          if (ok)
+          {
+            ok = psa_cipher_update(&op, enc->ciphertext.data, cipher_len, plaintext, cipher_len, &part_len) == PSA_SUCCESS;
+            out_total += part_len;
+          }
+          if (ok)
+          {
+            size_t finish_len = 0;
+            ok = psa_cipher_finish(&op, plaintext + out_total, cipher_len - out_total, &finish_len) == PSA_SUCCESS;
+            out_total += finish_len;
+            ok = ok && (out_total == cipher_len);
+          }
+          else
+          {
+            psa_cipher_abort(&op);
+          }
+          if (!ok)
+          {
+            ESP_LOGE(TAG, "CTR decryption failed despite a verified CMAC — this should never happen");
+            free(plaintext);
+            return;
+          }
         }
 
         // The tag verified: this frame is the node's, so its msgid is real and
         // the replay counter may finally move.
         this->commit_rx_msgid_(rcv_message);
 
-        // Tier 3 (mac-separation-implementation-plan.md section 2(b), step
-        // 3): this is the session-opening uplink if it carries a nonzero
-        // sessionNonce — present on exactly one frame per session. Derive
-        // K_enc/K_mac from it now. Gated on the GCM tag just having
-        // verified above, so this isn't acted on from an unauthenticated
-        // frame; a real CMAC-covered sessionNonce is the eventual
-        // replacement once Encrypt-then-CMAC lands.
-        if (rcv_message->header && rcv_message->header->sessionnonce != 0)
-        {
-          uint32_t session_id = 0;
-          {
-            std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-            auto it = s_base_nonce_map.find(sender);
-            if (it != s_base_nonce_map.end()) session_id = it->second;
-          }
-          if (session_id != 0 &&
-              !this->deriveSessionKeys_(session_id, rcv_message->header->sessionnonce))
-          {
-            ESP_LOGE(TAG, "[%s] Session key derivation failed", this->get_name().c_str());
-          }
-        }
+        // (Session keys, if this was the session-opening uplink, were
+        // already derived earlier in this function — before the CMAC
+        // verify above needed them. See the comment there.)
 
         // A successful decrypt proves the node holds the matching base nonce —
         // the encrypted session is confirmed both ways.  Only now do we treat

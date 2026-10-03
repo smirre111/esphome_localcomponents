@@ -106,7 +106,7 @@ both standard on Ubuntu 24.04.
   itself compiles. The on-air format is byte-identical to production.
 * `sim/crypto.{h,cpp}` provides AES-GCM-128 / SHA-256 via mbedtls — the
   same library the on-device PSA Crypto layer wraps. The pinned
-  `SHA-256("LoRaKey1")[0:16]` test would fail if the key string drifted.
+  `SHA-256("LoRaHome")[0:16]` test would fail if the key string drifted.
 * Encrypted path: `NodeModel::send_resp_` encrypts when `peer_base_` is
   populated, `HubListener::on_frame` unwraps the `EncryptedPayload`
   envelope, validates IV against the stored base nonce, decrypts, and

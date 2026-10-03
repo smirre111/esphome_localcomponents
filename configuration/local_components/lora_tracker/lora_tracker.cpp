@@ -1197,8 +1197,37 @@ namespace esphome
             burstMsg->header->fireoffsetus = offset;
           }
 
-          size_t clen  = lora_client_operation_message__get_packed_size(burstMsg);
-          uint8_t *cbuf = static_cast<uint8_t *>(malloc(clen));
+          // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
+          // the ciphertext was sealed ONCE, at pack time; the tag was only
+          // a placeholder then, because it must cover THIS copy's just-
+          // stamped burstIndex/burstCount/onMark/fireStamped/fireRound/
+          // fireOffsetUs — fields that do not exist until this point in
+          // the loop. Recompute it now, per copy, right before packing.
+          // A copy whose session has no keys (or has gone stale) is
+          // dropped rather than sent half-sealed.
+          bool skip_copy = false;
+          if (burstMsg->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED &&
+              burstMsg->encrypted != nullptr)
+          {
+            LORAClient *dest_client = nullptr;
+            for (auto *c : this->clients_)
+            {
+              if (c->short_address_ == burstMsg->header->destaddress)
+              {
+                dest_client = c;
+                break;
+              }
+            }
+            if (dest_client == nullptr ||
+                !dest_client->sealBurstCopyTag(burstMsg->encrypted, burstMsg->header))
+            {
+              ESP_LOGW(TAG, "Could not seal copy %d's tag (no session?) — dropping this copy", cnt);
+              skip_copy = true;
+            }
+          }
+
+          size_t clen  = skip_copy ? 0 : lora_client_operation_message__get_packed_size(burstMsg);
+          uint8_t *cbuf = skip_copy ? nullptr : static_cast<uint8_t *>(malloc(clen));
           if (cbuf)
           {
             lora_client_operation_message__pack(burstMsg, cbuf);
@@ -1226,11 +1255,17 @@ namespace esphome
                        (unsigned) this->tx_stamp_misses_);
             }
           }
-          else
+          else if (!skip_copy && burstMsg->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED)
           {
-            // OOM fallback: unindexed copy, still placed.
+            // OOM fallback: unindexed copy, still placed. Plaintext only —
+            // an encrypted frame's `data`/`len` still carry the placeholder
+            // tag from pack time (sealBurstCopyTag never ran on them), so
+            // sending them raw would ship an unverifiable frame instead of
+            // dropping it.
             this->sendPacketAt(data, len, copy_at_us);
           }
+          // else: deliberately dropped (sealing failed, or OOM on an
+          // encrypted copy) — counted via the warning log above, not sent.
         }
         else
         {

@@ -42,10 +42,6 @@ extern "C" {
 #include "GridState.h"
 #include "NodeClock.h"   // settledFlagForTest: the boot-minute anchor tests
 
-using proto_sim::aes_gcm_decrypt;
-using proto_sim::derive_gcm_iv;
-using proto_sim::build_header_aad;
-
 namespace {
 
 // The hub is peer 1 in production ("CMD_LOGIN from peer 1"), NOT 0xFF.
@@ -973,12 +969,31 @@ TEST_F(RealNodeFixture, DecryptedDownlinkProvesSessionEndToEnd) {
     std::vector<uint8_t> plain(plain_len);
     lora_client_operation_message__pack(&inner, plain.data());
 
+    // Tier 3: this test drives a REAL LOGIN into the real node above, so the
+    // node derived its own node_nonce via esp_random() — unobservable from
+    // here. Ask the node to seal under its own CURRENT session keys instead
+    // of trying to re-derive them (ctrEncryptForTest/cmacComputeForTest);
+    // session_id is the hub_nonce the LOGIN above carried (kNonce).
     constexpr uint32_t kMsgId = 2;
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(kNodeAddr, kSubnet, kHubAddr, kMsgId, aad);
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv_downlink(kNonce, kMsgId, iv);
-    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad), plain.data(), plain.size());
+    uint8_t ctr_iv[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(kNonce, kNodeAddr, /*downlink=*/true, kMsgId,
+                                      /*block_idx=*/0, ctr_iv);
+    std::vector<uint8_t> ciphertext(plain.size());
+    ASSERT_TRUE(disp.ctrEncryptForTest(ctr_iv, plain.data(), plain.size(), ciphertext.data()));
+
+    framecrypto::EtmHeaderFields fields{};
+    fields.downlink       = true;
+    fields.session_id     = kNonce;
+    fields.dest_address   = kNodeAddr;
+    fields.dest_subnet    = kSubnet;
+    fields.sender_address = kHubAddr;
+    fields.msgid          = kMsgId;
+    uint8_t prefix[framecrypto::kEtmPrefixBytes];
+    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(ciphertext.size()), prefix);
+    std::vector<uint8_t> mac_input(prefix, prefix + sizeof(prefix));
+    mac_input.insert(mac_input.end(), ciphertext.begin(), ciphertext.end());
+    uint8_t tag[framecrypto::kSessionCmacTagBytes];
+    ASSERT_TRUE(disp.cmacComputeForTest(mac_input.data(), mac_input.size(), tag, sizeof(tag)));
 
     LoraClientOperationMessage outer = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     LoraHeader hdr = LORA_HEADER__INIT;
@@ -988,10 +1003,10 @@ TEST_F(RealNodeFixture, DecryptedDownlinkProvesSessionEndToEnd) {
     hdr.msgid         = kMsgId;
     outer.header      = &hdr;
     EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
-    ep.tag.data        = enc.tag.data();
-    ep.tag.len         = enc.tag.size();
-    ep.ciphertext.data = enc.ciphertext.data();
-    ep.ciphertext.len  = enc.ciphertext.size();
+    ep.tag.data        = tag;
+    ep.tag.len         = sizeof(tag);
+    ep.ciphertext.data = ciphertext.data();
+    ep.ciphertext.len  = ciphertext.size();
     outer.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
     outer.encrypted = &ep;
 
@@ -3966,17 +3981,42 @@ beacon_mac(uint32_t key_id, uint32_t round, uint32_t slot, uint32_t mask,
 // Wrap an operation message as an encrypted downlink from the hub. Same
 // construction as DecryptedDownlinkProvesSessionEndToEnd, hoisted so more than
 // one test can reach the authenticated handlers.
-std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgid,
-                                uint32_t nonce = kMtNonce) {
+// Tier 3: `nonce` is the LOGIN's hub_nonce (== session_id); the node derived
+// its own node_nonce via esp_random() when it accepted that LOGIN, which this
+// helper cannot know. So it asks the already-logged-in `disp` to seal under
+// its own CURRENT session keys instead of re-deriving them — same trick as
+// DecryptedDownlinkProvesSessionEndToEnd above. `disp` must already hold a
+// session from a LOGIN carrying hub_nonce == `nonce`.
+std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, LoraClientOperationMessage &inner,
+                                uint32_t msgid, uint32_t nonce = kMtNonce) {
     size_t plain_len = lora_client_operation_message__get_packed_size(&inner);
     std::vector<uint8_t> plain(plain_len);
     lora_client_operation_message__pack(&inner, plain.data());
 
-    uint8_t aad[proto_sim::kHeaderAadLen];
-    proto_sim::build_header_aad(kNodeAddr, kSubnet, kHubAddr, msgid, aad);
-    uint8_t iv[12];
-    proto_sim::derive_gcm_iv_downlink(nonce, msgid, iv);
-    auto enc = proto_sim::aes_gcm_encrypt(iv, aad, sizeof(aad), plain.data(), plain.size());
+    uint8_t ctr_iv[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(nonce, kNodeAddr, /*downlink=*/true, msgid,
+                                      /*block_idx=*/0, ctr_iv);
+    std::vector<uint8_t> ciphertext(plain.size());
+    if (!disp.ctrEncryptForTest(ctr_iv, plain.data(), plain.size(), ciphertext.data())) {
+        ADD_FAILURE() << "encrypt_op: no session keys on disp (missing/mismatched LOGIN?)";
+    }
+
+    framecrypto::EtmHeaderFields fields{};
+    fields.downlink       = true;
+    fields.session_id     = nonce;
+    fields.dest_address   = kNodeAddr;
+    fields.dest_subnet    = kSubnet;
+    fields.sender_address = kHubAddr;
+    fields.msgid          = msgid;
+    fields.on_mark        = true;   // placed, as the hub places a session downlink
+    uint8_t prefix[framecrypto::kEtmPrefixBytes];
+    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(ciphertext.size()), prefix);
+    std::vector<uint8_t> mac_input(prefix, prefix + sizeof(prefix));
+    mac_input.insert(mac_input.end(), ciphertext.begin(), ciphertext.end());
+    uint8_t tag[framecrypto::kSessionCmacTagBytes];
+    if (!disp.cmacComputeForTest(mac_input.data(), mac_input.size(), tag, sizeof(tag))) {
+        ADD_FAILURE() << "encrypt_op: no session keys on disp (missing/mismatched LOGIN?)";
+    }
 
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = kNodeAddr;
@@ -3986,10 +4026,10 @@ std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgi
     hdr.onmark        = true;   // placed, as the hub places a session downlink
 
     EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
-    ep.tag.data        = enc.tag.data();
-    ep.tag.len         = enc.tag.size();
-    ep.ciphertext.data = enc.ciphertext.data();
-    ep.ciphertext.len  = enc.ciphertext.size();
+    ep.tag.data        = tag;
+    ep.tag.len         = sizeof(tag);
+    ep.ciphertext.data = ciphertext.data();
+    ep.ciphertext.len  = ciphertext.size();
 
     LoraClientOperationMessage outer = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     outer.header    = &hdr;
@@ -4002,7 +4042,7 @@ std::vector<uint8_t> encrypt_op(LoraClientOperationMessage &inner, uint32_t msgi
     return frame;
 }
 
-std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
+std::vector<uint8_t> encrypted_mode_test(CmdDispatcher &disp, ModeTest__Mode mode, uint32_t msgid,
                                          uint32_t grid_period_ms = 1093,
                                          uint32_t seq = 0,
                                          int32_t arm_offset_us = 0,
@@ -4030,14 +4070,14 @@ std::vector<uint8_t> encrypted_mode_test(ModeTest__Mode mode, uint32_t msgid,
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
     inner.modetest = &mt;
-    return encrypt_op(inner, msgid);
+    return encrypt_op(disp, inner, msgid);
 }
 
 // A ModeTest that leaves the power-profile field at its proto3 default — the
 // frame a sender that has never heard of the field produces. That used to mean
 // "pin the CPU at 240 MHz with light sleep off", which is the opposite of what
 // the field's own comment promised.
-std::vector<uint8_t> encrypted_mode_test_default_profile(uint32_t msgid) {
+std::vector<uint8_t> encrypted_mode_test_default_profile(CmdDispatcher &disp, uint32_t msgid) {
     ModeTest mt = MODE_TEST__INIT;
     mt.enable       = true;
     mt.durations    = 60;
@@ -4048,20 +4088,20 @@ std::vector<uint8_t> encrypted_mode_test_default_profile(uint32_t msgid) {
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
     inner.modetest = &mt;
-    return encrypt_op(inner, msgid);
+    return encrypt_op(disp, inner, msgid);
 }
 
 // The hub's real "ModeTest OFF" frame — the path that restores the node's mode.
-std::vector<uint8_t> encrypted_mode_test_off(uint32_t msgid) {
+std::vector<uint8_t> encrypted_mode_test_off(CmdDispatcher &disp, uint32_t msgid) {
     ModeTest mt = MODE_TEST__INIT;
     mt.enable = false;
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
     inner.modetest = &mt;
-    return encrypt_op(inner, msgid);
+    return encrypt_op(disp, inner, msgid);
 }
 
-std::vector<uint8_t> encrypted_grid_sync(uint32_t slot, uint32_t msgid,
+std::vector<uint8_t> encrypted_grid_sync(CmdDispatcher &disp, uint32_t slot, uint32_t msgid,
                                         bool with_key = false,
                                         bool enable = true) {
     GridSync gs = GRID_SYNC__INIT;
@@ -4086,7 +4126,7 @@ std::vector<uint8_t> encrypted_grid_sync(uint32_t slot, uint32_t msgid,
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
     inner.gridsync = &gs;
-    return encrypt_op(inner, msgid);
+    return encrypt_op(disp, inner, msgid);
 }
 
 }  // namespace
@@ -4095,7 +4135,7 @@ TEST_F(RealNodeFixture, ModeTestBActuallyPutsTheNodeInTimedRx) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
 
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active) << "the grid must adopt before B is armable";
     ASSERT_TRUE(disp.isSessionProven());
@@ -4103,7 +4143,7 @@ TEST_F(RealNodeFixture, ModeTestBActuallyPutsTheNodeInTimedRx) {
     // Adopting the grid already enables timed RX, so prove the handler is what
     // sets it rather than inheriting a true it never wrote: put the node back
     // in Mode A first, through the same handler.
-    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/3);
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/3);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_TRUE(disp.modeTestActive());
     EXPECT_FALSE(disp.timedRxEnabledForTest())
@@ -4112,12 +4152,12 @@ TEST_F(RealNodeFixture, ModeTestBActuallyPutsTheNodeInTimedRx) {
 
     // Stopped through the hub's own OFF frame, not a test hook: the restore is
     // the half that was already written, and it is what puts Mode A back.
-    auto off = encrypted_mode_test_off(/*msgid=*/4);
+    auto off = encrypted_mode_test_off(disp, /*msgid=*/4);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
     ASSERT_FALSE(disp.modeTestActive());
     ASSERT_TRUE(disp.timedRxEnabledForTest()) << "the restore puts the grid's mode back";
 
-    auto b = encrypted_mode_test(MODE_TEST__MODE__MODE_B, /*msgid=*/5);
+    auto b = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_B, /*msgid=*/5);
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
     ASSERT_TRUE(disp.modeTestActive());
     EXPECT_TRUE(disp.timedRxEnabledForTest());
@@ -4167,10 +4207,10 @@ std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid
 // on or off. crypto_on defaults false: most of the tests below are about the
 // ping/counter mechanics, not encryption, and MAC-2 off is the baseline they
 // were written against.
-void holdSessionAndArmTest(NodeProbe &disp, bool counter_on, bool crypto_on = false) {
+void holdSessionAndArmTest(CmdDispatcher &disp, bool counter_on, bool crypto_on = false) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, 0, counter_on,
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, 0, counter_on,
                                  /*mac_echo=*/true, crypto_on);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
 }
@@ -4178,8 +4218,8 @@ void holdSessionAndArmTest(NodeProbe &disp, bool counter_on, bool crypto_on = fa
 // An encrypted MAC ping, built the way a hub with MAC-2 on would send one:
 // the WHOLE operation message (header included) sealed under CMD_ENCRYPTED,
 // exactly like encrypt_op wraps any other command.
-std::vector<uint8_t> build_mac_ping_encrypted(uint32_t seq, bool want_echo, uint32_t msgid,
-                                              uint32_t nonce = kMtNonce) {
+std::vector<uint8_t> build_mac_ping_encrypted(CmdDispatcher &disp, uint32_t seq, bool want_echo,
+                                              uint32_t msgid, uint32_t nonce = kMtNonce) {
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind     = MAC_CONTROL__KIND__MAC_PING;
     mc.seq      = seq;
@@ -4188,7 +4228,7 @@ std::vector<uint8_t> build_mac_ping_encrypted(uint32_t seq, bool want_echo, uint
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
     inner.maccontrol = &mc;
-    return encrypt_op(inner, msgid, nonce);
+    return encrypt_op(disp, inner, msgid, nonce);
 }
 
 }  // namespace
@@ -4246,7 +4286,7 @@ TEST_F(RealNodeFixture, AnEncryptedPingIsAnsweredWhenMac2IsOn) {
     holdSessionAndArmTest(disp, /*counter_on=*/false, /*crypto_on=*/true);
     ASSERT_TRUE(disp.macSublayers().crypto_enabled);
 
-    auto ping = build_mac_ping_encrypted(/*seq=*/1, /*want_echo=*/true, /*msgid=*/500);
+    auto ping = build_mac_ping_encrypted(disp, /*seq=*/1, /*want_echo=*/true, /*msgid=*/500);
     disp.onReceiveNew(ping.data(), static_cast<int>(ping.size()));
     EXPECT_EQ(disp.macCounters().ping_rx, 1u) << "an encrypted ping must be accepted";
     EXPECT_EQ(disp.macCounters().echo_tx, 1u) << "and answered";
@@ -4266,7 +4306,7 @@ TEST_F(RealNodeFixture, APlaintextPingIsStillAnsweredWithMac2Off) {
 
 TEST_F(RealNodeFixture, ThePingExemptionEndsWithTheTest) {
     holdSessionAndArmTest(disp, /*counter_on=*/false);
-    auto off = encrypted_mode_test_off(/*msgid=*/3);
+    auto off = encrypted_mode_test_off(disp, /*msgid=*/3);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
     ASSERT_FALSE(disp.modeTestActive());
 
@@ -4341,9 +4381,9 @@ TEST_F(RealNodeFixture, ThePingSequenceRestartsWithEachTest) {
     disp.onReceiveNew(p9.data(), static_cast<int>(p9.size()));
     ASSERT_EQ(disp.macCounters().ping_rx, 1u);
 
-    auto off = encrypted_mode_test_off(/*msgid=*/3);
+    auto off = encrypted_mode_test_off(disp, /*msgid=*/3);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
-    auto a = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, 0, true, true,
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, 0, true, true,
                                  /*crypto=*/false);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_TRUE(disp.modeTestActive());
@@ -4385,7 +4425,7 @@ TEST_F(RealNodeFixture, AModeTestClampsTheReceivePathTagsToWarn) {
 TEST_F(RealNodeFixture, TheLogLevelsComeBackWhenTheTestStops) {
     proto_sim_log_levels().clear();
     holdSessionAndArmTest(disp, /*counter_on=*/false);
-    auto off = encrypted_mode_test_off(/*msgid=*/3);
+    auto off = encrypted_mode_test_off(disp, /*msgid=*/3);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
     ASSERT_FALSE(disp.modeTestActive());
     for (const char *tag : {"CmdDispatcher", "LoraInterface", "frtosTasks"})
@@ -4432,11 +4472,11 @@ TEST_F(RealNodeFixture, ASweepsOwnMissedMarksNeitherCountNorDemote) {
 
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active) << "a sweep needs an anchor to mis-arm against";
 
-    auto sweep = encrypted_mode_test(MODE_TEST__MODE__MODE_SWEEP, /*msgid=*/3,
+    auto sweep = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_SWEEP, /*msgid=*/3,
                                      /*grid_period_ms=*/1093, /*seq=*/0,
                                      /*arm_offset_us=*/12000);
     disp.onReceiveNew(sweep.data(), static_cast<int>(sweep.size()));
@@ -4467,11 +4507,11 @@ TEST_F(RealNodeFixture, AnOrdinaryTimedRunStillCountsItsMissedMarks) {
 
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
 
-    auto b = encrypted_mode_test(MODE_TEST__MODE__MODE_B, /*msgid=*/3);
+    auto b = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_B, /*msgid=*/3);
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
     ASSERT_TRUE(disp.modeTestActive());
 
@@ -4506,12 +4546,12 @@ TEST_F(RealNodeFixture, ModeTestBIsRefusedWithNoGridRatherThanMislabelled) {
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
     inner.timesync = &ts;
-    auto tsf = encrypt_op(inner, /*msgid=*/2);
+    auto tsf = encrypt_op(disp, inner, /*msgid=*/2);
     disp.onReceiveNew(tsf.data(), static_cast<int>(tsf.size()));
     ASSERT_TRUE(disp.isSessionProven());
     ASSERT_FALSE(disp.gridState().active);
 
-    auto b = encrypted_mode_test(MODE_TEST__MODE__MODE_B, /*msgid=*/3);
+    auto b = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_B, /*msgid=*/3);
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
 
     EXPECT_FALSE(disp.modeTestActive()) << "no grid, no Mode B measurement";
@@ -4524,11 +4564,11 @@ TEST_F(RealNodeFixture, ModeTestCIsRefusedBecauseTheHandlerCannotApplyIt) {
     // produced a report labelled mode = 3 over a run that never left Mode A.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.isSessionProven());
 
-    auto c = encrypted_mode_test(MODE_TEST__MODE__MODE_C, /*msgid=*/3);
+    auto c = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_C, /*msgid=*/3);
     disp.onReceiveNew(c.data(), static_cast<int>(c.size()));
 
     EXPECT_FALSE(disp.modeTestActive());
@@ -4884,7 +4924,7 @@ TEST_F(RealNodeFixture, TheFleetKeyIsAdoptedOnlyFromAnAuthenticatedGridSync) {
     // carries the key.
     auto login = pack_login_op(/*msgid=*/602, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto enc = encrypted_grid_sync(/*slot=*/4, /*msgid=*/603, /*with_key=*/true);
+    auto enc = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/603, /*with_key=*/true);
     disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
 
     ASSERT_TRUE(disp.gridState().active);
@@ -4895,7 +4935,7 @@ TEST_F(RealNodeFixture, TheFleetKeyIsAdoptedOnlyFromAnAuthenticatedGridSync) {
 TEST_F(RealNodeFixture, AWithdrawnGridKeepsTheFleetKey) {
     auto login = pack_login_op(/*msgid=*/610, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto enc = encrypted_grid_sync(4, 611, /*with_key=*/true);
+    auto enc = encrypted_grid_sync(disp, 4, 611, /*with_key=*/true);
     disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
     ASSERT_TRUE(disp.hasNetKey());
 
@@ -4912,7 +4952,7 @@ TEST_F(RealNodeFixture, AWithdrawnGridKeepsTheFleetKey) {
     // Encrypted, and that is not incidental: once a node holds a session the
     // plaintext gate refuses every non-LOGIN, non-beacon, non-demote frame, so
     // a plaintext GridSync never reaches this handler at all.
-    auto off = encrypted_grid_sync(/*slot=*/4, /*msgid=*/612, /*with_key=*/false,
+    auto off = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/612, /*with_key=*/false,
                                    /*enable=*/false);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
     EXPECT_FALSE(disp.gridState().active) << "the grid goes";
@@ -4962,7 +5002,7 @@ TEST_F(RealNodeFixture, APlaintextGridDemoteIsAcceptedEvenWithASession) {
     // restarted and holds no session to encrypt with.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_TRUE(disp.isSessionProven()) << "precondition: the gate is armed";
@@ -4983,7 +5023,7 @@ TEST_F(RealNodeFixture, AGridDemoteMayNotStripTheFleetKey) {
     // close. Strictly an escalation, not a denial of service.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.hasNetKey());
 
@@ -5003,7 +5043,7 @@ TEST_F(RealNodeFixture, AGridDemoteAddressedToOneNodeIsRefused) {
     // it does not yet know which nodes exist.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
 
@@ -5021,14 +5061,14 @@ TEST_F(RealNodeFixture, AGridDemoteDoesNotRatchetTheReplayCounter) {
     // login.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
 
     auto demote = build_grid_demote();
     disp.onReceiveNew(demote.data(), static_cast<int>(demote.size()));
 
     // An ordinary encrypted command with the NEXT msgid must still be accepted.
-    auto gs2 = encrypted_grid_sync(/*slot=*/4, /*msgid=*/3, /*with_key=*/true);
+    auto gs2 = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/3, /*with_key=*/true);
     disp.onReceiveNew(gs2.data(), static_cast<int>(gs2.size()));
     EXPECT_TRUE(disp.gridState().active)
         << "the demote must not have moved the rx counter";
@@ -5040,7 +5080,7 @@ TEST_F(RealNodeFixture, AKeyedNodeAdoptsTheMaskFromASignedBeacon) {
     // and Tier 3's saving was UNREACHABLE rather than merely unused.
     auto login = pack_login_op(/*msgid=*/620, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto enc = encrypted_grid_sync(4, 621, /*with_key=*/true);
+    auto enc = encrypted_grid_sync(disp, 4, 621, /*with_key=*/true);
     disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
     ASSERT_TRUE(disp.hasNetKey());
 
@@ -5068,7 +5108,7 @@ TEST_F(RealNodeFixture, ASignedBeaconCanFinallyLetANodeSkipItsWindow) {
     // the MECHANISM now works end to end, so the remaining question is policy.
     auto login = pack_login_op(/*msgid=*/660, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto enc = encrypted_grid_sync(/*slot=*/4, /*msgid=*/661, /*with_key=*/true);
+    auto enc = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/661, /*with_key=*/true);
     disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
     ASSERT_TRUE(disp.hasNetKey());
 
@@ -5096,7 +5136,7 @@ TEST_F(RealNodeFixture, AForgedBeaconIsIgnoredEntirelyNotMerelyDistrusted) {
     // anchor 14 ms per beacon until the node is off the grid.
     auto login = pack_login_op(/*msgid=*/630, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto enc = encrypted_grid_sync(4, 631, /*with_key=*/true);
+    auto enc = encrypted_grid_sync(disp, 4, 631, /*with_key=*/true);
     disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
     ASSERT_TRUE(disp.hasNetKey());
 
@@ -5126,7 +5166,7 @@ TEST_F(RealNodeFixture, ABeaconUnderAnUnknownKeyIdIsRefused) {
     // which is exactly the behaviour it had before the beacon existed.
     auto login = pack_login_op(/*msgid=*/640, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto enc = encrypted_grid_sync(4, 641, /*with_key=*/true);
+    auto enc = encrypted_grid_sync(disp, 4, 641, /*with_key=*/true);
     disp.onReceiveNew(enc.data(), static_cast<int>(enc.size()));
     const gridstate::State before = disp.gridState();
 
@@ -5176,7 +5216,7 @@ TEST_F(RealNodeFixture, AnOmittedPowerProfileFieldMeansTheProductionProfile) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
 
-    auto mt = encrypted_mode_test_default_profile(/*msgid=*/2);
+    auto mt = encrypted_mode_test_default_profile(disp, /*msgid=*/2);
     disp.onReceiveNew(mt.data(), static_cast<int>(mt.size()));
 
     ASSERT_TRUE(disp.modeTestActive());
@@ -5202,7 +5242,7 @@ TEST_F(RealNodeFixture, DroppingThePowerProfileIsAnExplicitAct) {
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
     inner.modetest = &mt;
-    auto frame = encrypt_op(inner, /*msgid=*/2);
+    auto frame = encrypt_op(disp, inner, /*msgid=*/2);
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
 
     ASSERT_TRUE(disp.modeTestActive());
@@ -5553,7 +5593,7 @@ TEST_F(RealNodeFixture, APlaintextFrameCannotFeedThePhaseFit) {
     // than desynchronising silently. A bound is not a reason to accept it.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_TRUE(disp.isSessionProven());
@@ -6278,16 +6318,16 @@ TEST_F(RealNodeFixture, ALateMarkAfterTheDeadlineDoesNotArmANewTest) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
 
-    auto start = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2);
+    auto start = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2);
     disp.onReceiveNew(start.data(), static_cast<int>(start.size()));
     ASSERT_TRUE(disp.modeTestActive()) << "a seq-0 START must arm";
 
-    auto off = encrypted_mode_test_off(/*msgid=*/3);
+    auto off = encrypted_mode_test_off(disp, /*msgid=*/3);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
     ASSERT_FALSE(disp.modeTestActive()) << "and the test must be over before the late mark";
 
     // The late mark: identical in every field to a START except its seq.
-    auto late = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/4,
+    auto late = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/4,
                                     /*grid_period_ms=*/1093, /*seq=*/278);
     disp.onReceiveNew(late.data(), static_cast<int>(late.size()));
     EXPECT_FALSE(disp.modeTestActive())
@@ -6296,7 +6336,7 @@ TEST_F(RealNodeFixture, ALateMarkAfterTheDeadlineDoesNotArmANewTest) {
            "run has already been reported";
 
     // And the guard must not have eaten the legitimate case.
-    auto restart = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/5);
+    auto restart = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/5);
     disp.onReceiveNew(restart.data(), static_cast<int>(restart.size()));
     EXPECT_TRUE(disp.modeTestActive())
         << "a fresh seq-0 START after that must still arm";
@@ -6309,18 +6349,18 @@ TEST_F(RealNodeFixture, ANodeThatMissedTheStartJoinsOnAnEarlyMark) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
 
-    auto too_late = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2,
+    auto too_late = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2,
                                         /*grid_period_ms=*/1093,
                                         /*seq=*/modetest::kLateStartMaxSeq + 1);
     disp.onReceiveNew(too_late.data(), static_cast<int>(too_late.size()));
     EXPECT_FALSE(disp.modeTestActive()) << "past the join window a mark is still only a mark";
 
-    auto early = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/3,
+    auto early = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/3,
                                      /*grid_period_ms=*/1093, /*seq=*/4);
     disp.onReceiveNew(early.data(), static_cast<int>(early.size()));
     ASSERT_TRUE(disp.modeTestActive()) << "mark 4 of a run the node never saw start";
 
-    auto off = encrypted_mode_test_off(/*msgid=*/4);
+    auto off = encrypted_mode_test_off(disp, /*msgid=*/4);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
     EXPECT_FALSE(disp.modeTestActive()) << "and the hub's STOP still ends it";
 }
@@ -6339,7 +6379,7 @@ TEST_F(RealNodeFixture, AModeTestRunMeasuresTheNodesClockRateFromItsMarks) {
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
 
     constexpr uint32_t kPeriodMs = 1093;
-    auto start = encrypted_mode_test(MODE_TEST__MODE__MODE_A, /*msgid=*/2, kPeriodMs);
+    auto start = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2, kPeriodMs);
     disp.onReceiveNew(start.data(), static_cast<int>(start.size()));
     ASSERT_TRUE(disp.modeTestActive());
 
@@ -6348,7 +6388,7 @@ TEST_F(RealNodeFixture, AModeTestRunMeasuresTheNodesClockRateFromItsMarks) {
     uint32_t msgid = 3, heard = 0;
     for (uint32_t k = 0; k <= 200; ++k) {
         if (k == 3 || k == 7) continue;
-        auto mark = encrypted_mode_test(MODE_TEST__MODE__MODE_A, msgid++, kPeriodMs,
+        auto mark = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, msgid++, kPeriodMs,
                                         /*seq=*/k + 1);
         // The mark's T0 is on the rate; its RxDone is one air time later. The
         // node subtracts the air time of the frame it actually received, and
@@ -6617,9 +6657,9 @@ void armModeBWithGrid(CmdDispatcher &disp) {
     disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);   // Mode B needs the crystal
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(/*slot=*/4, /*msgid=*/2);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
-    auto start = encrypted_mode_test(MODE_TEST__MODE__MODE_B, /*msgid=*/3,
+    auto start = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_B, /*msgid=*/3,
                                      /*grid_period_ms=*/1500, /*seq=*/0);
     disp.onReceiveNew(start.data(), static_cast<int>(start.size()));
 }
@@ -6627,7 +6667,7 @@ void armModeBWithGrid(CmdDispatcher &disp) {
 void feedModeBMarks(CmdDispatcher &disp, const gridstate::State &truth) {
     uint32_t msgid = 4;
     for (uint32_t r = 10; r < 70; ++r) {
-        auto mark = encrypted_mode_test(MODE_TEST__MODE__MODE_B, msgid++, 1500,
+        auto mark = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_B, msgid++, 1500,
                                         /*seq=*/r);
         const int64_t rx = gridstate::t0ForRound(truth, r)
                          + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) mark.size());
