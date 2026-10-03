@@ -306,6 +306,64 @@ TEST(SessionManager, SessionNoncesSurviveSaveAndLoadUnderTheirOwnKey) {
     EXPECT_EQ(restored_hub_nonce, kNonce);
 }
 
+// Security review finding H3: CmdDispatcher::handleLogin() used to call
+// saveSession() (lsess) AFTER the base_nonce/counter NVS write (PersistState,
+// via set_base_nonce()->save()). A crash between the two left lsess OLD and
+// PersistState NEW (new base_nonce, counters reset to 0) — resuming with the
+// OLD session's keys paired with FRESH counters, which is real CTR
+// keystream reuse (msgid 1 under the old K_enc was already used in the
+// session this login reset). Fixed by reordering: saveSession() now runs
+// BEFORE the PersistState write. This proves the new order's safety
+// property directly: a crash in that window leaves lsess NEW and
+// PersistState STALE (old base_nonce, old/higher counters) — the keys
+// resumed are the NEW ones, paired with counters that are merely stale
+// (never reused), not reset to a value the new key has never seen before.
+TEST(SessionManager, ACrashBetweenSaveSessionAndSaveLeavesTheNewKeysSafelyPairedWithStaleCounters) {
+    proto_sim_nvs_reset();
+    constexpr uint32_t kOldNonce = 0x11111111u;
+    constexpr uint32_t kOldNodeNonce = 0x22222222u;
+    constexpr uint32_t kNewNonce = 0x33333333u;
+    constexpr uint32_t kNewNodeNonce = 0x44444444u;
+
+    {
+        // The OLD session, fully persisted (both blobs), with some
+        // non-trivial counter progress.
+        SessionManager a;
+        a.setPersistPeer(kHub);
+        a.setBaseNonce(kHub, kOldNonce);
+        a.setNodeNonce(kOldNodeNonce);
+        a.saveSession();
+        for (int i = 0; i < 20; ++i) a.nextTxId();
+        a.save();
+
+        // A fresh LOGIN starts: setBaseNonce() (in-memory only) and
+        // saveSession() (lsess, NVS) run — matching handleLogin's new
+        // order — but the crash happens before save() (PersistState,
+        // which would also persist resetCounters()'s in-memory 0s).
+        a.setBaseNonce(kHub, kNewNonce);
+        a.setNodeNonce(kNewNodeNonce);
+        a.saveSession();
+        // a.save() deliberately NOT called — simulates the crash.
+    }
+
+    SessionManager b;
+    b.setPersistPeer(kHub);
+    b.load();          // PersistState: still the OLD base_nonce + old tx_id_
+    b.loadSession();    // lsess: the NEW hub_nonce/node_nonce — "authoritative"
+
+    uint32_t resumed_hub_nonce = 0;
+    ASSERT_TRUE(b.getBaseNonce(kHub, resumed_hub_nonce));
+    EXPECT_EQ(resumed_hub_nonce, kNewNonce)
+        << "the keys resumed must be the NEW session's, from the durably-"
+           "written lsess — not the old PersistState write that never happened";
+    EXPECT_EQ(b.nodeNonce(), kNewNodeNonce);
+    EXPECT_EQ(b.txId(), 84u)   // 20 + load()'s own +64 jump-ahead margin (N-2)
+        << "counters are STALE (never reset to 0 for this crash window), "
+           "which is safe — the new keys were never used with any of these "
+           "ids before; resetting them to 0 here is what would have made it "
+           "keystream reuse";
+}
+
 TEST(SessionManager, SessionWithoutAConfirmedNonceSavesNothing) {
     // Same reasoning as SavingWithoutASessionWritesNothing above: a zero
     // node_nonce (never set) must not produce a blob that restores a
