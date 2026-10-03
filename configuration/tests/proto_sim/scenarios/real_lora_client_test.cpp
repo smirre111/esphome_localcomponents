@@ -1177,6 +1177,78 @@ TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
     esphome::shim_hooks::set_active_clock(nullptr);
 }
 
+// Invariant I3 (mac-separation-implementation-plan.md section 2(b)):
+// sealBurstCopyTag() must refuse to retag a copy whose ciphertext was
+// sealed under a session that is no longer current — sealing it anyway
+// would pair an OLD ciphertext with a NEW tag, silently wasting the copy
+// (the node's CMAC check fails) rather than visibly dropping it here.
+//
+// The real queue/burst path retags synchronously inside the same call that
+// seals (both the shim and the real tracker), so there is no window to
+// inject a re-login between the two through the public send APIs. This
+// calls sealBurstCopyTag() directly instead, after s_pack_operation_message
+// has snapshotted session #1's key id and a second LOGIN has moved the
+// listener on to session #2 — exactly the ordering a re-login mid-burst
+// would produce.
+TEST(RealLoraClient, StaleSessionCopyIsRefusedNotRetaggedUnderTheWrongKey) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    ensure_psa_ready();
+
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    drive_session(clock, radio, rol);
+    ASSERT_EQ(rol.sessionGenerationForTest(), 1u);
+    rol.mark_session_confirmed_for_test();
+
+    // Seal a real frame under session #1 — this is what snapshots
+    // s_seal_key_id_map[18]. What happens to the packed bytes afterwards
+    // (the shim retags and "sends" them immediately) doesn't matter here.
+    rol.send_remote_config();
+
+    // A second session, moving the listener on to a brand-new K_enc/K_mac
+    // WITHOUT ever touching s_seal_key_id_map[18] — exactly like a real
+    // frame still sitting in the tracker's queue when a re-login lands.
+    // Via the test hook, not a real second LOGIN: the shim retags
+    // synchronously inside send(), so there is no window between seal and
+    // retag to drive a real re-login through anyway (see the banner above).
+    ASSERT_TRUE(rol.deriveSessionKeysForTest(/*session_id=*/0xDEADBEEFu, kTestNodeNonce));
+    ASSERT_EQ(rol.sessionGenerationForTest(), 2u)
+        << "precondition: the second session must have derived NEW keys";
+
+    LoraHeader hdr   = LORA_HEADER__INIT;
+    hdr.destaddress   = 18;
+    hdr.destsubnet    = 2;
+    hdr.senderaddress = esphome::lora_tracker::kHubAddress;
+    hdr.msgid         = 999;
+    uint8_t ciphertext[4] = {0, 0, 0, 0};
+    uint8_t tag[framecrypto::kSessionCmacTagBytes] = {0};
+    EncryptedPayload enc = ENCRYPTED_PAYLOAD__INIT;
+    enc.ciphertext.data = ciphertext;
+    enc.ciphertext.len  = sizeof(ciphertext);
+    enc.tag.data        = tag;
+    enc.tag.len         = sizeof(tag);
+
+    EXPECT_FALSE(rol.sealBurstCopyTag(&enc, &hdr))
+        << "a copy sealed under session #1 must not be retagged under #2's key";
+    EXPECT_EQ(rol.staleSessionDropsForTest(), 1u);
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
 TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
     // send_remote_config() packed raw, so ClientConfig ALWAYS went out in the
     // clear — including to a provisioned node, which refuses plaintext commands

@@ -296,6 +296,12 @@ namespace esphome
       // For tests: how many times this listener's session keys have been
       // (re)derived — mirrors CmdDispatcher::sessionGenerationForTest().
       uint32_t sessionGenerationForTest() const { return this->session_generation_; }
+      // For tests: install a session directly (sets the base nonce AND
+      // derives K_enc/K_mac from it), without a real LOGIN/uplink round
+      // trip. Mirrors CmdDispatcher's setBaseNonceForTest reasoning: some
+      // tests need "a second, DIFFERENT session now exists" as a precise,
+      // one-line precondition rather than a second full handshake.
+      bool deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce);
       // For tests: encrypt a block under this listener's CURRENT K_enc with
       // CTR — the only way to prove the hub and node landed on bit-IDENTICAL
       // session keys, since opaque PSA key ids can't be compared directly.
@@ -1107,13 +1113,14 @@ namespace esphome
       // Returns false (caller must not send this copy) if this listener
       // has no session keys yet.
       //
-      // KNOWN SIMPLIFICATION (not invariant I3's full "captured SessionRef,
-      // drop on generation mismatch"): this always uses the CURRENT
-      // k_mac_key_id_/session_id rather than a snapshot taken when the
-      // frame was sealed, so a re-login mid-burst could retag later copies
-      // under a different key than the ciphertext was sealed with. Rare
-      // (a session change inside one ~1.4s burst) and not yet closed.
+      // Invariant I3: refuses to retag (returns false) when the ciphertext's
+      // sealed-at session (s_seal_key_id_map, dest-keyed) no longer matches
+      // this listener's CURRENT k_enc_key_id_ — see the map's own comment in
+      // lora_client.cpp for the one residual gap (two frames in flight for
+      // the same dest, straddling a re-login).
       bool sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header);
+      // For tests: how many burst copies were dropped by the check above.
+      uint32_t staleSessionDropsForTest() const { return this->tx_stale_session_drops_; }
 
       uint8_t  short_address_{0};
       uint8_t  subnet_address_{0};
@@ -1186,6 +1193,9 @@ namespace esphome
       psa_key_id_t k_enc_key_id_{PSA_KEY_ID_NULL};
       psa_key_id_t k_mac_key_id_{PSA_KEY_ID_NULL};
       uint32_t     session_generation_{0};
+      // Invariant I3: burst copies sealBurstCopyTag() refused because their
+      // ciphertext was sealed under a session that is no longer current.
+      uint32_t     tx_stale_session_drops_{0};
       // Set to true as soon as the startup-login path is initiated (either the
       // timer is armed or the login has already been sent).  Checked by the NTP
       // on_time_sync callback so that NTP resyncs (which fire the callback again)

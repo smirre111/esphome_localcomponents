@@ -76,6 +76,24 @@ static std::map<uint32_t, psa_key_id_t> s_k_enc_map;
 static std::map<uint32_t, psa_key_id_t> s_k_mac_map;
 static std::mutex                       s_session_keys_mutex;
 
+// Invariant I3 (mac-separation-implementation-plan.md section 2(b)): a burst
+// copy's tag must be sealed under the SAME session the ciphertext was sealed
+// with, not whatever session happens to be current when the tracker's send
+// loop gets around to retagging it. A fresh psa_key_id_t is minted on every
+// deriveSessionKeys_() call, so the key id itself is a free, already-unique
+// generation marker — no separate counter needed. s_pack_operation_message()
+// snapshots the enc_key_id it just sealed under, per dest; sealBurstCopyTag()
+// compares that snapshot against the listener's CURRENT k_enc_key_id_ and
+// refuses to retag a copy whose session has moved on.
+//
+// This is dest-keyed, not per-frame: two frames for the SAME dest in flight
+// at once, straddling a re-login, could still mis-attribute. Closing that
+// fully means threading the snapshot through rx_buffer_t the way TxPolicy
+// already does — not done here. What this closes is the common case (one
+// frame in flight per dest, which is nearly always true given one node, one
+// outstanding burst at a time).
+static std::map<uint32_t, psa_key_id_t> s_seal_key_id_map;
+
 // ---------------------------------------------------------------------------
 // Derive the 16-byte AES-GCM key via SHA-256("LoRaHome")[0:16].
 // Mirrors derive_aes_gcm_key() in BlindsESP CmdDispatcher.cpp.
@@ -417,6 +435,13 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
     ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
     free(inner);
     return false;
+  }
+
+  // Invariant I3: snapshot which session this ciphertext was sealed under,
+  // so sealBurstCopyTag() can refuse to retag it under a DIFFERENT one later.
+  {
+    std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+    s_seal_key_id_map[dest] = enc_key_id;
   }
 
   uint8_t ctr_block[framecrypto::kCtrBlockBytes];
@@ -1600,10 +1625,37 @@ namespace esphome
       return true;
     }
 
+    bool LORAListener::deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce)
+    {
+      {
+        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+        s_base_nonce_map[this->short_address_] = session_id;
+      }
+      return this->deriveSessionKeys_(session_id, node_nonce);
+    }
+
     bool LORAListener::sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header)
     {
       if (this->k_mac_key_id_ == PSA_KEY_ID_NULL || enc == nullptr || header == nullptr)
         return false;
+
+      // Invariant I3: refuse to retag a copy whose ciphertext was sealed
+      // under a DIFFERENT session than the one current right now (a
+      // re-login landed between pack time and this copy's turn in the
+      // burst loop). Sealing it anyway would pair an OLD ciphertext with a
+      // NEW tag, which the node simply fails to verify — not a security
+      // issue, but a silently wasted copy this at least counts.
+      {
+        std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+        auto it = s_seal_key_id_map.find(header->destaddress);
+        if (it == s_seal_key_id_map.end() || it->second != this->k_enc_key_id_)
+        {
+          ++this->tx_stale_session_drops_;
+          ESP_LOGW(TAG, "[%s] Dropping burst copy sealed under a stale session (%u so far)",
+                   this->get_name().c_str(), (unsigned) this->tx_stale_session_drops_);
+          return false;
+        }
+      }
 
       uint32_t session_id = 0;
       {
