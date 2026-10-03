@@ -4256,7 +4256,8 @@ std::vector<uint8_t> encrypted_mode_test_off(CmdDispatcher &disp, uint32_t msgid
 
 std::vector<uint8_t> encrypted_grid_sync(CmdDispatcher &disp, uint32_t slot, uint32_t msgid,
                                         bool with_key = false,
-                                        bool enable = true) {
+                                        bool enable = true,
+                                        uint32_t nonce = kMtNonce) {
     GridSync gs = GRID_SYNC__INIT;
     gs.enable            = enable;
     gs.slotindex         = slot;
@@ -4279,7 +4280,7 @@ std::vector<uint8_t> encrypted_grid_sync(CmdDispatcher &disp, uint32_t slot, uin
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
     inner.gridsync = &gs;
-    return encrypt_op(disp, inner, msgid);
+    return encrypt_op(disp, inner, msgid, nonce);
 }
 
 }  // namespace
@@ -5280,6 +5281,41 @@ TEST_F(RealNodeFixture, AFreshAuthenticatedLoginDemotesAHeldGrid) {
     EXPECT_FALSE(disp.gridState().active)
         << "a fresh, authenticated session must demote any grid held under "
            "the previous one";
+}
+
+// Security review finding H2: the retry check only recognised the CURRENT
+// hub_nonce, so a byte-for-byte replay of an OLDER authentic LOGIN (the MIC
+// has no freshness/timestamp term) was treated as "genuinely new" — full
+// counter reset, key rotation, and an UNRATE-LIMITED grid demote, bypassing
+// kGridDemoteRateLimitMs via this second trigger. An attacker who captured
+// ANY past accepted LOGIN could replay it once every 5 s indefinitely.
+TEST_F(RealNodeFixture, AReplayOfAnOldSupersededLoginIsDroppedNotTreatedAsNew) {
+    // Session #1.
+    auto login1 = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login1.data(), static_cast<int>(login1.size()));
+    ASSERT_EQ(disp.sessionGenerationForTest(), 1u);
+
+    // Session #2 genuinely supersedes #1 — kMtNonce now goes into the
+    // recently-superseded history.
+    proto_sim_timer_advance_us(6'000'000);
+    auto login2 = pack_login_op(/*msgid=*/1, 0xABCDEF01u);
+    disp.onReceiveNew(login2.data(), static_cast<int>(login2.size()));
+    ASSERT_EQ(disp.sessionGenerationForTest(), 2u);
+
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true,
+                                  /*enable=*/true, 0xABCDEF01u);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active) << "precondition: session #2 holds a grid";
+
+    // Replay session #1's ORIGINAL login — byte-identical, so its MIC still
+    // verifies (the MIC has no freshness term of its own).
+    proto_sim_timer_advance_us(6'000'000);
+    disp.onReceiveNew(login1.data(), static_cast<int>(login1.size()));
+
+    EXPECT_EQ(disp.sessionGenerationForTest(), 2u)
+        << "a replay of an old, superseded LOGIN must not rotate keys again";
+    EXPECT_TRUE(disp.gridState().active)
+        << "and must not demote the grid session #2 is legitimately holding";
 }
 
 // Security review finding H1: the MAC-1 freshness query classified EVERY
