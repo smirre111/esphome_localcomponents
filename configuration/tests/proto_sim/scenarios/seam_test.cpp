@@ -505,6 +505,92 @@ TEST_F(Seam, BothSidesDeriveIdenticalSessionKeysFromARealLogin) {
 }
 
 // ---------------------------------------------------------------------------
+TEST_F(Seam, ASecondRealLoginInOneHubUptimeStillConfirms) {
+    // Regression for a real bug this review caught: handle_encrypted_() used
+    // to derive this listener's K_enc/K_mac only "if k_enc_key_id_ ==
+    // PSA_KEY_ID_NULL" — so the FIRST session's keys, once installed, were
+    // never replaced. A node's SECOND-ever login in one hub uptime (a
+    // reflash, a REGISTER, a failed tracked-op giving up and re-logging in,
+    // ...) left the hub silently decrypting with the wrong key forever,
+    // because the real sessionNonce on the second session-opening uplink
+    // was simply never looked at again. Drives TWO full real LOGIN + real
+    // session-opening-uplink round trips and proves the hub's generation
+    // (and keys) actually advance the second time, not just the first.
+    rol.config_synced_ = true;
+
+    auto drive_round = [&](uint32_t expected_generation) {
+        rol.send_login();
+        const auto login = lastDownlink();
+        ASSERT_FALSE(login.empty()) << "send_login must have emitted a LoginMsg";
+        disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
+                          esp_timer_get_time());
+
+        while (disp.runOneTxCommand()) {}
+        auto uplinks = lif.drain_tx_queue();
+        ASSERT_FALSE(uplinks.empty()) << "handleLogin's sendWakeBeacon() must have transmitted";
+        rol.set_response(uplinks.front().data(), uplinks.front().size());
+
+        ASSERT_EQ(disp.sessionGenerationForTest(), expected_generation)
+            << "the node's own generation must advance on round " << expected_generation;
+        ASSERT_EQ(rol.sessionGenerationForTest(), expected_generation)
+            << "the hub must install a NEW session's keys on round " << expected_generation
+            << " — not keep the previous round's forever";
+
+        uint8_t iv[16] = {0};
+        iv[0] = 0xAB; iv[15] = (uint8_t) expected_generation;
+        const uint8_t plain[16] = "SameKeyProofBlk";
+        uint8_t node_ct[16] = {0}, hub_ct[16] = {0};
+        ASSERT_TRUE(disp.ctrEncryptForTest(iv, plain, sizeof(plain), node_ct));
+        ASSERT_TRUE(rol.ctrEncryptForTest(iv, plain, sizeof(plain), hub_ct));
+        EXPECT_EQ(memcmp(node_ct, hub_ct, sizeof(node_ct)), 0)
+            << "round " << expected_generation << ": both sides must land on the "
+               "bit-identical K_enc";
+    };
+
+    drive_round(1);
+    drive_round(2);
+}
+
+// ---------------------------------------------------------------------------
+TEST_F(Seam, AFreshLoginClearsAStaleTrackedOpRetryBuffer) {
+    // Invariant I3 (a), the finding sharper than the original "dest-keyed,
+    // not per-frame" comment admitted: pack-once means a tracked op's
+    // retry is the SAME stored ciphertext, byte for byte, resent later by
+    // a timer. Across a re-login that ciphertext belongs to a session
+    // whose keys are about to be destroyed — if the retry buffer survived,
+    // the first frame sealed under the NEW session would re-approve this
+    // STALE one too (one dest-keyed generation stamp covers both), and the
+    // node would verify its CMAC (freshly retagged) but CTR-decrypt it
+    // under the WRONG key, handing garbage to the response handlers. The
+    // fix (clearSessionKeys_()) drops the buffer instead — the in-flight
+    // command is simply lost, which the existing retry/give-up machinery
+    // already treats as a user-visible failure.
+    rol.config_synced_ = true;
+    rol.send_login();
+    const auto login = lastDownlink();
+    disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
+                      esp_timer_get_time());
+    while (disp.runOneTxCommand()) {}
+    auto uplinks = lif.drain_tx_queue();
+    ASSERT_FALSE(uplinks.empty());
+    rol.set_response(uplinks.front().data(), uplinks.front().size());
+    ASSERT_EQ(rol.sessionGenerationForTest(), 1u) << "precondition: session #1 confirmed";
+
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                             COV_OPERATION__CMD_OPEN, 0.0f);
+    ASSERT_TRUE(rol.awaitingAck()) << "precondition: a tracked op is in flight";
+    ASSERT_FALSE(rol.trackedOpFrameEmptyForTest())
+        << "precondition: its sealed ciphertext is stored for a pack-once retry";
+
+    // A genuinely new challenge — not a retry of the pending one (there is
+    // none here), so it mints a fresh nonce and clears session #1's keys
+    // AND, with this fix, its stale tracked-op buffer.
+    rol.send_login();
+    EXPECT_TRUE(rol.trackedOpFrameEmptyForTest())
+        << "the stale retry buffer must not survive into session #2";
+}
+
+// ---------------------------------------------------------------------------
 TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin) {
     // THE DEADLOCK THAT COST THE FIRST BENCH SESSION ITS FIRST HOUR.
     //

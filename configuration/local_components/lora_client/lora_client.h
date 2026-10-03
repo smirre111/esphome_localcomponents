@@ -611,6 +611,11 @@ namespace esphome
       // observable only through a log line or a binary sensor.
       bool     awaitingAck() const     { return this->op_awaiting_ack_; }
       bool     commandFailed() const   { return this->command_failed_; }
+      // For tests: whether the tracked-op retry buffer (op_frame_, the ONE
+      // place a sealed ciphertext is stored and re-sent later) is empty —
+      // invariant I3 (a) needs this cleared on every fresh send_login()
+      // challenge, see clearSessionKeys_().
+      bool     trackedOpFrameEmptyForTest() const { return this->op_frame_.empty(); }
       uint32_t schedulePushMsgid() const { return this->sched_push_msgid_; }
       // A published GridSync the node has not confirmed yet, and how many times
       // it has been re-published for that.
@@ -1114,10 +1119,12 @@ namespace esphome
       // has no session keys yet.
       //
       // Invariant I3: refuses to retag (returns false) when the ciphertext's
-      // sealed-at session (s_seal_key_id_map, dest-keyed) no longer matches
-      // this listener's CURRENT k_enc_key_id_ — see the map's own comment in
-      // lora_client.cpp for the one residual gap (two frames in flight for
-      // the same dest, straddling a re-login).
+      // sealed-at session generation (s_seal_generation_map, dest-keyed) no
+      // longer matches this listener's CURRENT session_generation_ — see
+      // the map's own comment in lora_client.cpp for the one residual gap
+      // (a frame mid-burst in the tracker's queue the instant a re-login
+      // lands) and for why the generation, not the psa_key_id_t, is the
+      // marker.
       bool sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header);
       // For tests: how many burst copies were dropped by the check above.
       uint32_t staleSessionDropsForTest() const { return this->tx_stale_session_drops_; }
@@ -1193,6 +1200,16 @@ namespace esphome
       psa_key_id_t k_enc_key_id_{PSA_KEY_ID_NULL};
       psa_key_id_t k_mac_key_id_{PSA_KEY_ID_NULL};
       uint32_t     session_generation_{0};
+      // The session_id (== hub_nonce) the CURRENTLY INSTALLED k_enc_key_id_/
+      // k_mac_key_id_ were derived for. Lets handle_encrypted_ tell "this
+      // session-opening uplink is for the session I already hold" (skip
+      // re-deriving — a duplicate burst copy must not force a fresh PSA
+      // import and bump the generation) apart from "this is a NEW session"
+      // (re-derive). Fixes a real bug: without tracking this, a node's
+      // SECOND-ever login in one hub uptime kept the FIRST session's keys
+      // forever, because the old code only derived when the key id was
+      // still null.
+      uint32_t     installed_session_id_{0};
       // Invariant I3: burst copies sealBurstCopyTag() refused because their
       // ciphertext was sealed under a session that is no longer current.
       uint32_t     tx_stale_session_drops_{0};
@@ -1245,10 +1262,35 @@ namespace esphome
       bool admit_frame_(::LoraClientResponseMessage *rcv_message);
       void handle_encrypted_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
       // Tier 3: derive this listener's K_enc/K_mac from (K_root, session_id,
-      // node_nonce, hub/node addresses) and install them, destroying
-      // whatever was there before only on success — mirrors
-      // CmdDispatcher::deriveSessionKeys_() on the node.
+      // node_nonce, hub/node addresses) and install them immediately,
+      // destroying whatever was there before only on success — mirrors
+      // CmdDispatcher::deriveSessionKeys_() on the node. Used by the test
+      // hook and anywhere else that doesn't need the verify-before-install
+      // gating handle_encrypted_ uses (see deriveSessionKeyCandidate_()).
       bool deriveSessionKeys_(uint32_t session_id, uint32_t node_nonce);
+      // Derives candidate K_enc/K_mac into freshly-imported PSA key ids
+      // WITHOUT installing them — safe to call on an UNVERIFIED frame's
+      // sessionNonce, since nothing committed is touched. The caller must
+      // either installSessionKeys_() these ids after verifying a frame
+      // under them, or destroy both ids itself if it does not.
+      bool deriveSessionKeyCandidate_(uint32_t session_id, uint32_t node_nonce,
+                                      psa_key_id_t *out_enc_id, psa_key_id_t *out_mac_id);
+      // Installs a previously-derived candidate as this listener's LIVE
+      // session keys: destroys whatever was live before, updates the
+      // shared maps, bumps session_generation_, and records session_id so
+      // a later duplicate of the same session-opening uplink is recognised
+      // and skipped rather than re-derived.
+      void installSessionKeys_(uint32_t session_id, psa_key_id_t enc_id, psa_key_id_t mac_id);
+      // Destroys whatever session keys are live and clears them from the
+      // shared maps — called when send_login() mints a FRESH challenge
+      // nonce (a genuinely new session), so a stale key from the session
+      // just superseded cannot be used to (mis)encrypt a downlink in the
+      // window before the new session-opening uplink arrives; the hub
+      // correctly drops with "no session keys" instead. NOT called on a
+      // bare RETRY of the same pending nonce — that could destroy keys a
+      // session-opening uplink already installed for THIS challenge while
+      // the retry timer raced it.
+      void clearSessionKeys_();
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
       void commit_rx_msgid_(const ::LoraClientResponseMessage *rcv_message);

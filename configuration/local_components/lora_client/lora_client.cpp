@@ -74,25 +74,42 @@ static std::mutex                   s_base_nonce_map_mutex;
 // s_base_nonce_map exists alongside each listener's own session state.
 static std::map<uint32_t, psa_key_id_t> s_k_enc_map;
 static std::map<uint32_t, psa_key_id_t> s_k_mac_map;
+// Mirrors each listener's session_generation_, per dest — s_pack_operation_
+// message() (a free function) needs it and has no `this`. Updated at the
+// same time as s_k_enc_map/s_k_mac_map, under the same lock.
+static std::map<uint32_t, uint32_t>     s_session_generation_map;
 static std::mutex                       s_session_keys_mutex;
 
 // Invariant I3 (mac-separation-implementation-plan.md section 2(b)): a burst
 // copy's tag must be sealed under the SAME session the ciphertext was sealed
 // with, not whatever session happens to be current when the tracker's send
-// loop gets around to retagging it. A fresh psa_key_id_t is minted on every
-// deriveSessionKeys_() call, so the key id itself is a free, already-unique
-// generation marker — no separate counter needed. s_pack_operation_message()
-// snapshots the enc_key_id it just sealed under, per dest; sealBurstCopyTag()
-// compares that snapshot against the listener's CURRENT k_enc_key_id_ and
-// refuses to retag a copy whose session has moved on.
+// loop gets around to retagging it.
+//
+// Snapshotting the psa_key_id_t itself (the original version of this) is
+// UNSOUND: mbedTLS's volatile key ids are small reused slot indices, so a
+// later generation can be assigned the SAME id an earlier generation held —
+// a stale copy would then compare equal to "current" by coincidence.
+// session_generation_ is a plain monotonically-incrementing counter that is
+// NEVER reused, so it is the actual generation marker; s_seal_generation_map
+// mirrors it per dest for the same reason s_session_generation_map above
+// does. s_pack_operation_message() snapshots it at seal time;
+// sealBurstCopyTag() compares that snapshot against the listener's CURRENT
+// session_generation_ and refuses to retag a copy whose session has moved
+// on.
 //
 // This is dest-keyed, not per-frame: two frames for the SAME dest in flight
-// at once, straddling a re-login, could still mis-attribute. Closing that
-// fully means threading the snapshot through rx_buffer_t the way TxPolicy
-// already does — not done here. What this closes is the common case (one
-// frame in flight per dest, which is nearly always true given one node, one
-// outstanding burst at a time).
-static std::map<uint32_t, psa_key_id_t> s_seal_key_id_map;
+// at once, straddling a re-login, could still mis-attribute — BUT the one
+// place a ciphertext is actually stored and re-sent later (op_frame_, the
+// tracked-op retry buffer) is cleared on every fresh send_login() challenge
+// (see clearSessionKeys_()), which is the only way a "frame still in flight
+// across a re-login" can arise in this codebase: pack-once never re-seals
+// on retry, and nothing else holds a sealed buffer across a session change.
+// Fully closing the remaining in-the-air-right-now case (a copy literally
+// mid-burst in the tracker's queue the instant a re-login lands) means
+// threading the snapshot through rx_buffer_t the way TxPolicy already does
+// — not done here, and account for it as rare (a session change inside one
+// ~1.4s burst) rather than closed.
+static std::map<uint32_t, uint32_t>     s_seal_generation_map;
 
 // ---------------------------------------------------------------------------
 // Derive the 16-byte AES-GCM key via SHA-256("LoRaHome")[0:16].
@@ -437,11 +454,17 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
     return false;
   }
 
-  // Invariant I3: snapshot which session this ciphertext was sealed under,
-  // so sealBurstCopyTag() can refuse to retag it under a DIFFERENT one later.
+  // Invariant I3: snapshot which session generation this ciphertext was
+  // sealed under, so sealBurstCopyTag() can refuse to retag it under a
+  // DIFFERENT one later. The generation, not the psa_key_id_t: mbedTLS's
+  // volatile key ids are reused slot indices, so a later generation could
+  // otherwise be assigned the SAME id an earlier generation held.
+  uint32_t seal_generation = 0;
   {
     std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-    s_seal_key_id_map[dest] = enc_key_id;
+    auto git = s_session_generation_map.find(dest);
+    seal_generation = (git != s_session_generation_map.end()) ? git->second : 0;
+    s_seal_generation_map[dest] = seal_generation;
   }
 
   uint8_t ctr_block[framecrypto::kCtrBlockBytes];
@@ -1557,7 +1580,8 @@ namespace esphome
     // hub/node addresses). Mirrors CmdDispatcher::deriveSessionKeys_() on
     // the node — both sides must land on identical keys from the same
     // four inputs.
-    bool LORAListener::deriveSessionKeys_(uint32_t session_id, uint32_t node_nonce)
+    bool LORAListener::deriveSessionKeyCandidate_(uint32_t session_id, uint32_t node_nonce,
+                                                  psa_key_id_t *out_enc_id, psa_key_id_t *out_mac_id)
     {
       uint8_t root_material[kAesGcmKeyBytes];
       if (!s_derive_aes_gcm_key(root_material))
@@ -1610,19 +1634,70 @@ namespace esphome
         return false;
       }
 
+      *out_enc_id = new_enc_id;
+      *out_mac_id = new_mac_id;
+      return true;
+    }
+
+    void LORAListener::installSessionKeys_(uint32_t session_id, psa_key_id_t enc_id, psa_key_id_t mac_id)
+    {
+      // Invariant I3 (c): the member writes below race sealBurstCopyTag()
+      // reading k_mac_key_id_/session_generation_ on the tracker task — both
+      // sides now take s_session_keys_mutex over the read/write, not just
+      // over the shared maps, even though the members themselves are
+      // per-listener (a global lock serialising rare install/clear calls
+      // across every listener is a fine price for not needing a second
+      // mutex per instance).
+      std::lock_guard<std::mutex> lock(s_session_keys_mutex);
       if (this->k_enc_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_enc_key_id_);
       if (this->k_mac_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_mac_key_id_);
-      this->k_enc_key_id_ = new_enc_id;
-      this->k_mac_key_id_ = new_mac_id;
-      {
-        std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-        s_k_enc_map[this->short_address_] = new_enc_id;
-        s_k_mac_map[this->short_address_] = new_mac_id;
-      }
+      this->k_enc_key_id_ = enc_id;
+      this->k_mac_key_id_ = mac_id;
+      this->installed_session_id_ = session_id;
       ++this->session_generation_;
-      ESP_LOGI(TAG, "[%s] Session keys derived (generation=%u)", this->get_name().c_str(),
+      s_k_enc_map[this->short_address_] = enc_id;
+      s_k_mac_map[this->short_address_] = mac_id;
+      s_session_generation_map[this->short_address_] = this->session_generation_;
+      ESP_LOGI(TAG, "[%s] Session keys installed (generation=%u)", this->get_name().c_str(),
                (unsigned) this->session_generation_);
+    }
+
+    bool LORAListener::deriveSessionKeys_(uint32_t session_id, uint32_t node_nonce)
+    {
+      psa_key_id_t enc_id = PSA_KEY_ID_NULL, mac_id = PSA_KEY_ID_NULL;
+      if (!this->deriveSessionKeyCandidate_(session_id, node_nonce, &enc_id, &mac_id))
+        return false;
+      this->installSessionKeys_(session_id, enc_id, mac_id);
       return true;
+    }
+
+    void LORAListener::clearSessionKeys_()
+    {
+      std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+      if (this->k_enc_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_enc_key_id_);
+      if (this->k_mac_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_mac_key_id_);
+      this->k_enc_key_id_ = PSA_KEY_ID_NULL;
+      this->k_mac_key_id_ = PSA_KEY_ID_NULL;
+      this->installed_session_id_ = 0;
+      s_k_enc_map.erase(this->short_address_);
+      s_k_mac_map.erase(this->short_address_);
+      s_seal_generation_map.erase(this->short_address_);
+      s_session_generation_map.erase(this->short_address_);
+
+      // Invariant I3 (a): the ONE place a sealed ciphertext is stored and
+      // re-sent later, across however much time passes — pack-once means a
+      // retry never re-encrypts. Across a re-login that ciphertext belongs
+      // to a session this listener is about to stop holding keys for, so
+      // retransmit_tracked_op_() must not be able to resend it: the first
+      // frame sealed under the NEW session would otherwise re-approve this
+      // STALE one too (both share one dest-keyed generation stamp), and a
+      // verified-CMAC-but-wrong-key decrypt would hand the garbage result
+      // straight to the response handlers. Dropping it here means the
+      // in-flight command is simply lost — the existing kOpMaxRetries/
+      // op_awaiting_ack_ machinery already handles "no ack arrived" as a
+      // user-visible failure, which is what this now also is.
+      this->op_frame_.clear();
+      this->op_frame_msgid_ = 0;
     }
 
     bool LORAListener::deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce)
@@ -1636,26 +1711,37 @@ namespace esphome
 
     bool LORAListener::sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header)
     {
-      if (this->k_mac_key_id_ == PSA_KEY_ID_NULL || enc == nullptr || header == nullptr)
+      if (enc == nullptr || header == nullptr)
         return false;
 
       // Invariant I3: refuse to retag a copy whose ciphertext was sealed
-      // under a DIFFERENT session than the one current right now (a
-      // re-login landed between pack time and this copy's turn in the
+      // under a DIFFERENT session generation than the one current right now
+      // (a re-login landed between pack time and this copy's turn in the
       // burst loop). Sealing it anyway would pair an OLD ciphertext with a
       // NEW tag, which the node simply fails to verify — not a security
       // issue, but a silently wasted copy this at least counts.
+      //
+      // Invariant I3 (c): this listener's k_mac_key_id_/session_generation_
+      // are written by installSessionKeys_()/clearSessionKeys_() on the main
+      // loop while THIS reads them from the tracker task — one lock over
+      // both the stale check and the read, matching the write side, so
+      // there is no window where a half-updated pair (new generation, old
+      // key id or vice versa) is observed.
+      psa_key_id_t mac_key_id = PSA_KEY_ID_NULL;
       {
         std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-        auto it = s_seal_key_id_map.find(header->destaddress);
-        if (it == s_seal_key_id_map.end() || it->second != this->k_enc_key_id_)
+        auto it = s_seal_generation_map.find(header->destaddress);
+        if (it == s_seal_generation_map.end() || it->second != this->session_generation_)
         {
           ++this->tx_stale_session_drops_;
           ESP_LOGW(TAG, "[%s] Dropping burst copy sealed under a stale session (%u so far)",
                    this->get_name().c_str(), (unsigned) this->tx_stale_session_drops_);
           return false;
         }
+        mac_key_id = this->k_mac_key_id_;
       }
+      if (mac_key_id == PSA_KEY_ID_NULL)
+        return false;
 
       uint32_t session_id = 0;
       {
@@ -1688,7 +1774,7 @@ namespace esphome
 
       uint8_t tag[framecrypto::kSessionCmacTagBytes];
       size_t tag_len = 0;
-      if (psa_mac_compute(this->k_mac_key_id_, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(tag)),
+      if (psa_mac_compute(mac_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(tag)),
                           mac_input.data(), mac_input.size(),
                           tag, sizeof(tag), &tag_len) != PSA_SUCCESS ||
           tag_len != sizeof(tag))
@@ -1752,23 +1838,65 @@ namespace esphome
 
         // Tier 3 (mac-separation-implementation-plan.md section 2(b)): if
         // this IS the session-opening uplink (sessionNonce present), derive
-        // K_enc/K_mac from it NOW, before the key-availability check below —
-        // otherwise the very first such frame would need the keys it exists
-        // to establish. Safe to do before verifying anything: deriving from
-        // a forged sessionNonce only ever produces a key under which THIS
-        // forged frame's own tag will fail to verify a moment later: it
-        // doesn't move any committed state and there's nothing to do with a
-        // wrong key the CMAC check right after doesn't immediately reject.
+        // a CANDIDATE K_enc/K_mac from it now — into fresh PSA key ids that
+        // are NOT installed as this listener's live keys yet.
+        //
+        // This is what lets the hub follow a node across ANY NUMBER of
+        // re-logins within one hub uptime, not just the first: the old code
+        // only derived "if this->k_enc_key_id_ == PSA_KEY_ID_NULL", so a
+        // node's SECOND-ever login in one hub uptime (a reflash, a REGISTER,
+        // a tracked-op giving up and re-logging in, ...) left the hub
+        // holding the FIRST session's keys forever — the session-opening
+        // uplink's real sessionNonce was simply never looked at again, and
+        // every uplink from the node failed CMAC until the hub itself
+        // rebooted. installed_session_id_ (set by installSessionKeys_)
+        // tracks which session_id the LIVE keys belong to, so a duplicate
+        // burst copy of a session-opening uplink ALREADY confirmed (same
+        // session_id) is recognised and skipped — it uses the live keys
+        // directly, with no new PSA import and no generation bump.
+        //
+        // Deriving before this frame is verified is safe PROVIDED the
+        // candidate is only ever used to try THIS frame, and only INSTALLED
+        // (replacing the live keys) if that verify succeeds below — a
+        // forged sessionNonce then at most wastes one derivation, never
+        // pins attacker-chosen keys as live (the earlier version of this
+        // comment claimed deriving-and-installing immediately "doesn't
+        // move any committed state", which was wrong: it moved exactly the
+        // state — this->k_enc_key_id_/k_mac_key_id_ — that every later
+        // uplink's decrypt depends on).
         uint32_t session_id = 0;
         {
           std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
           session_id = s_base_nonce_map[sender];
         }
-        if (rcv_message->header && rcv_message->header->sessionnonce != 0 &&
-            this->k_enc_key_id_ == PSA_KEY_ID_NULL)
+        psa_key_id_t enc_key_id = this->k_enc_key_id_;
+        psa_key_id_t mac_key_id = this->k_mac_key_id_;
+        psa_key_id_t candidate_enc_id = PSA_KEY_ID_NULL;
+        psa_key_id_t candidate_mac_id = PSA_KEY_ID_NULL;
+        const bool is_session_opening =
+            rcv_message->header && rcv_message->header->sessionnonce != 0;
+        const bool needs_candidate =
+            is_session_opening &&
+            (this->k_enc_key_id_ == PSA_KEY_ID_NULL || this->installed_session_id_ != session_id);
+        if (needs_candidate)
         {
-          this->deriveSessionKeys_(session_id, rcv_message->header->sessionnonce);
+          if (!this->deriveSessionKeyCandidate_(session_id, rcv_message->header->sessionnonce,
+                                                &candidate_enc_id, &candidate_mac_id))
+          {
+            ESP_LOGE(TAG, "Session key candidate derivation failed for peer %u", sender);
+            return;
+          }
+          enc_key_id = candidate_enc_id;
+          mac_key_id = candidate_mac_id;
         }
+
+        // A candidate not yet installed must be destroyed on every exit
+        // from here on that is not the install call at the bottom of a
+        // successful verify+decrypt.
+        auto destroy_candidate = [&]() {
+          if (candidate_enc_id != PSA_KEY_ID_NULL) psa_destroy_key(candidate_enc_id);
+          if (candidate_mac_id != PSA_KEY_ID_NULL) psa_destroy_key(candidate_mac_id);
+        };
 
         // Encrypt-then-CMAC replaces AES-GCM. Verify the tag BEFORE
         // decrypting — a tampered ciphertext or header field fails the
@@ -1776,9 +1904,10 @@ namespace esphome
         // bytes. Node uplinks never burst, so burstIndex/burstCount/
         // onMark/fireStamped/fireRound/fireOffsetUs are always 0/false on
         // this path (whatever the node actually sealed).
-        if (this->k_enc_key_id_ == PSA_KEY_ID_NULL || this->k_mac_key_id_ == PSA_KEY_ID_NULL)
+        if (enc_key_id == PSA_KEY_ID_NULL || mac_key_id == PSA_KEY_ID_NULL)
         {
           ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", sender);
+          destroy_candidate();
           return;
         }
 
@@ -1805,12 +1934,13 @@ namespace esphome
         if (!mac_input)
         {
           ESP_LOGE(TAG, "Memory allocation failed for MAC input");
+          destroy_candidate();
           return;
         }
         memcpy(mac_input, cmac_prefix, sizeof(cmac_prefix));
         memcpy(mac_input + sizeof(cmac_prefix), enc->ciphertext.data, cipher_len);
 
-        const bool mac_ok = psa_mac_verify(this->k_mac_key_id_,
+        const bool mac_ok = psa_mac_verify(mac_key_id,
                                            PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, enc->tag.len),
                                            mac_input, sizeof(cmac_prefix) + cipher_len,
                                            enc->tag.data, enc->tag.len) == PSA_SUCCESS;
@@ -1818,6 +1948,7 @@ namespace esphome
         if (!mac_ok)
         {
           ESP_LOGE(TAG, "Encrypt-then-CMAC verification failed");
+          destroy_candidate();
           return;
         }
 
@@ -1829,12 +1960,13 @@ namespace esphome
         if (!plaintext)
         {
           ESP_LOGE(TAG, "Memory allocation failed for plaintext");
+          destroy_candidate();
           return;
         }
 
         {
           psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
-          bool ok = psa_cipher_decrypt_setup(&op, this->k_enc_key_id_, PSA_ALG_CTR) == PSA_SUCCESS;
+          bool ok = psa_cipher_decrypt_setup(&op, enc_key_id, PSA_ALG_CTR) == PSA_SUCCESS;
           if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
           size_t out_total = 0, part_len = 0;
           if (ok)
@@ -1856,6 +1988,7 @@ namespace esphome
           if (!ok)
           {
             ESP_LOGE(TAG, "CTR decryption failed despite a verified CMAC — this should never happen");
+            destroy_candidate();
             free(plaintext);
             return;
           }
@@ -1865,9 +1998,13 @@ namespace esphome
         // the replay counter may finally move.
         this->commit_rx_msgid_(rcv_message);
 
-        // (Session keys, if this was the session-opening uplink, were
-        // already derived earlier in this function — before the CMAC
-        // verify above needed them. See the comment there.)
+        // The candidate (if one was derived) just proved itself by verifying
+        // THIS frame — install it as the live session now, replacing
+        // whatever was there before. This is the only path that installs a
+        // newly-derived candidate; every early return above destroyed it
+        // instead.
+        if (needs_candidate)
+          this->installSessionKeys_(session_id, candidate_enc_id, candidate_mac_id);
 
         // A successful decrypt proves the node holds the matching base nonce —
         // the encrypted session is confirmed both ways.  Only now do we treat
@@ -2435,11 +2572,18 @@ namespace esphome
 
       if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN)
       {
-        // The node's prand is deliberately ignored: send_login() mints a fresh
-        // one, so a replayed login cannot pin the counters.
-        if (!this->session_confirmed_)
-          this->commit_rx_msgid_(rcv_message);
-        this->send_login();
+        // Dropped, not acted on. This used to unconditionally call
+        // send_login() — admit_frame_() only checks sender address and a
+        // forward-jump msgid window, neither of which authenticates
+        // anything, so ANY plaintext unicast frame with this proto_case
+        // could force a re-login (and, since send_login() now clears live
+        // session keys on a fresh challenge, tear down a working session)
+        // at will. The real node firmware never sends this proto_case on
+        // an uplink — grepped BlindsESP/main/CmdDispatcher.cpp, confirmed
+        // no caller ever sets LoraClientResponseMessage.proto to LOGIN —
+        // so there is no legitimate sender to accommodate here.
+        ESP_LOGW(TAG, "%s: ignoring unauthenticated PROTO_LOGIN uplink (no legitimate sender for it)",
+                 this->get_name().c_str());
         return;
       }
 
@@ -3423,6 +3567,13 @@ namespace esphome
       {
         base = esp_random();
         this->pending_login_nonce_ = base;
+        // A genuinely NEW challenge: whatever session keys are live belong
+        // to the session this challenge supersedes. Clear them now so a
+        // downlink packed before the new session-opening uplink arrives is
+        // correctly dropped ("no session keys") instead of silently
+        // encrypted under the old session's keys. See clearSessionKeys_()'s
+        // comment for why this is NOT done on a bare retry.
+        this->clearSessionKeys_();
       }
 
       // §4.6 rule: a new session invalidates the hub's confidence. The
