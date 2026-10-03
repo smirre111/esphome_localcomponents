@@ -5282,6 +5282,70 @@ TEST_F(RealNodeFixture, AFreshAuthenticatedLoginDemotesAHeldGrid) {
            "the previous one";
 }
 
+// Security review finding H1: the MAC-1 freshness query classified EVERY
+// frame reaching admitFrame — including a plaintext LOGIN, which is checked
+// here BEFORE handleLogin() ever verifies its MIC. A forged LOGIN (bad MIC,
+// unicast, msgid in the forward window) classified as New: it reset
+// last_addressed_us_ (holding off Demotion::SyncStale indefinitely) and fed
+// the bounded phase-sample path, with no rate limit at all (a MIC failure
+// never touches last_login_ms_).
+TEST_F(RealNodeFixture, AForgedLoginCannotHoldOffSyncStaleOrFeedPhaseTracking) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.sessionGenerationForTest(), 1u);
+
+    // A genuine encrypted frame sets the baseline — proves last_addressed_us_
+    // DOES move for a real frame, so the forged one failing to move it isn't
+    // just a dead accessor.
+    auto real_frame = encrypted_sysop(disp, /*msgid=*/3, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(real_frame.data(), static_cast<int>(real_frame.size()));
+    const int64_t baseline = disp.lastAddressedUsForTest();
+    ASSERT_GT(baseline, 0);
+    const uint32_t phase_n_before = disp.phaseStats().n;
+
+    proto_sim_timer_advance_us(60'000'000);   // well past the 5 s login rate limit
+
+    // A forged LOGIN: correct header (unicast, msgid inside the forward
+    // window), onMark/fireStamped set adversarially (the concrete shape the
+    // review names), a BAD mic. handleLogin() must drop this on its MIC
+    // check — this test is about what happens BEFORE that, in admitFrame()'s
+    // own freshness classification.
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = 4;
+    hdr.onmark        = true;
+    hdr.firestamped   = true;
+    hdr.fireround     = 999;
+    hdr.fireoffsetus  = 123456;
+    op.header         = &hdr;
+    LoginMsg forged = LOGIN_MSG__INIT;
+    forged.nonce     = 0xDEADBEEFu;
+    uint8_t bad_mic[framecrypto::kSessionCmacTagBytes] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    forged.mic.data  = bad_mic;
+    forged.mic.len   = sizeof(bad_mic);
+    op.cmd_case      = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
+    op.login         = &forged;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_EQ(disp.sessionGenerationForTest(), 1u)
+        << "precondition: the forged LOGIN must not have been accepted";
+    EXPECT_EQ(disp.lastAddressedUsForTest(), baseline)
+        << "a forged, unauthenticated LOGIN must not reset last_addressed_us_ "
+           "— it classified as New before this fix, holding SyncStale "
+           "demotion off indefinitely";
+    EXPECT_EQ(disp.phaseStats().n, phase_n_before)
+        << "and must not be able to feed the bounded phase-sample path either";
+}
+
 TEST_F(RealNodeFixture, AKeyedNodeAdoptsTheMaskFromASignedBeacon) {
     // The gate used to be frame_authenticated_ — the AEAD flag, which is false
     // for every broadcast by construction. So the branch could never be taken
