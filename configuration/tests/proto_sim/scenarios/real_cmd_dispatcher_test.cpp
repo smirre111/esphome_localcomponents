@@ -241,6 +241,100 @@ TEST_F(RealNodeFixture, CmdLoginResetsCountersAndStoresNonce) {
            "frame counters at will. (Production CmdDispatcher.cpp:1215)";
 }
 
+// Tier 3 (mac-separation-implementation-plan.md section 2(b), step 2): the
+// hub's own retry of a LOGIN it already got answered (SAME hub_nonce) must
+// resend the opening uplink WITHOUT resetting counters or re-deriving keys
+// — resetting here is what let the hub's retry path force real nonce reuse
+// (U2/F3). Proven directly: a msgid already consumed before the retry must
+// still be refused as a replay afterwards, which only holds if rx_message_id_
+// was never zeroed.
+TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
+    proto_sim_timer_reset();
+    constexpr uint32_t kHubNonce = 0x13572468u;
+
+    auto login = pack_login_op(/*msgid=*/1, kHubNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    ASSERT_EQ(disp.sessionGenerationForTest(), 1u)
+        << "precondition: the first LOGIN must derive session keys";
+    CmdDispatcher::tx_command_t drain{};
+    while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+
+    // Consume rx msgid 5 via an ordinary command. The node now holds a
+    // session, so its plaintext gate refuses an unencrypted command — build
+    // one the way encrypt_op() does, under the node's own CURRENT session
+    // keys (ctrEncryptForTest/cmacComputeForTest), since only the node knows
+    // the node_nonce handleLogin generated.
+    LoraClientOperationMessage inner_op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
+    covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
+    covop.operation  = COV_OPERATION__CMD_STOP;
+    inner_op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+    inner_op.operation = &covop;
+    std::vector<uint8_t> plain(lora_client_operation_message__get_packed_size(&inner_op));
+    lora_client_operation_message__pack(&inner_op, plain.data());
+
+    constexpr uint32_t kOpMsgId = 5;
+    uint8_t ctr_iv[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(kHubNonce, kNodeAddr, /*downlink=*/true, kOpMsgId,
+                                      /*block_idx=*/0, ctr_iv);
+    std::vector<uint8_t> ciphertext(plain.size());
+    ASSERT_TRUE(disp.ctrEncryptForTest(ctr_iv, plain.data(), plain.size(), ciphertext.data()));
+    framecrypto::EtmHeaderFields fields{};
+    fields.downlink       = true;
+    fields.session_id     = kHubNonce;
+    fields.dest_address   = kNodeAddr;
+    fields.dest_subnet    = kSubnet;
+    fields.sender_address = kHubAddr;
+    fields.msgid          = kOpMsgId;
+    uint8_t prefix[framecrypto::kEtmPrefixBytes];
+    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(ciphertext.size()), prefix);
+    std::vector<uint8_t> mac_input(prefix, prefix + sizeof(prefix));
+    mac_input.insert(mac_input.end(), ciphertext.begin(), ciphertext.end());
+    uint8_t tag[framecrypto::kSessionCmacTagBytes];
+    ASSERT_TRUE(disp.cmacComputeForTest(mac_input.data(), mac_input.size(), tag, sizeof(tag)));
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader op_hdr = LORA_HEADER__INIT;
+    op_hdr.destaddress   = kNodeAddr;
+    op_hdr.destsubnet    = kSubnet;
+    op_hdr.senderaddress = kHubAddr;
+    op_hdr.msgid         = kOpMsgId;
+    op.header      = &op_hdr;
+    EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
+    ep.tag.data        = tag;
+    ep.tag.len         = sizeof(tag);
+    ep.ciphertext.data = ciphertext.data();
+    ep.ciphertext.len  = ciphertext.size();
+    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
+    op.encrypted  = &ep;
+    std::vector<uint8_t> op_bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, op_bytes.data());
+    disp.onReceiveNew(op_bytes.data(), static_cast<int>(op_bytes.size()));
+    ASSERT_EQ(disp.rxMsgIdForTest(), 5u) << "precondition: msgid 5 was accepted";
+    CmdDispatcher::tx_command_t rx_drain{};
+    while (xQueueReceive(disp.rxCmdQueueNew, &rx_drain, 0) == pdTRUE) {}
+    while (xQueueReceive(disp.txCmdQueueNew, &rx_drain, 0) == pdTRUE) {}
+
+    // Past the 5 s LOGIN rate limit, the hub retries the SAME LOGIN (same
+    // hub_nonce) — e.g. because it never saw the AVAILABLE ack.
+    proto_sim_timer_advance_us(6'000'000);
+    auto retry = pack_login_op(/*msgid=*/1, kHubNonce);
+    disp.onReceiveNew(retry.data(), static_cast<int>(retry.size()));
+
+    EXPECT_EQ(disp.sessionGenerationForTest(), 1u)
+        << "a retry of the live session must not re-derive K_enc/K_mac";
+    EXPECT_EQ(disp.rxMsgIdForTest(), 5u)
+        << "a retry of the live session must not reset rx_message_id_";
+    EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 2u)
+        << "the retry must still resend the beacon + AVAILABLE ack";
+
+    // The clinching proof: msgid 5 again must still be refused as a replay —
+    // it would be freely accepted (5 > 0) if the retry had reset the counter.
+    disp.onReceiveNew(op_bytes.data(), static_cast<int>(op_bytes.size()));
+    EXPECT_EQ(uxQueueMessagesWaiting(disp.rxCmdQueueNew), 0u)
+        << "msgid 5 must still be a replay after the retry";
+}
+
 TEST_F(RealNodeFixture, CmdOperationReplayRejected) {
     // CMD_OPEN with msgid=1, then again with msgid=1.
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -2256,6 +2350,50 @@ TEST(RealCmdDispatcherPersist, ASessionFromLoginSurvivesSaveAndLoad) {
     EXPECT_TRUE(d2.canResumeSession())
         << "and the restored session must be usable, or the beacon-first "
            "resume encrypts with a nonce the hub has never held";
+}
+
+// Tier 3 (mac-separation-implementation-plan.md section 2(b), item 6): Mode C
+// resume must cost no LOGIN round-trip. K_enc/K_mac are RAM-only PSA key
+// slots that do NOT survive a reboot/deep sleep — only {hub_nonce, node_nonce}
+// are persisted (under the separate "lsess" NVS key, saveSession()/
+// loadSession()) — so loadPersistentState() must re-derive them, or every
+// encrypted frame after a resume fails with no session keys at all.
+TEST(RealCmdDispatcherPersist, ResumedSessionHasWorkingKeysWithNoLogin) {
+    MotorCtrl mot; SystemCtrl sys; LoraInterface lif;
+    portMUX_TYPE mmux{}, bmux{};
+
+    proto_sim_nvs_reset();
+    uint8_t node_ct[16] = {0};
+    const uint8_t plain[16] = "ResumeKeyProof!";
+    uint8_t iv[16] = {0};
+    iv[0] = 0x11; iv[15] = 0x22;
+
+    {
+        CmdDispatcher d{&mot, &sys, &lif, mmux, bmux};
+        sys.setAddress(kNodeAddr, kSubnet);
+        ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
+
+        auto login = pack_login_op(/*msgid=*/1, /*nonce=*/0xA1B2C3D4);
+        d.onReceiveNew(login.data(), static_cast<int>(login.size()));
+        ASSERT_EQ(d.sessionGenerationForTest(), 1u)
+            << "precondition: LOGIN must derive session keys";
+        ASSERT_TRUE(d.ctrEncryptForTest(iv, plain, sizeof(plain), node_ct));
+        d.savePersistentState();
+    }
+
+    // A fresh dispatcher — the deep-sleep reboot. No LOGIN follows.
+    CmdDispatcher d2{&mot, &sys, &lif, mmux, bmux};
+    d2.loadPersistentState();
+
+    EXPECT_EQ(d2.sessionGenerationForTest(), 1u)
+        << "loadPersistentState() must re-derive K_enc/K_mac from the "
+           "persisted nonces without a LOGIN round-trip";
+    uint8_t resumed_ct[16] = {0};
+    ASSERT_TRUE(d2.ctrEncryptForTest(iv, plain, sizeof(plain), resumed_ct))
+        << "the resumed session must actually have usable keys";
+    EXPECT_EQ(memcmp(node_ct, resumed_ct, sizeof(node_ct)), 0)
+        << "the re-derived K_enc must be bit-identical to the pre-sleep one, "
+           "or every downlink after a resume fails to decrypt";
 }
 
 TEST_F(RealNodeFixture, ProvisionedNodeIsRecognisedWithoutAConfigPush) {
