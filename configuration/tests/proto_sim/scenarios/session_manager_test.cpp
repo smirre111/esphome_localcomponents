@@ -100,17 +100,17 @@ TEST(SessionManager, OnlyThePersistPeerAsksToBeSaved) {
 
 TEST(SessionManager, AcceptsAForwardJumpAndAdvances) {
     SessionManager s = freshManager();
-    EXPECT_TRUE(s.acceptRxId(5));
+    EXPECT_TRUE(s.acceptRxId(5, 0));
     EXPECT_EQ(s.rxId(), 5u);
-    EXPECT_TRUE(s.acceptRxId(6));
+    EXPECT_TRUE(s.acceptRxId(6, 0));
     EXPECT_EQ(s.rxId(), 6u);
 }
 
 TEST(SessionManager, RejectsAReplayAndLeavesTheCounterAlone) {
     SessionManager s = freshManager();
-    ASSERT_TRUE(s.acceptRxId(10));
+    ASSERT_TRUE(s.acceptRxId(10, 0));
 
-    EXPECT_FALSE(s.acceptRxId(10)) << "the same id twice is a replay";
+    EXPECT_FALSE(s.acceptRxId(10, 0)) << "the same id twice is a replay";
     EXPECT_EQ(s.rxId(), 10u)
         << "a rejected frame must not move the counter — that is how an "
            "overheard frame used to wedge the link";
@@ -125,12 +125,12 @@ TEST(SessionManager, RejectsAReplayAndLeavesTheCounterAlone) {
 
 TEST(SessionManager, AnUnseenIdBelowTheMarkIsAReorderNotAReplay) {
     SessionManager s = freshManager();
-    ASSERT_TRUE(s.acceptRxId(10));
+    ASSERT_TRUE(s.acceptRxId(10, 0));
 
-    EXPECT_TRUE(s.acceptRxId(9))
+    EXPECT_TRUE(s.acceptRxId(9, 0))
         << "the node has never seen 9; refusing it is what loses a retried "
            "command for good";
-    EXPECT_FALSE(s.acceptRxId(9)) << "but only once — the second time is a replay";
+    EXPECT_FALSE(s.acceptRxId(9, 0)) << "but only once — the second time is a replay";
     EXPECT_EQ(s.rxId(), 10u)
         << "and accepting behind the mark must not move the mark backwards, or "
            "the next replay walks in behind it";
@@ -141,10 +141,10 @@ TEST(SessionManager, AnIdAlreadySeenIsRefusedHoweverItArrives) {
     // weaken: a frame the node has acted on cannot be made to act again.
     SessionManager s = freshManager();
     for (uint32_t id : {5u, 6u, 7u, 8u})
-        ASSERT_TRUE(s.acceptRxId(id));
+        ASSERT_TRUE(s.acceptRxId(id, 0));
 
     for (uint32_t id : {5u, 6u, 7u, 8u})
-        EXPECT_FALSE(s.acceptRxId(id)) << "replay of " << id;
+        EXPECT_FALSE(s.acceptRxId(id, 0)) << "replay of " << id;
 }
 
 TEST(SessionManager, TooFarBehindTheMarkIsStillARefusal) {
@@ -152,11 +152,11 @@ TEST(SessionManager, TooFarBehindTheMarkIsStillARefusal) {
     // forward jump may be 1024, but an attacker replaying something old gets
     // kReplayWindow of reach, not that.
     SessionManager s = freshManager();
-    ASSERT_TRUE(s.acceptRxId(1000));
+    ASSERT_TRUE(s.acceptRxId(1000, 0));
 
-    EXPECT_FALSE(s.acceptRxId(1000 - SessionManager::kReplayWindow))
+    EXPECT_FALSE(s.acceptRxId(1000 - SessionManager::kReplayWindow, 0))
         << "exactly the window's width behind is out";
-    EXPECT_TRUE(s.acceptRxId(1000 - SessionManager::kReplayWindow + 1))
+    EXPECT_TRUE(s.acceptRxId(1000 - SessionManager::kReplayWindow + 1, 0))
         << "one inside it is a reorder";
     EXPECT_LT(SessionManager::kReplayWindow, SessionManager::kMsgIdWindow);
 }
@@ -166,30 +166,30 @@ TEST(SessionManager, ALoginClearsWhatHasBeenSeenAsWellAsTheMark) {
     // numbering would refuse the first frames of the new session — and a login
     // is exactly when the hub starts counting from 1 again.
     SessionManager s = freshManager();
-    ASSERT_TRUE(s.acceptRxId(5));
+    ASSERT_TRUE(s.acceptRxId(5, 0));
     s.resetCounters();
 
     EXPECT_EQ(s.rxId(), 0u);
-    EXPECT_TRUE(s.acceptRxId(1)) << "the new session's first frame";
-    EXPECT_TRUE(s.acceptRxId(2));
+    EXPECT_TRUE(s.acceptRxId(1, 0)) << "the new session's first frame";
+    EXPECT_TRUE(s.acceptRxId(2, 0));
 }
 
 TEST(SessionManager, RejectsAJumpBeyondTheWindow) {
     SessionManager s = freshManager();
-    ASSERT_TRUE(s.acceptRxId(10));
+    ASSERT_TRUE(s.acceptRxId(10, 0));
 
     // Ratcheting onto a corrupt id would drop every legitimate lower id until
     // the next login.
-    EXPECT_FALSE(s.acceptRxId(10 + SessionManager::kMsgIdWindow + 1));
+    EXPECT_FALSE(s.acceptRxId(10 + SessionManager::kMsgIdWindow + 1, 0));
     EXPECT_EQ(s.rxId(), 10u);
 
     // The window edge itself is still accepted.
-    EXPECT_TRUE(s.acceptRxId(10 + SessionManager::kMsgIdWindow));
+    EXPECT_TRUE(s.acceptRxId(10 + SessionManager::kMsgIdWindow, 0));
 }
 
 TEST(SessionManager, LoginResetsBothDirections) {
     SessionManager s = freshManager();
-    ASSERT_TRUE(s.acceptRxId(50));
+    ASSERT_TRUE(s.acceptRxId(50, 0));
     s.nextTxId();
     s.nextTxId();
     ASSERT_EQ(s.txId(), 2u);
@@ -225,7 +225,7 @@ TEST(SessionManager, ASessionSurvivesSaveAndLoad) {
         a.setPersistPeer(kHub);
         a.setBaseNonce(kHub, kNonce);
         for (int i = 0; i < 7; i++) a.nextTxId();
-        ASSERT_TRUE(a.acceptRxId(3));
+        ASSERT_TRUE(a.acceptRxId(3, 0));
         a.save();
     }
 
@@ -260,7 +260,7 @@ TEST(SessionManager, RestoredMarginIsFullySeenSoNothingInItCanBeReplayed) {
         SessionManager a;
         a.setPersistPeer(kHub);
         a.setBaseNonce(kHub, kNonce);
-        ASSERT_TRUE(a.acceptRxId(3));
+        ASSERT_TRUE(a.acceptRxId(3, 0));
         a.save();
     }
 
@@ -274,11 +274,11 @@ TEST(SessionManager, RestoredMarginIsFullySeenSoNothingInItCanBeReplayed) {
     // a reboot-and-replay attempt (or a genuine hub retry of an old frame)
     // would send.
     for (uint32_t id = 1; id <= restored; ++id)
-        EXPECT_FALSE(b.acceptRxId(id)) << "id " << id << " is within the "
+        EXPECT_FALSE(b.acceptRxId(id, 0)) << "id " << id << " is within the "
             "restored margin and must read as already-seen";
 
     // A genuinely new id above the mark still works.
-    EXPECT_TRUE(b.acceptRxId(restored + 1));
+    EXPECT_TRUE(b.acceptRxId(restored + 1, 0));
 }
 
 // Tier 3 (mac-separation-implementation-plan.md section 2(b), step 2): the

@@ -5634,6 +5634,78 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
         << "and from there the node measures the true grid";
 }
 
+// MAC-1 freshness query (mac-separation-implementation-plan.md): the anchor
+// RE-SOLVE is unbounded (no guard-band check of its own, unlike the sample
+// commit), so it must run on New only — a replayed copy of a frame already
+// accepted must not be able to trigger it, even once the clock has settled
+// and the grid is still provisional (the exact state the re-solve is
+// waiting for).
+TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
+    constexpr uint32_t kSlot       = 4;
+    constexpr int64_t  kTrueAnchor = 90'000'000;
+    constexpr int64_t  kBootError  = 8'000;
+
+    nodeclock::setSettledForTest(false);
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
+    hdr.msgid = 790; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.firestamped = true; hdr.fireround = 0;
+    hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
+    GridSync g = GRID_SYNC__INIT;
+    g.enable = true; g.slotindex = kSlot; g.slotcount = timedgrid::kSlotCount;
+    g.roundus = timedgrid::kRoundUs; g.pitchus = timedgrid::kSlotPitchUs;
+    g.txround = 0; g.txslot = kSlot;
+    g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
+    g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+
+    const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
+    const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
+    disp.noteDriftSample(gs_rx);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
+        << "precondition: adopted with the boot-minute error, still provisional";
+
+    auto rx_for = [&](uint32_t round, size_t len) {
+        const int64_t t0 = kTrueAnchor + (int64_t) round * timedgrid::kRoundUs + 300'000;
+        return t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) len);
+    };
+    auto at_truth = [&](uint32_t msgid, uint32_t round) {
+        auto f = pack_stamped_sysop(msgid, round, 300'000);
+        const int64_t rx = rx_for(round, f.size());
+        disp.noteDriftSample(rx);
+        disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
+        return f;
+    };
+
+    const auto first = at_truth(791, 10);
+    ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
+        << "precondition: accepted while still unsettled, no re-solve yet";
+
+    // The clock settles — the re-solve is now armed, waiting for a stamped
+    // frame. Replay the SAME frame (same msgid, same bytes) rather than
+    // delivering a genuinely new one.
+    nodeclock::setSettledForTest(true);
+    const int64_t replay_rx = rx_for(10, first.size());
+    disp.noteDriftSample(replay_rx);
+    disp.onReceiveNew(const_cast<uint8_t *>(first.data()), static_cast<int>(first.size()),
+                      replay_rx);
+    EXPECT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
+        << "a replayed copy (CurrentBurstCopy, not New) must not resolve the "
+           "provisional anchor";
+
+    // A genuinely new stamped frame still does, proving the re-solve itself
+    // is intact and it is specifically the replay that was refused.
+    at_truth(792, 12);
+    EXPECT_EQ(disp.gridState().anchor_us, kTrueAnchor)
+        << "a NEW frame still re-solves the anchor once the clock has settled";
+}
+
 TEST_F(RealNodeFixture, CopiesOfOneFrameCannotVouchForThemselves) {
     // Every heard copy of a stamped burst is a sample, but all copies of one frame
     // share its timing. Promotion needs evidence from more than one transmission.
