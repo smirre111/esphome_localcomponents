@@ -433,6 +433,64 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
 }
 
 // ---------------------------------------------------------------------------
+TEST_F(Seam, BothSidesDeriveIdenticalSessionKeysFromARealLogin) {
+    // Tier 3 (mac-separation-implementation-plan.md section 2(b)): K_enc/
+    // K_mac are derived independently on each side from (K_root, session_id,
+    // node_nonce, hub_addr, node_addr) — nothing carries the derived key
+    // itself over the air. Both the hub-side and node-side unit tests call
+    // framecrypto::buildSessionKeyKdfInput with inputs THEY chose, so neither
+    // can catch the two sides disagreeing about what session_id/node_nonce
+    // actually were on a REAL exchange. This is the one test that can: it
+    // drives a real LOGIN and a real session-opening uplink across the seam,
+    // then proves the two independently-derived K_enc keys are bit-identical
+    // by comparing ciphertext, since the opaque PSA key ids can't be
+    // compared directly.
+    rol.config_synced_ = true;
+    rol.send_login();
+    const auto login = lastDownlink();
+    ASSERT_FALSE(login.empty()) << "send_login must have emitted a LoginMsg";
+
+    disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
+                      esp_timer_get_time());
+    uint32_t hub_nonce = 0;
+    ASSERT_TRUE(disp.getBaseNonceForTest(1, hub_nonce))
+        << "precondition: the node must have accepted the (MIC-verified) LOGIN";
+    ASSERT_EQ(disp.sessionGenerationForTest(), 1u)
+        << "accepting LOGIN must derive session keys, not just store the nonce";
+
+    // Drain the node's TX queue so the wake beacon it queued (carrying
+    // sessionNonce) actually reaches the air — not just "the queue has an
+    // entry", an actual frame built by the real transmit body.
+    while (disp.runOneTxCommand()) {}
+    auto uplinks = lif.drain_tx_queue();
+    ASSERT_FALSE(uplinks.empty()) << "handleLogin's sendWakeBeacon() must have transmitted";
+
+    // The WAKE BEACON specifically (sent first, msgid 1) is the
+    // session-opening uplink that carries sessionNonce — handleLogin sends
+    // it before sendAvailable(), and pending_session_opening_ clears after
+    // whichever uplink goes out first. Deliver it to the hub as the radio
+    // would.
+    rol.set_response(uplinks.front().data(), uplinks.front().size());
+    ASSERT_EQ(rol.sessionGenerationForTest(), 1u)
+        << "the session-opening uplink's sessionNonce must have reached "
+           "handle_encrypted_ and derived the hub's own session keys";
+
+    // The actual proof: encrypt the same block under each side's
+    // independently-derived K_enc and compare.
+    uint8_t iv[16] = {0};
+    iv[0] = 0xAB; iv[15] = 0xCD;
+    const uint8_t plain[16] = "SameKeyProofBlk";
+    uint8_t node_ct[16] = {0}, hub_ct[16] = {0};
+    ASSERT_TRUE(disp.ctrEncryptForTest(iv, plain, sizeof(plain), node_ct));
+    ASSERT_TRUE(rol.ctrEncryptForTest(iv, plain, sizeof(plain), hub_ct));
+    EXPECT_EQ(memcmp(node_ct, hub_ct, sizeof(node_ct)), 0)
+        << "both sides must land on the bit-identical K_enc from the same "
+           "(session_id, node_nonce, hub_addr, node_addr) — a mismatch here "
+           "means the two sides would never be able to decrypt each other "
+           "once Encrypt-then-CMAC replaces AES-GCM";
+}
+
+// ---------------------------------------------------------------------------
 TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin) {
     // THE DEADLOCK THAT COST THE FIRST BENCH SESSION ITS FIRST HOUR.
     //

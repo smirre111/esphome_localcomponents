@@ -27,6 +27,8 @@
 
 #include <esp_bt_defs.h> //For esp_bd_addr_t
 
+#include <psa/crypto.h>
+
 #include <array>
 #include <mutex>
 #include <string>
@@ -111,7 +113,7 @@ namespace esphome
 
       // A listener that goes away must not leave the onboarding gate held by a
       // pointer nobody will ever release (a host test builds and drops many).
-      ~LORAListener() { s_onboarding_gate_.release(this); }
+      ~LORAListener();
 
       void setup() override;
       void dump_config() override;
@@ -287,6 +289,29 @@ namespace esphome
       // `now` to exercise the comparison, which is the whole of U-5.
       void noteBeaconEpochForTest(uint32_t epoch) {
         this->last_beacon_epoch_ = epoch;
+      }
+
+      // For tests: how many times this listener's session keys have been
+      // (re)derived — mirrors CmdDispatcher::sessionGenerationForTest().
+      uint32_t sessionGenerationForTest() const { return this->session_generation_; }
+      // For tests: encrypt a block under this listener's CURRENT K_enc with
+      // CTR — the only way to prove the hub and node landed on bit-IDENTICAL
+      // session keys, since opaque PSA key ids can't be compared directly.
+      // Inline PSA calls rather than comm_utils.h, which is node-only.
+      bool ctrEncryptForTest(const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out) {
+        if (this->k_enc_key_id_ == PSA_KEY_ID_NULL || len == 0) return false;
+        psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
+        if (psa_cipher_encrypt_setup(&op, this->k_enc_key_id_, PSA_ALG_CTR) != PSA_SUCCESS)
+          return false;
+        if (psa_cipher_set_iv(&op, iv, 16) != PSA_SUCCESS) { psa_cipher_abort(&op); return false; }
+        size_t out_len = 0, total = 0;
+        if (psa_cipher_update(&op, in, len, out, len, &out_len) != PSA_SUCCESS)
+        { psa_cipher_abort(&op); return false; }
+        total += out_len;
+        size_t finish_len = 0;
+        if (psa_cipher_finish(&op, out + total, len - total, &finish_len) != PSA_SUCCESS)
+          return false;
+        return total + finish_len == len;
       }
 
       // U-2: the node's radio-busy skip count, as of its last PhaseReport.
@@ -1130,6 +1155,15 @@ namespace esphome
       // accepted one, so regenerating leaves hub and node with disagreeing
       // base nonces and every subsequent encrypted reply fails IV check.
       uint32_t pending_login_nonce_{0};
+      // Tier 3 (mac-separation-implementation-plan.md section 2(b)): this
+      // node's session keys, re-derived when its sessionNonce arrives on
+      // the session-opening uplink. Per-listener (unlike K_auth/the GCM
+      // key, which are fleet-wide statics) because each node contributes
+      // its own node_nonce. NOT YET USED to encrypt anything — see
+      // CmdDispatcher::deriveSessionKeys_()'s matching note.
+      psa_key_id_t k_enc_key_id_{PSA_KEY_ID_NULL};
+      psa_key_id_t k_mac_key_id_{PSA_KEY_ID_NULL};
+      uint32_t     session_generation_{0};
       // Set to true as soon as the startup-login path is initiated (either the
       // timer is armed or the login has already been sent).  Checked by the NTP
       // on_time_sync callback so that NTP resyncs (which fire the callback again)
@@ -1178,6 +1212,11 @@ namespace esphome
       void handle_register_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
       bool admit_frame_(::LoraClientResponseMessage *rcv_message);
       void handle_encrypted_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
+      // Tier 3: derive this listener's K_enc/K_mac from (K_root, session_id,
+      // node_nonce, hub/node addresses) and install them, destroying
+      // whatever was there before only on success — mirrors
+      // CmdDispatcher::deriveSessionKeys_() on the node.
+      bool deriveSessionKeys_(uint32_t session_id, uint32_t node_nonce);
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
       void commit_rx_msgid_(const ::LoraClientResponseMessage *rcv_message);

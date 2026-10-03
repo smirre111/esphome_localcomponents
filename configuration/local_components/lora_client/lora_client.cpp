@@ -184,6 +184,34 @@ static bool s_init_k_auth_key()
   return true;
 }
 
+// Shared import helpers for the per-session keys below — mirrors
+// comm_utils.c's comm_utils_import_cmac_key()/comm_utils_import_ctr_key(),
+// which the hub has no equivalent of (comm_utils.c is node-only).
+static bool s_import_cmac_key(const uint8_t *key_material, size_t key_bytes, psa_key_id_t *out_id)
+{
+  psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE |
+                                   PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH);
+  psa_set_key_algorithm(&attrs, PSA_ALG_AT_LEAST_THIS_LENGTH_MAC(PSA_ALG_CMAC, 8));
+  psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&attrs, (psa_key_bits_t)(key_bytes * 8));
+  psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
+  *out_id = PSA_KEY_ID_NULL;
+  return psa_import_key(&attrs, key_material, key_bytes, out_id) == PSA_SUCCESS;
+}
+
+static bool s_import_ctr_key(const uint8_t *key_material, size_t key_bytes, psa_key_id_t *out_id)
+{
+  psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT);
+  psa_set_key_algorithm(&attrs, PSA_ALG_CTR);
+  psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&attrs, (psa_key_bits_t)(key_bytes * 8));
+  psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
+  *out_id = PSA_KEY_ID_NULL;
+  return psa_import_key(&attrs, key_material, key_bytes, out_id) == PSA_SUCCESS;
+}
+
 // ---------------------------------------------------------------------------
 // Downlink (hub->node) encryption helpers.  Mirror the node's
 // pack_response_message()/derive_gcm_nonce() so the two directions stay wire
@@ -419,6 +447,20 @@ namespace esphome
     // this file ANNOUNCES it, and two copies is how those two come to disagree.
     using timedgrid::kBeaconSlotIndex;
     using timedgrid::kBeaconEveryRounds;
+
+    LORAListener::~LORAListener()
+    {
+      s_onboarding_gate_.release(this);
+      // Tier 3: per-listener keys, otherwise never freed — fine for the
+      // handful of LORAListener instances a real hub constructs once at
+      // boot, but the host test harness constructs many short-lived ones
+      // in one process against mbedTLS's finite PSA key slot table (same
+      // reasoning as CmdDispatcher's destructor on the node side).
+      if (this->k_enc_key_id_ != PSA_KEY_ID_NULL)
+        psa_destroy_key(this->k_enc_key_id_);
+      if (this->k_mac_key_id_ != PSA_KEY_ID_NULL)
+        psa_destroy_key(this->k_mac_key_id_);
+    }
 
     void LORAListener::setup()
     {
@@ -1420,6 +1462,74 @@ namespace esphome
       }
     }
 
+    // Tier 3 (mac-separation-implementation-plan.md section 2(b)): derive
+    // this listener's K_enc/K_mac from (K_root, session_id, node_nonce,
+    // hub/node addresses). Mirrors CmdDispatcher::deriveSessionKeys_() on
+    // the node — both sides must land on identical keys from the same
+    // four inputs.
+    bool LORAListener::deriveSessionKeys_(uint32_t session_id, uint32_t node_nonce)
+    {
+      uint8_t root_material[kAesGcmKeyBytes];
+      if (!s_derive_aes_gcm_key(root_material))
+        return false;
+
+      psa_key_id_t root_key_id = PSA_KEY_ID_NULL;
+      if (!s_import_cmac_key(root_material, sizeof(root_material), &root_key_id))
+      {
+        memset(root_material, 0, sizeof(root_material));
+        return false;
+      }
+      memset(root_material, 0, sizeof(root_material));
+
+      const uint8_t hub_addr  = static_cast<uint8_t>(kHubAddress);
+      const uint8_t node_addr = static_cast<uint8_t>(this->short_address_);
+
+      uint8_t enc_input[framecrypto::kKdfInputBytes];
+      uint8_t mac_input[framecrypto::kKdfInputBytes];
+      framecrypto::buildSessionKeyKdfInput(0x01, session_id, node_nonce, hub_addr, node_addr, enc_input);
+      framecrypto::buildSessionKeyKdfInput(0x02, session_id, node_nonce, hub_addr, node_addr, mac_input);
+
+      uint8_t k_enc_material[kAesGcmKeyBytes];
+      uint8_t k_mac_material[kAesGcmKeyBytes];
+      size_t enc_len = 0, mac_len = 0;
+      const bool enc_ok = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kAesGcmKeyBytes),
+                                          enc_input, sizeof(enc_input),
+                                          k_enc_material, sizeof(k_enc_material), &enc_len) == PSA_SUCCESS &&
+                          enc_len == kAesGcmKeyBytes;
+      const bool mac_ok = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kAesGcmKeyBytes),
+                                          mac_input, sizeof(mac_input),
+                                          k_mac_material, sizeof(k_mac_material), &mac_len) == PSA_SUCCESS &&
+                          mac_len == kAesGcmKeyBytes;
+      psa_destroy_key(root_key_id);
+      if (!enc_ok || !mac_ok)
+      {
+        memset(k_enc_material, 0, sizeof(k_enc_material));
+        memset(k_mac_material, 0, sizeof(k_mac_material));
+        return false;
+      }
+
+      psa_key_id_t new_enc_id = PSA_KEY_ID_NULL, new_mac_id = PSA_KEY_ID_NULL;
+      const bool imported = s_import_ctr_key(k_enc_material, sizeof(k_enc_material), &new_enc_id) &&
+                            s_import_cmac_key(k_mac_material, sizeof(k_mac_material), &new_mac_id);
+      memset(k_enc_material, 0, sizeof(k_enc_material));
+      memset(k_mac_material, 0, sizeof(k_mac_material));
+      if (!imported)
+      {
+        if (new_enc_id != PSA_KEY_ID_NULL) psa_destroy_key(new_enc_id);
+        if (new_mac_id != PSA_KEY_ID_NULL) psa_destroy_key(new_mac_id);
+        return false;
+      }
+
+      if (this->k_enc_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_enc_key_id_);
+      if (this->k_mac_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_mac_key_id_);
+      this->k_enc_key_id_ = new_enc_id;
+      this->k_mac_key_id_ = new_mac_id;
+      ++this->session_generation_;
+      ESP_LOGI(TAG, "[%s] Session keys derived (generation=%u)", this->get_name().c_str(),
+               (unsigned) this->session_generation_);
+      return true;
+    }
+
     // The encrypted uplink path: derive the IV, authenticate, unpack the inner
     // payload, confirm the session, then forward to the child nodes with the
     // plaintext outer header re-attached (loracover needs it for addressing).
@@ -1514,6 +1624,28 @@ namespace esphome
         // The tag verified: this frame is the node's, so its msgid is real and
         // the replay counter may finally move.
         this->commit_rx_msgid_(rcv_message);
+
+        // Tier 3 (mac-separation-implementation-plan.md section 2(b), step
+        // 3): this is the session-opening uplink if it carries a nonzero
+        // sessionNonce — present on exactly one frame per session. Derive
+        // K_enc/K_mac from it now. Gated on the GCM tag just having
+        // verified above, so this isn't acted on from an unauthenticated
+        // frame; a real CMAC-covered sessionNonce is the eventual
+        // replacement once Encrypt-then-CMAC lands.
+        if (rcv_message->header && rcv_message->header->sessionnonce != 0)
+        {
+          uint32_t session_id = 0;
+          {
+            std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+            auto it = s_base_nonce_map.find(sender);
+            if (it != s_base_nonce_map.end()) session_id = it->second;
+          }
+          if (session_id != 0 &&
+              !this->deriveSessionKeys_(session_id, rcv_message->header->sessionnonce))
+          {
+            ESP_LOGE(TAG, "[%s] Session key derivation failed", this->get_name().c_str());
+          }
+        }
 
         // A successful decrypt proves the node holds the matching base nonce —
         // the encrypted session is confirmed both ways.  Only now do we treat

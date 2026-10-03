@@ -281,6 +281,50 @@ TEST(SessionManager, RestoredMarginIsFullySeenSoNothingInItCanBeReplayed) {
     EXPECT_TRUE(b.acceptRxId(restored + 1));
 }
 
+// Tier 3 (mac-separation-implementation-plan.md section 2(b), step 2): the
+// session nonces persist under their OWN NVS key ("lsess"), separate from
+// PersistState ("peerstate") above — this proves that independence, and
+// that a resume round-trips both nonces.
+TEST(SessionManager, SessionNoncesSurviveSaveAndLoadUnderTheirOwnKey) {
+    proto_sim_nvs_reset();
+    constexpr uint32_t kNodeNonce = 0xDEADBEEFu;
+    {
+        SessionManager a;
+        a.setPersistPeer(kHub);
+        a.setBaseNonce(kHub, kNonce);   // base_nonce IS hub_nonce/sessionId
+        a.setNodeNonce(kNodeNonce);
+        a.saveSession();
+    }
+
+    SessionManager b;
+    b.setPersistPeer(kHub);   // loadSession() re-installs base_nonce via this
+    b.loadSession();
+
+    EXPECT_EQ(b.nodeNonce(), kNodeNonce);
+    uint32_t restored_hub_nonce = 0;
+    ASSERT_TRUE(b.getBaseNonce(kHub, restored_hub_nonce));
+    EXPECT_EQ(restored_hub_nonce, kNonce);
+}
+
+TEST(SessionManager, SessionWithoutAConfirmedNonceSavesNothing) {
+    // Same reasoning as SavingWithoutASessionWritesNothing above: a zero
+    // node_nonce (never set) must not produce a blob that restores a
+    // session that was never actually established.
+    proto_sim_nvs_reset();
+    {
+        SessionManager a;
+        a.setPersistPeer(kHub);
+        a.setBaseNonce(kHub, kNonce);
+        // node_nonce left at its default (0) — no session established.
+        a.saveSession();
+    }
+
+    SessionManager b;
+    b.setPersistPeer(kHub);
+    b.loadSession();
+    EXPECT_EQ(b.nodeNonce(), 0u) << "nothing should have been persisted to restore";
+}
+
 TEST(SessionManager, SavingWithoutASessionWritesNothing) {
     // The failure that produced blobs restoring a session the hub could never
     // authenticate: persist peer set, but no nonce for it.
