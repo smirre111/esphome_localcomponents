@@ -7,6 +7,7 @@
 // codec layer instead of silently passing on hand-rolled structs.
 
 #include "sim/wire_codec.h"
+#include "sim/crypto.h"
 
 extern "C" {
 #include "blinds.pb-c.h"
@@ -166,13 +167,23 @@ static std::vector<uint8_t> serialize_op_impl(const LoraClientOperationMessage& 
         pb.cmd_case     = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
         pb.coverconfig  = &pb_cv;
         break;
-    case Cmd::Login:
+    case Cmd::Login: {
         login_msg__init(&pb_login);
         pb_login.nonce            = m.login.nonce;
         pb_login.request_register = m.login.request_register;
+        // Tier 3: LOGIN is MIC-authenticated now — compute it here, same
+        // reasoning as the REGISTER case in serialize_resp_impl below.
+        static uint8_t mic[framecrypto::kSessionCmacTagBytes];
+        proto_sim::compute_login_mic(pb_header.destaddress, pb_header.destsubnet,
+                                     pb_header.senderaddress, pb_header.msgid,
+                                     pb_login.nonce, pb_login.request_register,
+                                     mic);
+        pb_login.mic.data = mic;
+        pb_login.mic.len  = sizeof(mic);
         pb.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
         pb.login    = &pb_login;
         break;
+    }
     case Cmd::TimeSync:
         time_sync__init(&pb_ts);
         pb_ts.epoch     = m.timesync.epoch;
@@ -272,13 +283,24 @@ static std::vector<uint8_t> serialize_resp_impl(const LoraClientResponseMessage&
         pb.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL;
         pb.avail      = &pb_avail;
         break;
-    case Proto::Register:
+    case Proto::Register: {
         client_register__init(&pb_reg);
         pb_reg.mac_addr     = m.reg.mac_addr;
         pb_reg.needs_config = m.reg.needs_config;
+        // Tier 3: REGISTER is MIC-authenticated now — compute it here so
+        // every sim-model caller gets a frame the real hub actually
+        // accepts, without each call site having to know about K_auth.
+        static uint8_t mic[framecrypto::kSessionCmacTagBytes];
+        proto_sim::compute_register_mic(pb_reg.mac_addr, pb_reg.needs_config,
+                                        pb_header.destaddress, pb_header.destsubnet,
+                                        pb_header.senderaddress, pb_header.msgid,
+                                        mic);
+        pb_reg.mic.data = mic;
+        pb_reg.mic.len  = sizeof(mic);
         pb.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER;
         pb.register_  = &pb_reg;
         break;
+    }
     case Proto::State:
         client_battery__init(&pb_bat);
         pb_bat.voltage = m.state.voltage;

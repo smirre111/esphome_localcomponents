@@ -270,6 +270,10 @@ struct  CoverConfig
 struct  LoginMsg
 {
   ProtobufCMessage base;
+  /*
+   * hub_nonce (mac-separation-implementation-plan.md section 2(b)): esp_random()
+   * on the hub. Mixed into the session-key derivation and covered by `mic`.
+   */
   uint32_t nonce;
   /*
    * Set by the hub when it has NOT yet pushed config to this node this session
@@ -280,14 +284,28 @@ struct  LoginMsg
    * awake node without requiring it to reboot.  False on a normal login.
    */
   protobuf_c_boolean request_register;
+  /*
+   * Tier 3: CMAC(K_auth, "LG1" || dest || subnet || sender || msgid ||
+   * hub_nonce || request_register)[0:8]. Authenticates LOGIN before any
+   * state change (rate limit, resetCounters()) — previously plaintext and
+   * accepted on a bare 5 s rate limit, letting a forged/replayed LOGIN
+   * force real, key-free GCM IV reuse.
+   */
+  ProtobufCBinaryData mic;
 };
 #define LOGIN_MSG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&login_msg__descriptor) \
-    , 0, 0 }
+    , 0, 0, {0,NULL} }
 
 
 /*
- * Exchange used to provision a per-peer base nonce for nonce derivation.
+ * Tier 3 note (mac-separation-implementation-plan.md section 2(b)): this is
+ * SUPERSEDED by LoginMsg's session-establishment protocol once that's fully
+ * wired on both sides (hub_nonce/node_nonce mixed into per-session key
+ * derivation subsumes this exchange's rekey role) — kept live, not yet
+ * retired, until that rewiring lands in the same changeset that removes it.
+ * Removing the wire message before its replacement is wired in would leave
+ * the hub with no mid-session rekey path at all.
  */
 struct  BaseNonceExchange
 {
@@ -681,8 +699,6 @@ struct  LoraHeader
   uint32_t senderaddress;
   uint32_t msgid;
   /*
-   * field 5 (encrypted) removed — encryption is inferred from the oneof case
-   * (presence of the `encrypted` payload), not a header flag.
    * Burst scheduling (hub -> node): each copy of a TX burst carries its own
    * 0-based index and the total count.  The node uses these to compute when
    * the burst ends and defers its response until the channel is clear.
@@ -721,10 +737,17 @@ struct  LoraHeader
   protobuf_c_boolean firestamped;
   uint32_t fireround;
   uint32_t fireoffsetus;
+  /*
+   * Tier 3 session establishment (mac-separation-implementation-plan.md
+   * section 2(b), step 3): the node's session-opening uplink carries its
+   * freshly generated node_nonce here, ONCE per session, covered by that
+   * frame's CMAC. Zero on every other frame.
+   */
+  uint32_t sessionnonce;
 };
 #define LORA_HEADER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_header__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*
@@ -1356,10 +1379,18 @@ struct  ClientRegister
    * so config changes flashed into the hub are always delivered.
    */
   protobuf_c_boolean needs_config;
+  /*
+   * Tier 3 (mac-separation-implementation-plan.md section 2(b), step 7):
+   * CMAC(K_auth, "RG1" || mac_addr || needs_config || header)[0:8].
+   * REGISTER previously had no authentication at all and was processed
+   * before any address/msgid filter — a forged plaintext REGISTER could
+   * drop an existing session outright.
+   */
+  ProtobufCBinaryData mic;
 };
 #define CLIENT_REGISTER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&client_register__descriptor) \
-    , 0, 0 }
+    , 0, 0, {0,NULL} }
 
 
 struct  ClientAvailable

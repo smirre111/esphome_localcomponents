@@ -8,7 +8,7 @@
 
 // AES-GCM-128 helpers that match production CmdDispatcher.cpp / lora_client.cpp.
 //
-// Key:        SHA-256("LoRaKey1")[0:16]
+// Key:        SHA-256("LoRaHome")[0:16]
 // Nonce/IV:   base_nonce_BE[4] ‖ frame_counter_BE[8]   (12 bytes)
 // AAD:        destaddress‖destsubnet‖senderaddress‖msgid‖encrypted, each BE u32
 //             (20 bytes)
@@ -70,5 +70,22 @@ std::optional<std::vector<uint8_t>>
 aes_gcm_decrypt(const uint8_t iv[12], const uint8_t* aad, size_t aad_len,
                 const uint8_t* cipher, size_t cipher_len,
                 const uint8_t* tag,    size_t tag_len);
+
+// ---------------------------------------------------------------------------
+// Tier 3 (docs/mac-separation-implementation-plan.md section 2(b)): LOGIN
+// and REGISTER are now MIC-authenticated under K_auth, derived from the same
+// K_root this file's AES-GCM key comes from. Model-based test scaffolding
+// (wire_codec.cpp's sim::ClientRegister/LoginMsg serializers) computes these
+// so a simulated node/hub frame still verifies against the REAL production
+// code under test.
+// ---------------------------------------------------------------------------
+
+void compute_login_mic(uint32_t dest, uint32_t subnet, uint32_t sender,
+                       uint32_t msgid, uint32_t hub_nonce, bool request_register,
+                       uint8_t out[framecrypto::kSessionCmacTagBytes]);
+
+void compute_register_mic(uint64_t mac_addr, bool needs_config,
+                          uint32_t dest, uint32_t subnet, uint32_t sender,
+                          uint32_t msgid, uint8_t out[framecrypto::kSessionCmacTagBytes]);
 
 } // namespace proto_sim

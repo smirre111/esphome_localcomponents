@@ -79,6 +79,14 @@ std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce) {
 
     LoginMsg login = LOGIN_MSG__INIT;
     login.nonce    = nonce;
+    // Tier 3 (mac-separation-implementation-plan.md section 2(b)): LOGIN is
+    // MIC-authenticated now — compute it so the real node's handleLogin
+    // actually accepts this frame instead of dropping it unverified.
+    uint8_t mic[framecrypto::kSessionCmacTagBytes];
+    proto_sim::compute_login_mic(hdr.destaddress, hdr.destsubnet, hdr.senderaddress,
+                                 hdr.msgid, nonce, /*request_register=*/false, mic);
+    login.mic.data = mic;
+    login.mic.len  = sizeof(mic);
     op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
     op.login       = &login;
 

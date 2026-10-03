@@ -48,6 +48,13 @@ static constexpr size_t         kAesGcmTagBytes = 8;  // truncated AES-GCM tag (
 // PSA key slot — imported once at setup(), reused for every decrypt call.
 static psa_key_id_t s_aes_gcm_key_id = PSA_KEY_ID_NULL;
 
+// Tier 3 (docs/mac-separation-implementation-plan.md section 2(b)): K_auth,
+// derived once from K_root (the same shared key s_aes_gcm_key_id's material
+// comes from) and used only to authenticate LOGIN/REGISTER. Fleet-wide, like
+// the GCM key — there is one shared K_root, not per-node keys (see the
+// plan's Tier 2 postponement note).
+static psa_key_id_t s_k_auth_key_id = PSA_KEY_ID_NULL;
+
 // File-scope encryption state, keyed by peer short address.
 // Only the base nonce is tracked per peer; the AES-GCM frame counter is the
 // same value as the protobuf LoraHeader.msgid — one unified counter per
@@ -86,6 +93,12 @@ static bool s_init_psa_gcm_key()
   if (s_aes_gcm_key_id != PSA_KEY_ID_NULL)
     return true; // already imported
 
+  // Defensive, idempotent — see the matching comment on the node's
+  // init_psa_key() for why this call was added here even though setup()
+  // is also supposed to have done it.
+  if (psa_crypto_init() != PSA_SUCCESS)
+    return false;
+
   uint8_t key_material[kAesGcmKeyBytes];
   if (!s_derive_aes_gcm_key(key_material))
     return false;
@@ -103,6 +116,69 @@ static bool s_init_psa_gcm_key()
   if (status != PSA_SUCCESS)
   {
     s_aes_gcm_key_id = PSA_KEY_ID_NULL;
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3: derive K_auth = AES-CMAC(K_root, framecrypto::buildKAuthKdfInput())
+// once, from the same K_root bytes as the GCM key above. Mirrors
+// CmdDispatcher::init_k_auth_() on the node — both sides must derive
+// bit-identical K_auth from the same K_root for LOGIN/REGISTER MICs to
+// verify.
+// ---------------------------------------------------------------------------
+static bool s_init_k_auth_key()
+{
+  if (s_k_auth_key_id != PSA_KEY_ID_NULL)
+    return true; // already derived
+
+  if (psa_crypto_init() != PSA_SUCCESS)
+    return false;
+
+  uint8_t root_material[kAesGcmKeyBytes];
+  if (!s_derive_aes_gcm_key(root_material))
+    return false;
+
+  psa_key_attributes_t root_attrs = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_usage_flags(&root_attrs, PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE |
+                                        PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH);
+  psa_set_key_algorithm(&root_attrs, PSA_ALG_AT_LEAST_THIS_LENGTH_MAC(PSA_ALG_CMAC, 8));
+  psa_set_key_type(&root_attrs, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&root_attrs, kAesGcmKeyBytes * 8);
+  psa_set_key_lifetime(&root_attrs, PSA_KEY_LIFETIME_VOLATILE);
+
+  psa_key_id_t root_key_id = PSA_KEY_ID_NULL;
+  psa_status_t status = psa_import_key(&root_attrs, root_material, kAesGcmKeyBytes, &root_key_id);
+  memset(root_material, 0, sizeof(root_material));
+  if (status != PSA_SUCCESS)
+    return false;
+
+  uint8_t kdf_input[framecrypto::kKdfInputBytes];
+  framecrypto::buildKAuthKdfInput(kdf_input);
+
+  uint8_t k_auth_material[kAesGcmKeyBytes];
+  size_t k_auth_len = 0;
+  status = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kAesGcmKeyBytes),
+                           kdf_input, sizeof(kdf_input),
+                           k_auth_material, sizeof(k_auth_material), &k_auth_len);
+  psa_destroy_key(root_key_id);
+  if (status != PSA_SUCCESS || k_auth_len != kAesGcmKeyBytes)
+    return false;
+
+  psa_key_attributes_t auth_attrs = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_usage_flags(&auth_attrs, PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE |
+                                        PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH);
+  psa_set_key_algorithm(&auth_attrs, PSA_ALG_AT_LEAST_THIS_LENGTH_MAC(PSA_ALG_CMAC, 8));
+  psa_set_key_type(&auth_attrs, PSA_KEY_TYPE_AES);
+  psa_set_key_bits(&auth_attrs, kAesGcmKeyBytes * 8);
+  psa_set_key_lifetime(&auth_attrs, PSA_KEY_LIFETIME_VOLATILE);
+
+  status = psa_import_key(&auth_attrs, k_auth_material, sizeof(k_auth_material), &s_k_auth_key_id);
+  memset(k_auth_material, 0, sizeof(k_auth_material));
+  if (status != PSA_SUCCESS)
+  {
+    s_k_auth_key_id = PSA_KEY_ID_NULL;
     return false;
   }
   return true;
@@ -427,6 +503,10 @@ namespace esphome
       else
       {
         ESP_LOGI(TAG, "PSA AES-GCM key imported (id=%u)", (unsigned)s_aes_gcm_key_id);
+      }
+      if (psa_ret == PSA_SUCCESS && !s_init_k_auth_key())
+      {
+        ESP_LOGE(TAG, "Failed to derive K_auth — LOGIN/REGISTER MICs will fail");
       }
 
       // Schedule a login challenge so frame counters and AES-GCM nonces are
@@ -945,6 +1025,36 @@ namespace esphome
           ESP_LOGD(TAG, "%s: REGISTER is for another node's MAC — ignoring", this->get_name().c_str());
           lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
+        }
+
+        // Tier 3 (mac-separation-implementation-plan.md section 2(b), step
+        // 7): verify REGISTER's MIC before any state change — this used to
+        // be accepted purely on an address match, before any filter at all,
+        // so a forged plaintext REGISTER naming a real node's MAC could drop
+        // that node's existing session outright.
+        {
+          uint8_t mic_input[framecrypto::kRegisterMicInputBytes];
+          const uint32_t dest   = rcv_message->header ? rcv_message->header->destaddress   : 0;
+          const uint32_t subnet = rcv_message->header ? rcv_message->header->destsubnet    : 0;
+          const uint32_t sender = rcv_message->header ? rcv_message->header->senderaddress : 0;
+          const uint32_t msgid  = rcv_message->header ? rcv_message->header->msgid         : 0;
+          framecrypto::buildRegisterMicInput(reg->mac_addr, reg->needs_config,
+                                             dest, subnet, sender, msgid, mic_input);
+          // Lazy-import, same reasoning as send_login().
+          if (s_k_auth_key_id == PSA_KEY_ID_NULL)
+            s_init_k_auth_key();
+          const bool mic_ok = s_k_auth_key_id != PSA_KEY_ID_NULL &&
+                              reg->mic.len == framecrypto::kSessionCmacTagBytes &&
+                              psa_mac_verify(s_k_auth_key_id,
+                                            PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, reg->mic.len),
+                                            mic_input, sizeof(mic_input),
+                                            reg->mic.data, reg->mic.len) == PSA_SUCCESS;
+          if (!mic_ok)
+          {
+            ESP_LOGW(TAG, "%s: REGISTER failed MIC verification — dropping", this->get_name().c_str());
+            lora_client_response_message__free_unpacked(rcv_message, NULL);
+            return;
+          }
         }
 
         ESP_LOGI(TAG, "%s, Registered with LORA server", this->get_name().c_str());
@@ -3056,6 +3166,35 @@ namespace esphome
       // clears config_synced_), looping register <-> login for 8+ minutes with
       // a healthy radio at RSSI -36. No measurement can run without a session.
       login.request_register = !this->config_synced_ && !this->config_push_pending_;
+
+      // Tier 3: authenticate LOGIN so a forged/replayed one can no longer
+      // force the node to re-seal under a reused base nonce (U2/the LOGIN
+      // bug) — verified by the node BEFORE it touches its rate limit or
+      // resets its counters.
+      uint8_t mic_input[framecrypto::kLoginMicInputBytes];
+      uint8_t mic_tag[framecrypto::kSessionCmacTagBytes] = {0};
+      framecrypto::buildLoginMicInput(header.destaddress, header.destsubnet,
+                                      header.senderaddress, header.msgid,
+                                      base, login.request_register, mic_input);
+      // Lazy-import, same as the GCM key above (lines ~224/269) — this path
+      // can be reached without setup() ever having run (e.g. a test driving
+      // send_login() directly), and K_auth is needed right now, not later.
+      if (s_k_auth_key_id == PSA_KEY_ID_NULL)
+        s_init_k_auth_key();
+      if (s_k_auth_key_id != PSA_KEY_ID_NULL)
+      {
+        size_t mic_len = 0;
+        if (psa_mac_compute(s_k_auth_key_id,
+                            PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(mic_tag)),
+                            mic_input, sizeof(mic_input),
+                            mic_tag, sizeof(mic_tag), &mic_len) != PSA_SUCCESS ||
+            mic_len != sizeof(mic_tag))
+        {
+          ESP_LOGE(TAG, "LOGIN MIC computation failed — sending unauthenticated (node will reject)");
+        }
+      }
+      login.mic.data = mic_tag;
+      login.mic.len  = sizeof(mic_tag);
       op_message.login = &login;
 
       uint8_t *txBuf;

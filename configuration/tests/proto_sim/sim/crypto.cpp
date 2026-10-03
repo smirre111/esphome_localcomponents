@@ -2,6 +2,8 @@
 
 #include "FrameCrypto.h"
 
+#include <mbedtls/cipher.h>
+#include <mbedtls/cmac.h>
 #include <mbedtls/gcm.h>
 #include <mbedtls/sha256.h>
 
@@ -49,6 +51,55 @@ const uint8_t* aes_gcm_key() {
         std::memcpy(key, hash, 16);
     });
     return key;
+}
+
+namespace {
+
+// One-shot AES-CMAC (mbedtls 2.x's mbedtls_cipher_cmac always produces the
+// full 16-byte block; callers truncate as needed — same convention as PSA's
+// TRUNCATED_MAC, which also takes the leading bytes of the full MAC).
+void cmac_full(const uint8_t key[16], const uint8_t* input, size_t input_len,
+               uint8_t out16[16]) {
+    const mbedtls_cipher_info_t* info =
+        mbedtls_cipher_info_from_values(MBEDTLS_CIPHER_ID_AES, 128, MBEDTLS_MODE_ECB);
+    mbedtls_cipher_cmac(info, key, 128, input, input_len, out16);
+}
+
+// K_auth = AES-CMAC(K_root, framecrypto::buildKAuthKdfInput()) — mirrors
+// CmdDispatcher::init_k_auth_() / lora_client.cpp's s_init_k_auth_key().
+const uint8_t* k_auth_key() {
+    static uint8_t key[16];
+    static std::once_flag once;
+    std::call_once(once, [] {
+        uint8_t kdf_input[framecrypto::kKdfInputBytes];
+        framecrypto::buildKAuthKdfInput(kdf_input);
+        cmac_full(aes_gcm_key(), kdf_input, sizeof(kdf_input), key);
+    });
+    return key;
+}
+
+}  // namespace
+
+void compute_login_mic(uint32_t dest, uint32_t subnet, uint32_t sender,
+                       uint32_t msgid, uint32_t hub_nonce, bool request_register,
+                       uint8_t out[framecrypto::kSessionCmacTagBytes]) {
+    uint8_t input[framecrypto::kLoginMicInputBytes];
+    framecrypto::buildLoginMicInput(dest, subnet, sender, msgid, hub_nonce,
+                                    request_register, input);
+    uint8_t full[16];
+    cmac_full(k_auth_key(), input, sizeof(input), full);
+    std::memcpy(out, full, framecrypto::kSessionCmacTagBytes);
+}
+
+void compute_register_mic(uint64_t mac_addr, bool needs_config,
+                          uint32_t dest, uint32_t subnet, uint32_t sender,
+                          uint32_t msgid, uint8_t out[framecrypto::kSessionCmacTagBytes]) {
+    uint8_t input[framecrypto::kRegisterMicInputBytes];
+    framecrypto::buildRegisterMicInput(mac_addr, needs_config, dest, subnet,
+                                       sender, msgid, input);
+    uint8_t full[16];
+    cmac_full(k_auth_key(), input, sizeof(input), full);
+    std::memcpy(out, full, framecrypto::kSessionCmacTagBytes);
 }
 
 // These delegate to the production header rather than re-deriving the layout.

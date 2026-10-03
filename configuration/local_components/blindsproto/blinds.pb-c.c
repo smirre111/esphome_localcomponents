@@ -1537,7 +1537,7 @@ const ProtobufCMessageDescriptor cover_config__descriptor =
   (ProtobufCMessageInit) cover_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor login_msg__field_descriptors[2] =
+static const ProtobufCFieldDescriptor login_msg__field_descriptors[3] =
 {
   {
     "nonce",
@@ -1563,15 +1563,28 @@ static const ProtobufCFieldDescriptor login_msg__field_descriptors[2] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "mic",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(LoginMsg, mic),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned login_msg__field_indices_by_name[] = {
+  2,   /* field[2] = mic */
   0,   /* field[0] = nonce */
   1,   /* field[1] = request_register */
 };
 static const ProtobufCIntRange login_msg__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 2 }
+  { 0, 3 }
 };
 const ProtobufCMessageDescriptor login_msg__descriptor =
 {
@@ -1581,7 +1594,7 @@ const ProtobufCMessageDescriptor login_msg__descriptor =
   "LoginMsg",
   "",
   sizeof(LoginMsg),
-  2,
+  3,
   login_msg__field_descriptors,
   login_msg__field_indices_by_name,
   1,  login_msg__number_ranges,
@@ -2530,7 +2543,7 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   (ProtobufCMessageInit) node_wake_beacon__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_header__field_descriptors[10] =
+static const ProtobufCFieldDescriptor lora_header__field_descriptors[11] =
 {
   {
     "destAddress",
@@ -2652,6 +2665,18 @@ static const ProtobufCFieldDescriptor lora_header__field_descriptors[10] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "sessionNonce",
+    12,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_FIXED32,
+    0,   /* quantifier_offset */
+    offsetof(LoraHeader, sessionnonce),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_header__field_indices_by_name[] = {
   5,   /* field[5] = burstCount */
@@ -2664,12 +2689,13 @@ static const unsigned lora_header__field_indices_by_name[] = {
   3,   /* field[3] = msgId */
   6,   /* field[6] = onMark */
   2,   /* field[2] = senderAddress */
+  10,   /* field[10] = sessionNonce */
 };
 static const ProtobufCIntRange lora_header__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 6, 4 },
-  { 0, 10 }
+  { 0, 11 }
 };
 const ProtobufCMessageDescriptor lora_header__descriptor =
 {
@@ -2679,7 +2705,7 @@ const ProtobufCMessageDescriptor lora_header__descriptor =
   "LoraHeader",
   "",
   sizeof(LoraHeader),
-  10,
+  11,
   lora_header__field_descriptors,
   lora_header__field_indices_by_name,
   2,  lora_header__number_ranges,
@@ -4395,7 +4421,7 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   (ProtobufCMessageInit) lora_client_operation_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor client_register__field_descriptors[2] =
+static const ProtobufCFieldDescriptor client_register__field_descriptors[3] =
 {
   {
     "mac_addr",
@@ -4421,15 +4447,28 @@ static const ProtobufCFieldDescriptor client_register__field_descriptors[2] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "mic",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BYTES,
+    0,   /* quantifier_offset */
+    offsetof(ClientRegister, mic),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned client_register__field_indices_by_name[] = {
   0,   /* field[0] = mac_addr */
+  2,   /* field[2] = mic */
   1,   /* field[1] = needs_config */
 };
 static const ProtobufCIntRange client_register__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 2 }
+  { 0, 3 }
 };
 const ProtobufCMessageDescriptor client_register__descriptor =
 {
@@ -4439,7 +4478,7 @@ const ProtobufCMessageDescriptor client_register__descriptor =
   "ClientRegister",
   "",
   sizeof(ClientRegister),
-  2,
+  3,
   client_register__field_descriptors,
   client_register__field_indices_by_name,
   1,  client_register__number_ranges,

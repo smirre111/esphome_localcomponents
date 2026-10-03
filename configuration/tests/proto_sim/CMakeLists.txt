@@ -683,6 +683,17 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     target_link_libraries(real_cmd_dispatcher_test
         PRIVATE real_cmd_dispatcher proto_sim GTest::gtest GTest::gtest_main)
     gtest_discover_tests(real_cmd_dispatcher_test)
+
+    # Tier 3 (docs/mac-separation-implementation-plan.md section 2(b)):
+    # comm_utils.c's Encrypt-then-CMAC primitives (CMAC compute/verify,
+    # CTR), exercised directly against the real production C file rather
+    # than through CmdDispatcher's call sites.
+    add_executable(comm_utils_tier3_test
+        scenarios/comm_utils_tier3_test.cpp
+        ${NODE_SHIM_DIR}/host_clock.c)
+    target_link_libraries(comm_utils_tier3_test
+        PRIVATE real_cmd_dispatcher proto_sim GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(comm_utils_tier3_test)
     # ------------------------------------------------------------------
     # THE SEAM: the real hub and the real node in one process.
     #
