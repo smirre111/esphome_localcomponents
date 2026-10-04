@@ -1223,8 +1223,16 @@ namespace esphome
                 break;
               }
             }
-            if (dest_client == nullptr ||
-                !dest_client->sealBurstCopyTag(burstMsg->encrypted, burstMsg->header))
+            // H-1: the wall-clock cost of this call, whether it succeeds or
+            // not — a session gone stale mid-burst is itself cheap to
+            // detect, but the acceptance gate is about the ordinary case,
+            // which is the overwhelming majority of samples.
+            const int64_t seal_t0 = esp_timer_get_time();
+            const bool sealed = dest_client != nullptr &&
+                                dest_client->sealBurstCopyTag(burstMsg->encrypted, burstMsg->header);
+            this->noteTagWriteLatencyUs_(
+                (uint32_t) (esp_timer_get_time() - seal_t0));
+            if (!sealed)
             {
               ESP_LOGW(TAG, "Could not seal copy %d's tag (no session?) — dropping this copy", cnt);
               skip_copy = true;
@@ -1314,6 +1322,56 @@ namespace esphome
 
       if (burstMsg != nullptr)
         lora_client_operation_message__free_unpacked(burstMsg, NULL);
+    }
+
+    // H-1 acceptance gate: bucket one sealBurstCopyTag() latency sample and,
+    // every kTagLatencyReportEvery samples, log a p50/p99/max/n summary
+    // computed from the cumulative bucket counts, then reset for the next
+    // window. Buckets rather than raw samples because the gate only needs
+    // percentiles against a 1ms/3ms budget, not individual values.
+    void LORATracker::noteTagWriteLatencyUs_(uint32_t us)
+    {
+      uint32_t bucket = us / kTagLatencyBucketUs;
+      if (bucket > kTagLatencyBuckets)
+        bucket = kTagLatencyBuckets;
+      this->tag_latency_hist_[bucket]++;
+      this->tag_latency_n_++;
+      if (us > this->tag_latency_max_us_)
+        this->tag_latency_max_us_ = us;
+
+      if (this->tag_latency_n_ < kTagLatencyReportEvery)
+        return;
+
+      const uint32_t total = this->tag_latency_n_;
+      const uint32_t p50_target = (total + 1) / 2;
+      const uint32_t p99_target = (total * 99 + 99) / 100;
+      uint32_t cum = 0;
+      uint32_t p50_us = 0, p99_us = 0;
+      bool have_p50 = false, have_p99 = false;
+      for (uint32_t b = 0; b <= kTagLatencyBuckets; b++)
+      {
+        cum += this->tag_latency_hist_[b];
+        const uint32_t bucket_us = (b == kTagLatencyBuckets)
+                                        ? (kTagLatencyBuckets * kTagLatencyBucketUs)
+                                        : ((b + 1) * kTagLatencyBucketUs);
+        if (!have_p50 && cum >= p50_target)
+        {
+          p50_us = bucket_us;
+          have_p50 = true;
+        }
+        if (!have_p99 && cum >= p99_target)
+        {
+          p99_us = bucket_us;
+          have_p99 = true;
+        }
+      }
+
+      ESP_LOGW(TAG, "H-1 tag-write latency: n=%u p50~%uus p99~%uus max=%uus",
+               total, p50_us, p99_us, this->tag_latency_max_us_);
+
+      this->tag_latency_hist_.fill(0);
+      this->tag_latency_n_ = 0;
+      this->tag_latency_max_us_ = 0;
     }
 
     void LORATracker::sendPacketOnce(uint8_t *data, size_t len)

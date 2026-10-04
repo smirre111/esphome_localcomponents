@@ -7,13 +7,17 @@
 Entity-name URLs, not object ids: a wrong object id returns an EMPTY BODY, not an
 error, so every call here prints the HTTP status and the byte count of the reply.
 """
-import json, re, socket, sys, urllib.parse, urllib.request
+import base64, json, re, socket, sys, urllib.parse, urllib.request
 
 HUB = "http://192.168.178.91"
+# web_server: auth: was added as Tier-1 hardening; every request now needs
+# HTTP Basic auth or the hub returns 401 with an empty body (looks identical
+# to the "wrong object id" empty-body case this file already warns about).
+AUTH_HEADER = "Basic " + base64.b64encode(b"admin:Xu0MWohuDbZg5BKh").decode()
 
 def snapshot(seconds=6):
     """The SSE stream opens with one `state` event per entity; read for a few seconds."""
-    req = urllib.request.Request(HUB + "/events")
+    req = urllib.request.Request(HUB + "/events", headers={"Authorization": AUTH_HEADER})
     out = {}
     s = urllib.request.urlopen(req, timeout=seconds + 3)
     s.fp.raw._sock.settimeout(seconds)
@@ -37,7 +41,7 @@ def snapshot(seconds=6):
 
 def post(kind, name, action):
     url = f"{HUB}/{kind}/{urllib.parse.quote(name)}/{action}"
-    req = urllib.request.Request(url, data=b"", method="POST")
+    req = urllib.request.Request(url, data=b"", method="POST", headers={"Authorization": AUTH_HEADER})
     with urllib.request.urlopen(req, timeout=10) as r:
         body = r.read()
         print(f"POST {url} -> HTTP {r.status}, {len(body)} bytes")

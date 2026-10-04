@@ -517,6 +517,30 @@ namespace esphome
       // missed their stamped instant. See kStampLeadUs.
       int64_t last_fire_us_{0};
       uint32_t tx_stamp_misses_{0};
+      // H-1 (mac-separation-implementation-plan.md's hardware acceptance
+      // gates): per-copy tag-write latency (stamp -> tag written, i.e. the
+      // wall-clock cost of sealBurstCopyTag() inside sendPacketBurst's retag
+      // loop). A fixed-width histogram rather than storing samples: the
+      // accept gate only needs p50/p99/max against a 1ms/3ms budget, and a
+      // run exercises far more than kTagLatencyReportEvery copies.
+      // kTagLatencyBucketUs-wide buckets up to kTagLatencyBuckets*that many
+      // us, plus one overflow bucket for anything at or past that — a
+      // latency landing there already fails the 3ms max gate regardless of
+      // which bucket it would have been.
+      static constexpr uint32_t kTagLatencyBucketUs    = 50;
+      static constexpr uint32_t kTagLatencyBuckets     = 80;   // 0..4000 us
+      static constexpr uint32_t kTagLatencyReportEvery = 2000; // matches H-1's own "≥2000 copies"
+      std::array<uint32_t, kTagLatencyBuckets + 1> tag_latency_hist_{};
+      uint32_t tag_latency_n_{0};
+      uint32_t tag_latency_max_us_{0};
+      // Logs a p50/p99/max/n summary every kTagLatencyReportEvery samples,
+      // then resets — so successive reports describe disjoint windows
+      // rather than a single ever-growing one. WARN level, same budget as
+      // every other periodic diagnostic line already on this link (not
+      // per-copy, so it does not itself perturb the latency it measures —
+      // see mac1-measurement's "UART logging is inside the measured
+      // interval" lesson).
+      void noteTagWriteLatencyUs_(uint32_t us);
       // This T0 as the hub grid describes it: round since the anchor and the
       // offset into that round. False without a grid, or before the anchor.
       bool fireStampFor_(int64_t t0_us, uint32_t *round, uint32_t *offset_us) const;
