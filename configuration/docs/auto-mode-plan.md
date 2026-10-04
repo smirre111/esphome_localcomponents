@@ -1,6 +1,8 @@
 # LoRa Blinds — Automatic (Scheduled) Node Mode — Implementation Plan
 
-**Status:** DRAFT — for review, nothing implemented yet.
+**Status:** IMPLEMENTED and live on both nodes (see the 2026-09-29
+clarification below) — the "DRAFT" label below is stale and kept only as a
+dated record of the original proposal.
 **Date:** 2026-08-21
 **Scope:** Add a battery-saving *automatic* mode where a node sleeps between
 scheduled events instead of listening continuously, executes time-based

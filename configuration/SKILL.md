@@ -122,7 +122,7 @@ Both sides share the same implementation:
 
 | Element | Value / Method |
 |---------|---------------|
-| Key | SHA-256(`"LoRaKey1"`)[0:16] — both sides use `psa_hash_compute(PSA_ALG_SHA_256, …)` |
+| Key | SHA-256(`"LoRaHome"`)[0:16] — both sides use `psa_hash_compute(PSA_ALG_SHA_256, …)` |
 | IV (12 bytes) | `base_nonce_BE[4] ‖ counter_BE[8]`, where `counter = LoraHeader.msgid` on **uplink** (node→hub) and `msgid \| (1ULL << 63)` on **downlink** (hub→node). That direction bit (`kDownlinkNonceFlag`, defined identically in `lora_client.cpp` and `CmdDispatcher.cpp`) is what stops the two directions reusing an IV under the shared per-peer base nonce. Omitting it fails the tag check with otherwise-correct key/AAD/base-nonce — a confusing failure, so check it first. |
 | AAD (16 bytes) | `destaddress‖destsubnet‖senderaddress‖msgid`, each 4-byte BE. The old 5th field (the `encrypted` header flag) was removed — encryption is inferred from the oneof case. AAD deliberately excludes `burstIndex`/`burstCount` so the tracker's per-copy burst re-stamping does not invalidate the tag. |
 | Tag | **8 bytes** — truncated (`kAesGcmTagBytes`) for the slim on-air envelope, not the full 16 |
@@ -323,7 +323,7 @@ All `set_timeout("login_startup", delay, …)` calls must add `short_address_ ×
 - Fix: ensure login challenge completes successfully after every reboot
 
 ### AES-GCM decryption fails
-- Verify both sides use the same key derivation: SHA-256(`"LoRaKey1"`)[0:16]
+- Verify both sides use the same key derivation: SHA-256(`"LoRaHome"`)[0:16]
 - Verify nonce structure: `base_nonce_BE[4] || (uint64_t)msgid_BE[8]`
 - Verify AAD built from header fields in same order (see `build_header_aad` in both sources)
 - Check login completed: `LoginMsg.nonce` must have been received and stored by the node (`CMD_LOGIN`). If the base-nonce map is empty after hub reboot (it is never persisted), login must fire before any encrypted packet arrives.

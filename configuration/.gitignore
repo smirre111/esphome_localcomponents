@@ -2,6 +2,15 @@
 # -B build/proto_sim; see tests/proto_sim/README.md).
 build/
 
+# A second, differently-named proto_sim build tree that was accidentally
+# tracked in the past (round-11 review of the mac-separation plan found
+# it on origin/main, 155 files, including a staged copy of node source
+# with the AES key literal baked in — see the "Urgent" section of
+# docs/mac-separation-implementation-plan.md). Untracked going forward;
+# removing it from history (it's already on the public remote) is a
+# separate, explicit decision, not done here.
+tests/proto_sim/build_clean/
+
 # ESPHome / PlatformIO build tree.
 .esphome/
 logs/
