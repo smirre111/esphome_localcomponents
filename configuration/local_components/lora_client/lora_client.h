@@ -905,6 +905,15 @@ namespace esphome
       uint32_t mac_ping_crypto_last_msgid_{0};   // 0 = range exhausted
       std::vector<uint8_t> op_frame_;
       uint32_t             op_frame_msgid_{0};
+      // Security review finding 1: a cover op / sysop issued while
+      // relogin_pending_ is true would otherwise pack plaintext (session not
+      // confirmed yet) and get stored — then every retry is rejected by the
+      // node's own plaintext-gate (it already holds a session), and after
+      // kOpMaxRetries the hub tears down the session it just rebuilt. Set by
+      // send_cover_operation()/send_tracked_sysop_() when deferring instead
+      // of sending; consumed by confirm_session_(), which actually sends it
+      // once encryption is possible.
+      bool     op_deferred_until_login_{false};
       esp_timer_handle_t mac_ping_timer_{nullptr};
       uint8_t  mac_ping_frame_[192]{};
       size_t   mac_ping_frame_len_{0};
@@ -1138,6 +1147,11 @@ namespace esphome
       // layout and three MacPing tests started reading registered_ as true
       // garbage. A node is not registered until handle_register_ sets this.
       bool     registered_{false};
+      // Security review finding 2: time-based REGISTER replay guard — see
+      // handle_register_(). A monotonic msgid check doesn't work here since
+      // every legitimate REGISTER's msgid is a small post-reboot value.
+      int64_t  last_register_accepted_us_{0};
+      static constexpr int64_t kRegisterRateLimitUs = 5000000; // 5 s, matches the node's LOGIN_RATE_LIMIT_MS
 
       // uint32_t rx_message_id_{0};
       // uint32_t tx_message_id_{0};

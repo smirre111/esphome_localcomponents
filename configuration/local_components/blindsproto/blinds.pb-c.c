@@ -1537,7 +1537,7 @@ const ProtobufCMessageDescriptor cover_config__descriptor =
   (ProtobufCMessageInit) cover_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor login_msg__field_descriptors[3] =
+static const ProtobufCFieldDescriptor login_msg__field_descriptors[4] =
 {
   {
     "nonce",
@@ -1575,8 +1575,21 @@ static const ProtobufCFieldDescriptor login_msg__field_descriptors[3] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "hub_rebooted",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(LoginMsg, hub_rebooted),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned login_msg__field_indices_by_name[] = {
+  3,   /* field[3] = hub_rebooted */
   2,   /* field[2] = mic */
   0,   /* field[0] = nonce */
   1,   /* field[1] = request_register */
@@ -1584,7 +1597,7 @@ static const unsigned login_msg__field_indices_by_name[] = {
 static const ProtobufCIntRange login_msg__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 3 }
+  { 0, 4 }
 };
 const ProtobufCMessageDescriptor login_msg__descriptor =
 {
@@ -1594,7 +1607,7 @@ const ProtobufCMessageDescriptor login_msg__descriptor =
   "LoginMsg",
   "",
   sizeof(LoginMsg),
-  3,
+  4,
   login_msg__field_descriptors,
   login_msg__field_indices_by_name,
   1,  login_msg__number_ranges,

@@ -197,6 +197,10 @@ namespace esphome
       // one frame per beacon round — so it belongs on the loop rather than on a
       // timer of its own.
       this->serviceBeacon();
+      // H-1 (security review finding 8): the actual ESP_LOGW for a report
+      // noteTagWriteLatencyUs_() computed, deferred out of the burst retag
+      // loop to here.
+      this->drainTagLatencyReport_();
       esphome::delay(10);
       // this->sendPacketBytes(txBuf, len);
 
@@ -1329,6 +1333,13 @@ namespace esphome
     // computed from the cumulative bucket counts, then reset for the next
     // window. Buckets rather than raw samples because the gate only needs
     // percentiles against a 1ms/3ms budget, not individual values.
+    // Security review finding 8: this is called from inside sendPacketBurst's
+    // per-copy retag loop — the exact interval H-1 measures — so it must
+    // never do anything whose own cost could perturb that measurement or
+    // push a copy's actual send past its declared fire instant. Bucketing a
+    // sample is a few array writes, cheap and bounded; the synchronous
+    // ESP_LOGW a full report used to do right here was not; it is now only
+    // computed here and drained by loop() instead, off the hot path.
     void LORATracker::noteTagWriteLatencyUs_(uint32_t us)
     {
       uint32_t bucket = us / kTagLatencyBucketUs;
@@ -1348,30 +1359,59 @@ namespace esphome
       uint32_t cum = 0;
       uint32_t p50_us = 0, p99_us = 0;
       bool have_p50 = false, have_p99 = false;
+      bool p50_saturated = false, p99_saturated = false;
       for (uint32_t b = 0; b <= kTagLatencyBuckets; b++)
       {
         cum += this->tag_latency_hist_[b];
-        const uint32_t bucket_us = (b == kTagLatencyBuckets)
-                                        ? (kTagLatencyBuckets * kTagLatencyBucketUs)
-                                        : ((b + 1) * kTagLatencyBucketUs);
+        const bool overflow = (b == kTagLatencyBuckets);
+        const uint32_t bucket_us = overflow ? (kTagLatencyBuckets * kTagLatencyBucketUs)
+                                             : ((b + 1) * kTagLatencyBucketUs);
         if (!have_p50 && cum >= p50_target)
         {
           p50_us = bucket_us;
+          p50_saturated = overflow;
           have_p50 = true;
         }
         if (!have_p99 && cum >= p99_target)
         {
           p99_us = bucket_us;
+          p99_saturated = overflow;
           have_p99 = true;
         }
       }
 
-      ESP_LOGW(TAG, "H-1 tag-write latency: n=%u p50~%uus p99~%uus max=%uus",
-               total, p50_us, p99_us, this->tag_latency_max_us_);
+      // Security review finding 8: the overflow bucket's edge (4000us) is
+      // numerically identical to the last real bucket's own edge, so a run
+      // whose tail is entirely past the histogram's range used to print the
+      // same "~4000us" a run with no tail at all would — max partly
+      // compensated, but p50/p99 themselves gave no hint. Flagging each one
+      // that landed there separately makes a saturated run visibly distinct
+      // from a merely-at-the-edge one.
+      this->tag_latency_report_n_          = total;
+      this->tag_latency_report_p50_us_     = p50_us;
+      this->tag_latency_report_p50_sat_    = p50_saturated;
+      this->tag_latency_report_p99_us_     = p99_us;
+      this->tag_latency_report_p99_sat_    = p99_saturated;
+      this->tag_latency_report_max_us_     = this->tag_latency_max_us_;
+      this->tag_latency_report_ready_      = true;
 
       this->tag_latency_hist_.fill(0);
       this->tag_latency_n_ = 0;
       this->tag_latency_max_us_ = 0;
+    }
+
+    // Drains a report noteTagWriteLatencyUs_() left waiting, from loop() —
+    // never from inside the burst retag path. See that function's banner.
+    void LORATracker::drainTagLatencyReport_()
+    {
+      if (!this->tag_latency_report_ready_)
+        return;
+      this->tag_latency_report_ready_ = false;
+      ESP_LOGW(TAG, "H-1 tag-write latency: n=%u p50~%s%uus p99~%s%uus max=%uus",
+               this->tag_latency_report_n_,
+               this->tag_latency_report_p50_sat_ ? ">" : "", this->tag_latency_report_p50_us_,
+               this->tag_latency_report_p99_sat_ ? ">" : "", this->tag_latency_report_p99_us_,
+               this->tag_latency_report_max_us_);
     }
 
     void LORATracker::sendPacketOnce(uint8_t *data, size_t len)

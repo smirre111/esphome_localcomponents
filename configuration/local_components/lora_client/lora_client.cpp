@@ -1212,6 +1212,33 @@ namespace esphome
           }
         }
 
+        // Security review finding 2: the MIC above stops forgery but not
+        // replay — REGISTER carries no msgid/freshness check of its own
+        // (it is routed around admit_frame_ for the unprovisioned-bootstrap
+        // case, which has no session to check one against), and a REGISTER's
+        // own msgid is NOT usable as a monotonic replay key either: it is
+        // always a small post-reboot value, so a strict increasing check
+        // would reject every legitimate reboot after the first. A captured
+        // REGISTER could otherwise be replayed at will to force a full
+        // relogin cycle on demand — the same grid-demote-with-no-rate-limit
+        // bypass H2 closed for LOGIN, reached through this message instead.
+        // Rate-limited by time instead: a real reboot cadence is many
+        // seconds at minimum, so this blocks rapid replay without blocking
+        // a genuine one.
+        {
+          const int64_t now_us = esp_timer_get_time();
+          if (this->last_register_accepted_us_ != 0 &&
+              (now_us - this->last_register_accepted_us_) < kRegisterRateLimitUs)
+          {
+            ESP_LOGW(TAG, "%s: REGISTER rate-limited (%lld ms after the last one) — dropping",
+                     this->get_name().c_str(),
+                     (long long) ((now_us - this->last_register_accepted_us_) / 1000));
+            lora_client_response_message__free_unpacked(rcv_message, NULL);
+            return;
+          }
+          this->last_register_accepted_us_ = now_us;
+        }
+
         ESP_LOGI(TAG, "%s, Registered with LORA server", this->get_name().c_str());
         this->registered_ = true;
         // (a'): a REGISTER from THIS node's MAC is proof it is awake right now.
@@ -1283,6 +1310,15 @@ namespace esphome
         this->login_retry_count_        = 0;
         this->relogin_pending_          = true;  // the node restarted: its old session is gone
         this->pending_login_nonce_      = 0;     // node just (re-)registered → mint fresh
+        // Same reasoning as send_login()'s mint-fresh-nonce branch: the node
+        // just told us (via REGISTER) that it rebooted, so whatever keys/
+        // in-flight tracked-op ciphertext we hold for the OLD session are
+        // for a session that, from the node's side, no longer exists either
+        // — there is no "retry" to preserve. Without this, clearSessionKeys_()
+        // only ran on the hub's NEXT send_login() mint-fresh-nonce call, not
+        // here, leaving op_frame_ holding ciphertext the rebooted node could
+        // never have decrypted anyway.
+        this->clearSessionKeys_();
         this->startup_login_initiated_  = true;  // prevent NTP callback from cancelling this timer
         this->cancel_timeout("login_startup");
         this->cancel_timeout("login_retry");
@@ -1444,6 +1480,22 @@ namespace esphome
     {
       this->session_confirmed_ = true;
       this->relogin_pending_   = false;
+
+      // Security review finding 1: send the tracked op that send_cover_
+      // operation()/send_tracked_sysop_() deferred instead of packing
+      // plaintext. Unlike the config/TimeSync/GridSync deferrals below, this
+      // is NOT gated on !login_acked_ — a tracked op can be deferred by any
+      // relogin, not just the hub's first one this process, so it must fire
+      // on every confirm that finds one waiting.
+      if (this->op_deferred_until_login_)
+      {
+        this->op_deferred_until_login_ = false;
+        ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred tracked op",
+                 this->get_name().c_str());
+        this->begin_tracked_op_(this->tx_tracked_op_(),
+                                this->op_kind_ == TrackedOpKind::SYSOP ? "Sysop" : "Cover op");
+      }
+
       // The settle clock for the onboarding gate starts here: the pushes that
       // follow a confirmation are queued over the next ~2 s.
       if (this->onboarding_held_ && !this->onboarding_confirmed_)
@@ -1568,8 +1620,13 @@ namespace esphome
           ESP_LOGI(TAG, "[%s] Session resumed without config sync this boot — scheduling re-login to push config",
                    this->get_name().c_str());
           this->set_timeout("config_sync_relogin", 500, [this]() {
+            // Same reasoning as finding 9's handle_encrypted_ fix: go
+            // through do_login_and_arm_retry_(), not a bare send_login(),
+            // so this also respects acquire_onboarding_() and arms a retry
+            // instead of being a one-shot that silently does nothing if
+            // this particular LoginMsg is lost.
             if (!this->config_synced_)
-              this->send_login();
+              this->do_login_and_arm_retry_();
           });
         }
       }
@@ -1831,8 +1888,15 @@ namespace esphome
         }
         if (!sender_has_base_nonce)
         {
+          // Security review finding 9: go through do_login_and_arm_retry_(),
+          // not a bare send_login(). The bare call bypassed
+          // acquire_onboarding_() (the 2026-09-26 onboarding-storm fix —
+          // two nodes re-provisioning at once could still pile their
+          // ~1.85 s/frame downlink queues onto each other here) and armed
+          // no retry, so a dropped re-provisioning LoginMsg had no recovery
+          // until this node happened to send another encrypted uplink.
           ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", sender);
-          this->send_login();
+          this->do_login_and_arm_retry_();
           return;
         }
 
@@ -1940,7 +2004,13 @@ namespace esphome
         memcpy(mac_input, cmac_prefix, sizeof(cmac_prefix));
         memcpy(mac_input + sizeof(cmac_prefix), enc->ciphertext.data, cipher_len);
 
-        const bool mac_ok = psa_mac_verify(mac_key_id,
+        // NIT (security review): pin the received tag to exactly
+        // kSessionCmacTagBytes, same as LOGIN/REGISTER already require and
+        // the node's mirror of this check — the key policy floors
+        // truncation at 8 bytes regardless, so this is defense-in-depth,
+        // not a live exploit.
+        const bool mac_ok = enc->tag.len == framecrypto::kSessionCmacTagBytes &&
+                            psa_mac_verify(mac_key_id,
                                            PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, enc->tag.len),
                                            mac_input, sizeof(cmac_prefix) + cipher_len,
                                            enc->tag.data, enc->tag.len) == PSA_SUCCESS;
@@ -2915,10 +2985,18 @@ namespace esphome
       // session exists, so s_pack_operation_message packed it in the clear —
       // and the node's plaintext gate refuses every non-LOGIN, non-beacon frame
       // while it holds a session resumed from NVS. The one frame that must not
-      // be missed was dropped by exactly the nodes it was aimed at; they fell
-      // back on their own missed-mark counter instead, which is the mechanism
-      // that actually works and made this one look redundant rather than
-      // broken.
+      // be missed was dropped by exactly the nodes it was aimed at.
+      //
+      // Security review finding 6: the missed-mark counter this comment used
+      // to cite as the fallback that "actually works" was retired
+      // 2026-09-20 — no such fallback exists on the node any more. The
+      // node's own handleGridDemote() rate-limits honoring a demote to once
+      // per hour (kGridDemoteRateLimitMs), so if THIS broadcast is also
+      // missed (plaintext-gate drop above, or simple air loss) and the hub
+      // reboots again inside that hour (the known double-boot pattern), the
+      // node sits on a dead anchor until SyncStale eventually notices or the
+      // next NTP-gated startup LOGIN fires — not broken, but not prompt
+      // either, and not something to assume is covered elsewhere.
       //
       // GridDemote has no fields and is exempt from that gate. What makes the
       // exemption safe is that its only effect is to throw an anchor away:
@@ -3192,6 +3270,19 @@ namespace esphome
       // queue is now stale. Bumped before the pack, so the frame carries the
       // generation that supersedes it. See txqueue::SupersedeTable.
       this->op_generation_++;
+
+      // Security review finding 1: see op_deferred_until_login_'s comment.
+      // The op's parameters above are already stored on `this`, so
+      // confirm_session_() can replay this exact call once encryption is
+      // possible, rather than this sending a plaintext frame now that the
+      // node (already holding a session) will reject outright.
+      if (this->relogin_pending_)
+      {
+        this->op_deferred_until_login_ = true;
+        ESP_LOGD(TAG, "[%s] Cover op deferred — session being rebuilt", this->get_name().c_str());
+        return;
+      }
+      this->op_deferred_until_login_ = false;
       this->begin_tracked_op_(this->tx_tracked_op_(), "Cover op");
     }
 
@@ -3205,6 +3296,15 @@ namespace esphome
       this->op_sysop_ = sysop;
 
       this->op_generation_++;   // same reasoning as send_cover_operation
+
+      // See send_cover_operation()'s identical guard just above.
+      if (this->relogin_pending_)
+      {
+        this->op_deferred_until_login_ = true;
+        ESP_LOGD(TAG, "[%s] Sysop deferred — session being rebuilt", this->get_name().c_str());
+        return;
+      }
+      this->op_deferred_until_login_ = false;
       this->begin_tracked_op_(this->tx_tracked_op_(), "Sysop");
     }
 
@@ -3217,6 +3317,20 @@ namespace esphome
       this->set_timeout("op_retry", this->ack_wait_ms_(kOpRetryIntervalMs), [this]() {
         if (!this->op_awaiting_ack_)
           return; // acked already; one-shot, nothing to re-arm
+        // Security review finding 1: a relogin can start WHILE a retry is
+        // already in flight (clearSessionKeys_() empties op_frame_ right
+        // out from under it). Sending now would just be a plaintext frame
+        // the node — still holding its old session — rejects outright, and
+        // counting it would burn a retry for nothing. Wait for
+        // confirm_session_() instead of spending the retry budget on a
+        // session that doesn't exist yet.
+        if (this->relogin_pending_)
+        {
+          ESP_LOGD(TAG, "[%s] Tracked op retry deferred — session being rebuilt",
+                   this->get_name().c_str());
+          this->schedule_op_retry_();
+          return;
+        }
         if (++this->op_retry_count_ > kOpMaxRetries)
         {
           ESP_LOGE(TAG, "[%s] Tracked op not acknowledged after %u retries — marking failed",
@@ -3274,12 +3388,22 @@ namespace esphome
     {
       if (this->op_frame_.empty())
       {
-        // Nothing stored (a retry that survived a reboot, or a first send that
-        // failed to pack). Falling back to a fresh pack is correct: it is a new
-        // command, and the node will treat it as one.
+        // Nothing stored (a retry whose session was cleared mid-flight, or a
+        // first send that failed to pack). Falling back to a fresh pack is
+        // correct: it is a new command, and the node will treat it as one —
+        // which per security review finding 1 means op_first_msgid_/
+        // op_last_msgid_ must move to match. tx_tracked_op_() allocates a
+        // fresh msgid from a counter that was just reset by the relogin that
+        // cleared op_frame_, so without this the old range (from before the
+        // reset) would reject the node's ack to this new attempt outright —
+        // handle_command_ack_ never seeing it, "command failed" even though
+        // the blind did move.
         ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing",
                  this->get_name().c_str());
-        return this->tx_tracked_op_();
+        const uint32_t msgid = this->tx_tracked_op_();
+        this->op_first_msgid_ = msgid;
+        this->op_last_msgid_  = msgid;
+        return msgid;
       }
 
       // Under the SAME generation as the original: a retransmission is the same
@@ -3672,6 +3796,18 @@ namespace esphome
       // a healthy radio at RSSI -36. No measurement can run without a session.
       login.request_register = !this->config_synced_ && !this->config_push_pending_;
 
+      // Security review finding 7: true only on the hub's FIRST LOGIN send
+      // for this node since the hub process itself started — i.e. a genuine
+      // reboot. login_acked_ is exactly this: it starts false at boot/setup
+      // and is never reset to false again except by this same node's own
+      // reboot/sleep cycle (handle_register_, enter-sleep) or the very next
+      // send_login() challenge before it fires — never by the OTHER triggers
+      // that call send_login() while the node stays up (tracked-op-retry
+      // exhaustion, config_sync_relogin, the REGISTER follow-up, the
+      // sleep-fallback timer), which is exactly the distinction the node's
+      // demote-on-LOGIN needs and did not have before.
+      login.hub_rebooted = !this->login_acked_;
+
       // Tier 3: authenticate LOGIN so a forged/replayed one can no longer
       // force the node to re-seal under a reused base nonce (U2/the LOGIN
       // bug) — verified by the node BEFORE it touches its rate limit or
@@ -3680,7 +3816,8 @@ namespace esphome
       uint8_t mic_tag[framecrypto::kSessionCmacTagBytes] = {0};
       framecrypto::buildLoginMicInput(header.destaddress, header.destsubnet,
                                       header.senderaddress, header.msgid,
-                                      base, login.request_register, mic_input);
+                                      base, login.request_register, login.hub_rebooted,
+                                      mic_input);
       // Lazy-import, same as the GCM key above (lines ~224/269) — this path
       // can be reached without setup() ever having run (e.g. a test driving
       // send_login() directly), and K_auth is needed right now, not later.

@@ -591,6 +591,42 @@ TEST_F(Seam, AFreshLoginClearsAStaleTrackedOpRetryBuffer) {
 }
 
 // ---------------------------------------------------------------------------
+TEST_F(Seam, ATrackedOpIssuedMidReloginIsDeferredNotSentPlaintext) {
+    // Security review finding 1: send_cover_operation()/send_tracked_sysop_()
+    // used to pack with session_confirmed_ (false, mid-relogin) and send
+    // immediately regardless — a plaintext frame the node (still holding
+    // its OLD session) rejects outright, with every retry rejected the same
+    // way until kOpMaxRetries tears the just-rebuilt session down again.
+    rol.config_synced_ = true;
+    rol.send_login();   // mints a fresh nonce: relogin_pending_ becomes true
+
+    // Issued BEFORE the round trip below confirms the new session.
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                             COV_OPERATION__CMD_OPEN, 0.0f);
+    EXPECT_FALSE(rol.awaitingAck())
+        << "a cover op issued mid-relogin must be deferred, not begun — "
+           "sending now would just be a plaintext frame the node rejects";
+    EXPECT_TRUE(rol.trackedOpFrameEmptyForTest())
+        << "nothing should be packed/stored until the session is confirmed";
+
+    // Complete the round trip: node accepts the LOGIN, answers, hub installs
+    // keys and confirms — which must now send the op it deferred above.
+    const auto login = lastDownlink();
+    ASSERT_FALSE(login.empty());
+    disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
+                      esp_timer_get_time());
+    while (disp.runOneTxCommand()) {}
+    auto uplinks = lif.drain_tx_queue();
+    ASSERT_FALSE(uplinks.empty());
+    rol.set_response(uplinks.front().data(), uplinks.front().size());
+
+    EXPECT_TRUE(rol.awaitingAck())
+        << "confirm_session_() must send the deferred op once encryption is possible";
+    EXPECT_FALSE(rol.trackedOpFrameEmptyForTest())
+        << "the op is now packed (encrypted) and stored for its own retry cycle";
+}
+
+// ---------------------------------------------------------------------------
 TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin) {
     // THE DEADLOCK THAT COST THE FIRST BENCH SESSION ITS FIRST HOUR.
     //

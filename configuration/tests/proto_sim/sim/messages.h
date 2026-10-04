@@ -185,6 +185,8 @@ struct CoverConfig {
 struct LoginMsg {
     uint32_t nonce{0};
     bool     request_register{false};
+    // Security review finding 7: see blinds.proto's LoginMsg.hub_rebooted.
+    bool     hub_rebooted{false};
 };
 
 struct BaseNonceExchange {

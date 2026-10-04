@@ -173,12 +173,14 @@ static std::vector<uint8_t> serialize_op_impl(const LoraClientOperationMessage& 
         login_msg__init(&pb_login);
         pb_login.nonce            = m.login.nonce;
         pb_login.request_register = m.login.request_register;
+        pb_login.hub_rebooted     = m.login.hub_rebooted;
         // Tier 3: LOGIN is MIC-authenticated now — compute it here, same
         // reasoning as the REGISTER case in serialize_resp_impl below.
         static uint8_t mic[framecrypto::kSessionCmacTagBytes];
         proto_sim::compute_login_mic(pb_header.destaddress, pb_header.destsubnet,
                                      pb_header.senderaddress, pb_header.msgid,
                                      pb_login.nonce, pb_login.request_register,
+                                     pb_login.hub_rebooted,
                                      mic);
         pb_login.mic.data = mic;
         pb_login.mic.len  = sizeof(mic);

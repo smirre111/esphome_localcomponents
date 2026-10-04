@@ -286,16 +286,28 @@ struct  LoginMsg
   protobuf_c_boolean request_register;
   /*
    * Tier 3: CMAC(K_auth, "LG1" || dest || subnet || sender || msgid ||
-   * hub_nonce || request_register)[0:8]. Authenticates LOGIN before any
-   * state change (rate limit, resetCounters()) — previously plaintext and
-   * accepted on a bare 5 s rate limit, letting a forged/replayed LOGIN
-   * force real, key-free GCM IV reuse.
+   * hub_nonce || request_register || hub_rebooted)[0:8]. Authenticates
+   * LOGIN before any state change (rate limit, resetCounters()) —
+   * previously plaintext and accepted on a bare 5 s rate limit, letting a
+   * forged/replayed LOGIN force real, key-free GCM IV reuse.
    */
   ProtobufCBinaryData mic;
+  /*
+   * Security review finding 7: true only when this is the hub's FIRST
+   * LOGIN send for this node since the hub process itself started
+   * (!login_acked_ at send time) — i.e. a genuine hub reboot, not one of
+   * the other triggers that mint a fresh session without the hub having
+   * restarted (tracked-op-retry exhaustion, config_sync_relogin, the
+   * REGISTER follow-up, the sleep-fallback timer). The node's
+   * demote-on-authenticated-LOGIN uses this instead of treating every
+   * fresh session as proof of a hub reboot, which cost a Mode B node its
+   * phase anchor on every one of those other triggers too.
+   */
+  protobuf_c_boolean hub_rebooted;
 };
 #define LOGIN_MSG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&login_msg__descriptor) \
-    , 0, 0, {0,NULL} }
+    , 0, 0, {0,NULL}, 0 }
 
 
 /*

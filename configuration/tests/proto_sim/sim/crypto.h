@@ -82,6 +82,7 @@ aes_gcm_decrypt(const uint8_t iv[12], const uint8_t* aad, size_t aad_len,
 
 void compute_login_mic(uint32_t dest, uint32_t subnet, uint32_t sender,
                        uint32_t msgid, uint32_t hub_nonce, bool request_register,
+                       bool hub_rebooted,
                        uint8_t out[framecrypto::kSessionCmacTagBytes]);
 
 void compute_register_mic(uint64_t mac_addr, bool needs_config,

@@ -254,7 +254,7 @@ inline void buildSessionKeyKdfInput(uint8_t half, uint32_t session_id,
 // ---- Session establishment MICs (section 2(b), steps 1 and 7) ----
 //
 //   LOGIN:    CMAC(K_auth, "LG1" || dest || subnet || sender || msgid ||
-//                           hub_nonce || request_register)[0:8]
+//                           hub_nonce || request_register || hub_rebooted)[0:8]
 //   REGISTER: CMAC(K_auth, "RG1" || mac_addr || needs_config || header)[0:8]
 //
 // Both verified BEFORE any state change on the receiving side (rate limit,
@@ -262,12 +262,12 @@ inline void buildSessionKeyKdfInput(uint8_t half, uint32_t session_id,
 // lives in the caller, not here.
 
 // "LG1"(3) + dest(4) + subnet(4) + sender(4) + msgid(4) + hub_nonce(4) +
-// request_register(1) = 24 bytes.
-static constexpr size_t kLoginMicInputBytes = 3 + 4 + 4 + 4 + 4 + 4 + 1;
+// request_register(1) + hub_rebooted(1) = 25 bytes.
+static constexpr size_t kLoginMicInputBytes = 3 + 4 + 4 + 4 + 4 + 4 + 1 + 1;
 
 inline void buildLoginMicInput(uint32_t dest, uint32_t subnet, uint32_t sender,
                                uint32_t msgid, uint32_t hub_nonce,
-                               bool request_register,
+                               bool request_register, bool hub_rebooted,
                                uint8_t out[kLoginMicInputBytes])
 {
     out[0] = 'L'; out[1] = 'G'; out[2] = '1';
@@ -277,6 +277,7 @@ inline void buildLoginMicInput(uint32_t dest, uint32_t subnet, uint32_t sender,
     u32be(msgid,  out + 15);
     u32be(hub_nonce, out + 19);
     out[23] = request_register ? 1u : 0u;
+    out[24] = hub_rebooted     ? 1u : 0u;
 }
 
 // REGISTER's "header" component is the 4 scalar fields of LoraHeader that

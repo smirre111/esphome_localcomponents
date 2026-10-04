@@ -533,14 +533,26 @@ namespace esphome
       std::array<uint32_t, kTagLatencyBuckets + 1> tag_latency_hist_{};
       uint32_t tag_latency_n_{0};
       uint32_t tag_latency_max_us_{0};
-      // Logs a p50/p99/max/n summary every kTagLatencyReportEvery samples,
-      // then resets — so successive reports describe disjoint windows
-      // rather than a single ever-growing one. WARN level, same budget as
-      // every other periodic diagnostic line already on this link (not
-      // per-copy, so it does not itself perturb the latency it measures —
-      // see mac1-measurement's "UART logging is inside the measured
-      // interval" lesson).
+      // Security review finding 8: the ESP_LOGW itself must not run inside
+      // sendPacketBurst's retag loop (the very interval being measured) —
+      // noteTagWriteLatencyUs_() only computes into these and sets the
+      // ready flag; drainTagLatencyReport_(), called from loop(), does the
+      // actual logging. "_sat_" flags whether that percentile landed in the
+      // overflow bucket, since its displayed edge is otherwise numerically
+      // identical to the last real bucket's.
+      bool     tag_latency_report_ready_{false};
+      uint32_t tag_latency_report_n_{0};
+      uint32_t tag_latency_report_p50_us_{0};
+      bool     tag_latency_report_p50_sat_{false};
+      uint32_t tag_latency_report_p99_us_{0};
+      bool     tag_latency_report_p99_sat_{false};
+      uint32_t tag_latency_report_max_us_{0};
+      // Computes a p50/p99/max/n summary every kTagLatencyReportEvery
+      // samples into the report fields above, then resets the histogram —
+      // so successive reports describe disjoint windows rather than a
+      // single ever-growing one. Never logs itself; see drainTagLatencyReport_().
       void noteTagWriteLatencyUs_(uint32_t us);
+      void drainTagLatencyReport_();
       // This T0 as the hub grid describes it: round since the anchor and the
       // offset into that round. False without a grid, or before the anchor.
       bool fireStampFor_(int64_t t0_us, uint32_t *round, uint32_t *offset_us) const;

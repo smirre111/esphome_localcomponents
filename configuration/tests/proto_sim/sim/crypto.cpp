@@ -83,10 +83,11 @@ const uint8_t* k_auth_key() {
 
 void compute_login_mic(uint32_t dest, uint32_t subnet, uint32_t sender,
                        uint32_t msgid, uint32_t hub_nonce, bool request_register,
+                       bool hub_rebooted,
                        uint8_t out[framecrypto::kSessionCmacTagBytes]) {
     uint8_t input[framecrypto::kLoginMicInputBytes];
     framecrypto::buildLoginMicInput(dest, subnet, sender, msgid, hub_nonce,
-                                    request_register, input);
+                                    request_register, hub_rebooted, input);
     uint8_t full[16];
     cmac_full(k_auth_key(), input, sizeof(input), full);
     std::memcpy(out, full, framecrypto::kSessionCmacTagBytes);

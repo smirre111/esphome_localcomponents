@@ -322,23 +322,28 @@ TEST(FrameCryptoTier3, SessionKeyKdfInputDiffersOnlyByTheHalfByte) {
 
 TEST(FrameCryptoTier3, LoginMicInputCoversEveryField) {
     uint8_t base[kLoginMicInputBytes];
-    buildLoginMicInput(1, 2, 3, 4, 5, false, base);
+    buildLoginMicInput(1, 2, 3, 4, 5, false, false, base);
     EXPECT_EQ(base[0], 'L'); EXPECT_EQ(base[1], 'G'); EXPECT_EQ(base[2], '1');
 
     uint8_t v[kLoginMicInputBytes];
-    buildLoginMicInput(9, 2, 3, 4, 5, false, v);
+    buildLoginMicInput(9, 2, 3, 4, 5, false, false, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "dest";
-    buildLoginMicInput(1, 9, 3, 4, 5, false, v);
+    buildLoginMicInput(1, 9, 3, 4, 5, false, false, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "subnet";
-    buildLoginMicInput(1, 2, 9, 4, 5, false, v);
+    buildLoginMicInput(1, 2, 9, 4, 5, false, false, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "sender";
-    buildLoginMicInput(1, 2, 3, 9, 5, false, v);
+    buildLoginMicInput(1, 2, 3, 9, 5, false, false, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "msgid";
-    buildLoginMicInput(1, 2, 3, 4, 9, false, v);
+    buildLoginMicInput(1, 2, 3, 4, 9, false, false, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0) << "hub_nonce";
-    buildLoginMicInput(1, 2, 3, 4, 5, true, v);
+    buildLoginMicInput(1, 2, 3, 4, 5, true, false, v);
     EXPECT_NE(memcmp(base, v, sizeof(v)), 0)
         << "request_register — a forged LOGIN flipping this bit must not "
+           "verify under the honest MIC";
+    buildLoginMicInput(1, 2, 3, 4, 5, false, true, v);
+    EXPECT_NE(memcmp(base, v, sizeof(v)), 0)
+        << "hub_rebooted (security review finding 7) — a forged LOGIN "
+           "flipping this bit to force an unnecessary grid demote must not "
            "verify under the honest MIC";
 }
 

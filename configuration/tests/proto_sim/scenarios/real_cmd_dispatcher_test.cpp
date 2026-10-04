@@ -64,7 +64,8 @@ constexpr uint64_t kNodeMac = 0xE08CFE5F9EC4ULL;
 // generation says "the same window each time", which is what they mean.
 constexpr uint8_t kTestWindowGen = 1;
 
-std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce) {
+std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce,
+                                   bool hub_rebooted = false) {
     LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
     LoraHeader hdr               = LORA_HEADER__INIT;
     hdr.destaddress   = kNodeAddr;
@@ -73,14 +74,16 @@ std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce) {
     hdr.msgid         = msgid;
     op.header         = &hdr;
 
-    LoginMsg login = LOGIN_MSG__INIT;
-    login.nonce    = nonce;
+    LoginMsg login     = LOGIN_MSG__INIT;
+    login.nonce        = nonce;
+    login.hub_rebooted = hub_rebooted;
     // Tier 3 (mac-separation-implementation-plan.md section 2(b)): LOGIN is
     // MIC-authenticated now — compute it so the real node's handleLogin
     // actually accepts this frame instead of dropping it unverified.
     uint8_t mic[framecrypto::kSessionCmacTagBytes];
     proto_sim::compute_login_mic(hdr.destaddress, hdr.destsubnet, hdr.senderaddress,
-                                 hdr.msgid, nonce, /*request_register=*/false, mic);
+                                 hdr.msgid, nonce, /*request_register=*/false,
+                                 hub_rebooted, mic);
     login.mic.data = mic;
     login.mic.len  = sizeof(mic);
     op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
@@ -4877,6 +4880,50 @@ TEST_F(RealNodeFixture, ABeaconCorrectsDriftWithoutTouchingTheGeometry) {
     EXPECT_GE(disp.phaseStats().n, 1u);
 }
 
+// Security review finding 5: burst_index's MAC coverage stops a replay of
+// THIS beacon with a rewritten burstIndex, but not a plain delayed replay of
+// an EARLIER genuine beacon byte-for-byte — the re-anchor capture window is
+// wider than the guard band it is meant to bound. txround monotonicity
+// closes it: a round at or behind the last one accepted is never fresher,
+// authenticated or not.
+TEST_F(RealNodeFixture, AReplayedOlderBeaconDoesNotReAnchor) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/1000);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // Round 50 anchors normally.
+    const gridstate::State before = disp.gridState();
+    constexpr int64_t kDrift = 900;
+    auto b50 = build_grid_beacon(/*round=*/50, before.params.beacon_slot, /*msgid=*/1);
+    disp.onReceiveNew(b50.data(), static_cast<int>(b50.size()),
+                      rx_for_beacon(before, 50, kDrift, (uint32_t) b50.size()));
+    const gridstate::State after50 = disp.gridState();
+    ASSERT_EQ(after50.anchor_us, before.anchor_us + kDrift)
+        << "precondition: round 50 anchored normally";
+    ASSERT_EQ(after50.last_round, 50u);
+
+    // A byte-for-byte replay of an OLDER round (30, before 50) must not
+    // re-anchor, even though nothing about the frame itself is forged.
+    auto b30 = build_grid_beacon(/*round=*/30, before.params.beacon_slot, /*msgid=*/2);
+    constexpr int64_t kReplayDrift = 5000; // a large, obviously-wrong pull if accepted
+    disp.onReceiveNew(b30.data(), static_cast<int>(b30.size()),
+                      rx_for_beacon(before, 30, kReplayDrift, (uint32_t) b30.size()));
+
+    const gridstate::State afterReplay = disp.gridState();
+    EXPECT_EQ(afterReplay.anchor_us, after50.anchor_us)
+        << "a replayed older round must not move the anchor";
+    EXPECT_EQ(afterReplay.last_round, 50u)
+        << "last_round must not move backward";
+
+    // An exact replay of round 50 itself (not just an older one) must also
+    // be refused — "at or behind", not just "strictly before".
+    auto b50again = build_grid_beacon(/*round=*/50, before.params.beacon_slot, /*msgid=*/3);
+    disp.onReceiveNew(b50again.data(), static_cast<int>(b50again.size()),
+                      rx_for_beacon(before, 50, kReplayDrift, (uint32_t) b50again.size()));
+    EXPECT_EQ(disp.gridState().anchor_us, after50.anchor_us)
+        << "an exact replay of the last-accepted round must not re-anchor either";
+}
+
 TEST_F(RealNodeFixture, ABeaconOutsideTheGuardIsNotDriftAndIsRefused) {
     // A beacon cannot be sealed with a per-node session key, so this bound is
     // what makes acting on it safe. A whole slot pitch out is the case that
@@ -5264,23 +5311,45 @@ TEST_F(RealNodeFixture, ARepeatedGridDemoteWithinTheRateLimitIsIgnored) {
 // Demote-on-authenticated-LOGIN: a fresh session implies the hub rebooted,
 // which is itself a legitimate, AUTHENTICATED reason to demote — and unlike
 // the broadcast GridDemote, it needs no rate limit.
-TEST_F(RealNodeFixture, AFreshAuthenticatedLoginDemotesAHeldGrid) {
+TEST_F(RealNodeFixture, AFreshAuthenticatedLoginReportingAHubRebootDemotesAHeldGrid) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
     auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active) << "precondition: the node holds a grid";
 
-    // A SECOND login, with a different hub_nonce — a genuinely new session,
-    // not the hub's own retry of the first (CmdLoginRetryOfTheSameSession...
+    // A SECOND login, with a different hub_nonce AND hub_rebooted=true — a
+    // genuinely new session the hub reports as following its own reboot, not
+    // the hub's own retry of the first (CmdLoginRetryOfTheSameSession...
     // covers that case separately, and it must NOT demote).
     proto_sim_timer_advance_us(6'000'000);   // past the 5 s login rate limit
-    auto login2 = pack_login_op(/*msgid=*/1, 0xABCDEF01u);
+    auto login2 = pack_login_op(/*msgid=*/1, 0xABCDEF01u, /*hub_rebooted=*/true);
     disp.onReceiveNew(login2.data(), static_cast<int>(login2.size()));
 
     EXPECT_FALSE(disp.gridState().active)
-        << "a fresh, authenticated session must demote any grid held under "
-           "the previous one";
+        << "a fresh, authenticated session reporting a hub reboot must "
+           "demote any grid held under the previous one";
+}
+
+// Security review finding 7: the hub also mints a fresh session (same wire
+// shape as a reboot) on tracked-op-retry exhaustion, config_sync_relogin,
+// the REGISTER follow-up, and the sleep-fallback timer — none of which mean
+// the hub actually restarted. Demoting on every one of those cost a Mode B
+// node its phase anchor and ~8 samples to re-promote for no reason.
+TEST_F(RealNodeFixture, AFreshSessionNotReportingAHubRebootDoesNotDemoteAHeldGrid) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2, /*with_key=*/true);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active) << "precondition: the node holds a grid";
+
+    proto_sim_timer_advance_us(6'000'000);
+    auto login2 = pack_login_op(/*msgid=*/1, 0xABCDEF01u, /*hub_rebooted=*/false);
+    disp.onReceiveNew(login2.data(), static_cast<int>(login2.size()));
+
+    EXPECT_TRUE(disp.gridState().active)
+        << "a fresh session the hub does NOT report as following a reboot "
+           "must not cost the node its grid";
 }
 
 // Security review finding H2: the retry check only recognised the CURRENT
