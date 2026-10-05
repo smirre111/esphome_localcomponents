@@ -31,7 +31,7 @@ def run(step, button, timeout_s=1150, ping_after=None):
 A2 = "Mode Test A — long, MAC-1 + MAC-2 (node 2)"
 B2 = "Mode Test B — long, MAC-1 + MAC-2 (node 2)"
 PING2 = "MAC Ping Start long, MAC-2 (node 2)"
-TM = "Timed Mode (Mode B) — node 2"
+TM = "Timed Mode (Mode B) — Node 2"
 
 ok = run("T2_turnaround", A2, ping_after=PING2)
 time.sleep(60)

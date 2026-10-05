@@ -47,7 +47,7 @@ A0 = "Mode Test A — long, MAC-0 baseline (node 2)"
 A1 = "Mode Test A — long, MAC-1 counter (node 2)"
 B0 = "Mode Test B — long, production profile (node 2)"
 B1 = "Mode Test B — long, MAC-1 counter (node 2)"
-TM = "Timed Mode (Mode B) — node 2"
+TM = "Timed Mode (Mode B) — Node 2"
 
 ok = run("A0_mac0", A0)
 time.sleep(60)
