@@ -14,6 +14,8 @@
 #include "esphome/components/lora_client/OnboardingGate.h"
 // How often an automatic-mode node needs its wall clock resynced.
 #include "esphome/components/lora_client/TimeSyncPolicy.h"
+// Hub-only: the first ack wait of an optimistic single shot.
+#include "esphome/components/lora_client/SingleShotAckWait.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -587,6 +589,10 @@ namespace esphome
       bool grid_aligned() const     { return this->grid_aligned_; }
       uint8_t grid_slot() const     { return this->grid_slot_; }
 
+      // For tests: optimistic-single-shot bookkeeping of the tracked command.
+      bool op_short_wait_spent_for_test() const { return this->op_short_wait_spent_; }
+      bool op_sent_optimistic_for_test() const  { return this->op_sent_optimistic_; }
+
       // Test seam: send_aligned_ is protected, and the alignment POLICY is the
       // part worth testing directly rather than only through a full command.
       // (a'): the sleep model's answer, for tests.
@@ -860,6 +866,17 @@ namespace esphome
       // send_aligned_ would otherwise overwrite it, and a grid publication
       // already did.
       bool     last_placed_single_shot_{false};
+      // Whether the frame send_aligned_ last placed was a single shot ONLY
+      // because the optimistic switch bypassed ConfirmationStale. Same
+      // ownership rule as op_sent_single_shot_ above: the tracked command copies
+      // it into op_sent_optimistic_ itself.
+      bool     last_placed_optimistic_{false};
+      // The tracked command's first shot was such an optimistic single shot, so
+      // its first ack wait is the short one (SingleShotAckWait.h).
+      bool     op_sent_optimistic_{false};
+      // The short wait has been used for this command. It is used at most once,
+      // and is never counted against kOpMaxRetries.
+      bool     op_short_wait_spent_{false};
       // The mark the last placed downlink for this node was aimed at, so a
       // second command inside the same round goes to the FOLLOWING mark instead
       // of on top of the first. 0 = nothing placed yet.

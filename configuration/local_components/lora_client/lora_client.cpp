@@ -732,6 +732,23 @@ namespace esphome
         return false;                   // cannot predict — never "missed"
       if (this->time == nullptr || !this->time->now().is_valid())
         return false;                   // no clock — cannot compare
+      // AN INTERACTIVE NODE THAT HAS BEACONED SINCE THE HUB LAST PUT IT TO
+      // SLEEP IS AWAKE, AND NOTHING PREDICTS WHEN IT SLEEPS AGAIN.
+      //
+      // next_wake_epoch_() predicts the wake of a sleep the hub commanded
+      // (last_sleep_epoch_ + sleep_duration_). Once the node has woken and
+      // beaconed, that prediction is spent: an interactive node only sleeps on
+      // another CMD_SLEEP, which stamps last_sleep_epoch_ afresh. Without this
+      // clause the stale prediction (or, with no sleep on record, last_beacon_ +
+      // sleep_duration_) went overdue ~6 h + grace after the LAST BEACON of a
+      // node that is awake, healthy and merely quiet — and an interactive node
+      // beacons only on wake, boot, relogin and mode change, never while idle —
+      // so it silently lost single shot (TxRefusal::BeaconMissed, a rung the
+      // optimistic switch deliberately cannot bypass) and bursted forever.
+      // Automatic-mode nodes are not touched: they sleep on their own schedule
+      // and DO check in periodically.
+      if (!this->auto_mode_ && this->last_beacon_epoch_ > this->last_sleep_epoch_)
+        return false;
       const uint32_t now = static_cast<uint32_t>(this->time->now().timestamp);
       if (now < wake_at + kBeaconOverdueGraceS)
         return false;                   // not yet due, or inside the grace
@@ -3031,6 +3048,20 @@ namespace esphome
       // rare. The tracked-op senders copy it into op_sent_single_shot_
       // themselves, so the flag belongs to the command it describes.
       this->last_placed_single_shot_ = single_shot;
+      // Was the optimistic switch what made this a single shot? Judged by asking
+      // the SAME ladder with the switch withheld: if its only remaining refusal
+      // is ConfirmationStale, the bypass was used. This decides whether a miss
+      // gets the short first ack wait (SingleShotAckWait.h); a single shot that
+      // the hub was entitled to on fresh evidence keeps the normal wait.
+      {
+        timedmode::HubBelief strict = belief;
+        strict.optimistic_single_shot = false;
+        this->last_placed_optimistic_ =
+            single_shot &&
+            timedmode::txRefusalFor(strict, timedgrid::kGuardUs,
+                                    this->published_resync_max_s_) ==
+                timedmode::TxRefusal::ConfirmationStale;
+      }
 
       if (!this->grid_aligned_ || !this->parent_->gridStarted())
       {
@@ -3156,6 +3187,7 @@ namespace esphome
         // rather than inside send_aligned_, where every other producer would
         // overwrite it.
         this->op_sent_single_shot_ = this->last_placed_single_shot_;
+        this->op_sent_optimistic_  = this->last_placed_optimistic_;
         free(buf);
       }
       else
@@ -3171,6 +3203,7 @@ namespace esphome
       this->op_last_msgid_   = msgid;
       this->op_retry_count_  = 0;
       this->op_awaiting_ack_ = true;
+      this->op_short_wait_spent_ = false;
       this->set_command_failed_(false);
 
       ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
@@ -3235,7 +3268,21 @@ namespace esphome
       // interval phase offset), then re-arms itself.  This guarantees the first
       // retransmit waits the full interval, leaving the node's deferred ACK a
       // quiet window to arrive first.
-      this->set_timeout("op_retry", this->ack_wait_ms_(kOpRetryIntervalMs), [this]() {
+      //
+      // The FIRST wait of a command whose first shot was an OPTIMISTIC single
+      // shot is the short one: a wrong guess is then found out in about the time
+      // the frame needs to land and be answered, not after 3 s. See
+      // SingleShotAckWait.h for the derivation. Measured from the placed mark,
+      // which is where the frame actually goes out, not from now.
+      const bool short_wait = singleshotwait::useShortFirstWait(
+          this->op_sent_optimistic_, this->op_retry_count_, this->op_short_wait_spent_);
+      uint32_t base_ms = kOpRetryIntervalMs;
+      if (short_wait)
+      {
+        const int64_t us_to_t0 = this->last_placed_t0_us_ - esp_timer_get_time();
+        base_ms = singleshotwait::firstAckWaitMs(us_to_t0, kOpRetryIntervalMs);
+      }
+      this->set_timeout("op_retry", this->ack_wait_ms_(base_ms), [this, short_wait]() {
         if (!this->op_awaiting_ack_)
           return; // acked already; one-shot, nothing to re-arm
         // Security review finding 1: a relogin can start WHILE a retry is
@@ -3249,6 +3296,25 @@ namespace esphome
         {
           ESP_LOGD(TAG, "[%s] Tracked op retry deferred — session being rebuilt",
                    this->get_name().c_str());
+          this->schedule_op_retry_();
+          return;
+        }
+        if (short_wait)
+        {
+          // The optimistic guess missed. Burst NOW (Rule 4 below marks the node
+          // unacked, so retransmit_tracked_op_() places a full burst), but do
+          // NOT count it: op_retry_count_ is the budget that ends in "command
+          // failed, tear the session down", and a guess the operator
+          // opted into is not evidence the session is dead. The
+          // normal 3 s waits and the full kOpMaxRetries follow unchanged.
+          this->op_short_wait_spent_ = true;
+          this->belief_.single_shot_unacked = true;
+          ESP_LOGW(TAG, "[%s] optimistic single shot unacked — bursting now "
+                        "(not counted against the retry budget)",
+                   this->get_name().c_str());
+          const uint32_t msgid = this->retransmit_tracked_op_();
+          ESP_LOGW(TAG, "[%s] Tracked op burst fallback (msgid=%u)",
+                   this->get_name().c_str(), (unsigned)msgid);
           this->schedule_op_retry_();
           return;
         }
@@ -3333,6 +3399,7 @@ namespace esphome
       this->send_aligned_(this->op_frame_.data(), this->op_frame_.size(),
                           this->tracked_op_policy_());
       this->op_sent_single_shot_ = this->last_placed_single_shot_;
+      this->op_sent_optimistic_  = this->last_placed_optimistic_;
       return this->op_frame_msgid_;
     }
 

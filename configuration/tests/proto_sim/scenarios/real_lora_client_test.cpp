@@ -3650,6 +3650,9 @@ void makePredictable(real_helpers::RealHubHarness &h, uint32_t cycle_s,
     h.rol.set_sleep_duration(cycle_s);
     h.rol.set_checkin_interval(cycle_s);
     h.rol.noteBeaconEpochForTest(beacon_at);
+    // The hub put it to sleep right after that beacon: a COMMANDED sleep is what
+    // makes the prediction (and so "overdue") meaningful for an interactive node.
+    h.rol.last_sleep_epoch_ = beacon_at;
     h.time.set_now(now, /*valid=*/true);
 }
 
@@ -5076,4 +5079,364 @@ TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSessi
     f.clock.tick(200);
     EXPECT_EQ(count_logins_since(f.radio, before), 1u) << "once per exhaustion";
     EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
+}
+
+// ===========================================================================
+// OPTIMISTIC SINGLE SHOT, END TO END (2026-10-06)
+//
+// The switch (loradevices.yml, default OFF) lets the hub spend ONE copy on a
+// node whose only refusal is an aged-out confirmation. These tests pin the
+// half that makes a wrong guess cheap: the FIRST ack wait is short, measured
+// from the placed mark; the burst fallback still happens; and the miss is not
+// charged against the retry budget that ends in a session teardown.
+// ===========================================================================
+
+namespace {
+
+// The listener's tracked-op bookkeeping is protected; same probe pattern as
+// AckProbe above, adding no state.
+struct OptProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::last_placed_t0_us_;
+    using esphome::lora_tracker::LORAListener::op_frame_;
+    using esphome::lora_tracker::LORAListener::op_first_msgid_;
+    using esphome::lora_tracker::LORAListener::relogin_pending_;
+    using esphome::lora_tracker::LORAListener::last_timesync_sent_us_;
+    using esphome::lora_tracker::LORAListener::op_deferred_until_login_;
+};
+OptProbe &P(real_helpers::RealHubHarness &h) { return static_cast<OptProbe &>(h.rol); }
+
+// Grid confirmed, a good phase report, then 24 h of silence: the ONLY thing
+// refusing single shot is ConfirmationStale — asserted, not assumed.
+void staleButOtherwiseGood(real_helpers::RealHubHarness &h) {
+    confirmedGrid(h);
+    h.rol.node_fw_version_ = 10104;
+    h.rol.notePhaseReportForTest(/*rtc_slow_src=*/2, /*err_us=*/500,
+                                 /*spread_us=*/800, /*samples=*/8,
+                                 /*outside_guard=*/0, /*node_timed_rx=*/true);
+    proto_sim_timer_advance_us((int64_t) 24 * 60 * 60 * 1'000'000LL);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::ConfirmationStale)
+        << "precondition: staleness, and nothing else, is what refuses";
+}
+
+void sendOpen(real_helpers::RealHubHarness &h) {
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                               COV_OPERATION__CMD_OPEN, 0.0f);
+}
+
+// Microseconds from now to the mark the last command was placed on.
+int64_t usToPlacedMark(real_helpers::RealHubHarness &h) {
+    return P(h).last_placed_t0_us_ - esp_timer_get_time();
+}
+
+}  // namespace
+
+TEST(OptimisticShot, OnAndStaleSendsOneCopyAndRemembersTheGuessWasOptimistic) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None);
+
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    EXPECT_EQ(h.tracker.last_copies, 1) << "one placed copy, not a 17-copy burst";
+    EXPECT_TRUE(h.rol.op_sent_optimistic_for_test())
+        << "the bypass was what made it a single shot";
+    EXPECT_LE(P(h).op_frame_.size(), singleshotwait::kLargestTrackedOpBytes)
+        << "the tail budget assumes a tracked op this small";
+    EXPECT_EQ((uint32_t) LORAClient::kUplinkOffsetUs, singleshotwait::kNodeReplyOffsetUs)
+        << "SingleShotAckWait.h restates the node's reply offset";
+}
+
+TEST(OptimisticShot, SwitchOffBurstsAsBeforeAndWaitsTheFullInterval) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    ASSERT_FALSE(h.rol.optimistic_single_shot());
+
+    sendOpen(h);
+    EXPECT_NE(h.tracker.last_copies, 1) << "switch off: the burst it always was";
+    EXPECT_FALSE(h.rol.op_sent_optimistic_for_test());
+
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(2000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "no early retransmit";
+    EXPECT_EQ(h.rol.opRetryCount(), 0u);
+    h.clock.tick(1000 + 50);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the normal 3 s retry";
+    EXPECT_EQ(h.rol.opRetryCount(), 1u);
+}
+
+TEST(OptimisticShot, AMissedFirstShotBurstsAfterTheShortWaitNotAfterThreeSeconds) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+
+    const int64_t to_mark_us = usToPlacedMark(h);
+    const uint32_t wait_ms = singleshotwait::firstAckWaitMs(to_mark_us, 3000);
+    ASSERT_LT(wait_ms, 3000u) << "precondition: this is the SHORT wait";
+    ASSERT_GE(wait_ms, singleshotwait::kTailMs);
+
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(wait_ms - 30);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "not before the wait has run out";
+    EXPECT_FALSE(h.rol.hubBelief().single_shot_unacked);
+
+    h.clock.tick(60);
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the burst fallback went out";
+    EXPECT_NE(h.tracker.last_copies, 1) << "and it is a BURST";
+    EXPECT_TRUE(h.rol.hubBelief().single_shot_unacked) << "Rule 4 fired";
+    EXPECT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::SingleShotUnacked);
+    EXPECT_TRUE(h.rol.op_short_wait_spent_for_test());
+    EXPECT_TRUE(h.rol.awaitingAck()) << "still waiting for the node";
+
+    // The ack for the ORIGINAL msgid (the retry is the same command) lands.
+    deliverAck(h.rol, P(h).op_first_msgid_);
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.commandFailed());
+}
+
+TEST(OptimisticShot, TheWaitIsMeasuredFromThePlacedMarkNotFromPlacement) {
+    // A placed frame can be a whole round from the air. A flat 500 ms would
+    // expire before the frame was ever sent and burst on top of it.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+
+    // Put "now" about 1.2 s before one of this node's marks.
+    const int64_t mark = h.tracker.nextT0ForSlotUs(h.rol.grid_slot(),
+                                                   esp_timer_get_time() + 2'000'000);
+    proto_sim_timer_set_now_us(mark - 1'200'000);
+
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    const int64_t to_mark_us = usToPlacedMark(h);
+    ASSERT_GT(to_mark_us, 900'000) << "precondition: the mark is genuinely far off";
+
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(singleshotwait::kTailMs + 200);   // where a flat 500 ms wait would have fired
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends)
+        << "the frame is still waiting for its mark; bursting now would collide with it";
+    EXPECT_FALSE(h.rol.hubBelief().single_shot_unacked);
+
+    h.clock.tick(singleshotwait::firstAckWaitMs(to_mark_us, 3000) + 50);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "after the mark plus the tail";
+}
+
+TEST(OptimisticShot, ACancelledWaitDoesNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(100);
+    deliverAck(h.rol, P(h).op_first_msgid_);   // the guess was RIGHT
+    h.clock.tick(5000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "an acked single shot is not followed by a burst";
+    EXPECT_FALSE(h.rol.hubBelief().single_shot_unacked) << "and Rule 4 stays quiet";
+    EXPECT_FALSE(h.rol.commandFailed());
+}
+
+TEST(OptimisticShot, TheMissIsNotChargedAgainstTheRetryBudget) {
+    // A wrong guess is what optimism accepts. If it counted, one miss would
+    // leave 3 retries instead of 4 before "command failed after retries —
+    // clearing session, forcing re-login" tears down a healthy session.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    h.clock.tick(singleshotwait::firstAckWaitMs(usToPlacedMark(h), 3000) + 50);
+    ASSERT_TRUE(h.rol.op_short_wait_spent_for_test());
+    ASSERT_EQ(h.rol.opRetryCount(), 0u) << "the fallback burst is not a counted retry";
+
+    // The four normal retries are all still available...
+    for (uint32_t i = 1; i <= 4; ++i) {
+        h.clock.tick(3000 + 50);
+        EXPECT_EQ(h.rol.opRetryCount(), i);
+        EXPECT_FALSE(h.rol.commandFailed()) << "retry " << i << " of 4 is within budget";
+    }
+    // ...and only the fifth timeout is the failure.
+    h.clock.tick(3000 + 50);
+    EXPECT_TRUE(h.rol.commandFailed());
+}
+
+TEST(OptimisticShot, TheShortWaitIsPerCommandNotPerSession) {
+    // A second optimistic command, after the first one's miss, earns the short
+    // wait again: the "spent" flag belongs to the command, not the listener.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    h.clock.tick(singleshotwait::firstAckWaitMs(usToPlacedMark(h), 3000) + 50);
+    ASSERT_TRUE(h.rol.op_short_wait_spent_for_test());
+    deliverAck(h.rol, P(h).op_first_msgid_);   // the burst got through
+    ASSERT_FALSE(h.rol.awaitingAck());
+
+    // The node answers a beacon again (fresh report), then it is stale again.
+    h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, true);
+    proto_sim_timer_advance_us((int64_t) 24 * 60 * 60 * 1'000'000LL);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None)
+        << "Rule 4 cleared by the fresh report, staleness bypassed by the switch";
+
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1) << "optimistic again";
+    EXPECT_FALSE(h.rol.op_short_wait_spent_for_test()) << "a new command starts unspent";
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(singleshotwait::firstAckWaitMs(usToPlacedMark(h), 3000) + 50);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the short wait applies again";
+}
+
+TEST(OptimisticShot, ASingleShotTheHubWasEntitledToKeepsTheNormalWait) {
+    // Fresh evidence, switch on: still a single shot, but not an OPTIMISTIC one,
+    // so the short wait does not apply.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    confirmedGrid(h);
+    h.rol.node_fw_version_ = 10104;
+    h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, true);   // fresh
+    h.rol.enable_optimistic_single_shot(true);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None);
+
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    EXPECT_FALSE(h.rol.op_sent_optimistic_for_test())
+        << "the bypass was not used, so this is not the optimistic case";
+
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(2500);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "the normal 3 s wait";
+    h.clock.tick(500 + 50);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1);
+    EXPECT_EQ(h.rol.opRetryCount(), 1u) << "and this one IS a counted retry";
+}
+
+TEST(OptimisticShot, ASessionChangeStillBurstsAndKeepsTheNormalWait) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None);
+
+    h.rol.send_login();   // a new session: positive evidence the node moved
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::SessionChanged)
+        << "optimism must not outrank a session change";
+
+    P(h).relogin_pending_ = false;
+    sendOpen(h);
+    EXPECT_NE(h.tracker.last_copies, 1) << "a burst";
+    EXPECT_FALSE(h.rol.op_sent_optimistic_for_test());
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(1500);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "normal wait: nothing at 1.5 s";
+    h.clock.tick(1500);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1);
+}
+
+TEST(OptimisticShot, ARebootStillBurstsAndKeepsTheNormalWait) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None);
+
+    auto reg = serialize_register(kMacRol2);   // the node's own notice that it restarted
+    h.rol.set_response(reg.data(), reg.size());
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::RebootedSinceConfirm);
+
+    P(h).relogin_pending_ = false;
+    sendOpen(h);
+    EXPECT_NE(h.tracker.last_copies, 1);
+    EXPECT_FALSE(h.rol.op_sent_optimistic_for_test());
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(1500);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends);
+    h.clock.tick(1500);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1);
+}
+
+// ---------------------------------------------------------------------------
+// The quiet-interactive-node gap in beacon_overdue_ (found 2026-10-06)
+// ---------------------------------------------------------------------------
+
+TEST(BeaconMissed, AnAwakeQuietInteractiveNodeIsNotMissedAfterItsSleepCycle) {
+    // An interactive node beacons on wake, boot, relogin and mode change —
+    // never while idle. After it has woken (beacon newer than the hub's last
+    // CMD_SLEEP) nothing predicts another sleep, so 6 h of silence is not a
+    // missed check-in. It used to read as BeaconMissed, a rung the optimistic
+    // switch cannot bypass, so the node bursted forever.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    h.rol.registered_ = true;
+    h.rol.set_sleep_duration(21600);
+    h.rol.last_sleep_epoch_ = 1000;            // hub put it to sleep at 1000
+    h.rol.noteBeaconEpochForTest(1100);        // ...and a button woke it early
+    h.time.set_now(1000 + 21600 + LORAClient::kBeaconOverdueGraceS + 5, /*valid=*/true);
+    EXPECT_FALSE(h.rol.node_overdue())
+        << "it woke after the sleep that predicted it; nothing says it should beacon again";
+    EXPECT_FALSE(h.rol.hubBelief().beacon_missed);
+
+    // Never put to sleep by the hub at all: same answer, however long it is quiet.
+    h.rol.last_sleep_epoch_ = 0;
+    h.rol.noteBeaconEpochForTest(1000);
+    h.time.set_now(1000 + 7 * 3600, /*valid=*/true);
+    EXPECT_FALSE(h.rol.node_overdue()) << "awake for 7 h with no sleep on record";
+}
+
+TEST(BeaconMissed, AnInteractiveNodeTheHubPutToSleepAndNeverHeardAgainIsStillMissed) {
+    // The fix must not blunt the check it sits in: a COMMANDED sleep that the
+    // node does not wake from is exactly what U-5 exists to see.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.set_sleep_duration(600);
+    h.rol.noteBeaconEpochForTest(900);
+    h.rol.last_sleep_epoch_ = 1000;            // commanded to sleep AFTER its last beacon
+    h.time.set_now(1000 + 600 + LORAClient::kBeaconOverdueGraceS + 1, /*valid=*/true);
+    EXPECT_TRUE(h.rol.node_overdue());
+}
+
+TEST(BeaconMissed, AnAutoModeNodeIsStillJudgedByItsCheckinInterval) {
+    // Auto-mode nodes DO check in periodically; the clause must not touch them.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.set_auto_mode_default(true);
+    h.rol.set_checkin_interval(600);
+    h.rol.noteBeaconEpochForTest(1000);        // last_sleep_epoch_ == 0 < beacon
+    h.time.set_now(1000 + 600 + LORAClient::kBeaconOverdueGraceS + 1, /*valid=*/true);
+    EXPECT_TRUE(h.rol.node_overdue());
+}
+
+TEST(OptimisticShot, AQuietInteractiveNodeKeepsQualifyingForSingleShotPastSixHours) {
+    // The consequence the gap had, end to end through the ladder.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.set_sleep_duration(21600);
+    confirmedGrid(h);
+    h.rol.node_fw_version_ = 10104;
+    h.time.set_now(1000, /*valid=*/true);
+    h.rol.noteBeaconEpochForTest(1000);
+    h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, true);
+    h.rol.enable_optimistic_single_shot(true);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None);
+
+    h.time.set_now(1000 + 7 * 3600, /*valid=*/true);
+    proto_sim_timer_advance_us((int64_t) 7 * 3600 * 1'000'000LL);
+    EXPECT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None)
+        << "7 h quiet: still single-shot eligible (stale confirmation bypassed, "
+           "and no spurious BeaconMissed)";
 }
