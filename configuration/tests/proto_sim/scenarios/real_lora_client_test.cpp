@@ -5440,3 +5440,102 @@ TEST(OptimisticShot, AQuietInteractiveNodeKeepsQualifyingForSingleShotPastSixHou
         << "7 h quiet: still single-shot eligible (stale confirmation bypassed, "
            "and no spurious BeaconMissed)";
 }
+
+// ---------------------------------------------------------------------------
+// The shadow pending-mask inputs, read off a real listener
+// ---------------------------------------------------------------------------
+
+TEST(PendingShadowInputs, TheListenerReportsWhatItOwes) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    const int64_t now = esp_timer_get_time();
+
+    // A fresh listener owes plenty: login not settled, config not pushed.
+    pendingshadow::NodeInputs in = h.rol.pending_shadow_inputs(now);
+    EXPECT_TRUE(in.relogin_pending) << "session not confirmed";
+    EXPECT_TRUE(in.push_awaiting_ack) << "config not yet pushed this boot";
+    EXPECT_TRUE(in.timed_mode_off);
+    EXPECT_FALSE(in.latency_tolerant);
+    EXPECT_FALSE(in.op_awaiting_ack);
+    EXPECT_EQ(in.slot, (uint8_t) (h.rol.grid_slot() % timedgrid::kSlotCount));
+
+    // Settle everything the listener could owe.
+    h.rol.session_confirmed_ = true;
+    P(h).relogin_pending_   = false;
+    h.rol.config_synced_     = true;
+    h.rol.enable_timed_mode(true);
+    h.rol.set_auto_mode_default(true);
+    h.rol.node_sched_version_ = h.rol.schedule_version();
+    h.rol.sched_dirty_ = false;
+    h.rol.sched_push_msgid_ = 0;
+    P(h).last_timesync_sent_us_ = now - 1000;
+    // A published GridSync nobody has confirmed yet is something the node is owed.
+    // Set directly: whether enable_timed_mode() manages to pack one depends on
+    // session-key state that is static across tests in one process.
+    h.rol.gridsync_msgids_[0]    = 0x1234;
+    h.rol.gridsync_msgid_count_  = 1;
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    in = h.rol.pending_shadow_inputs(now);
+    EXPECT_TRUE(in.push_awaiting_ack) << "GridSync awaiting its ack";
+    deliverAck(h.rol, 0x1234);
+    ASSERT_FALSE(h.rol.gridSyncAwaitingAck());
+    in = h.rol.pending_shadow_inputs(now);
+    EXPECT_FALSE(in.relogin_pending);
+    EXPECT_FALSE(in.push_awaiting_ack);
+    // A schedule the node has not been sent yet is owed too.
+    h.rol.node_sched_version_ ^= 1u;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "schedule pending";
+    h.rol.node_sched_version_ ^= 1u;
+    EXPECT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack);
+    EXPECT_FALSE(in.timed_mode_off);
+    EXPECT_TRUE(in.latency_tolerant) << "automatic mode is the proxy for latency tolerant";
+    EXPECT_FALSE(in.timesync_due) << "an auto-mode node was given one a second ago";
+    EXPECT_EQ(in.since_last_traffic_us, -1) << "never heard, never addressed: unknown";
+}
+
+TEST(PendingShadowInputs, OpsAndDeferredOpsAreVisible) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    const int64_t now = esp_timer_get_time();
+
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).op_awaiting_ack);
+    deliverAck(h.rol, P(h).op_first_msgid_);
+    EXPECT_FALSE(h.rol.pending_shadow_inputs(now).op_awaiting_ack);
+
+    P(h).relogin_pending_ = true;
+    sendOpen(h);   // parked behind the relogin
+    EXPECT_TRUE(P(h).op_deferred_until_login_);
+    const pendingshadow::NodeInputs in = h.rol.pending_shadow_inputs(now);
+    EXPECT_TRUE(in.op_deferred_until_login);
+    EXPECT_TRUE(in.relogin_pending);
+}
+
+TEST(PendingShadowInputs, TrafficAgeComesFromHearingAndFromAddressingTheNode) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    proto_sim_timer_set_now_us(10'000'000);
+    h.rol.note_node_heard_();
+    proto_sim_timer_advance_us(400'000'000);   // ~6.7 min later
+    pendingshadow::NodeInputs in = h.rol.pending_shadow_inputs(esp_timer_get_time());
+    EXPECT_EQ(in.since_last_traffic_us, 400'000'000);
+
+    // A downlink placed for it counts, once its mark has passed.
+    P(h).last_placed_t0_us_ = esp_timer_get_time() - 5'000'000;
+    in = h.rol.pending_shadow_inputs(esp_timer_get_time());
+    EXPECT_EQ(in.since_last_traffic_us, 5'000'000);
+
+    // ...and while its mark is still ahead it is a QUEUED frame.
+    P(h).last_placed_t0_us_ = esp_timer_get_time() + 800'000;
+    in = h.rol.pending_shadow_inputs(esp_timer_get_time());
+    EXPECT_TRUE(in.queued_frames);
+
+    // The hub's own air being busy also counts, for every node.
+    P(h).last_placed_t0_us_ = 0;
+    h.tracker.tx_drain_us = 1'000'000;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(esp_timer_get_time()).queued_frames);
+}

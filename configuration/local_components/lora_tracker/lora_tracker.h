@@ -24,6 +24,9 @@
 // Section 4.4's beacon authenticator. Dependency-free (no PSA), like TxQueue.h
 // above — only the byte LAYOUT lives there; the PSA call stays in the .cpp.
 #include "esphome/components/lora_client/FrameCrypto.h"
+// SHADOW pending-data mask: the would-be bitmap, computed and logged by
+// serviceBeacon but never transmitted. Dependency-free, hub-only.
+#include "esphome/components/lora_client/PendingShadow.h"
 
 // Configuration
 #define POOL_SIZE 5
@@ -280,6 +283,21 @@ namespace esphome
 
       // For tests: how many beacons have actually been queued.
       uint32_t  beaconsSent() const { return this->beacons_sent_; }
+
+      // SHADOW pending-data mask (PendingShadow.h). serviceBeacon still sends
+      // pending::allListening(); these report what it WOULD have sent.
+      //   shadowBeacons()          beacons the shadow was evaluated for
+      //   shadowBeaconsWithClear() of those, how many would have cleared >= 1 bit
+      //   shadowLastMask()         the last would-be mask
+      uint32_t  shadowBeacons() const          { return this->shadow_beacons_; }
+      uint32_t  shadowBeaconsWithClear() const { return this->shadow_beacons_with_clear_; }
+      uint32_t  shadowLastMask() const         { return this->shadow_last_mask_; }
+      // Evaluate, count and LOG one shadow verdict. Public so a test can feed it
+      // hand-built inputs; production calls it only from serviceBeacon, once per
+      // beacon, outside every mutex and nowhere near the burst retag path.
+      pendingshadow::Verdict recordShadowPending(const pendingshadow::NodeInputs *in,
+                                                 const std::string *names, size_t n,
+                                                 uint32_t round);
       int64_t   gridAnchorUs() const { return this->grid_anchor_us_; }
       bool      gridStarted() const  { return this->grid_started_; }
 
@@ -481,6 +499,9 @@ namespace esphome
       txqueue::SupersedeTable supersede_;
       uint32_t tx_superseded_drops_{0};
       uint32_t beacons_sent_{0};
+      uint32_t shadow_beacons_{0};
+      uint32_t shadow_beacons_with_clear_{0};
+      uint32_t shadow_last_mask_{0xFFFFFFFFu};
       bool    grid_started_{false};
       // Section 4.4's fleet key. Minted in startGrid(), published inside each
       // node's already-encrypted GridSync, never sent in the clear.

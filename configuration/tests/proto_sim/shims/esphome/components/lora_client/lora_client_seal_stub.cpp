@@ -27,5 +27,14 @@ namespace esphome
     {
       return false;
     }
+
+    // serviceBeacon gathers the SHADOW pending-mask inputs from every registered
+    // listener. This target registers none, so the call is never reached at
+    // runtime; the stub answers "listen" (the default-constructed inputs) for
+    // the same reason sealBurstCopyTag answers false: the safe direction.
+    pendingshadow::NodeInputs LORAListener::pending_shadow_inputs(int64_t)
+    {
+      return pendingshadow::NodeInputs{};
+    }
   }
 }

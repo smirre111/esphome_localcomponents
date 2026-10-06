@@ -1533,3 +1533,66 @@ TEST(RealTrackerDrain, APlacedFrameIsPricedFromItsMarkNotFromNow) {
     EXPECT_GT(t.txDrainUs(), 5'000'000)
         << "the frame cannot leave before its mark, so the backlog reaches past it";
 }
+
+// ---------------------------------------------------------------------------
+// SHADOW pending-data mask (2026-10-06): computed and logged by serviceBeacon,
+// never transmitted. The whole point is zero behaviour change on the air.
+// ---------------------------------------------------------------------------
+
+TEST(RealTrackerBeaconShadow, TheShadowIsEvaluatedOncePerBeaconAndTheAirIsUnchanged) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    TxProbe t;
+    t.init();
+    t.startGrid();
+    ASSERT_EQ(t.shadowBeacons(), 0u);
+
+    const int64_t beacon_t0 = t.nextBeaconT0Us(esp_timer_get_time());
+    ASSERT_GT(beacon_t0, 0);
+    t.serviceBeacon();
+    t.serviceBeacon();
+    t.serviceBeacon();
+    ASSERT_EQ(t.beaconsSent(), 1u);
+    EXPECT_EQ(t.shadowBeacons(), 1u) << "once per queued beacon, not once per loop pass";
+    EXPECT_EQ(t.shadowBeaconsWithClear(), 0u) << "no nodes registered: nothing to clear";
+    EXPECT_EQ(t.shadowLastMask(), pending::allListening());
+
+    const int64_t fire = loratiming::fireInstantUs(beacon_t0, 0);
+    proto_sim_timer_set_now_us(fire - LORATracker::kPrepareLeadUs);
+    ASSERT_TRUE(t.serviceTxQueue(fire - LORATracker::kPrepareLeadUs));
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+    const auto &bytes = lorahal::rec().packets.at(0);
+    LoraClientOperationMessage *msg = lora_client_operation_message__unpack(
+        nullptr, bytes.size(), bytes.data());
+    ASSERT_NE(msg, nullptr);
+    ASSERT_EQ(msg->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON);
+    EXPECT_TRUE(msg->gridbeacon->pendingmaskvalid) << "validity flag semantics unchanged";
+    EXPECT_EQ(msg->gridbeacon->pendingmask, pending::allListening());
+    lora_client_operation_message__free_unpacked(msg, nullptr);
+}
+
+TEST(RealTrackerBeaconShadow, TheVerdictIsCountedAndRemembered) {
+    TxProbe t;
+    t.init();
+    pendingshadow::NodeInputs quiet;
+    quiet.slot = 4;
+    quiet.timed_mode_off = false;
+    quiet.latency_tolerant = true;
+    quiet.since_last_traffic_us = 1'000'000'000'000LL;
+    const std::string names[1] = {"rol_2"};
+
+    pendingshadow::Verdict v = t.recordShadowPending(&quiet, names, 1, 0);
+    EXPECT_TRUE(v.any_cleared);
+    EXPECT_EQ(t.shadowBeacons(), 1u);
+    EXPECT_EQ(t.shadowBeaconsWithClear(), 1u);
+    EXPECT_EQ(t.shadowLastMask(), pending::allListening() & ~(1u << 4));
+
+    pendingshadow::NodeInputs busy = quiet;
+    busy.op_awaiting_ack = true;
+    v = t.recordShadowPending(&busy, names, 1, 233);
+    EXPECT_FALSE(v.any_cleared);
+    EXPECT_EQ(t.shadowBeacons(), 2u);
+    EXPECT_EQ(t.shadowBeaconsWithClear(), 1u) << "a beacon with nothing cleared is not counted";
+    EXPECT_EQ(t.shadowLastMask(), pending::allListening());
+}

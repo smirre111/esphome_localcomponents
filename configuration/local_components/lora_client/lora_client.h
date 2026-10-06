@@ -14,8 +14,10 @@
 #include "esphome/components/lora_client/OnboardingGate.h"
 // How often an automatic-mode node needs its wall clock resynced.
 #include "esphome/components/lora_client/TimeSyncPolicy.h"
-// Hub-only: the first ack wait of an optimistic single shot.
+// Hub-only: the first ack wait of an optimistic single shot, and the shadow
+// pending-data mask (computed and logged, never transmitted).
 #include "esphome/components/lora_client/SingleShotAckWait.h"
+#include "esphome/components/lora_client/PendingShadow.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -589,6 +591,11 @@ namespace esphome
       bool grid_aligned() const     { return this->grid_aligned_; }
       uint8_t grid_slot() const     { return this->grid_slot_; }
 
+      // SHADOW pending-data mask (PendingShadow.h): everything the would-be
+      // mask decision reads about THIS node, gathered in one place. Called from
+      // LORATracker::serviceBeacon only, never from the transmit path. Not
+      // const because schedule_version() lazily recomputes its CRC.
+      pendingshadow::NodeInputs pending_shadow_inputs(int64_t now_us);
       // For tests: optimistic-single-shot bookkeeping of the tracked command.
       bool op_short_wait_spent_for_test() const { return this->op_short_wait_spent_; }
       bool op_sent_optimistic_for_test() const  { return this->op_sent_optimistic_; }
@@ -1222,6 +1229,9 @@ namespace esphome
       // (a'): Unix epoch of the last ACCEPTED uplink from this node — a REGISTER
       // for its MAC or an authenticated frame. See is_node_awake_().
       uint32_t last_heard_epoch_{0};
+      // Same event on the monotonic clock (esp_timer), 0 = never. The shadow
+      // pending mask needs "how long ago" without depending on a valid wall clock.
+      int64_t  last_heard_us_{0};
       void     note_node_heard_();
       bool     login_acked_{false};
       // True once the hub has successfully DECRYPTED a frame from this node,

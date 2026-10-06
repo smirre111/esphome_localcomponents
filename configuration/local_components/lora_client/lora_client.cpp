@@ -761,8 +761,54 @@ namespace esphome
     void LORAListener::note_node_heard_()
     {
       this->onboarding_heard_ = true;
+      this->last_heard_us_ = esp_timer_get_time();
       if (this->time != nullptr && this->time->now().is_valid())
         this->last_heard_epoch_ = static_cast<uint32_t>(this->time->now().timestamp);
+    }
+
+    pendingshadow::NodeInputs LORAListener::pending_shadow_inputs(int64_t now_us)
+    {
+      pendingshadow::NodeInputs in;
+      in.slot = static_cast<uint8_t>(this->grid_slot_ % timedgrid::kSlotCount);
+      in.op_awaiting_ack          = this->op_awaiting_ack_;
+      in.op_deferred_until_login  = this->op_deferred_until_login_;
+      // "Login still settling" counts with an explicit relogin: both mean the
+      // hub is mid-conversation with this node (TimeSync's sleepOk reads the same).
+      in.relogin_pending          = this->relogin_pending_ || !this->session_confirmed_;
+      // Anything the node has been sent and not confirmed, or is still owed:
+      // a schedule push in flight or an edit not yet pushed, a GridSync, and
+      // this boot's configuration push.
+      in.push_awaiting_ack =
+          (this->sched_push_msgid_ != 0 && this->sched_push_retries_ < kSchedMaxRetries) ||
+          this->sched_dirty_ || this->schedule_pending() ||
+          this->gridsync_msgid_count_ != 0 || !this->config_synced_ ||
+          this->config_push_pending_;
+      in.timesync_due = timesyncpolicy::shouldSend(
+          this->auto_mode_,
+          this->last_timesync_sent_us_ == 0 ? -1 : now_us - this->last_timesync_sent_us_);
+      // OTA is a tracked sysop, so op_awaiting_ack_ above already covers it.
+      //
+      // The hub's own transmit side is global, not per node: a frame placed for
+      // this node that has not fired yet, or anything draining on the air.
+      in.queued_frames =
+          (this->last_placed_t0_us_ > now_us) ||
+          (this->parent_ != nullptr && this->parent_->txDrainUs() > 0);
+      in.timed_mode_off = !this->timed_mode_enabled_;
+      // THERE IS NO EXPLICIT LATENCY-TOLERANT FLAG. An automatic-mode node is
+      // the only kind that is already unreachable between check-ins by design
+      // (implementation-plan.md section 5.5), so that is the proxy.
+      in.latency_tolerant = this->auto_mode_;
+      // Traffic in EITHER direction: the last frame heard from it, or the last
+      // downlink placed for it (that mark, once past, is the last time it was
+      // addressed).
+      int64_t last = this->last_heard_us_;
+      if (this->last_placed_t0_us_ > 0)
+      {
+        const int64_t placed = this->last_placed_t0_us_ < now_us ? this->last_placed_t0_us_ : now_us;
+        if (placed > last) last = placed;
+      }
+      in.since_last_traffic_us = (last == 0) ? -1 : now_us - last;
+      return in;
     }
 
     bool LORAListener::is_node_awake_() const

@@ -728,6 +728,23 @@ namespace esphome
       if (lead > (int64_t) timedgrid::kRoundUs || lead < txqueue::kPrepareLeadUs)
         return;
 
+      // SHADOW pending mask: gather what each node's bit WOULD depend on, here,
+      // before this beacon enters the transmit queue (so the beacon itself does
+      // not count as "queued frames" for every node). Evaluated and logged only
+      // once the beacon is actually queued, below. The node states are read on
+      // this loop task, which is where they are written.
+      std::vector<pendingshadow::NodeInputs> shadow_in;
+      std::vector<std::string>               shadow_names;
+      shadow_in.reserve(this->listeners_.size());
+      shadow_names.reserve(this->listeners_.size());
+      for (LORAListener *l : this->listeners_)
+      {
+        if (l == nullptr)
+          continue;
+        shadow_in.push_back(l->pending_shadow_inputs(now));
+        shadow_names.push_back(l->get_name());
+      }
+
       LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = LORATracker::broadcastAddressing;
@@ -829,6 +846,52 @@ namespace esphome
       ESP_LOGI(TAG, "beacon queued: round %u, slot %u, T0 %lld us, fire %lld us",
                (unsigned) round, (unsigned) timedgrid::kBeaconSlotIndex,
                (long long) t0, (long long) fire);
+      // Shadow only: what was transmitted above is allListening(), whatever this says.
+      this->recordShadowPending(shadow_in.data(), shadow_names.data(),
+                                shadow_in.size(), round);
+    }
+
+    // One line per beacon: the slot map, the would-be mask, who would have been
+    // cleared, and what held everyone else. Never alters what is transmitted.
+    pendingshadow::Verdict LORATracker::recordShadowPending(
+        const pendingshadow::NodeInputs *in, const std::string *names, size_t n,
+        uint32_t round)
+    {
+      const int64_t interval_us =
+          (int64_t) timedgrid::kBeaconEveryRounds * (int64_t) timedgrid::kRoundUs;
+      std::vector<uint32_t> reasons(n, 0u);
+      const pendingshadow::Verdict v =
+          pendingshadow::shadowMask(in, n, interval_us, reasons.data());
+
+      this->shadow_beacons_++;
+      if (v.any_cleared)
+        this->shadow_beacons_with_clear_++;
+      this->shadow_last_mask_ = v.mask;
+
+      std::string detail;
+      char rbuf[96];
+      for (size_t i = 0; i < n; ++i)
+      {
+        const bool cleared = i < pendingshadow::kMaxNodes && (v.cleared_nodes & (1u << i)) != 0;
+        pendingshadow::describeReasons(reasons[i], rbuf, sizeof(rbuf));
+        char one[160];
+        if (cleared)
+          snprintf(one, sizeof(one), " | %s slot %u CLEAR (no reason to listen)",
+                   names[i].c_str(), (unsigned) in[i].slot);
+        else if (reasons[i] == 0)
+          snprintf(one, sizeof(one), " | %s slot %u LISTEN (slot shared with a listener)",
+                   names[i].c_str(), (unsigned) in[i].slot);
+        else
+          snprintf(one, sizeof(one), " | %s slot %u LISTEN (%s)",
+                   names[i].c_str(), (unsigned) in[i].slot, rbuf);
+        detail += one;
+      }
+      ESP_LOGI(TAG, "beacon shadow r%u: sent=0x%08x would=0x%08x cleared_slots=0x%08x "
+                    "beacons_with_clear=%u/%u%s",
+               (unsigned) round, (unsigned) pending::allListening(), (unsigned) v.mask,
+               (unsigned) v.cleared_slots, (unsigned) this->shadow_beacons_with_clear_,
+               (unsigned) this->shadow_beacons_, detail.c_str());
+      return v;
     }
 
     int64_t LORATracker::nextT0ForSlotUs(uint8_t slot, int64_t now_us) const
