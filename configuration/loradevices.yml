@@ -31,6 +31,24 @@ esp32:
       # against. Nothing in this file previously said what the rate was, so the
       # stride was correct only by inheritance from a default.
       CONFIG_FREERTOS_HZ: "1000"
+      # PSA Crypto is called from the ESPHome loop (session key install/destroy,
+      # uplink verify), from the tracker's send task (per-copy burst retag) and
+      # from esp_timer callbacks (MAC pings). Without mbedTLS threading, PSA's
+      # global key-slot state is unguarded across those tasks: a re-login that
+      # destroys a key mid-burst could race a psa_mac_compute on the send task.
+      # (lora_client.cpp additionally holds s_session_keys_mutex across the use
+      # of a session key, so the key cannot be destroyed under the call.)
+      CONFIG_MBEDTLS_THREADING_C: y
+      # ALT is the Kconfig default once THREADING_C is on, but ESP-IDF ships no
+      # alt implementation and check_config.h forbids ALT together with PTHREAD
+      # ("MBEDTLS_THREADING_ALT defined, but not all prerequisites" - seen on
+      # IDF 5.5.2), so ALT is switched off and the pthread backend is used.
+      CONFIG_MBEDTLS_THREADING_ALT: n
+      CONFIG_MBEDTLS_THREADING_PTHREAD: y
+      # Keep the panic handler in IRAM so a crash while the flash cache is off
+      # (an NVS write on the other core) still produces a backtrace instead of
+      # a silent interrupt-watchdog reset.
+      CONFIG_ESP_PANIC_HANDLER_IRAM: y
     # advanced:
     #   loop_task_stack_size: 16384
   
