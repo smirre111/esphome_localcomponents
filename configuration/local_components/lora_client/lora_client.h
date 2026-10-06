@@ -637,6 +637,8 @@ namespace esphome
       uint32_t gridSyncRequestsIgnored() const  { return this->gridsync_requests_ignored_; }
       // Plaintext uplinks refused because this node holds a confirmed session.
       uint32_t plaintextRefused() const { return this->plaintext_refused_; }
+      uint32_t nonCanonicalFrames() const { return this->noncanonical_frames_; }
+      bool     rxTimingTrusted() const { return this->rx_timing_trusted_; }
       uint32_t opRetryCount() const    { return this->op_retry_count_; }
       // Why the node says it is NOT in Mode B, and whether it says it IS. Both
       // arrive in every decrypted beacon's PhaseReport and were stored in
@@ -1023,6 +1025,11 @@ namespace esphome
       uint32_t      gridsync_requests_answered_{0};
       uint32_t      gridsync_requests_ignored_{0};
       uint32_t      plaintext_refused_{0};
+      // FrameCanon.h verdict for the uplink being processed (set once per frame
+      // in set_response, read by noteAuthenticatedUplink_). false = the frame's
+      // on-air length is not a trustworthy T0 input.
+      bool          rx_timing_trusted_{true};
+      uint32_t      noncanonical_frames_{0};
       static constexpr uint8_t  kSchedMaxRetries   = 3;
       static constexpr uint32_t kSchedRetryMs      = 5000;
       // The most an ack timer is stretched by the transmit backlog. A ceiling

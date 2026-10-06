@@ -107,6 +107,8 @@ struct NodeProbe : CmdDispatcher {
         : CmdDispatcher(m, s, l, mm, bm) {}
     using CmdDispatcher::last_rx_window_gen_;
     using CmdDispatcher::modeTestExpiredCb_;   // the node-owned deadline
+    using CmdDispatcher::rx_timing_trusted_;     // FrameCanon verdict for the last frame
+    using CmdDispatcher::noncanonical_frames_;
     // What the HUB was last told, as distinct from what the console last saw.
     // The flicker test has to assert the state the hub ends up believing, and
     // that reason travels inside the beacon BODY (built later, in
@@ -3812,6 +3814,130 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
 }
 
 // ---------------------------------------------------------------------------
+// Length re-encode check (FrameCanon.h): a frame whose on-air length is not what
+// the decoded message re-encodes to must still be PROCESSED, but never used as a
+// T0 source. Padding changes n_sym(len) and so T0, on content the CMAC still
+// verifies; an unknown field keeps the lengths equal but sits outside the CMAC.
+// ---------------------------------------------------------------------------
+namespace {
+// Rebuild a packed frame with `extra` spliced INSIDE its header (field 1, one-byte
+// length). Used for both the duplicated-field case (same value, longer wire) and
+// the unknown-field case.
+std::vector<uint8_t> splice_into_header(const std::vector<uint8_t> &f,
+                                        const std::vector<uint8_t> &extra) {
+    EXPECT_EQ(f[0], 0x0A);
+    const size_t hlen = f[1];
+    EXPECT_LT(hlen + extra.size(), 128u);
+    std::vector<uint8_t> out;
+    out.push_back(0x0A);
+    out.push_back((uint8_t)(hlen + extra.size()));
+    out.insert(out.end(), f.begin() + 2, f.begin() + 2 + hlen);
+    out.insert(out.end(), extra.begin(), extra.end());
+    out.insert(out.end(), f.begin() + 2 + hlen, f.end());
+    return out;
+}
+// msgId (field 4) a second time with the SAME value: identical decoded content,
+// longer on the air.
+std::vector<uint8_t> dup_msgid(const std::vector<uint8_t> &f, uint32_t msgid) {
+    std::vector<uint8_t> extra{0x20};
+    uint32_t v = msgid;
+    while (v >= 0x80) { extra.push_back((uint8_t)(v | 0x80)); v >>= 7; }
+    extra.push_back((uint8_t) v);
+    return splice_into_header(f, extra);
+}
+// An unknown outer field (number 111, varint 1) -- what a NEWER peer's extra field is.
+std::vector<uint8_t> with_unknown_outer(std::vector<uint8_t> f) {
+    f.push_back(0xF8); f.push_back(0x06); f.push_back(0x01);
+    return f;
+}
+}  // namespace
+
+TEST_F(RealNodeFixture, ACanonicalFrameIsTrustedForTiming) {
+    auto op = pack_sysop_op(/*msgid=*/950, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
+    EXPECT_TRUE(disp.rx_timing_trusted_);
+    EXPECT_EQ(disp.noncanonical_frames_, 0u) << "a same-version frame must never trip the check";
+    EXPECT_EQ(drain_acks(disp), 1);
+}
+
+TEST_F(RealNodeFixture, APaddedFrameIsProcessedButCommitsNoPhaseSample) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/0, /*msgid=*/960);
+    disp.noteDriftSample(1'000'000);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 1'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+    disp.resetPhaseStats();
+    drain_acks(disp);
+
+    // Control: the canonical frame, on its mark, commits a sample.
+    auto good = pack_sysop_op(/*msgid=*/961, CLIENT_OPERATION__CMD_STATUS);
+    const int64_t rx_good = rxOnMark(disp, good.size(), 1'040'000);
+    disp.noteDriftSample(rx_good);
+    disp.onReceiveNew(good.data(), static_cast<int>(good.size()), rx_good);
+    ASSERT_EQ(disp.phaseStats().n, 1u) << "control: canonical frame must commit a sample";
+    ASSERT_EQ(drain_acks(disp), 1);
+
+    // The same content duplicated-field padded, ALSO landing on a mark.
+    auto padded = dup_msgid(pack_sysop_op(962, CLIENT_OPERATION__CMD_STATUS), 962);
+    const int64_t rx_pad = rxOnMark(disp, padded.size(), 1'040'000 + timedgrid::kRoundUs);
+    disp.noteDriftSample(rx_pad);
+    disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()), rx_pad);
+    EXPECT_FALSE(disp.rx_timing_trusted_);
+    EXPECT_EQ(disp.noncanonical_frames_, 1u);
+    EXPECT_EQ(disp.phaseStats().n, 1u) << "a padded frame's length is not a T0 input: no new sample";
+    EXPECT_EQ(drain_acks(disp), 1) << "demote, do not drop: the command is still processed";
+}
+
+TEST_F(RealNodeFixture, AFrameWithAnUnknownFieldStillRunsButIsNotATimingSource) {
+    // Forward compatibility: a NEWER peer's extra field must not break its command.
+    auto gs = build_grid_sync(true, 0, 970);
+    disp.noteDriftSample(1'000'000);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 1'000'000);
+    ASSERT_TRUE(disp.gridState().active);
+    disp.resetPhaseStats();
+    drain_acks(disp);
+
+    auto fwd = with_unknown_outer(pack_sysop_op(971, CLIENT_OPERATION__CMD_STATUS));
+    const int64_t rx = rxOnMark(disp, fwd.size(), 1'040'000);
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(fwd.data(), static_cast<int>(fwd.size()), rx);
+    EXPECT_FALSE(disp.rx_timing_trusted_) << "unknown fields sit outside the CMAC: timing withheld";
+    EXPECT_EQ(disp.phaseStats().n, 0u);
+    EXPECT_EQ(drain_acks(disp), 1) << "but the command it carries still runs";
+
+    // Same for an unknown field inside the header.
+    auto hdr_unk = splice_into_header(pack_sysop_op(972, CLIENT_OPERATION__CMD_STATUS),
+                                      {0xF8, 0x06, 0x01});
+    disp.onReceiveNew(hdr_unk.data(), static_cast<int>(hdr_unk.size()));
+    EXPECT_FALSE(disp.rx_timing_trusted_);
+    EXPECT_EQ(drain_acks(disp), 1);
+}
+
+TEST_F(RealNodeFixture, TheVerdictIsPerFrameNotSticky) {
+    auto padded = dup_msgid(pack_sysop_op(980, CLIENT_OPERATION__CMD_STATUS), 980);
+    disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()));
+    ASSERT_FALSE(disp.rx_timing_trusted_);
+    auto good = pack_sysop_op(981, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(good.data(), static_cast<int>(good.size()));
+    EXPECT_TRUE(disp.rx_timing_trusted_) << "a later canonical frame is trusted again";
+    EXPECT_EQ(disp.noncanonical_frames_, 1u);
+}
+
+TEST_F(RealNodeFixture, ANonCanonicalGridSyncIsNotAdoptedAndACanonicalCopyIs) {
+    auto padded = dup_msgid(build_grid_sync(true, 4, 990), 990);
+    disp.noteDriftSample(2'000'000);
+    disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()), 2'000'000);
+    EXPECT_FALSE(disp.gridState().active)
+        << "the anchor would be solved from a skewed T0: not adopted from a padded copy";
+    EXPECT_EQ(disp.expectedT0Us(), 0);
+
+    auto good = build_grid_sync(true, 4, 991, timedgrid::kSlotCount, timedgrid::kSlotPitchUs,
+                                /*burst_index=*/1);
+    disp.noteDriftSample(2'100'000);
+    disp.onReceiveNew(good.data(), static_cast<int>(good.size()), 2'100'000);
+    EXPECT_TRUE(disp.gridState().active) << "the next canonical copy of the burst adopts as normal";
+}
+
+// ---------------------------------------------------------------------------
 // Once a session exists, every command must be encrypted
 // ---------------------------------------------------------------------------
 //
@@ -4879,6 +5005,31 @@ TEST_F(RealNodeFixture, ABeaconCorrectsDriftWithoutTouchingTheGeometry) {
     EXPECT_EQ(after.params.beacon_every_rounds, before.params.beacon_every_rounds);
     // And it is the sample an idle node's phase tracking otherwise never gets.
     EXPECT_GE(disp.phaseStats().n, 1u);
+}
+
+// Length re-encode check: a beacon whose length is not canonical must not be the
+// T0 source for a re-anchor (its n_sym, and so its T0, is skewed), while a canonical
+// beacon in the same position moves the anchor as normal.
+TEST_F(RealNodeFixture, ANonCanonicalBeaconDoesNotReAnchorButACanonicalOneDoes) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/1000);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    const gridstate::State before = disp.gridState();
+    constexpr int64_t kDrift = 900;
+
+    auto padded = dup_msgid(build_grid_beacon(/*round=*/50, before.params.beacon_slot, /*msgid=*/1), 1);
+    disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()),
+                      rx_for_beacon(before, 50, kDrift, (uint32_t) padded.size()));
+    EXPECT_FALSE(disp.rx_timing_trusted_);
+    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us)
+        << "a padded beacon's length is not a T0 input: the anchor must not move";
+
+    auto good = build_grid_beacon(/*round=*/51, before.params.beacon_slot, /*msgid=*/2);
+    disp.onReceiveNew(good.data(), static_cast<int>(good.size()),
+                      rx_for_beacon(before, 51, kDrift, (uint32_t) good.size()));
+    EXPECT_TRUE(disp.rx_timing_trusted_);
+    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us + kDrift)
+        << "control: the canonical beacon re-anchors as before";
 }
 
 // Security review finding 5: burst_index's MAC coverage stops a replay of

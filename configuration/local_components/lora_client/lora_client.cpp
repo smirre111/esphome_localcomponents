@@ -2,6 +2,8 @@
 // Shared with the node firmware — the AEAD wire format now lives in exactly
 // one place. See the banner in FrameCrypto.h.
 #include "esphome/components/lora_client/FrameCrypto.h"
+// Is a frame's on-air length a trustworthy T0 input? See the banner in FrameCanon.h.
+#include "esphome/components/lora_client/FrameCanon.h"
 // The funnel rate arithmetic, so a ModeTest report is recomputed on the hub
 // rather than trusted from the node (test-plan.md I1).
 #include "esphome/components/lora_client/MacFunnel.h"
@@ -1295,6 +1297,16 @@ namespace esphome
     {
       if (this->parent_ == nullptr)
         return;
+      // A non-canonical frame's length is not a trustworthy T0 input
+      // (FrameCanon.h): record "no usable origin" (0) rather than a skewed one,
+      // so send_into_class_a_window_() answers NoUplinkStamp and falls back to
+      // the burst, and the wake-clock pairing is skipped.
+      if (!this->rx_timing_trusted_)
+      {
+        this->last_uplink_t0_us_  = 0;
+        this->last_uplink_unc_us_ = 0;
+        return;
+      }
       this->last_uplink_t0_us_  = this->parent_->last_rx_t0_us();
       this->last_uplink_unc_us_ = this->parent_->rx_stamp_uncertainty_us();
       // §4.6: the same stamp answers a second question — did this uplink land
@@ -2507,6 +2519,24 @@ namespace esphome
       {
         ESP_LOGE(TAG, "Could not read protobuf");
         return;
+      }
+
+      // Length re-encode check (mac-separation-implementation-plan.md, receiver
+      // order step 1): the hub's T0 stamp for this uplink is derived from the
+      // on-air length, which the CMAC does not cover. DEMOTE, DO NOT DROP --
+      // see FrameCanon.h. The frame is processed as usual; only its use as a
+      // timing origin (noteAuthenticatedUplink_) is withheld.
+      this->rx_timing_trusted_ = framecanon::timingTrusted(framecanon::classify(
+          {(uint32_t) len,
+           (uint32_t) lora_client_response_message__get_packed_size(rcv_message),
+           rcv_message->base.n_unknown_fields +
+               (rcv_message->header ? rcv_message->header->base.n_unknown_fields : 0u)}));
+      if (!this->rx_timing_trusted_)
+      {
+        this->noncanonical_frames_++;
+        ESP_LOGW(TAG, "%s: non-canonical uplink (len %u) -- processed, but its length is "
+                      "not used for timing (%u so far)",
+                 this->get_name().c_str(), (unsigned) len, (unsigned) this->noncanonical_frames_);
       }
 
       // Ownership for the rest of the function. Before this, every early exit

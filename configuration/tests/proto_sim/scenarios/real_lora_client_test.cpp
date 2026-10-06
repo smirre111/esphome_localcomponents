@@ -615,6 +615,93 @@ TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
            "never aimed at a window; counting it would inflate the denominator";
 }
 
+// Length re-encode check (FrameCanon.h), hub side. The hub's T0 stamp for an
+// uplink comes from its on-air length, which the CMAC does not cover, so a
+// non-canonical uplink is still PROCESSED (counter advanced, command run) but
+// must not become the node's Class A window origin ("no usable origin" -> burst).
+namespace {
+// Splice `extra` inside the header field (field 1, one-byte length) of a packed frame.
+std::vector<uint8_t> hdr_splice(const std::vector<uint8_t> &f, const std::vector<uint8_t> &extra) {
+    EXPECT_EQ(f[0], 0x0A);
+    const size_t hlen = f[1];
+    std::vector<uint8_t> out{0x0A, (uint8_t)(hlen + extra.size())};
+    out.insert(out.end(), f.begin() + 2, f.begin() + 2 + hlen);
+    out.insert(out.end(), extra.begin(), extra.end());
+    out.insert(out.end(), f.begin() + 2 + hlen, f.end());
+    return out;
+}
+}  // namespace
+
+TEST(RealLoraClient, ACanonicalUplinkBecomesTheClassAOriginAndTripsNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.tracker.last_rx_t0_us_v = 100'000;
+    auto f = real_helpers::serialize_avail(18, 1);
+    h.rol.set_response(f.data(), f.size());
+    EXPECT_TRUE(h.rol.rx_timing_trusted_);
+    EXPECT_EQ(h.rol.noncanonical_frames_, 0u) << "a same-version uplink must never trip the check";
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 100'000);
+}
+
+TEST(RealLoraClient, APaddedUplinkIsProcessedButNeverBecomesTheClassAOrigin) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.tracker.last_rx_t0_us_v = 100'000;
+
+    // Duplicate msgId (field 4, tag 0x20) with the same value: identical decoded
+    // content, longer wire, so the tracker's length-derived T0 is skewed.
+    auto padded = hdr_splice(real_helpers::serialize_avail(18, 1), {0x20, 0x01});
+    h.rol.set_response(padded.data(), padded.size());
+    EXPECT_FALSE(h.rol.rx_timing_trusted_);
+    EXPECT_EQ(h.rol.noncanonical_frames_, 1u);
+    EXPECT_EQ(h.rol.last_uplink_msgid_, 1u) << "demote, do not drop: the frame still advanced the counter";
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 0) << "but its skewed T0 must not become the origin";
+
+    // A previously GOOD origin is withdrawn, not left stale, by a later padded frame.
+    auto good = real_helpers::serialize_avail(18, 2);
+    h.tracker.last_rx_t0_us_v = 200'000;
+    h.rol.set_response(good.data(), good.size());
+    ASSERT_EQ(h.rol.last_uplink_t0_us_, 200'000);
+    auto padded2 = hdr_splice(real_helpers::serialize_avail(18, 3), {0x20, 0x03});
+    h.tracker.last_rx_t0_us_v = 300'000;
+    h.rol.set_response(padded2.data(), padded2.size());
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 0);
+
+    // The verdict is per frame: the next canonical uplink restores a usable origin.
+    auto next = real_helpers::serialize_avail(18, 4);
+    h.tracker.last_rx_t0_us_v = 400'000;
+    h.rol.set_response(next.data(), next.size());
+    EXPECT_TRUE(h.rol.rx_timing_trusted_);
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 400'000);
+}
+
+TEST(RealLoraClient, AnUplinkWithAnUnknownFieldStillRunsButIsNotATimingSource) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.tracker.last_rx_t0_us_v = 100'000;
+
+    // A NEWER node's extra field (forward compatibility): the lengths agree,
+    // because protobuf-c counts unknown fields, but it sits outside the CMAC.
+    auto fwd = real_helpers::serialize_avail(18, 1);
+    fwd.push_back(0xF8); fwd.push_back(0x06); fwd.push_back(0x01);
+    h.rol.set_response(fwd.data(), fwd.size());
+    EXPECT_FALSE(h.rol.rx_timing_trusted_);
+    EXPECT_EQ(h.rol.noncanonical_frames_, 1u);
+    EXPECT_EQ(h.rol.last_uplink_msgid_, 1u) << "the frame is processed";
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 0);
+
+    // An unknown field INSIDE the header is caught the same way.
+    h.tracker.last_rx_t0_us_v = 500'000;
+    auto hdr_unk = hdr_splice(real_helpers::serialize_avail(18, 2), {0xF8, 0x06, 0x01});
+    h.rol.set_response(hdr_unk.data(), hdr_unk.size());
+    EXPECT_FALSE(h.rol.rx_timing_trusted_);
+    EXPECT_EQ(h.rol.noncanonical_frames_, 2u);
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 0);
+}
+
 TEST(RealLoraClient, TheClassALedgerAccumulatesTheNodesOwnFunnel) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
