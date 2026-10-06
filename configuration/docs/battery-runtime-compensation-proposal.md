@@ -10,8 +10,8 @@ learning. The plan below is kept for the design rationale — read it as
 history, not as an open TODO.
 
 Written 2026-09-27, from the user's observation on the bench: a blind moves
-slower on a low battery than on a fresh one. This is a **plan**, not a change —
-nothing here has been implemented.
+slower on a low battery than on a fresh one. This was a **plan** when
+written; it has since been implemented (see the status header above).
 
 The ask, restated as three parts: (1) correlate observed runtime with the
 battery so low-voltage runs can be corrected for, (2) do the correction
