@@ -89,12 +89,6 @@ public:
     void send_remote_config();
     void enter_sleep();
 
-    // Recovery path: hub sends a fresh 4-byte base nonce as a standalone
-    // CMD_BASENONCE message. Production calls this when an encrypted reply
-    // arrives for a peer the hub has no nonce for (file-scope map cleared
-    // by hub reboot).
-    void send_base_nonce_exchange();
-
     // Cover-side TX (mirrors LoraCoverComponent::control). The destAddress is
     // ALWAYS taken from this listener's short_address_ — that's the invariant
     // the user's original misrouting suspicion was about.

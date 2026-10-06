@@ -19,7 +19,6 @@ typedef struct LoraCoverOperation LoraCoverOperation;
 typedef struct ClientConfig ClientConfig;
 typedef struct CoverConfig CoverConfig;
 typedef struct LoginMsg LoginMsg;
-typedef struct BaseNonceExchange BaseNonceExchange;
 typedef struct PhaseReport PhaseReport;
 typedef struct CommandAck CommandAck;
 typedef struct EncryptedPayload EncryptedPayload;
@@ -112,12 +111,14 @@ typedef enum _ClientOperation {
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(CLIENT_OPERATION)
 } ClientOperation;
 /*
- * Encryption algorithm identifiers for on-air encrypted payloads.
+ * Encryption algorithm identifiers. LEGACY and UNUSED on the wire since the
+ * Tier 3 Encrypt-then-CMAC cutover (nothing reads or writes it); the enum and
+ * its numbers are retained only so the hub and node stubs stay identical.
  */
 typedef enum _EncryptionAlgo {
   ENCRYPTION_ALGO__ENC_NONE = 0,
   /*
-   * AES-GCM 128-bit key (recommended)
+   * legacy: AES-GCM was replaced by Encrypt-then-CMAC
    */
   ENCRYPTION_ALGO__ENC_AES_GCM_128 = 1
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(ENCRYPTION_ALGO)
@@ -311,32 +312,6 @@ struct  LoginMsg
 
 
 /*
- * Tier 3 note (mac-separation-implementation-plan.md section 2(b)): this is
- * SUPERSEDED by LoginMsg's session-establishment protocol once that's fully
- * wired on both sides (hub_nonce/node_nonce mixed into per-session key
- * derivation subsumes this exchange's rekey role) — kept live, not yet
- * retired, until that rewiring lands in the same changeset that removes it.
- * Removing the wire message before its replacement is wired in would leave
- * the hub with no mid-session rekey path at all.
- */
-struct  BaseNonceExchange
-{
-  ProtobufCMessage base;
-  /*
-   * Optional key identifier for which key this base-nonce is associated
-   */
-  ProtobufCBinaryData key_id;
-  /*
-   * 4-byte base nonce unique per-peer
-   */
-  ProtobufCBinaryData base_nonce;
-};
-#define BASE_NONCE_EXCHANGE__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&base_nonce_exchange__descriptor) \
-    , {0,NULL}, {0,NULL} }
-
-
-/*
  * Acknowledgement of a received command, sent node -> hub so the hub can
  * confirm delivery and stop retransmitting.  ack_msg_id echoes the
  * LoraHeader.msgId of the command being acknowledged.
@@ -345,7 +320,8 @@ struct  BaseNonceExchange
  * This is the evidence section 4.6 promotes single-shot on: a measurement of
  * the HUB's transmissions against the marks the node armed for. It is not a
  * claim of readiness — the node is reporting where the hub's frames landed,
- * and the beacon's GCM tag is what makes it evidence rather than an assertion.
+ * and the authenticated (CMAC-tagged) frame it rides is what makes it evidence
+ * rather than an assertion.
  * It rides uplinks the node ALREADY SENDS, and that is a deliberate constraint
  * rather than an economy. A per-node periodic uplink at the cadence this needs
  * is exactly what section 4.4 prices and rejects: a unicast keepalive at 5.8
@@ -443,21 +419,22 @@ struct  CommandAck
  * When a payload is encrypted, the structured protobuf messages are not
  * present; instead the envelope carries this EncryptedPayload which holds
  * algorithm metadata, IV, optional key identifier, auth tag and ciphertext.
- * Slim on-air AEAD envelope.  Algorithm is fixed (AES-GCM-128 with a truncated
- * tag), and the IV/AAD are reconstructed by the receiver from the plaintext
- * outer header — so only the tag and ciphertext are transmitted.  The ciphertext
- * is the payload-only inner message (its header is NOT re-encrypted; the receiver
- * uses the outer header).
+ * Slim on-air Encrypt-then-CMAC envelope.  The scheme is fixed (AES-128-CTR
+ * under K_enc, then AES-CMAC under K_mac truncated to 8 bytes), and the CTR
+ * counter block and the CMAC prefix are reconstructed by the receiver from the
+ * plaintext outer header — so only the tag and ciphertext are transmitted.  The
+ * ciphertext is the payload-only inner message (its header is NOT re-encrypted;
+ * the receiver uses the outer header).
  */
 struct  EncryptedPayload
 {
   ProtobufCMessage base;
   /*
-   * truncated AES-GCM-128 auth tag
+   * AES-CMAC (K_mac), truncated to 8 bytes
    */
   ProtobufCBinaryData tag;
   /*
-   * AEAD-encrypted payload-only inner protobuf
+   * AES-CTR (K_enc) encrypted payload-only inner protobuf
    */
   ProtobufCBinaryData ciphertext;
 };
@@ -1300,7 +1277,6 @@ typedef enum {
   LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG = 12,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG = 13,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN = 14,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE = 15,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC = 16,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE = 17,
   LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST = 18,
@@ -1319,7 +1295,6 @@ struct  LoraClientOperationMessage
   LoraHeader *header;
   LoraClientOperationMessage__CmdCase cmd_case;
   union {
-    BaseNonceExchange *basenonce;
     ClientConfig *clientconfig;
     CoverConfig *coverconfig;
     /*
@@ -1626,25 +1601,6 @@ LoginMsg *
                       const uint8_t       *data);
 void   login_msg__free_unpacked
                      (LoginMsg *message,
-                      ProtobufCAllocator *allocator);
-/* BaseNonceExchange methods */
-void   base_nonce_exchange__init
-                     (BaseNonceExchange         *message);
-size_t base_nonce_exchange__get_packed_size
-                     (const BaseNonceExchange   *message);
-size_t base_nonce_exchange__pack
-                     (const BaseNonceExchange   *message,
-                      uint8_t             *out);
-size_t base_nonce_exchange__pack_to_buffer
-                     (const BaseNonceExchange   *message,
-                      ProtobufCBuffer     *buffer);
-BaseNonceExchange *
-       base_nonce_exchange__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   base_nonce_exchange__free_unpacked
-                     (BaseNonceExchange *message,
                       ProtobufCAllocator *allocator);
 /* PhaseReport methods */
 void   phase_report__init
@@ -2097,9 +2053,6 @@ typedef void (*CoverConfig_Closure)
 typedef void (*LoginMsg_Closure)
                  (const LoginMsg *message,
                   void *closure_data);
-typedef void (*BaseNonceExchange_Closure)
-                 (const BaseNonceExchange *message,
-                  void *closure_data);
 typedef void (*PhaseReport_Closure)
                  (const PhaseReport *message,
                   void *closure_data);
@@ -2186,7 +2139,6 @@ extern const ProtobufCMessageDescriptor lora_cover_operation__descriptor;
 extern const ProtobufCMessageDescriptor client_config__descriptor;
 extern const ProtobufCMessageDescriptor cover_config__descriptor;
 extern const ProtobufCMessageDescriptor login_msg__descriptor;
-extern const ProtobufCMessageDescriptor base_nonce_exchange__descriptor;
 extern const ProtobufCMessageDescriptor phase_report__descriptor;
 extern const ProtobufCMessageDescriptor command_ack__descriptor;
 extern const ProtobufCMessageDescriptor encrypted_payload__descriptor;

@@ -35,7 +35,13 @@
 // code has stood for at least three different root causes during this project,
 // so the layouts are pinned here field by field.
 //
-// Format, both directions:
+// LEGACY (AES-GCM era). The AAD / IV / direction-bit helpers below (kAadBytes,
+// kIvBytes, kTagBytes, kDownlinkFlag, frameCounter, buildAad, deriveIv) are no
+// longer used by the node firmware since the Tier 3 Encrypt-then-CMAC cutover;
+// they are kept only because the hub vendors this file and still pins them in
+// its tests. The live wire format starts at "Tier 3: Encrypt-then-CMAC" below.
+//
+// Format, both directions (GCM era):
 //
 //   AAD  = destAddress_BE32 || destSubnet_BE32 || senderAddress_BE32 || msgid_BE32
 //          (16 bytes, header only — the payload is NOT in the AAD)
@@ -323,6 +329,34 @@ inline void buildCtrInitialBlock(uint32_t session_id, uint32_t node_addr,
     const uint32_t dir_msgid = (downlink ? 0x80000000u : 0u) | (msgid & 0x7FFFFFFFu);
     u32be(dir_msgid, out + 8);
     u32be(block_idx, out + 12);
+}
+
+// The counter block has room for only 31 bits of msgid (the top bit is the
+// direction bit), but the CMAC prefix covers all 32. So msgid X and
+// X + 2^31 get the IDENTICAL keystream under one session key while still
+// carrying different tags: a two-time pad. buildCtrInitialBlock() masks
+// rather than refuses (its output is the wire format and must stay
+// byte-identical on both ends), so every caller must refuse such a msgid
+// BEFORE sealing or opening a frame, and move to a fresh session instead,
+// whose key derivation resets the counters.
+//
+// 2^31 frames is years of continuous traffic, which is exactly why this is
+// written down rather than left to the arithmetic never being reached: a
+// counter restored from NVS, or a corrupt one, gets there at once.
+static constexpr uint32_t kMsgidCtrLimit = 0x80000000u;
+
+// May a frame carrying this msgid be sealed (uplink) or opened (downlink)?
+inline bool msgidFitsCtr(uint32_t msgid)
+{
+    return msgid < kMsgidCtrLimit;
+}
+
+// Allocation form: given the LAST msgid handed out, is the next one still
+// inside the CTR space? Written as a comparison against the limit minus one
+// so that last == 0xFFFFFFFF cannot wrap `last + 1` back to 0 and pass.
+inline bool nextMsgidFitsCtr(uint32_t last_msgid)
+{
+    return last_msgid < kMsgidCtrLimit - 1u;
 }
 
 // CMAC input: a 45-byte fixed prefix over DECODED header fields, then the

@@ -189,11 +189,6 @@ struct LoginMsg {
     bool     hub_rebooted{false};
 };
 
-struct BaseNonceExchange {
-    std::vector<uint8_t> key_id;
-    uint32_t base_nonce{0}; // we encode as uint32 here; wire is 4-byte BE
-};
-
 // Slim on-air AEAD envelope: algorithm is fixed and the IV/AAD are
 // reconstructed by the receiver from the plaintext outer header, so ONLY the
 // tag and ciphertext are transmitted.  (`algo`, `iv` and `aad` were removed
@@ -221,7 +216,7 @@ struct LoraClientOperationMessage {
     LoraHeader header;
     enum class Cmd {
         NotSet, Operation, Sysop, ClientConfig, CoverConfig,
-        Login, BaseNonce, Encrypted,
+        Login, Encrypted,
         TimeSync, Schedule            // auto-mode (P0)
     } cmd{Cmd::NotSet};
     LoraCoverOperation       operation;
@@ -229,7 +224,6 @@ struct LoraClientOperationMessage {
     ::proto_sim::ClientConfig clientconfig;
     ::proto_sim::CoverConfig  coverconfig;
     LoginMsg                 login;
-    BaseNonceExchange        basenonce;
     EncryptedPayload         encrypted;
     ::proto_sim::TimeSync       timesync;
     ::proto_sim::ScheduleConfig schedule;

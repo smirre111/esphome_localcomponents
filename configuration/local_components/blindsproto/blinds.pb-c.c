@@ -187,51 +187,6 @@ void   login_msg__free_unpacked
   assert(message->base.descriptor == &login_msg__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
-void   base_nonce_exchange__init
-                     (BaseNonceExchange         *message)
-{
-  static const BaseNonceExchange init_value = BASE_NONCE_EXCHANGE__INIT;
-  *message = init_value;
-}
-size_t base_nonce_exchange__get_packed_size
-                     (const BaseNonceExchange *message)
-{
-  assert(message->base.descriptor == &base_nonce_exchange__descriptor);
-  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
-}
-size_t base_nonce_exchange__pack
-                     (const BaseNonceExchange *message,
-                      uint8_t       *out)
-{
-  assert(message->base.descriptor == &base_nonce_exchange__descriptor);
-  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
-}
-size_t base_nonce_exchange__pack_to_buffer
-                     (const BaseNonceExchange *message,
-                      ProtobufCBuffer *buffer)
-{
-  assert(message->base.descriptor == &base_nonce_exchange__descriptor);
-  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
-}
-BaseNonceExchange *
-       base_nonce_exchange__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data)
-{
-  return (BaseNonceExchange *)
-     protobuf_c_message_unpack (&base_nonce_exchange__descriptor,
-                                allocator, len, data);
-}
-void   base_nonce_exchange__free_unpacked
-                     (BaseNonceExchange *message,
-                      ProtobufCAllocator *allocator)
-{
-  if(!message)
-    return;
-  assert(message->base.descriptor == &base_nonce_exchange__descriptor);
-  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
-}
 void   phase_report__init
                      (PhaseReport         *message)
 {
@@ -1612,57 +1567,6 @@ const ProtobufCMessageDescriptor login_msg__descriptor =
   login_msg__field_indices_by_name,
   1,  login_msg__number_ranges,
   (ProtobufCMessageInit) login_msg__init,
-  NULL,NULL,NULL    /* reserved[123] */
-};
-static const ProtobufCFieldDescriptor base_nonce_exchange__field_descriptors[2] =
-{
-  {
-    "key_id",
-    1,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(BaseNonceExchange, key_id),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "base_nonce",
-    2,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(BaseNonceExchange, base_nonce),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-};
-static const unsigned base_nonce_exchange__field_indices_by_name[] = {
-  1,   /* field[1] = base_nonce */
-  0,   /* field[0] = key_id */
-};
-static const ProtobufCIntRange base_nonce_exchange__number_ranges[1 + 1] =
-{
-  { 1, 0 },
-  { 0, 2 }
-};
-const ProtobufCMessageDescriptor base_nonce_exchange__descriptor =
-{
-  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
-  "BaseNonceExchange",
-  "BaseNonceExchange",
-  "BaseNonceExchange",
-  "",
-  sizeof(BaseNonceExchange),
-  2,
-  base_nonce_exchange__field_descriptors,
-  base_nonce_exchange__field_indices_by_name,
-  1,  base_nonce_exchange__number_ranges,
-  (ProtobufCMessageInit) base_nonce_exchange__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
 static const ProtobufCFieldDescriptor phase_report__field_descriptors[10] =
@@ -4199,7 +4103,7 @@ const ProtobufCMessageDescriptor mode_test_report__descriptor =
   (ProtobufCMessageInit) mode_test_report__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[16] =
+static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[15] =
 {
   {
     "header",
@@ -4281,18 +4185,6 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
     offsetof(LoraClientOperationMessage, cmd_case),
     offsetof(LoraClientOperationMessage, login),
     &login_msg__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "basenonce",
-    15,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, basenonce),
-    &base_nonce_exchange__descriptor,
     NULL,
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
@@ -4395,29 +4287,29 @@ static const ProtobufCFieldDescriptor lora_client_operation_message__field_descr
   },
 };
 static const unsigned lora_client_operation_message__field_indices_by_name[] = {
-  7,   /* field[7] = basenonce */
   4,   /* field[4] = clientconfig */
   5,   /* field[5] = coverconfig */
-  10,   /* field[10] = drifttest */
+  9,   /* field[9] = drifttest */
   1,   /* field[1] = encrypted */
-  14,   /* field[14] = gridbeacon */
-  15,   /* field[15] = griddemote */
-  12,   /* field[12] = gridsync */
+  13,   /* field[13] = gridbeacon */
+  14,   /* field[14] = griddemote */
+  11,   /* field[11] = gridsync */
   0,   /* field[0] = header */
   6,   /* field[6] = login */
-  11,   /* field[11] = maccontrol */
-  13,   /* field[13] = modetest */
+  10,   /* field[10] = maccontrol */
+  12,   /* field[12] = modetest */
   2,   /* field[2] = operation */
-  9,   /* field[9] = schedule */
+  8,   /* field[8] = schedule */
   3,   /* field[3] = sysop */
-  8,   /* field[8] = timesync */
+  7,   /* field[7] = timesync */
 };
-static const ProtobufCIntRange lora_client_operation_message__number_ranges[3 + 1] =
+static const ProtobufCIntRange lora_client_operation_message__number_ranges[4 + 1] =
 {
   { 1, 0 },
   { 9, 1 },
-  { 20, 11 },
-  { 0, 16 }
+  { 16, 7 },
+  { 20, 10 },
+  { 0, 15 }
 };
 const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
 {
@@ -4427,10 +4319,10 @@ const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
   "LoraClientOperationMessage",
   "",
   sizeof(LoraClientOperationMessage),
-  16,
+  15,
   lora_client_operation_message__field_descriptors,
   lora_client_operation_message__field_indices_by_name,
-  3,  lora_client_operation_message__number_ranges,
+  4,  lora_client_operation_message__number_ranges,
   (ProtobufCMessageInit) lora_client_operation_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };

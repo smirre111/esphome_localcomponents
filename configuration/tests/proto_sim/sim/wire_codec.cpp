@@ -115,12 +115,10 @@ static std::vector<uint8_t> serialize_op_impl(const LoraClientOperationMessage& 
     ::ClientConfig       pb_cc;
     ::CoverConfig        pb_cv;
     ::LoginMsg           pb_login;
-    ::BaseNonceExchange  pb_basen;
     ::EncryptedPayload   pb_enc;
     ::TimeSync           pb_ts;
     ::ScheduleConfig     pb_sched;
     std::vector<uint8_t> name_buf;
-    std::vector<uint8_t> bn_buf;
     // Storage for the repeated ScheduleEntry array must outlive the pack call
     // below, so it is declared here rather than inside the switch case.
     std::vector<::ScheduleEntry>  sched_entries;
@@ -221,19 +219,6 @@ static std::vector<uint8_t> serialize_op_impl(const LoraClientOperationMessage& 
         pb_sched.entries   = sched_ptrs.empty() ? nullptr : sched_ptrs.data();
         pb.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
         pb.schedule = &pb_sched;
-        break;
-    case Cmd::BaseNonce:
-        base_nonce_exchange__init(&pb_basen);
-        // Encode base nonce as 4-byte big-endian (production wire format).
-        bn_buf.resize(4);
-        bn_buf[0] = (m.basenonce.base_nonce >> 24) & 0xFF;
-        bn_buf[1] = (m.basenonce.base_nonce >> 16) & 0xFF;
-        bn_buf[2] = (m.basenonce.base_nonce >>  8) & 0xFF;
-        bn_buf[3] = (m.basenonce.base_nonce >>  0) & 0xFF;
-        pb_basen.base_nonce.data = bn_buf.data();
-        pb_basen.base_nonce.len  = bn_buf.size();
-        pb.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE;
-        pb.basenonce = &pb_basen;
         break;
     case Cmd::Encrypted:
         fill_enc_pb(m.encrypted, pb_enc);
@@ -472,17 +457,6 @@ std::optional<LoraClientOperationMessage> deserialize_op(const uint8_t* data, si
                 se.kind        = e->kind;
                 out.schedule.entries.push_back(se);
             }
-        }
-        break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE:
-        out.cmd = Cmd::BaseNonce;
-        if (pb->basenonce && pb->basenonce->base_nonce.len == 4) {
-            const uint8_t* b = pb->basenonce->base_nonce.data;
-            out.basenonce.base_nonce =
-                (static_cast<uint32_t>(b[0]) << 24) |
-                (static_cast<uint32_t>(b[1]) << 16) |
-                (static_cast<uint32_t>(b[2]) <<  8) |
-                (static_cast<uint32_t>(b[3]));
         }
         break;
     case LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED:

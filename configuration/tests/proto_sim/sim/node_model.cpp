@@ -218,10 +218,6 @@ void NodeModel::on_frame(const AirFrame& f) {
         case ClientOperation::CMD_DISABLE_WIFI: last_motor_cmd_ = "WIFI_OFF"; break;
         }
         break;
-    case Cmd::BaseNonce:
-        if (!m.basenonce.key_id.empty() || m.basenonce.base_nonce != 0)
-            peer_base_[m.header.senderAddress] = m.basenonce.base_nonce;
-        break;
     case Cmd::Encrypted:
     case Cmd::NotSet:
         break;

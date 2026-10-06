@@ -211,24 +211,6 @@ void HubListener::send_cover_config(uint32_t open_time, uint32_t close_time,
     send_op_(std::move(m));
 }
 
-void HubListener::send_base_nonce_exchange() {
-    // Mint a fresh base nonce, store it on the hub side, and send the
-    // 4-byte BE-encoded value over the air. Mirrors lora_client.cpp:836.
-    uint32_t base = rng();
-    nonces_->set(short_address_, base);
-
-    LoraClientOperationMessage m;
-    m.header.destAddress   = short_address_;
-    m.header.destSubnet    = subnet_address_;
-    m.header.senderAddress = 0xFF;
-    m.header.msgId         = ++tx_message_id_;
-
-    m.cmd                  = LoraClientOperationMessage::Cmd::BaseNonce;
-    m.basenonce.base_nonce = base;
-    persist_nvs_();
-    send_op_(std::move(m));
-}
-
 void HubListener::send_sysop(ClientOperation op) {
     LoraClientOperationMessage m;
     m.header.destAddress   = short_address_;

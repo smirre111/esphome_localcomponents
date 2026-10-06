@@ -34,31 +34,24 @@
 // this component's tracked source never contains the real deployed value —
 // only this named, obviously-a-placeholder dev fallback.
 #ifdef LORA_FLEET_KEY
-static constexpr const char    *kLoRaAesGcmKey  = LORA_FLEET_KEY;
+static constexpr const char    *kLoRaRootKeyPhrase = LORA_FLEET_KEY;
 #else
-static constexpr const char    *kLoRaAesGcmKey  = "LoRaHome";
+static constexpr const char    *kLoRaRootKeyPhrase = "LoRaHome";
 #endif
-static constexpr size_t         kAesGcmKeyBytes = 16;
-static constexpr size_t         kAesGcmIvBytes  = 12;
-static constexpr size_t         kAesGcmTagBytes = 8;  // truncated AES-GCM tag (slim on-air)
-// PSA algorithm carrying the shortened tag length — key policy + encrypt/decrypt.
-// MUST match the node (CmdDispatcher.cpp).
-#define LORA_GCM_ALG PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_GCM, kAesGcmTagBytes)
-
-// PSA key slot — imported once at setup(), reused for every decrypt call.
-static psa_key_id_t s_aes_gcm_key_id = PSA_KEY_ID_NULL;
+// K_root is 16 bytes (AES-128): SHA-256(phrase)[0:16].
+static constexpr size_t         kRootKeyBytes   = 16;
 
 // Tier 3 (docs/mac-separation-implementation-plan.md section 2(b)): K_auth,
-// derived once from K_root (the same shared key s_aes_gcm_key_id's material
-// comes from) and used only to authenticate LOGIN/REGISTER. Fleet-wide, like
-// the GCM key — there is one shared K_root, not per-node keys (see the
-// plan's Tier 2 postponement note).
+// derived once from K_root and used only to authenticate LOGIN/REGISTER.
+// Fleet-wide — there is one shared K_root, not per-node keys (see the plan's
+// Tier 2 postponement note).
 static psa_key_id_t s_k_auth_key_id = PSA_KEY_ID_NULL;
 
 // File-scope encryption state, keyed by peer short address.
-// Only the base nonce is tracked per peer; the AES-GCM frame counter is the
-// same value as the protobuf LoraHeader.msgid — one unified counter per
-// direction, used for both replay protection and nonce derivation.
+// Only the base nonce (the session id feeding the CTR counter block) is
+// tracked per peer; the frame counter is the same value as the protobuf
+// LoraHeader.msgid — one unified counter per direction, used for both replay
+// protection and keystream derivation.
 // This map is shared across every LORAListener instance (lora_client is
 // MULTI_CONF), so a per-listener mutex cannot fully protect it; guard every
 // access with this one global mutex instead.
@@ -112,64 +105,30 @@ static std::mutex                       s_session_keys_mutex;
 static std::map<uint32_t, uint32_t>     s_seal_generation_map;
 
 // ---------------------------------------------------------------------------
-// Derive the 16-byte AES-GCM key via SHA-256("LoRaHome")[0:16].
-// Mirrors derive_aes_gcm_key() in BlindsESP CmdDispatcher.cpp.
+// Derive K_root, the 16-byte fleet key: SHA-256(kLoRaRootKeyPhrase)[0:16].
+// Mirrors derive_root_key() on the node (CmdDispatcher.cpp). It is the source
+// for K_auth (s_init_k_auth_key) and for K_enc/K_mac (session derivation);
+// changing a single byte of it breaks every frame on the air, so its output is
+// pinned by a test (HubRootKey in real_lora_client_test.cpp).
 // ---------------------------------------------------------------------------
-static bool s_derive_aes_gcm_key(uint8_t key_out[kAesGcmKeyBytes])
+static bool s_derive_root_key(uint8_t key_out[kRootKeyBytes])
 {
   uint8_t hash[32];
   size_t  hash_len = 0;
   psa_status_t status = psa_hash_compute(
       PSA_ALG_SHA_256,
-      reinterpret_cast<const uint8_t *>(kLoRaAesGcmKey),
-      strlen(kLoRaAesGcmKey),
+      reinterpret_cast<const uint8_t *>(kLoRaRootKeyPhrase),
+      strlen(kLoRaRootKeyPhrase),
       hash, sizeof(hash), &hash_len);
   if (status != PSA_SUCCESS)
     return false;
-  memcpy(key_out, hash, kAesGcmKeyBytes);
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Import the AES-GCM key into PSA once and store the key ID.
-// Mirrors init_psa_key() in BlindsESP CmdDispatcher.cpp.
-// ---------------------------------------------------------------------------
-static bool s_init_psa_gcm_key()
-{
-  if (s_aes_gcm_key_id != PSA_KEY_ID_NULL)
-    return true; // already imported
-
-  // Defensive, idempotent — see the matching comment on the node's
-  // init_psa_key() for why this call was added here even though setup()
-  // is also supposed to have done it.
-  if (psa_crypto_init() != PSA_SUCCESS)
-    return false;
-
-  uint8_t key_material[kAesGcmKeyBytes];
-  if (!s_derive_aes_gcm_key(key_material))
-    return false;
-
-  psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT);
-  psa_set_key_algorithm(&attrs, LORA_GCM_ALG);
-  psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attrs, kAesGcmKeyBytes * 8);
-  psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
-
-  psa_status_t status = psa_import_key(&attrs, key_material, kAesGcmKeyBytes,
-                                       &s_aes_gcm_key_id);
-  memset(key_material, 0, sizeof(key_material)); // zero key material from stack
-  if (status != PSA_SUCCESS)
-  {
-    s_aes_gcm_key_id = PSA_KEY_ID_NULL;
-    return false;
-  }
+  memcpy(key_out, hash, kRootKeyBytes);
   return true;
 }
 
 // ---------------------------------------------------------------------------
 // Tier 3: derive K_auth = AES-CMAC(K_root, framecrypto::buildKAuthKdfInput())
-// once, from the same K_root bytes as the GCM key above. Mirrors
+// once, from K_root. Mirrors
 // CmdDispatcher::init_k_auth_() on the node — both sides must derive
 // bit-identical K_auth from the same K_root for LOGIN/REGISTER MICs to
 // verify.
@@ -182,8 +141,8 @@ static bool s_init_k_auth_key()
   if (psa_crypto_init() != PSA_SUCCESS)
     return false;
 
-  uint8_t root_material[kAesGcmKeyBytes];
-  if (!s_derive_aes_gcm_key(root_material))
+  uint8_t root_material[kRootKeyBytes];
+  if (!s_derive_root_key(root_material))
     return false;
 
   psa_key_attributes_t root_attrs = PSA_KEY_ATTRIBUTES_INIT;
@@ -191,11 +150,11 @@ static bool s_init_k_auth_key()
                                         PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH);
   psa_set_key_algorithm(&root_attrs, PSA_ALG_AT_LEAST_THIS_LENGTH_MAC(PSA_ALG_CMAC, 8));
   psa_set_key_type(&root_attrs, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&root_attrs, kAesGcmKeyBytes * 8);
+  psa_set_key_bits(&root_attrs, kRootKeyBytes * 8);
   psa_set_key_lifetime(&root_attrs, PSA_KEY_LIFETIME_VOLATILE);
 
   psa_key_id_t root_key_id = PSA_KEY_ID_NULL;
-  psa_status_t status = psa_import_key(&root_attrs, root_material, kAesGcmKeyBytes, &root_key_id);
+  psa_status_t status = psa_import_key(&root_attrs, root_material, kRootKeyBytes, &root_key_id);
   memset(root_material, 0, sizeof(root_material));
   if (status != PSA_SUCCESS)
     return false;
@@ -203,13 +162,13 @@ static bool s_init_k_auth_key()
   uint8_t kdf_input[framecrypto::kKdfInputBytes];
   framecrypto::buildKAuthKdfInput(kdf_input);
 
-  uint8_t k_auth_material[kAesGcmKeyBytes];
+  uint8_t k_auth_material[kRootKeyBytes];
   size_t k_auth_len = 0;
-  status = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kAesGcmKeyBytes),
+  status = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kRootKeyBytes),
                            kdf_input, sizeof(kdf_input),
                            k_auth_material, sizeof(k_auth_material), &k_auth_len);
   psa_destroy_key(root_key_id);
-  if (status != PSA_SUCCESS || k_auth_len != kAesGcmKeyBytes)
+  if (status != PSA_SUCCESS || k_auth_len != kRootKeyBytes)
     return false;
 
   psa_key_attributes_t auth_attrs = PSA_KEY_ATTRIBUTES_INIT;
@@ -217,7 +176,7 @@ static bool s_init_k_auth_key()
                                         PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH);
   psa_set_key_algorithm(&auth_attrs, PSA_ALG_AT_LEAST_THIS_LENGTH_MAC(PSA_ALG_CMAC, 8));
   psa_set_key_type(&auth_attrs, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&auth_attrs, kAesGcmKeyBytes * 8);
+  psa_set_key_bits(&auth_attrs, kRootKeyBytes * 8);
   psa_set_key_lifetime(&auth_attrs, PSA_KEY_LIFETIME_VOLATILE);
 
   status = psa_import_key(&auth_attrs, k_auth_material, sizeof(k_auth_material), &s_k_auth_key_id);
@@ -258,133 +217,19 @@ static bool s_import_ctr_key(const uint8_t *key_material, size_t key_bytes, psa_
   return psa_import_key(&attrs, key_material, key_bytes, out_id) == PSA_SUCCESS;
 }
 
-// ---------------------------------------------------------------------------
-// Downlink (hub->node) encryption helpers.  Mirror the node's
-// pack_response_message()/derive_gcm_nonce() so the two directions stay wire
-// compatible.  Uplink decryption in set_response() keeps its own inline lambdas.
-// ---------------------------------------------------------------------------
-
-// Direction bit for the GCM nonce counter — set on downlink so hub->node and
-// node->hub never reuse an IV under the shared per-peer base nonce.  MUST match
-// kDownlinkNonceFlag on the node (CmdDispatcher.cpp).
-static constexpr uint64_t kDownlinkNonceFlag = (1ULL << 63);
-
-static void s_u32_be(uint32_t v, uint8_t *b)
-{
-  for (int i = 3; i >= 0; --i) { b[i] = static_cast<uint8_t>(v & 0xFF); v >>= 8; }
-}
-static void s_u64_be(uint64_t v, uint8_t *b)
-{
-  for (int i = 7; i >= 0; --i) { b[i] = static_cast<uint8_t>(v & 0xFF); v >>= 8; }
-}
-
-// Layout lives in the shared FrameCrypto.h — see the banner in that file.
-// This is now the ONLY AAD builder in the hub: set_response used to define a
-// second one as a lambda, so the encrypt and decrypt paths each had their own.
-static bool s_build_header_aad(const LoraHeader *h, uint8_t *aad, size_t *aad_len)
-{
-  if (!h || !aad || !aad_len) return false;
-  framecrypto::buildAad(h->destaddress, h->destsubnet, h->senderaddress, h->msgid, aad);
-  *aad_len = framecrypto::kAadBytes;
-  return true;
-}
-
-// IV = base_nonce(peer)[4 BE] || (counter | direction)[8 BE].
-static bool s_derive_gcm_nonce(uint32_t peer_address, uint64_t frame_counter, uint8_t nonce_out[12])
-{
-  std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-  auto it = s_base_nonce_map.find(peer_address);
-  if (it == s_base_nonce_map.end()) return false;
-  // deriveIv() also refuses a zero base nonce, which the hub did not check —
-  // a stored zero would have produced a usable-looking IV.
-  return framecrypto::deriveIv(it->second, frame_counter, nonce_out);
-}
-
-static bool s_encrypt_payload_gcm(const uint8_t *nonce, const uint8_t *aad, size_t aad_len,
-                                  const uint8_t *plain, size_t plain_len,
-                                  uint8_t *cipher_out, uint8_t *tag_out, size_t tag_len)
-{
-  if (s_aes_gcm_key_id == PSA_KEY_ID_NULL && !s_init_psa_gcm_key())
-    return false;
-
-  // PSA writes ciphertext||tag concatenated into one output buffer.
-  size_t   ct_cap = plain_len + tag_len;
-  uint8_t *ct     = static_cast<uint8_t *>(malloc(ct_cap));
-  if (!ct)
-    return false;
-
-  size_t       ct_len = 0;
-  psa_status_t st     = psa_aead_encrypt(
-      s_aes_gcm_key_id, LORA_GCM_ALG,
-      nonce, kAesGcmIvBytes,
-      aad,   aad_len,
-      plain, plain_len,
-      ct,    ct_cap, &ct_len);
-  if (st != PSA_SUCCESS || ct_len != plain_len + tag_len)
-  {
-    if (st != PSA_SUCCESS)
-      ESP_LOGE("lora_client", "psa_aead_encrypt failed: %d", static_cast<int>(st));
-    free(ct);
-    return false;
-  }
-  memcpy(cipher_out, ct, plain_len);
-  memcpy(tag_out,    ct + plain_len, tag_len);
-  free(ct);
-  return true;
-}
-
-// Decrypt counterpart of s_encrypt_payload_gcm above.
-//
-// This lived as a lambda inside set_response, so the two halves of the same
-// operation sat in different scopes — the same split the AAD builder had, and
-// a large part of why set_response was CCN 61.
-//
-// The key parameter is accepted for symmetry with the encrypt side but unused:
-// the key lives in the pre-imported PSA slot s_aes_gcm_key_id.
-static bool s_decrypt_payload_gcm(const uint8_t * /*key*/, const uint8_t *nonce,
-                                  const uint8_t *aad, size_t aad_len,
-                                  const uint8_t *cipher, size_t cipher_len,
-                                  const uint8_t *tag, size_t tag_len,
-                                  uint8_t *plain_out)
-{
-  if (!nonce || !cipher || !tag || !plain_out)
-    return false;
-  if (s_aes_gcm_key_id == PSA_KEY_ID_NULL && !s_init_psa_gcm_key())
-    return false;
-
-  // PSA psa_aead_decrypt() expects ciphertext || tag concatenated.
-  size_t   ct_len = cipher_len + tag_len;
-  uint8_t *ct_buf = static_cast<uint8_t *>(malloc(ct_len));
-  if (!ct_buf)
-    return false;
-  memcpy(ct_buf,              cipher, cipher_len);
-  memcpy(ct_buf + cipher_len, tag,    tag_len);
-
-  size_t       plain_len = 0;
-  psa_status_t status    = psa_aead_decrypt(
-      s_aes_gcm_key_id, LORA_GCM_ALG,
-      nonce,  kAesGcmIvBytes,
-      aad,    aad_len,
-      ct_buf, ct_len,
-      plain_out, cipher_len, &plain_len);
-  free(ct_buf);
-
-  if (status != PSA_SUCCESS)
-    // Literal tag, not TAG: these crypto helpers sit outside the
-    // esphome::lora_tracker namespace where TAG is declared. The encrypt twin
-    // above does the same.
-    ESP_LOGE("lora_client", "psa_aead_decrypt failed: %d", (int)status);
-  return status == PSA_SUCCESS;
-}
-
 // Pack a downlink operation, encrypting it into an EncryptedPayload-wrapped
 // LoraClientOperationMessage when a session (base nonce) exists for the dest
 // node.  Falls back to a plaintext pack otherwise (e.g. pre-login bootstrap:
-// LoginMsg / BaseNonceExchange / ClientConfig are sent via their own paths and
+// LoginMsg / ClientConfig are sent via their own paths and
 // stay plaintext regardless).  Returns malloc'd wire bytes in *out/*out_len;
 // caller frees with free().
+//
+// *msgid_refused (optional) is set when the frame was refused ONLY because its
+// msgid lies outside the CTR space (framecrypto::msgidFitsCtr): the caller
+// must then ask for a fresh session, see LORAListener::pack_operation_().
 static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool encrypt,
-                                     uint8_t **out, size_t *out_len)
+                                     uint8_t **out, size_t *out_len,
+                                     bool *msgid_refused = nullptr)
 {
   if (!plain || !plain->header || !out || !out_len)
     return false;
@@ -407,6 +252,18 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
       return false;
     lora_client_operation_message__pack(plain, *out);
     return true;
+  }
+
+  // The CTR counter block holds 31 bits of msgid but the CMAC covers 32, so a
+  // msgid >= 2^31 would reuse the keystream of (msgid - 2^31). The allocator
+  // (incrTxMessageId) never hands one out; this is the seal-point backstop for
+  // ids that bypass it (a restored counter, a reserved block).
+  if (!framecrypto::msgidFitsCtr(plain->header->msgid))
+  {
+    ESP_LOGE("lora_client", "Refusing to seal msgid %u for peer %u: beyond the CTR space",
+             (unsigned) plain->header->msgid, (unsigned) dest);
+    if (msgid_refused) *msgid_refused = true;
+    return false;
   }
 
   // Encrypt the payload ONLY — the inner message's header is redundant (the node
@@ -435,36 +292,17 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
   outer.senderaddress   = plain->header->senderaddress;
   outer.msgid           = plain->header->msgid;
 
-  psa_key_id_t enc_key_id = PSA_KEY_ID_NULL;
-  {
-    std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-    auto it = s_k_enc_map.find(dest);
-    if (it != s_k_enc_map.end()) enc_key_id = it->second;
-  }
   uint32_t session_id = 0;
   {
     std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
     auto it = s_base_nonce_map.find(dest);
     if (it != s_base_nonce_map.end()) session_id = it->second;
   }
-  if (enc_key_id == PSA_KEY_ID_NULL || session_id == 0)
+  if (session_id == 0)
   {
     ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
     free(inner);
     return false;
-  }
-
-  // Invariant I3: snapshot which session generation this ciphertext was
-  // sealed under, so sealBurstCopyTag() can refuse to retag it under a
-  // DIFFERENT one later. The generation, not the psa_key_id_t: mbedTLS's
-  // volatile key ids are reused slot indices, so a later generation could
-  // otherwise be assigned the SAME id an earlier generation held.
-  uint32_t seal_generation = 0;
-  {
-    std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-    auto git = s_session_generation_map.find(dest);
-    seal_generation = (git != s_session_generation_map.end()) ? git->second : 0;
-    s_seal_generation_map[dest] = seal_generation;
   }
 
   uint8_t ctr_block[framecrypto::kCtrBlockBytes];
@@ -477,33 +315,60 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
     free(inner);
     return false;
   }
+
+  // The key id is read AND USED under s_session_keys_mutex. This function also
+  // runs on the esp_timer task (build_mac_ping_frame_) while the ESPHome loop
+  // can install/destroy this peer's keys; reading the id, releasing the lock
+  // and only then calling PSA would let the key be destroyed (and its volatile
+  // slot reused) mid-operation. The critical section is one short CTR pass.
+  //
+  // Invariant I3: also snapshot which session generation this ciphertext is
+  // sealed under, so sealBurstCopyTag() can refuse to retag it under a
+  // DIFFERENT one later. The generation, not the psa_key_id_t: mbedTLS's
+  // volatile key ids are reused slot indices, so a later generation could
+  // otherwise be assigned the SAME id an earlier generation held.
+  bool have_key = false;
+  bool ctr_ok   = false;
   {
-    psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
-    bool ok = psa_cipher_encrypt_setup(&op, enc_key_id, PSA_ALG_CTR) == PSA_SUCCESS;
-    if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
-    size_t out_total = 0, part_len = 0;
-    if (ok)
+    std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+    auto kit = s_k_enc_map.find(dest);
+    const psa_key_id_t enc_key_id = (kit != s_k_enc_map.end()) ? kit->second : PSA_KEY_ID_NULL;
+    if (enc_key_id != PSA_KEY_ID_NULL)
     {
-      ok = psa_cipher_update(&op, inner, inner_len, cipher, inner_len, &part_len) == PSA_SUCCESS;
-      out_total += part_len;
+      have_key = true;
+      auto git = s_session_generation_map.find(dest);
+      s_seal_generation_map[dest] = (git != s_session_generation_map.end()) ? git->second : 0;
+
+      psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
+      bool ok = psa_cipher_encrypt_setup(&op, enc_key_id, PSA_ALG_CTR) == PSA_SUCCESS;
+      if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
+      size_t out_total = 0, part_len = 0;
+      if (ok)
+      {
+        ok = psa_cipher_update(&op, inner, inner_len, cipher, inner_len, &part_len) == PSA_SUCCESS;
+        out_total += part_len;
+      }
+      if (ok)
+      {
+        size_t finish_len = 0;
+        ok = psa_cipher_finish(&op, cipher + out_total, inner_len - out_total, &finish_len) == PSA_SUCCESS;
+        out_total += finish_len;
+        ok = ok && (out_total == inner_len);
+      }
+      else
+      {
+        psa_cipher_abort(&op);
+      }
+      ctr_ok = ok;
     }
-    if (ok)
-    {
-      size_t finish_len = 0;
-      ok = psa_cipher_finish(&op, cipher + out_total, inner_len - out_total, &finish_len) == PSA_SUCCESS;
-      out_total += finish_len;
-      ok = ok && (out_total == inner_len);
-    }
-    else
-    {
-      psa_cipher_abort(&op);
-    }
-    if (!ok)
-    {
-      free(inner);
-      free(cipher);
-      return false;
-    }
+  }
+  if (!have_key)
+    ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
+  if (!have_key || !ctr_ok)
+  {
+    free(inner);
+    free(cipher);
+    return false;
   }
   free(inner);
 
@@ -644,27 +509,20 @@ namespace esphome
         this->registered_ = false;
       }
 
-      // Initialise PSA Crypto and import the AES-GCM key once.
-      // psa_crypto_init() is idempotent — safe to call from multiple instances.
+      // Initialise PSA Crypto (idempotent — safe from multiple instances) and
+      // derive K_auth once. Every other PSA user on the hub (session key
+      // derivation, burst-copy tagging) relies on this having run.
       psa_status_t psa_ret = psa_crypto_init();
       if (psa_ret != PSA_SUCCESS)
       {
         ESP_LOGE(TAG, "psa_crypto_init failed: %d", (int)psa_ret);
-      }
-      else if (!s_init_psa_gcm_key())
-      {
-        ESP_LOGE(TAG, "Failed to import AES-GCM key into PSA — decryption will fail");
-      }
-      else
-      {
-        ESP_LOGI(TAG, "PSA AES-GCM key imported (id=%u)", (unsigned)s_aes_gcm_key_id);
       }
       if (psa_ret == PSA_SUCCESS && !s_init_k_auth_key())
       {
         ESP_LOGE(TAG, "Failed to derive K_auth — LOGIN/REGISTER MICs will fail");
       }
 
-      // Schedule a login challenge so frame counters and AES-GCM nonces are
+      // Schedule a login challenge so frame counters and session keys are
       // re-negotiated after every hub reboot, respecting the node's sleep window.
       ESP_LOGI(TAG, "[%s] setup: registered=%s time=%s time_valid=%s",
                this->get_name().c_str(),
@@ -691,7 +549,7 @@ namespace esphome
           // encrypted status messages that set login_acked_=true before NTP
           // syncs.  Using login_acked_ as the guard would prevent
           // schedule_startup_login_() from ever being called, leaving the
-          // AES-GCM nonce map (cleared on hub reboot) unpopulated.
+          // base-nonce map (cleared on hub reboot) unpopulated.
           // startup_login_initiated_ is only set here and is never touched by
           // incoming messages, so NTP resyncs that fire the callback a second
           // time do not disrupt an already-running session.
@@ -991,7 +849,7 @@ namespace esphome
       // Do NOT bail on login_acked_ here.  After a hub reboot the node may have
       // already sent a status message (setting login_acked_=true via the incoming-
       // message path) before this timer fired.  We still need to send LoginMsg so
-      // that the AES-GCM base-nonce map is repopulated (it is cleared on hub
+      // that the base-nonce map is repopulated (it is cleared on hub
       // reboot as a file-scope static and is never persisted to flash).
       //
       // One node's onboarding at a time. The downlink is a single queue at ~1.85 s
@@ -1024,7 +882,7 @@ namespace esphome
       this->login_acked_       = false;
       this->login_retry_count_ = 0;
 
-      this->send_login();   // resets frame counters to 0 + sends LoginMsg + BaseNonceExchange
+      this->send_login();   // resets frame counters to 0 + sends LoginMsg
 
       // Retry every hour; give up after kMaxLoginRetries (24 h).  One-shot,
       // self-re-arming — NOT set_interval (whose random initial phase fired the
@@ -1426,7 +1284,7 @@ namespace esphome
     //
     // Called from commit_rx_msgid_, NOT from admit_frame_. Admission checks the
     // address and the replay window, neither of which is authentication: a
-    // crafted plaintext frame, or an encrypted one that later fails its GCM
+    // crafted plaintext frame, or an encrypted one that later fails its CMAC
     // tag, was admitted and moved both of these. That gave an attacker in radio
     // range two levers with no key at all — one out-of-slot frame per round
     // resets in_slot_acks and denies the node single-shot forever, and three
@@ -1447,7 +1305,7 @@ namespace esphome
     // Advance the replay counter, once the frame has earned it.
     //
     // Split out of admit_frame_ so that only two kinds of frame can move it:
-    // one the hub has AUTHENTICATED (a successful GCM tag check), and one that
+    // one the hub has AUTHENTICATED (a successful CMAC tag check), and one that
     // arrived while no session existed, where there is nothing to authenticate
     // with and the counter is the only sequencing there is. A plaintext frame
     // arriving while the session IS confirmed is still processed exactly as
@@ -1530,7 +1388,7 @@ namespace esphome
       // (config_sync_relogin, the node-LOGIN path, the missing-nonce path),
       // and each of those previously skipped this clear, so the next
       // send_login() reused the still-pending nonce under a reset msgid —
-      // real GCM base-nonce reuse. This alone does not fully close the
+      // real base-nonce (keystream) reuse. This alone does not fully close the
       // issue (send_login's own unconditional tx/rx reset is the deeper
       // bug; Tier 3's session redesign is the real fix) but removes this
       // specific repeat-clear gap cheaply in the meantime.
@@ -1602,7 +1460,7 @@ namespace esphome
         }
 
         // Resume-path config-sync guarantee: if this session was recovered via
-        // the base-nonce RESUME path (BaseNonceExchange + NVS-restored counters
+        // the base-nonce RESUME path (NVS-restored counters
         // after a hub reboot) rather than a fresh send_login(), the node never
         // saw a request_register flag — so config changes flashed into the hub
         // this boot would not reach an awake node until its modeled wake.  When
@@ -1640,8 +1498,8 @@ namespace esphome
     bool LORAListener::deriveSessionKeyCandidate_(uint32_t session_id, uint32_t node_nonce,
                                                   psa_key_id_t *out_enc_id, psa_key_id_t *out_mac_id)
     {
-      uint8_t root_material[kAesGcmKeyBytes];
-      if (!s_derive_aes_gcm_key(root_material))
+      uint8_t root_material[kRootKeyBytes];
+      if (!s_derive_root_key(root_material))
         return false;
 
       psa_key_id_t root_key_id = PSA_KEY_ID_NULL;
@@ -1660,17 +1518,17 @@ namespace esphome
       framecrypto::buildSessionKeyKdfInput(0x01, session_id, node_nonce, hub_addr, node_addr, enc_input);
       framecrypto::buildSessionKeyKdfInput(0x02, session_id, node_nonce, hub_addr, node_addr, mac_input);
 
-      uint8_t k_enc_material[kAesGcmKeyBytes];
-      uint8_t k_mac_material[kAesGcmKeyBytes];
+      uint8_t k_enc_material[kRootKeyBytes];
+      uint8_t k_mac_material[kRootKeyBytes];
       size_t enc_len = 0, mac_len = 0;
-      const bool enc_ok = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kAesGcmKeyBytes),
+      const bool enc_ok = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kRootKeyBytes),
                                           enc_input, sizeof(enc_input),
                                           k_enc_material, sizeof(k_enc_material), &enc_len) == PSA_SUCCESS &&
-                          enc_len == kAesGcmKeyBytes;
-      const bool mac_ok = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kAesGcmKeyBytes),
+                          enc_len == kRootKeyBytes;
+      const bool mac_ok = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kRootKeyBytes),
                                           mac_input, sizeof(mac_input),
                                           k_mac_material, sizeof(k_mac_material), &mac_len) == PSA_SUCCESS &&
-                          mac_len == kAesGcmKeyBytes;
+                          mac_len == kRootKeyBytes;
       psa_destroy_key(root_key_id);
       if (!enc_ok || !mac_ok)
       {
@@ -1757,6 +1615,11 @@ namespace esphome
       this->op_frame_msgid_ = 0;
     }
 
+    bool LORAListener::deriveRootKeyForTest(uint8_t out[16])
+    {
+      return s_derive_root_key(out);
+    }
+
     bool LORAListener::deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce)
     {
       {
@@ -1771,33 +1634,11 @@ namespace esphome
       if (enc == nullptr || header == nullptr)
         return false;
 
-      // Invariant I3: refuse to retag a copy whose ciphertext was sealed
-      // under a DIFFERENT session generation than the one current right now
-      // (a re-login landed between pack time and this copy's turn in the
-      // burst loop). Sealing it anyway would pair an OLD ciphertext with a
-      // NEW tag, which the node simply fails to verify — not a security
-      // issue, but a silently wasted copy this at least counts.
-      //
-      // Invariant I3 (c): this listener's k_mac_key_id_/session_generation_
-      // are written by installSessionKeys_()/clearSessionKeys_() on the main
-      // loop while THIS reads them from the tracker task — one lock over
-      // both the stale check and the read, matching the write side, so
-      // there is no window where a half-updated pair (new generation, old
-      // key id or vice versa) is observed.
-      psa_key_id_t mac_key_id = PSA_KEY_ID_NULL;
-      {
-        std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-        auto it = s_seal_generation_map.find(header->destaddress);
-        if (it == s_seal_generation_map.end() || it->second != this->session_generation_)
-        {
-          ++this->tx_stale_session_drops_;
-          ESP_LOGW(TAG, "[%s] Dropping burst copy sealed under a stale session (%u so far)",
-                   this->get_name().c_str(), (unsigned) this->tx_stale_session_drops_);
-          return false;
-        }
-        mac_key_id = this->k_mac_key_id_;
-      }
-      if (mac_key_id == PSA_KEY_ID_NULL)
+      // Invariant I3 (stale-generation refusal) and I3 (c) (key read AND used
+      // under s_session_keys_mutex) are implemented in the locked section below.
+      // The CTR space guard again, at the retag point (s_pack_operation_message
+      // already refused to seal such a frame, so this is defence in depth).
+      if (!framecrypto::msgidFitsCtr(header->msgid))
         return false;
 
       uint32_t session_id = 0;
@@ -1808,6 +1649,9 @@ namespace esphome
         session_id = it->second;
       }
 
+      // Everything that needs no key is done BEFORE the key lock is taken, so
+      // the critical section below is one psa_mac_compute and nothing else
+      // (this is the H-1-measured retag path).
       framecrypto::EtmHeaderFields etm{};
       etm.downlink       = true;
       etm.session_id     = session_id;
@@ -1831,10 +1675,46 @@ namespace esphome
 
       uint8_t tag[framecrypto::kSessionCmacTagBytes];
       size_t tag_len = 0;
-      if (psa_mac_compute(mac_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(tag)),
-                          mac_input.data(), mac_input.size(),
-                          tag, sizeof(tag), &tag_len) != PSA_SUCCESS ||
-          tag_len != sizeof(tag))
+      bool stale = false;
+      bool mac_ok = false;
+      {
+        // The key id is read AND USED under the lock. The loop task's
+        // installSessionKeys_()/clearSessionKeys_() destroy the key under this
+        // same mutex, and a destroyed volatile key's slot id can be reused, so
+        // reading the id here and calling PSA after releasing (the previous
+        // shape) could MAC under a destroyed or a different session's key.
+        // Lock order: this mutex is taken before any PSA-internal lock and
+        // never while holding s_base_nonce_map_mutex, so there is no cycle.
+        // No logging inside the critical section.
+        std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+        auto it = s_seal_generation_map.find(header->destaddress);
+        if (it == s_seal_generation_map.end() || it->second != this->session_generation_)
+        {
+          stale = true;
+        }
+        else if (this->k_mac_key_id_ != PSA_KEY_ID_NULL)
+        {
+          mac_ok = psa_mac_compute(this->k_mac_key_id_,
+                                   PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(tag)),
+                                   mac_input.data(), mac_input.size(),
+                                   tag, sizeof(tag), &tag_len) == PSA_SUCCESS &&
+                   tag_len == sizeof(tag);
+        }
+      }
+      if (stale)
+      {
+        // Invariant I3: refuse to retag a copy whose ciphertext was sealed
+        // under a DIFFERENT session generation than the one current right now
+        // (a re-login landed between pack time and this copy's turn in the
+        // burst loop). Sealing it anyway would pair an OLD ciphertext with a
+        // NEW tag, which the node simply fails to verify — not a security
+        // issue, but a silently wasted copy this at least counts.
+        ++this->tx_stale_session_drops_;
+        ESP_LOGW(TAG, "[%s] Dropping burst copy sealed under a stale session (%u so far)",
+                 this->get_name().c_str(), (unsigned) this->tx_stale_session_drops_);
+        return false;
+      }
+      if (!mac_ok)
         return false;
 
       // enc->tag already has kSessionCmacTagBytes allocated (sealed at pack
@@ -1860,21 +1740,17 @@ namespace esphome
         // Use the header's msgid as the unified frame counter.  Replay protection
         // was already enforced above (msgid > frame_counter_.rx_message_id).
         // The IV must equal base_nonce || (uint64_t)msgid; if it doesn't the
-        // GCM tag will also fail, but checking up-front avoids the decrypt cost.
+        // CMAC tag will also fail, but checking up-front avoids the decrypt cost.
         uint32_t sender      = rcv_message->header ? rcv_message->header->senderaddress : 0;
 
         // If we don't have a base nonce for this peer (e.g. recovery after reboot),
         // re-provision one, send it, and discard this packet — the node will restart
         // its encryption with the new nonce on the next transmission.
         //
-        // Through send_login(), NOT send_base_nonce_exchange(). Both mint a
-        // nonce and store it in s_base_nonce_map, but BaseNonceExchange goes out
-        // as a plaintext CMD_BASENONCE, and a provisioned node refuses plaintext
-        // commands — it holds a session, so an unauthenticated frame offering it
-        // a new key is exactly what it must not act on. CMD_LOGIN is the one
-        // exemption the node makes, because LoginMsg carries the base nonce and
-        // IS the bootstrap; it is the designed recovery path and the only one
-        // that works here.
+        // Through send_login(): LoginMsg carries the base nonce and IS the
+        // bootstrap (MIC-authenticated, the one plaintext command a node holding
+        // a session accepts). BaseNonceExchange, which used to offer a key in
+        // plaintext, no longer exists on the wire.
         //
         // This matters most after a HUB reboot: s_base_nonce_map lives in RAM,
         // so the hub comes back holding no nonce for any node while every node
@@ -2022,6 +1898,21 @@ namespace esphome
           return;
         }
 
+        // AUTHENTIC, but is its msgid inside the CTR space? The counter block
+        // holds 31 bits while the tag covers 32, so msgid X and X + 2^31 would
+        // decrypt under the same keystream. Checked only AFTER the tag verified:
+        // a forged frame must not be able to make the hub tear a session down.
+        // The peer has run its counter off the end; the repair is a fresh
+        // session (LOGIN resets both counters), requested once per exhaustion.
+        if (!framecrypto::msgidFitsCtr(etm.msgid))
+        {
+          ESP_LOGW(TAG, "[%s] Authentic uplink with msgid %u beyond the CTR space — refusing it",
+                   this->get_name().c_str(), (unsigned) etm.msgid);
+          destroy_candidate();
+          this->requestMsgidRelogin_("uplink");
+          return;
+        }
+
         uint8_t ctr_block[framecrypto::kCtrBlockBytes];
         framecrypto::buildCtrInitialBlock(session_id, sender, /*downlink=*/false,
                                           etm.msgid, /*block_idx=*/0, ctr_block);
@@ -2081,7 +1972,7 @@ namespace esphome
         // login as acknowledged and allow the hub to encrypt downlink commands.
         //
         // (a'): an AUTHENTICATED uplink is also proof the node is awake right
-        // now — stamped only past the GCM check, so a forged or foreign frame
+        // now — stamped only past the CMAC check, so a forged or foreign frame
         // cannot move the sleep model.
         this->note_node_heard_();
         this->confirm_session_();
@@ -2162,11 +2053,11 @@ namespace esphome
       // persists to NVS, and this runs in an esp_timer task while the ESPHome
       // main loop owns that backend — hundreds of writes per run, off-loop.
       //
-      // MAC-2 ON: the OUTER header's msgid is what AEAD derives the IV and AAD
-      // from (s_pack_operation_message), so it MUST come from the reserved
+      // MAC-2 ON: the OUTER header's msgid is what the CTR counter block and the
+      // CMAC prefix derive from (s_pack_operation_message), so it MUST come from the reserved
       // block start_mac_ping set aside — reusing the dedicated ping counter
       // here would let a ping's msgid collide with an ordinary command's under
-      // the same base nonce, which is IV reuse. See mac_ping_crypto_'s comment.
+      // the same base nonce, which is keystream reuse. See mac_ping_crypto_'s comment.
       const bool encrypt_this_one =
           this->mac_ping_crypto_ && this->session_confirmed_ &&
           this->mac_ping_crypto_next_msgid_ <= this->mac_ping_crypto_last_msgid_;
@@ -2204,7 +2095,7 @@ namespace esphome
 
       uint8_t *buf = nullptr;
       size_t   len = 0;
-      if (!s_pack_operation_message(&op_message, encrypt_this_one, &buf, &len))
+      if (!this->pack_operation_(&op_message, encrypt_this_one, &buf, &len))
       {
         ESP_LOGE(TAG, "[%s] MAC ping: failed to pack", this->get_name().c_str());
         this->mac_ping_frame_len_ = 0;
@@ -2678,7 +2569,7 @@ namespace esphome
       //     is lost while Home Assistant shows it delivered;
       //   * the same ack confirms a GridSync or a ScheduleConfig push;
       //   * the PhaseReport it carries sets the hub's single-shot belief, which the
-      //     plan describes as authenticated by the beacon's GCM tag — on this path
+      //     plan describes as authenticated by the beacon's CMAC tag — on this path
       //     it was not.
       // This is the mirror of the node's default-deny gate (CmdDispatcher). REGISTER
       // and LOGIN are the two exemptions and both return before this point: REGISTER
@@ -2857,7 +2748,7 @@ namespace esphome
 
       uint8_t *buf = nullptr;
       size_t   len = 0;
-      if (!s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      if (!this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
       {
         ESP_LOGE(TAG, "[%s] failed to pack GridSync", this->get_name().c_str());
         return;
@@ -3207,11 +3098,11 @@ namespace esphome
         op_message.operation = &covop;
       }
 
-      // Encrypt the command in-session (AES-GCM) so the downlink op is
+      // Encrypt the command in-session (CTR + CMAC) so the downlink op is
       // authenticated; falls back to plaintext only before a session exists.
       uint8_t *buf = nullptr;
       size_t   len = 0;
-      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
       {
         // B4: PACK ONCE. Keep the exact bytes so a retry retransmits THESE,
         // rather than re-packing from live state.
@@ -3220,8 +3111,8 @@ namespace esphome
         // node's replay filter admitted the retry and executed the command a
         // SECOND time — a blind that moves twice. And tx_tracked_op_ re-reads
         // op_position_ at pack time, so a user moving the blind mid-retry
-        // produced different plaintext under a msgid-derived AEAD nonce; with
-        // a reused msgid that is GCM nonce reuse, and with a fresh one it is a
+        // produced different plaintext under a msgid-derived CTR counter block; with
+        // a reused msgid that is keystream reuse, and with a fresh one it is a
         // duplicate command. Storing the frame removes both: same msgid, same
         // ciphertext, and the node can recognise a duplicate and re-ack it.
         this->op_frame_.assign(buf, buf + len);
@@ -3529,7 +3420,7 @@ namespace esphome
       // Encrypt the sysop in-session so SLEEP cannot be forged/injected.
       uint8_t *txBuf = nullptr;
       size_t   len   = 0;
-      if (s_pack_operation_message(&op_message, this->session_confirmed_, &txBuf, &len))
+      if (this->pack_operation_(&op_message, this->session_confirmed_, &txBuf, &len))
       {
         this->parent_->send(txBuf, len);
         free(txBuf);
@@ -3583,14 +3474,59 @@ namespace esphome
 
     uint32_t LORAListener::incrTxMessageId()
     {
-      // mode_test_timer_cb_/drift_timer_cb_ call this from the esp_timer
-      // task concurrently with the main loop's ordinary traffic — a bare
-      // ++ here could hand out the same tx_message_id twice.
-      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-      uint32_t val = ++this->frame_counter_.tx_message_id;
-      // Persist the updated tx id so reboots don't reuse IDs
-      this->save_state_(true);
+      // The esp_timer callbacks (mode_test_timer_cb_/drift_timer_cb_) send
+      // frames prebuilt by build_*_frame_() and do not call this, so today
+      // every caller is on the ESPHome loop. The lock is kept as cheap
+      // insurance: a bare ++ from a second task could hand out the same
+      // tx_message_id twice.
+      uint32_t val = 0;
+      bool exhausted = false;
+      {
+        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+        if (!framecrypto::nextMsgidFitsCtr(this->frame_counter_.tx_message_id))
+        {
+          // The CTR counter block holds 31 bits of msgid: handing out 2^31 would
+          // reuse the keystream of msgid 0. Do not advance the counter (it must
+          // not wrap); hand back the first out-of-space id, which the seal point
+          // refuses, and ask for a fresh session below.
+          exhausted = true;
+          val = framecrypto::kMsgidCtrLimit;
+        }
+        else
+        {
+          val = ++this->frame_counter_.tx_message_id;
+          // Persist the updated tx id so reboots don't reuse IDs
+          this->save_state_(true);
+        }
+      }
+      if (exhausted)
+        this->requestMsgidRelogin_("allocate");
       return val;
+    }
+
+    void LORAListener::requestMsgidRelogin_(const char *where)
+    {
+      // Once per exhaustion: the flag is cleared in send_login(), which is where
+      // both msgid counters restart. Until then every refusal is silent.
+      if (this->msgid_relogin_pending_)
+        return;
+      this->msgid_relogin_pending_ = true;
+      ++this->msgid_relogin_requests_;
+      ESP_LOGE(TAG, "[%s] msgid space exhausted (%s): the CTR keystream would repeat — "
+                    "starting a fresh session", this->get_name().c_str(), where);
+      // Deferred, not inline: callers sit inside frame building and the
+      // admission path, and a login from there would re-enter them.
+      this->set_timeout("msgid_relogin", 0, [this]() { this->do_login_and_arm_retry_(); });
+    }
+
+    bool LORAListener::pack_operation_(LoraClientOperationMessage *plain, bool encrypt,
+                                       uint8_t **out, size_t *out_len)
+    {
+      bool refused = false;
+      const bool ok = s_pack_operation_message(plain, encrypt, out, out_len, &refused);
+      if (refused)
+        this->requestMsgidRelogin_("seal");
+      return ok;
     }
 
     void LORAListener::setRxMessageId(uint32_t msg_id)
@@ -3598,76 +3534,6 @@ namespace esphome
       this->frame_counter_.rx_message_id = msg_id;
       // Persist updated rx id
       this->save_state_(true);
-    }
-
-    void LORAListener::send_base_nonce_exchange()
-    {
-      // Generate a fresh base nonce for this peer and send it so the hub can
-      // start encrypting responses.  Also resets the frame-counter state so
-      // both sides start from zero after every (re-)login.
-      uint32_t base = esp_random();
-      // NOT COMMITTED YET. This used to be stored here, before the frame went
-      // anywhere, and that is how an exhausted buffer pool broke a session
-      // outright: the hub would start deriving its IVs from a base nonce the
-      // node had never been told, nothing either end sent could be decrypted by
-      // the other, and only a REGISTER recovered it. Committing after a
-      // successful handoff leaves BOTH ends on the previous nonce, which is a
-      // working session. See the commit below.
-      uint8_t bn[4];
-      // Encode base nonce as 4-byte big-endian
-      bn[0] = (base >> 24) & 0xFF;
-      bn[1] = (base >> 16) & 0xFF;
-      bn[2] = (base >>  8) & 0xFF;
-      bn[3] = (base >>  0) & 0xFF;
-
-      BaseNonceExchange exchange = BASE_NONCE_EXCHANGE__INIT;
-      exchange.base_nonce.data = bn;
-      exchange.base_nonce.len  = 4;
-
-      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress; // hub/controller address placeholder
-      header.msgid         = this->incrTxMessageId();
-      op_message.header    = &header;
-      op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_BASENONCE;
-      op_message.basenonce = &exchange;
-
-      size_t len    = lora_client_operation_message__get_packed_size(&op_message);
-      uint8_t *buf  = new uint8_t[len];
-      lora_client_operation_message__pack(&op_message, buf);
-      // PLACED, and as a BURST.
-      //
-      // This frame INSTALLS A KEY: the node adopts the nonce and persists it to
-      // NVS, and until it does, nothing either end sends can be decrypted by
-      // the other. It carries no ack, so a single copy that misses its window
-      // is silent and the session is simply broken from that moment. There is
-      // no version of Rule 4's "costs one frame" that applies to it — so the
-      // burst is asked for explicitly rather than left to the policy.
-      TxPolicy p;
-      p.copies = this->parent_->defaultBurstCopies();
-      const bool queued = this->send_aligned_(buf, len, p);
-      delete[] buf;
-
-      if (!queued)
-      {
-        // The frame never entered the transmit queue, so the node will never
-        // hear this nonce. Leave the map alone: both ends stay on the previous
-        // base and the session keeps working, which is the whole reason the
-        // commit moved below the send. The caller retries the exchange.
-        ESP_LOGE(TAG, "BaseNonceExchange to peer %u was not queued — keeping the "
-                      "previous base nonce so the session survives",
-                 (unsigned) this->short_address_);
-        return;
-      }
-
-      {
-        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-        s_base_nonce_map[this->short_address_] = base;
-      }
-      ESP_LOGI(TAG, "Sent BaseNonceExchange (base=0x%08x) to peer %u",
-               (unsigned)base, (unsigned)this->short_address_);
     }
 
     void LORAListener::send_login()
@@ -3701,7 +3567,7 @@ namespace esphome
       }
 
       // §4.6 rule: a new session invalidates the hub's confidence. The
-      // counters reset here, the AEAD keying changes, and the node may have
+      // counters reset here, the session keying changes, and the node may have
       // rebooted — none of which is compatible with still believing its
       // uplinks land in slot. It earns single-shot back from observation.
       //
@@ -3729,6 +3595,7 @@ namespace esphome
         this->frame_counter_.tx_message_id = 0;
         this->frame_counter_.rx_message_id = 0;
       }
+      this->msgid_relogin_pending_ = false;   // the msgid space restarts here
       // New login challenge: the encrypted session is not confirmed until the
       // node proves it by sending a frame we can decrypt.  Until then the hub
       // sends commands in plaintext (see s_pack_operation_message callers).
@@ -3752,7 +3619,7 @@ namespace esphome
       op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
 
       LoginMsg login = LOGIN_MSG__INIT;
-      // nonce carries the base-nonce for AES-GCM IV derivation.
+      // nonce carries the base-nonce (session id) for the CTR counter block.
       // The node stores it as its base_nonce on receipt of CMD_LOGIN.
       login.nonce = base;
       // If we have not pushed config to this node this session (config_synced_
@@ -3818,7 +3685,7 @@ namespace esphome
                                       header.senderaddress, header.msgid,
                                       base, login.request_register, login.hub_rebooted,
                                       mic_input);
-      // Lazy-import, same as the GCM key above (lines ~224/269) — this path
+      // Lazy-derive, as setup() does — this path
       // can be reached without setup() ever having run (e.g. a test driving
       // send_login() directly), and K_auth is needed right now, not later.
       if (s_k_auth_key_id == PSA_KEY_ID_NULL)
@@ -4214,7 +4081,7 @@ namespace esphome
       mt.enablecrypto     = this->mt_enable_crypto_;
       mt.macecho          = this->mt_mac_echo_;
       mt.armoffsetus      = this->mt_arm_offset_us_;
-      // The ruler mark, separate from msgid. msgid is also the AEAD nonce input
+      // The ruler mark, separate from msgid. msgid is also the CTR counter-block input
       // and the replay-filter key, so the test must be able to retransmit
       // without touching either; seq is free to be a plain monotonic index, and
       // a frame lost to the air leaves a GAP in it rather than shifting every
@@ -4231,7 +4098,7 @@ namespace esphome
       // exists, and exempting this one would let an unauthenticated frame pin a
       // node in a test mode. The node refuses to ARM without a session anyway
       // (ModeTestPolicy::armRefusal), so this is the second of two locks.
-      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
       {
         if (len <= sizeof(this->mt_frame_))
         {
@@ -4479,7 +4346,7 @@ namespace esphome
       // every drift frame was silently dropped and the test never started.
       // Exempting DriftTest would let an unauthenticated frame pin a node in
       // ~11 mA continuous RX — a battery-drain vector on a 1.2 mA device.
-      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
       {
         if (len <= sizeof(this->drift_frame_))
         {
@@ -4636,7 +4503,7 @@ namespace esphome
 
       uint8_t *buf = nullptr;
       size_t   len = 0;
-      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
       {
         // PLACED. It used to go out through the bare send(), so in Mode B it
         // left whenever the queue drained — into a window the node had stopped
@@ -4646,8 +4513,8 @@ namespace esphome
         // Single-shot ELIGIBLE, deliberately, and it is the only one of the
         // three routine downlinks that is: the node ACKS a schedule push, so a
         // missed single copy is visible and the retry above is already a burst.
-        // That is exactly Rule 4's bounded exposure. TimeSync and
-        // BaseNonceExchange carry no ack and ask for the burst explicitly.
+        // That is exactly Rule 4's bounded exposure. TimeSync carries no ack
+        // and asks for the burst explicitly.
         this->send_aligned_(buf, len);
         free(buf);
         // Arm the retransmit.  The node acks a schedule push (unlike TimeSync);
@@ -5334,7 +5201,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
 
       uint8_t *buf = nullptr;
       size_t   len = 0;
-      if (s_pack_operation_message(&op_message, this->session_confirmed_, &buf, &len))
+      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
       {
         // C2 when the hub has a usable uplink stamp for this node, today's
         // burst otherwise. Not a switch: the fallback IS the old behaviour, so
@@ -5489,7 +5356,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       size_t   len   = 0;
       // s_pack_operation_message takes a mutable message only because it copies
       // the struct to strip the inner header; it never writes through the pointer.
-      if (!s_pack_operation_message(const_cast<LoraClientOperationMessage *>(op),
+      if (!this->pack_operation_(const_cast<LoraClientOperationMessage *>(op),
                                     this->session_confirmed_, &txBuf, &len))
       {
         ESP_LOGE(TAG, "[%s] Failed to pack downlink", this->get_name().c_str());
@@ -5544,7 +5411,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // a config change flashed into the hub was lost silently.
       uint8_t *txBuf = nullptr;
       size_t   len   = 0;
-      if (!s_pack_operation_message(&op_message, this->session_confirmed_,
+      if (!this->pack_operation_(&op_message, this->session_confirmed_,
                                     &txBuf, &len))
       {
         ESP_LOGE(TAG, "[%s] Failed to pack ClientConfig", this->get_name().c_str());

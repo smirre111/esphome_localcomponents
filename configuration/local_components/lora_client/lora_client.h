@@ -148,7 +148,6 @@ namespace esphome
       // the hub's own clock is not yet valid — sending epoch 0 would be worse
       // than sending nothing, and the node ignores it anyway.
       void send_timesync();
-      void send_base_nonce_exchange();
 
       // ---- P4: schedule push ----
       // The hub owns the schedule; the node holds a working copy. They are
@@ -302,6 +301,18 @@ namespace esphome
       // tests need "a second, DIFFERENT session now exists" as a precise,
       // one-line precondition rather than a second full handshake.
       bool deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce);
+      // For tests: the 16-byte K_root every K_auth/K_enc/K_mac is derived from
+      // (SHA-256(fleet key phrase)[0:16]). A wrong byte here is invisible to
+      // anything that derives and compares on the SAME side, so a test pins it.
+      static bool deriveRootKeyForTest(uint8_t out[16]);
+      // For tests: the msgid / CTR-space guard (see requestMsgidRelogin_).
+      bool msgidReloginPendingForTest() const { return this->msgid_relogin_pending_; }
+      uint32_t msgidReloginRequestsForTest() const { return this->msgid_relogin_requests_; }
+      void clearMsgidReloginForTest() { this->msgid_relogin_pending_ = false; }
+      bool packOperationForTest(::LoraClientOperationMessage *plain, bool encrypt,
+                                uint8_t **out, size_t *out_len) {
+        return this->pack_operation_(plain, encrypt, out, out_len);
+      }
       // For tests: encrypt a block under this listener's CURRENT K_enc with
       // CTR — the only way to prove the hub and node landed on bit-IDENTICAL
       // session keys, since opaque PSA key ids can't be compared directly.
@@ -716,8 +727,8 @@ namespace esphome
       // mark-consumption was handled correctly inside, but no producer could
       // see a refusal, so a frame lost to an exhausted buffer pool was lost
       // full stop. It matters most for the frames that carry no ack and have
-      // no retry — send_base_nonce_exchange above all, which installs a key the
-      // node persists.
+      // no retry (a key-installing frame was the worst case, before the node
+      // dropped BaseNonceExchange; LOGIN now carries the nonce with its own retry).
       bool send_aligned_(const uint8_t *buf, size_t len);
       bool send_aligned_(const uint8_t *buf, size_t len, const TxPolicy &policy);
 
@@ -1190,7 +1201,7 @@ namespace esphome
       void     note_node_heard_();
       bool     login_acked_{false};
       // True once the hub has successfully DECRYPTED a frame from this node,
-      // proving the node holds the matching AES-GCM base nonce.  The hub encrypts
+      // proving the node holds the matching base nonce (session id).  The hub encrypts
       // downlink commands (and treats login as acknowledged) ONLY once this is
       // set; until then it sends plaintext, so a node that missed the LoginMsg can
       // still be controlled and Part B stays consistent (node has no session ->
@@ -1207,10 +1218,9 @@ namespace esphome
       uint32_t pending_login_nonce_{0};
       // Tier 3 (mac-separation-implementation-plan.md section 2(b)): this
       // node's session keys, re-derived when its sessionNonce arrives on
-      // the session-opening uplink. Per-listener (unlike K_auth/the GCM
-      // key, which are fleet-wide statics) because each node contributes
-      // its own node_nonce. NOT YET USED to encrypt anything — see
-      // CmdDispatcher::deriveSessionKeys_()'s matching note.
+      // the session-opening uplink. Per-listener (unlike K_auth, which is a
+      // fleet-wide static) because each node contributes
+      // its own node_nonce. These seal every confirmed-session downlink.
       psa_key_id_t k_enc_key_id_{PSA_KEY_ID_NULL};
       psa_key_id_t k_mac_key_id_{PSA_KEY_ID_NULL};
       uint32_t     session_generation_{0};
@@ -1344,6 +1354,16 @@ namespace esphome
       uint32_t ms_until_node_awake_() const;
       void     schedule_startup_login_();
       void     do_login_and_arm_retry_();
+
+      // Msgid / CTR-space guard (framecrypto::kMsgidCtrLimit). requestMsgidRelogin_
+      // starts a fresh session ONCE per exhaustion (flag cleared in send_login(),
+      // where both counters restart); pack_operation_ is s_pack_operation_message
+      // plus that request when the seal was refused for the msgid alone.
+      void     requestMsgidRelogin_(const char *where);
+      bool     pack_operation_(::LoraClientOperationMessage *plain, bool encrypt,
+                               uint8_t **out, size_t *out_len);
+      bool     msgid_relogin_pending_{false};
+      uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       // Arm a ONE-SHOT login retry that re-arms itself, mirroring
       // schedule_op_retry_().  Uses set_timeout rather than set_interval: an
       // interval's first firing is randomly phased within [0, interval), which

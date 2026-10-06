@@ -3449,27 +3449,6 @@ TEST(PlacedDownlinks, ATimeSyncIsDroppedRatherThanBurstAtASleepingNode) {
         << "both windows are past: nothing is listening, so nothing goes out";
 }
 
-TEST(PlacedDownlinks, ABaseNonceExchangeIsPlacedAndAlwaysABurst) {
-    // This frame INSTALLS A KEY — the node adopts the nonce and persists it,
-    // and until it does neither end can decrypt the other. It carries no ack,
-    // so a lost single copy breaks the session silently. There is no version of
-    // "costs one frame" that applies.
-    using namespace real_helpers;
-    RealHubHarness h{18, kMacRol2};
-    h.rol.registered_ = true;
-    h.rol.node_fw_version_ = 0x00010203;
-    h.rol.enable_timed_mode(true);
-    give_phase_report(h);
-    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot);
-
-    const size_t before = h.tracker.sent_earliest_us.size();
-    h.rol.send_base_nonce_exchange();
-    ASSERT_GT(h.tracker.sent_earliest_us.size(), before);
-
-    EXPECT_GT(h.tracker.last_earliest_us, 0) << "placed";
-    EXPECT_NE(h.tracker.last_copies, 1) << "never one copy for a key install";
-}
-
 TEST(PlacedDownlinks, ATimeSyncCarriesTheHubsInSlotCountToTheNode) {
     // U-4. NodeState::in_slot_uplinks is §4.6's own promotion criterion and the
     // node cannot measure it: where its uplink landed is produced by its
@@ -3518,76 +3497,6 @@ TEST(PlacedDownlinks, ATimeSyncCarriesTheHubsInSlotCountToTheNode) {
         lora_client_operation_message__free_unpacked(m, nullptr);
     }
     EXPECT_EQ(seen, 1) << "exactly one TimeSync";
-}
-
-TEST(PlacedDownlinks, ARefusedBaseNonceExchangeLeavesTheSessionWorking) {
-    // T-2's sharp edge, and the reason send_aligned_ stopped returning void.
-    //
-    // send() refuses a frame when the buffer pool is exhausted — five buffers
-    // against a queue of twenty, and a placed frame holds its buffer until its
-    // mark, so a fleet-wide push runs out. The mark is correctly not consumed,
-    // and that was already handled. What was NOT is that no producer could see
-    // the refusal.
-    //
-    // For this frame that was a session break: the new base nonce was stored in
-    // s_base_nonce_map BEFORE the send, so on a refusal the hub began deriving
-    // its IVs from a nonce the node had never been told. Nothing either end
-    // sent could be decrypted by the other and only a REGISTER recovered it —
-    // from a full buffer pool, with one warning line in the log.
-    //
-    // Committing after a successful handoff leaves BOTH ends on the previous
-    // base, which is a working session that the caller can simply retry.
-    using namespace real_helpers;
-    RealHubHarness h{18, kMacRol2};
-    ensure_psa_ready();          // real AEAD, not a stub: the tag is the point
-    h.rol.registered_ = true;
-    h.rol.node_fw_version_ = 0x00010203;
-
-    // Establish a working session, so there is a nonce that must survive.
-    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
-    ASSERT_NE(base, 0u);
-    ASSERT_TRUE(h.rol.session_confirmed_);
-
-    // Now the pool is full: the next handoff is refused.
-    h.tracker.drop_next_sends = 1;
-    h.rol.send_base_nonce_exchange();
-
-    EXPECT_TRUE(h.rol.session_confirmed_)
-        << "a frame that never left the hub must not take the session with it";
-
-    // The proof is that the PREVIOUS nonce still decrypts. An encrypted beacon
-    // the node builds with the base it actually holds must still verify here,
-    // and the phase report inside it is the observable that says it did — the
-    // GCM tag gates handle_beacon_, so a hub that had rolled its nonce forward
-    // would reject this frame and report nothing.
-    proto_sim::LoraClientResponseMessage inner;
-    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
-    inner.header.destSubnet    = 2;
-    inner.header.senderAddress = 18;
-    inner.header.msgId         = h.rol.frame_counter_.rx_message_id + 1;
-    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Beacon;
-    inner.beacon.fwVersion          = 0x00010203;
-    inner.beacon.phasePresent       = true;
-    inner.beacon.phase.rtcSlowSrc   = 2;
-    inner.beacon.phase.errUs        = 77;
-    inner.beacon.phase.spreadUs     = 88;
-    inner.beacon.phase.samples      = timedmode::kPromotionPhaseSamples;
-    inner.beacon.phase.outsideGuard = 0;
-
-    auto plain = proto_sim::serialize_resp_payload(inner);
-    auto enc = seal_uplink_like_node(base, inner.header, plain);
-    proto_sim::LoraClientResponseMessage outer;
-    outer.header               = inner.header;
-    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-    outer.encrypted.ciphertext = enc.ciphertext;
-    auto frame = proto_sim::serialize_resp(outer);
-    h.rol.set_response(frame.data(), frame.size());
-
-    EXPECT_EQ(h.rol.hubBelief().phase_err_us, 77)
-        << "the hub must still be on the base nonce the node actually holds — "
-           "this beacon was encrypted with it, and a rolled-forward nonce "
-           "would have failed its tag and reported nothing";
 }
 
 TEST(PlacedDownlinks, ARoutineDownlinkDoesNotEraseRuleFoursExposure) {
@@ -4846,4 +4755,238 @@ TEST(ConfigHashPersistence, ANodeWithNothingPersistedIsUnaffected) {
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+// ===========================================================================
+// 2026-10-06 hub cleanup: K_root pin + the msgid / CTR-space guard
+// (framecrypto::kMsgidCtrLimit), mirror of the node's guard.
+// ===========================================================================
+
+namespace {
+
+std::string hex16(const uint8_t *b) {
+    static const char *d = "0123456789abcdef";
+    std::string s;
+    for (int i = 0; i < 16; ++i) { s += d[b[i] >> 4]; s += d[b[i] & 15]; }
+    return s;
+}
+
+size_t count_logins_since(proto_sim::SimRadio &radio, size_t from) {
+    size_t n = 0;
+    for (size_t i = from; i < radio.transcript().size(); ++i) {
+        const auto &f = radio.transcript()[i];
+        if (f.dir != proto_sim::AirFrame::Dir::HubToNode) continue;
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login) ++n;
+    }
+    return n;
+}
+
+// An encrypted uplink carrying `msgid`, sealed under `base` like the real node.
+// `corrupt_tag` flips one tag bit so it fails the CMAC.
+std::vector<uint8_t> hand_sealed_uplink(uint32_t base, uint32_t msgid, bool corrupt_tag) {
+    proto_sim::LoraClientResponseMessage inner;
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = 2;
+    inner.header.senderAddress = 18;
+    inner.header.msgId         = msgid;
+    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Avail;
+    inner.avail.available      = true;
+    auto plain = proto_sim::serialize_resp_payload(inner);
+    auto enc = seal_uplink_like_node(base, inner.header, plain);
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = inner.header;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
+    outer.encrypted.ciphertext = enc.ciphertext;
+    if (corrupt_tag) outer.encrypted.tag[0] ^= 0x01;
+    return proto_sim::serialize_resp(outer);
+}
+
+struct MsgidGuardFixture {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    LORATracker tracker;
+    LORAClient  rol;
+    RealTimeClock time;
+    uint32_t base{0};
+    MsgidGuardFixture() {
+        esphome::shim_hooks::set_active_clock(&clock);
+        esphome::shim_hooks::reset_nvs();
+        esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+        ensure_psa_ready();
+        rol.set_name("rol");
+        rol.set_short_address(18);
+        rol.set_subnet_address(2);
+        rol.set_sleep_duration(21600);
+        rol.set_address(kMacRol2);
+        time.set_now(1787000000, /*valid=*/true);
+        rol.set_time(&time);
+        tracker.register_client(&rol);
+        base = drive_session(clock, radio, rol);
+    }
+    ~MsgidGuardFixture() {
+        esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+        esphome::shim_hooks::set_active_clock(nullptr);
+    }
+};
+
+}  // namespace
+
+TEST(HubRootKey, IsSha256OfTheFleetKeyPhraseTruncatedTo16Bytes) {
+    ensure_psa_ready();
+    // The real_lora_client target is compiled with LORA_FLEET_KEY=
+    // "ProtoSimTestKeyNotReal": SHA-256 of that phrase, first 16 bytes.
+    uint8_t got[16] = {0};
+    ASSERT_TRUE(LORAClient::deriveRootKeyForTest(got));
+    EXPECT_EQ(hex16(got), "abfdd27c60308b655495436cef9f7c5f");
+
+    // And the production dev literal's derivation, pinned independently of the
+    // hub code: K_root = SHA-256("LoRaHome")[0:16]. (Computed with sha256sum.)
+    const char *phrase = "LoRaHome";
+    uint8_t hash[32];
+    size_t  hash_len = 0;
+    ASSERT_EQ(psa_hash_compute(PSA_ALG_SHA_256, reinterpret_cast<const uint8_t *>(phrase),
+                               strlen(phrase), hash, sizeof(hash), &hash_len), PSA_SUCCESS);
+    EXPECT_EQ(hex16(hash), "16efc5cc9770cb2cb8e84a8c9feff412");
+}
+
+TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
+    MsgidGuardFixture f;
+    ASSERT_NE(f.base, 0u);
+    ASSERT_TRUE(f.rol.session_confirmed_);
+
+    f.rol.frame_counter_.tx_message_id = 0x7FFFFFFDu;
+    EXPECT_EQ(f.rol.incrTxMessageId(), 0x7FFFFFFEu);
+    EXPECT_EQ(f.rol.incrTxMessageId(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
+    EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
+
+    const size_t before = f.radio.transcript().size();
+    const uint32_t got = f.rol.incrTxMessageId();
+    EXPECT_EQ(got, framecrypto::kMsgidCtrLimit) << "the out-of-space marker";
+    EXPECT_FALSE(framecrypto::msgidFitsCtr(got));
+    EXPECT_EQ(f.rol.frame_counter_.tx_message_id, 0x7FFFFFFFu) << "the counter must not wrap or advance";
+    EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
+
+    // A second refusal asks for nothing more, and the id is still refused.
+    EXPECT_EQ(f.rol.incrTxMessageId(), framecrypto::kMsgidCtrLimit);
+    EXPECT_EQ(f.rol.msgidReloginRequestsForTest(), 1u) << "a repeat refusal must not ask again";
+
+    // The relogin goes out on the next tick: one LOGIN, counters restarted,
+    // flag cleared (the exhaustion is over).
+    EXPECT_EQ(count_logins_since(f.radio, before), 0u) << "deferred, not inline";
+    f.clock.tick(200);
+    EXPECT_EQ(count_logins_since(f.radio, before), 1u);
+    EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
+    EXPECT_LT(f.rol.frame_counter_.tx_message_id, 0x100u) << "msgids start over";
+}
+
+TEST(MsgidGuard, TheSealPointRefusesAMsgidBeyondTheCtrSpaceAndAsksForARelogin) {
+    MsgidGuardFixture f;
+    ASSERT_TRUE(f.rol.session_confirmed_);
+
+    LoraClientOperationMessage op;
+    LoraHeader hdr;
+    TimeSync ts;
+    auto build = [&](uint32_t msgid) {
+        hdr = LORA_HEADER__INIT;
+        hdr.destaddress   = 18;
+        hdr.destsubnet    = 2;
+        hdr.senderaddress = esphome::lora_tracker::kHubAddress;
+        hdr.msgid         = msgid;
+        ts = TIME_SYNC__INIT;
+        ts.epoch = 1787000000;
+        op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+        op.header   = &hdr;
+        op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+        op.timesync = &ts;
+    };
+
+    // CONTROL: an ordinary msgid seals.
+    uint8_t *buf = nullptr;
+    size_t len = 0;
+    build(5);
+    ASSERT_TRUE(f.rol.packOperationForTest(&op, true, &buf, &len)) << "control: an ordinary msgid seals";
+    free(buf);
+    ASSERT_FALSE(f.rol.msgidReloginPendingForTest());
+
+    // 2^31 + 5 would reuse msgid 5's keystream.
+    buf = nullptr;
+    len = 0;
+    build(0x80000005u);
+    EXPECT_FALSE(f.rol.packOperationForTest(&op, true, &buf, &len)) << "must not seal";
+    EXPECT_EQ(buf, nullptr);
+    EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
+
+    // The same msgid in the clear is not a CTR problem (no keystream): the
+    // guard applies to sealing only.
+    f.rol.clearMsgidReloginForTest();
+    buf = nullptr;
+    len = 0;
+    build(0x80000005u);
+    EXPECT_TRUE(f.rol.packOperationForTest(&op, /*encrypt=*/false, &buf, &len));
+    free(buf);
+    EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
+}
+
+TEST(MsgidGuard, TheRetagPointRefusesAMsgidBeyondTheCtrSpace) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();   // snapshots the seal generation
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = 18;
+    hdr.destsubnet    = 2;
+    hdr.senderaddress = esphome::lora_tracker::kHubAddress;
+    hdr.msgid         = 999;
+    uint8_t ciphertext[4] = {1, 2, 3, 4};
+    uint8_t tag[framecrypto::kSessionCmacTagBytes] = {0};
+    EncryptedPayload enc = ENCRYPTED_PAYLOAD__INIT;
+    enc.ciphertext.data = ciphertext;
+    enc.ciphertext.len  = sizeof(ciphertext);
+    enc.tag.data        = tag;
+    enc.tag.len         = sizeof(tag);
+
+    ASSERT_TRUE(f.rol.sealBurstCopyTag(&enc, &hdr)) << "control: an ordinary msgid is retagged";
+
+    memset(tag, 0, sizeof(tag));
+    hdr.msgid = 0x80000000u + 999;
+    EXPECT_FALSE(f.rol.sealBurstCopyTag(&enc, &hdr)) << "msgid beyond the CTR space is not tagged";
+    EXPECT_EQ(f.rol.staleSessionDropsForTest(), 0u) << "refused for the msgid, not as a stale session";
+    for (uint8_t b : tag) EXPECT_EQ(b, 0) << "the tag bytes must be untouched";
+}
+
+TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSession) {
+    MsgidGuardFixture f;
+    ASSERT_TRUE(f.rol.login_acked_);
+    f.rol.frame_counter_.rx_message_id = 0x7FFFFFF0u;
+
+    // CONTROL: an ordinary authentic uplink is accepted and asks for nothing.
+    auto ok = hand_sealed_uplink(f.base, 0x7FFFFFF1u, false);
+    f.rol.set_response(ok.data(), ok.size());
+    ASSERT_EQ(f.rol.frame_counter_.rx_message_id, 0x7FFFFFF1u) << "precondition: the control frame was accepted";
+    ASSERT_FALSE(f.rol.msgidReloginPendingForTest());
+
+    // A FORGED frame (one tag bit flipped) with a huge msgid is dropped on the
+    // tag, before the msgid guard can act on a value an attacker chose.
+    auto forged = hand_sealed_uplink(f.base, 0x80000003u, true);
+    f.rol.set_response(forged.data(), forged.size());
+    EXPECT_FALSE(f.rol.msgidReloginPendingForTest()) << "an unauthenticated frame must not trigger a relogin";
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, 0x7FFFFFF1u);
+
+    // The authentic one: refused, replay counter untouched, fresh session asked for.
+    const size_t before = f.radio.transcript().size();
+    auto bad = hand_sealed_uplink(f.base, 0x80000003u, false);
+    f.rol.set_response(bad.data(), bad.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, 0x7FFFFFF1u) << "must not advance the replay counter";
+    EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
+
+    // A second one before the login goes out does not queue a second login.
+    auto bad2 = hand_sealed_uplink(f.base, 0x80000004u, false);
+    f.rol.set_response(bad2.data(), bad2.size());
+
+    EXPECT_EQ(f.rol.msgidReloginRequestsForTest(), 1u) << "once per exhaustion, not once per refused frame";
+    f.clock.tick(200);
+    EXPECT_EQ(count_logins_since(f.radio, before), 1u) << "once per exhaustion";
+    EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
 }

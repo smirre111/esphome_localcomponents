@@ -23,7 +23,7 @@
 #include <cinttypes>
 #include <cstring>
 // Section 4.4's beacon MAC. PSA rather than a vendored AES: the same library
-// the AEAD already runs on, so there is one crypto implementation on this hub.
+// the session crypto already runs on, so there is one crypto implementation on this hub.
 #include <esp_random.h>
 #include <psa/crypto.h>
 
@@ -551,7 +551,7 @@ namespace esphome
 
       // PSA is initialised HERE, not left to whichever component happened to
       // set up first. LORAListener::setup() calls psa_crypto_init() for the
-      // AEAD, and the tracker's beacon MAC used to be able to free-ride on
+      // session keys, and the tracker's beacon MAC used to be able to free-ride on
       // that — but component setup order is not a contract, and the failure it
       // produces is psa_import_key: -137 (BAD_STATE) at beacon time, which
       // reads as a crypto fault rather than as an ordering one. The call is
@@ -639,8 +639,8 @@ namespace esphome
 
     // The beacon's authenticator: AES-CMAC over the fields the beacon carries.
     //
-    // A MAC, not the AEAD the rest of the link uses, and the reasoning is in
-    // FrameCrypto.h: nothing in a beacon is secret, and extending AES-GCM to a
+    // A MAC with its own key, not the per-session CTR+CMAC the rest of the link uses, and the reasoning is in
+    // FrameCrypto.h: nothing in a beacon is secret, and extending a counter-mode keystream to a
     // one-to-many key would need a never-repeating counter that a hub reboot
     // restarts. CMAC has no nonce to reuse.
     //

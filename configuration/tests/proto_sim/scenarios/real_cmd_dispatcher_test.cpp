@@ -119,6 +119,7 @@ struct NodeProbe : CmdDispatcher {
     // announced on every wake and then sent its check-in beacon as well —
     // two uplinks for one fact, measured on fw 1.1.2 and again on 1.1.3.
     using CmdDispatcher::simulateWakeForTest;
+    using CmdDispatcher::pack_response_message;   // the seal point, for the msgid guard
 };
 
 struct RealNodeFixture : public ::testing::Test {
@@ -7165,4 +7166,197 @@ TEST_F(RealNodeFixture, AModeBResidualShowsTheDriftAnUncorrectedPredictionLeaves
     EXPECT_NEAR(disp.modeTestResidualPpmForTest(), 60, 2)
         << "an uncorrected +60 ppm clock leaves +60 ppm of residual drift - the "
            "number Mode B's pass line is read from";
+}
+
+// ===========================================================================
+// 2026-10-06 node cleanup: BaseNonceExchange removal + the msgid / CTR-space
+// guard (FrameCrypto.h kMsgidCtrLimit).
+// ===========================================================================
+
+namespace {
+
+// An OLD peer's frame: a LoraClientOperationMessage whose cmd is the removed
+// BaseNonceExchange (oneof field 15). Hand-encoded, because the stubs no longer
+// know the field: header (field 1) + 0x7A (field 15, length-delimited) + len +
+// { base_nonce (field 2) = DE AD BE EF }.
+std::vector<uint8_t> old_basenonce_frame(uint32_t msgid, uint32_t dest) {
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = dest;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kHubAddr;
+    hdr.msgid         = msgid;
+    op.header = &hdr;
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    const uint8_t field15[] = {0x7A, 0x06, 0x12, 0x04, 0xDE, 0xAD, 0xBE, 0xEF};
+    out.insert(out.end(), field15, field15 + sizeof(field15));
+    return out;
+}
+
+bool reg_queued(CmdDispatcher &disp, uint32_t *count = nullptr) {
+    uint32_t n = 0;
+    CmdDispatcher::tx_command_t c{};
+    std::vector<CmdDispatcher::tx_command_t> keep;
+    while (xQueueReceive(disp.txCmdQueueNew, &c, 0) == pdTRUE) {
+        if (c.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_REGISTER) ++n;
+        keep.push_back(c);
+    }
+    for (auto &k : keep) xQueueSend(disp.txCmdQueueNew, &k, 0);
+    if (count) *count = n;
+    return n > 0;
+}
+
+}  // namespace
+
+TEST_F(RealNodeFixture, AnOldPeersBaseNonceExchangeIsAnUnknownFieldAndInstallsNothing) {
+    // Wire safety of removing BaseNonceExchange: field 15 is now reserved, so a
+    // peer that still sends it produces a frame whose cmd is NOT SET. The node
+    // must neither install the offered nonce nor transmit, and it must stay
+    // quiet (handleNotSet logs one INFO line).
+    auto frame = old_basenonce_frame(/*msgid=*/1, kNodeAddr);
+    disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
+
+    uint32_t nonce = 0;
+    EXPECT_FALSE(disp.getBaseNonceForTest(kHubAddr, nonce))
+        << "the removed BaseNonceExchange must not install a session key";
+    EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 0u) << "and must not make the node transmit";
+    EXPECT_EQ(uxQueueMessagesWaiting(disp.rxCmdQueueNew), 0u);
+
+    // Same frame at a node that HOLDS a session: refused as plaintext, session untouched.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, nonce));
+    ASSERT_EQ(nonce, kMtNonce);
+    while (disp.runOneTxCommand()) {}
+    (void) lif.drain_tx_queue();
+    auto frame2 = old_basenonce_frame(/*msgid=*/2, kNodeAddr);
+    disp.onReceiveNew(frame2.data(), static_cast<int>(frame2.size()));
+    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, nonce));
+    EXPECT_EQ(nonce, kMtNonce) << "a session must survive an old peer's plaintext key offer";
+}
+
+TEST_F(RealNodeFixture, AnAuthenticDownlinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSession) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    while (disp.runOneTxCommand()) {}
+    (void) lif.drain_tx_queue();
+    ASSERT_EQ(disp.sessionGenerationForTest(), 1u);
+    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+
+    // CONTROL: an ordinary authentic downlink is accepted and asks for nothing.
+    auto ok = encrypted_sysop(disp, /*msgid=*/2, CLIENT_OPERATION__CMD_STATUS, 0, true);
+    disp.onReceiveNew(ok.data(), static_cast<int>(ok.size()));
+    ASSERT_EQ(disp.rxMsgIdForTest(), 2u) << "precondition: the control frame was accepted";
+    ASSERT_FALSE(reg_queued(disp));
+    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+
+    // msgid 2^31 + 3 aliases msgid 3 in the CTR block but has its own valid tag.
+    auto bad = encrypted_sysop(disp, /*msgid=*/0x80000003u, CLIENT_OPERATION__CMD_STATUS, 0, true);
+    disp.onReceiveNew(bad.data(), static_cast<int>(bad.size()));
+
+    EXPECT_EQ(disp.rxMsgIdForTest(), 2u) << "the frame must not advance the replay counter";
+    uint32_t n = 0;
+    EXPECT_TRUE(reg_queued(disp, &n)) << "a fresh session (REGISTER) must be requested";
+    EXPECT_EQ(n, 1u);
+    EXPECT_TRUE(disp.msgidReloginPendingForTest());
+
+    // A second such frame does not queue a second REGISTER.
+    auto bad2 = encrypted_sysop(disp, /*msgid=*/0x80000004u, CLIENT_OPERATION__CMD_STATUS, 0, true);
+    disp.onReceiveNew(bad2.data(), static_cast<int>(bad2.size()));
+    reg_queued(disp, &n);
+    EXPECT_EQ(n, 1u) << "once per exhaustion";
+}
+
+TEST_F(RealNodeFixture, AForgedDownlinkWithAHugeMsgidCannotTearTheSessionDown) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    while (disp.runOneTxCommand()) {}
+    (void) lif.drain_tx_queue();
+
+    // Valid construction, then one tag bit flipped: it fails CMAC, so it must
+    // be dropped before the msgid guard can act on a value an attacker chose.
+    auto forged = encrypted_sysop(disp, /*msgid=*/0x80000003u, CLIENT_OPERATION__CMD_STATUS, 0, true);
+    LoraClientOperationMessage *m = lora_client_operation_message__unpack(
+        nullptr, forged.size(), forged.data());
+    ASSERT_NE(m, nullptr);
+    ASSERT_NE(m->encrypted, nullptr);
+    m->encrypted->tag.data[0] ^= 0x01;
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(m));
+    lora_client_operation_message__pack(m, out.data());
+    lora_client_operation_message__free_unpacked(m, nullptr);
+    disp.onReceiveNew(out.data(), static_cast<int>(out.size()));
+
+    EXPECT_FALSE(reg_queued(disp)) << "an unauthenticated frame must not trigger a relogin";
+    EXPECT_FALSE(disp.msgidReloginPendingForTest());
+}
+
+TEST_F(RealNodeFixture, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    while (disp.runOneTxCommand()) {}
+    (void) lif.drain_tx_queue();
+
+    // Two ids short of the boundary: 2^31-2 and 2^31-1 are still sealable.
+    disp.seedTxMsgIdForTest(0x7FFFFFFDu);
+    disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
+    ASSERT_TRUE(disp.runOneTxCommand());
+    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFEu);
+    EXPECT_EQ(lif.drain_tx_queue().size(), 1u);
+
+    disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
+    ASSERT_TRUE(disp.runOneTxCommand());
+    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
+    EXPECT_EQ(lif.drain_tx_queue().size(), 1u);
+    EXPECT_FALSE(disp.msgidReloginPendingForTest());
+    EXPECT_FALSE(reg_queued(disp));
+
+    // The next one would be 2^31: refused, nothing sent, a relogin requested.
+    disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
+    ASSERT_TRUE(disp.runOneTxCommand());
+    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFFu) << "the counter must not move past the boundary";
+    EXPECT_TRUE(lif.drain_tx_queue().empty()) << "nothing may be sealed with msgid >= 2^31";
+    uint32_t n = 0;
+    EXPECT_TRUE(reg_queued(disp, &n));
+    EXPECT_EQ(n, 1u);
+    EXPECT_TRUE(disp.msgidReloginPendingForTest());
+
+    // The REGISTER itself goes out (plaintext, counters restart) and ends the episode.
+    while (disp.runOneTxCommand()) {}
+    EXPECT_FALSE(disp.msgidReloginPendingForTest()) << "the counters restarted";
+    EXPECT_LT(disp.txMsgIdForTest(), 0x100u) << "msgids start over after the REGISTER";
+    EXPECT_FALSE(lif.drain_tx_queue().empty()) << "the REGISTER must reach the air";
+}
+
+TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
+    // Second line of defence: allocTxId_ never hands such an id out, but
+    // pack_response_message is where the keystream would actually repeat.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    while (disp.runOneTxCommand()) {}
+    (void) lif.drain_tx_queue();
+
+    ClientAvailable avail = CLIENT_AVAILABLE__INIT;
+    avail.available = 1;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kHubAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = kNodeAddr;
+    hdr.msgid         = 5;
+    LoraClientResponseMessage msg = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    msg.header     = &hdr;
+    msg.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL;
+    msg.avail      = &avail;
+
+    uint8_t *buf = nullptr;
+    size_t len = 0;
+    ASSERT_TRUE(disp.pack_response_message(&msg, &buf, &len)) << "control: an ordinary msgid seals";
+    free(buf);
+    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+
+    hdr.msgid = 0x80000005u;     // would reuse msgid 5's keystream
+    buf = nullptr;
+    EXPECT_FALSE(disp.pack_response_message(&msg, &buf, &len)) << "must not seal";
+    EXPECT_EQ(buf, nullptr);
+    EXPECT_TRUE(disp.msgidReloginPendingForTest());
 }
