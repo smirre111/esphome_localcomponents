@@ -57,5 +57,9 @@ if __name__ == "__main__":
                 print(f"{k} = {v}")
     elif cmd == "press":
         post("button", sys.argv[2], "press")
+    elif cmd == "cover":
+        # python tools/hubctl.py cover "RollladenWohnzimmer2" open|close|stop|<position 0..1>
+        arg = sys.argv[3]
+        post("cover", sys.argv[2], arg if arg in ("open", "close", "stop") else f"set?position={arg}")
     elif cmd == "switch":
         post("switch", sys.argv[2], "turn_on" if sys.argv[3] == "on" else "turn_off")
