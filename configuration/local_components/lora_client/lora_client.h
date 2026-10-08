@@ -599,6 +599,8 @@ namespace esphome
       // For tests: optimistic-single-shot bookkeeping of the tracked command.
       bool op_short_wait_spent_for_test() const { return this->op_short_wait_spent_; }
       bool op_sent_optimistic_for_test() const  { return this->op_sent_optimistic_; }
+      singleshotwait::AckLatency &ack_latency_for_test() { return this->ack_latency_; }
+      uint32_t op_first_tail_ms_for_test() const { return this->op_first_tail_ms_; }
 
       // Test seam: send_aligned_ is protected, and the alignment POLICY is the
       // part worth testing directly rather than only through a full command.
@@ -884,6 +886,16 @@ namespace esphome
       // The short wait has been used for this command. It is used at most once,
       // and is never counted against kOpMaxRetries.
       bool     op_short_wait_spent_{false};
+      // THIS node's measured mark->ack delays for single placed copies, and what
+      // they make the first ack wait of an optimistic shot (SingleShotAckWait.h).
+      // One per listener, so 32 nodes never share a latency.
+      singleshotwait::AckLatency ack_latency_;
+      // The mark the tracked command's FIRST frame was placed on, 0 when that
+      // frame was not a single placed copy. Captured at send time: other
+      // placements move last_placed_t0_us_ before the ack arrives.
+      int64_t  op_mark_us_{0};
+      // The tail (ms after the mark) the first ack wait used; 0 = none.
+      uint32_t op_first_tail_ms_{0};
       // The mark the last placed downlink for this node was aimed at, so a
       // second command inside the same round goes to the FOLLOWING mark instead
       // of on top of the first. 0 = nothing placed yet.

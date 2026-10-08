@@ -5128,6 +5128,32 @@ int64_t usToPlacedMark(real_helpers::RealHubHarness &h) {
     return P(h).last_placed_t0_us_ - esp_timer_get_time();
 }
 
+uint32_t nowMs() { return (uint32_t) (esp_timer_get_time() / 1000); }
+
+// The first-ack wait the listener will arm for the command just sent, as the
+// pure policy computes it from this node's own history (tx drain is 0 in the
+// shim unless a test sets it).
+uint32_t expectedWaitMs(real_helpers::RealHubHarness &h) {
+    return singleshotwait::firstAckWaitMs(usToPlacedMark(h), 0,
+                                          h.rol.ack_latency_for_test().tailMs(nowMs()));
+}
+
+// Give THIS node `n` clean mark->ack samples of `delay_ms`.
+void seedLatency(real_helpers::RealHubHarness &h, uint32_t delay_ms, unsigned n = 3) {
+    for (unsigned i = 0; i < n; ++i)
+        h.rol.ack_latency_for_test().note(nowMs(), delay_ms);
+}
+
+// Ms from now until a fallback burst leaves (10 ms steps, bounded).
+int msUntilBurst(real_helpers::RealHubHarness &h, int limit_ms = 12000) {
+    const size_t sends = h.tracker.sent_copies.size();
+    for (int t = 0; t < limit_ms; t += 10) {
+        h.clock.tick(10);
+        if (h.tracker.sent_copies.size() != sends) return t + 10;
+    }
+    return -1;
+}
+
 }  // namespace
 
 TEST(OptimisticShot, OnAndStaleSendsOneCopyAndRemembersTheGuessWasOptimistic) {
@@ -5175,10 +5201,8 @@ TEST(OptimisticShot, AMissedFirstShotBurstsAfterTheShortWaitNotAfterThreeSeconds
     sendOpen(h);
     ASSERT_EQ(h.tracker.last_copies, 1);
 
-    const int64_t to_mark_us = usToPlacedMark(h);
-    const uint32_t wait_ms = singleshotwait::firstAckWaitMs(to_mark_us, 3000);
-    ASSERT_LT(wait_ms, 3000u) << "precondition: this is the SHORT wait";
-    ASSERT_GE(wait_ms, singleshotwait::kTailMs);
+    const uint32_t wait_ms = expectedWaitMs(h);
+    ASSERT_GE(wait_ms, singleshotwait::kFloorTailMs);
 
     const size_t sends = h.tracker.sent_copies.size();
     h.clock.tick(wait_ms - 30);
@@ -5212,18 +5236,19 @@ TEST(OptimisticShot, TheWaitIsMeasuredFromThePlacedMarkNotFromPlacement) {
                                                    esp_timer_get_time() + 2'000'000);
     proto_sim_timer_set_now_us(mark - 1'200'000);
 
+    seedLatency(h, 1700);   // tail 2125 ms
     sendOpen(h);
     ASSERT_EQ(h.tracker.last_copies, 1);
     const int64_t to_mark_us = usToPlacedMark(h);
     ASSERT_GT(to_mark_us, 900'000) << "precondition: the mark is genuinely far off";
 
     const size_t sends = h.tracker.sent_copies.size();
-    h.clock.tick(singleshotwait::kTailMs + 200);   // where a flat 500 ms wait would have fired
+    h.clock.tick(h.rol.op_first_tail_ms_for_test() + 200);   // where a mark-less tail would have fired
     EXPECT_EQ(h.tracker.sent_copies.size(), sends)
         << "the frame is still waiting for its mark; bursting now would collide with it";
     EXPECT_FALSE(h.rol.hubBelief().single_shot_unacked);
 
-    h.clock.tick(singleshotwait::firstAckWaitMs(to_mark_us, 3000) + 50);
+    h.clock.tick(singleshotwait::firstAckWaitMs(to_mark_us, 0, 2125) - h.rol.op_first_tail_ms_for_test() - 200 + 50);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "after the mark plus the tail";
 }
 
@@ -5254,7 +5279,7 @@ TEST(OptimisticShot, TheMissIsNotChargedAgainstTheRetryBudget) {
     h.rol.enable_optimistic_single_shot(true);
     sendOpen(h);
     ASSERT_EQ(h.tracker.last_copies, 1);
-    h.clock.tick(singleshotwait::firstAckWaitMs(usToPlacedMark(h), 3000) + 50);
+    h.clock.tick(expectedWaitMs(h) + 50);
     ASSERT_TRUE(h.rol.op_short_wait_spent_for_test());
     ASSERT_EQ(h.rol.opRetryCount(), 0u) << "the fallback burst is not a counted retry";
 
@@ -5279,7 +5304,7 @@ TEST(OptimisticShot, TheShortWaitIsPerCommandNotPerSession) {
 
     sendOpen(h);
     ASSERT_EQ(h.tracker.last_copies, 1);
-    h.clock.tick(singleshotwait::firstAckWaitMs(usToPlacedMark(h), 3000) + 50);
+    h.clock.tick(expectedWaitMs(h) + 50);
     ASSERT_TRUE(h.rol.op_short_wait_spent_for_test());
     deliverAck(h.rol, P(h).op_first_msgid_);   // the burst got through
     ASSERT_FALSE(h.rol.awaitingAck());
@@ -5294,7 +5319,7 @@ TEST(OptimisticShot, TheShortWaitIsPerCommandNotPerSession) {
     ASSERT_EQ(h.tracker.last_copies, 1) << "optimistic again";
     EXPECT_FALSE(h.rol.op_short_wait_spent_for_test()) << "a new command starts unspent";
     const size_t sends = h.tracker.sent_copies.size();
-    h.clock.tick(singleshotwait::firstAckWaitMs(usToPlacedMark(h), 3000) + 50);
+    h.clock.tick(expectedWaitMs(h) + 50);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the short wait applies again";
 }
 
@@ -5364,6 +5389,185 @@ TEST(OptimisticShot, ARebootStillBurstsAndKeepsTheNormalWait) {
     EXPECT_EQ(h.tracker.sent_copies.size(), sends);
     h.clock.tick(1500);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1);
+}
+
+// ---------------------------------------------------------------------------
+// The adaptive first-ack deadline (SingleShotAckWait.h, 2026-10-08).
+//
+// Field fact: the ack of a placed single copy reaches the hub 1.6 - 2.2 s AFTER
+// THE MARK. A 500 ms tail burst 17 copies on top of 4 of 8 commands that were
+// about to be answered.
+// ---------------------------------------------------------------------------
+
+TEST(AdaptiveAckWait, AnAckAtTheMeasuredFieldLatencyDoesNotBurst) {
+    // The exact 19:21:39 case: mark 556 ms out, ack 1.7 s after the mark. With
+    // no history the deadline is the normal one; with history it is the node's.
+    using namespace real_helpers;
+    for (int with_history = 0; with_history < 2; ++with_history) {
+        RealHubHarness h{18, kMacRol2};
+        staleButOtherwiseGood(h);
+        h.rol.enable_optimistic_single_shot(true);
+        if (with_history) seedLatency(h, 2100);
+        sendOpen(h);
+        ASSERT_EQ(h.tracker.last_copies, 1);
+        const int64_t mark = P(h).last_placed_t0_us_;
+        const size_t sends = h.tracker.sent_copies.size();
+
+        // The old deadline (to mark + 500 ms, plus the double-counted drain)
+        // would have fired here, ~1.0 - 2.0 s after the command.
+        proto_sim_timer_set_now_us(mark + 1'700'000 - 1);
+        h.clock.tick(1);
+        ASSERT_EQ(h.tracker.sent_copies.size(), sends) << "no premature burst";
+        EXPECT_FALSE(h.rol.op_short_wait_spent_for_test());
+        deliverAck(h.rol, P(h).op_first_msgid_);
+        h.clock.tick(6000);
+        EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "an answered command is never followed by a burst";
+        EXPECT_FALSE(h.rol.hubBelief().single_shot_unacked);
+        EXPECT_FALSE(h.rol.commandFailed());
+        // And the clean ack taught the node's history its real latency.
+        EXPECT_NEAR((double) h.rol.ack_latency_for_test().maxDelayMs(nowMs()),
+                    with_history ? 2100.0 : 1700.0, 1.0);
+    }
+}
+
+TEST(AdaptiveAckWait, ATrulyMissingAckBurstsAtTheAdaptiveDeadlineNotBefore) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    seedLatency(h, 1800);                       // tail = 1800 + 450 = 2250
+    ASSERT_EQ(h.rol.ack_latency_for_test().tailMs(nowMs()), 2250u);
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    EXPECT_EQ(h.rol.op_first_tail_ms_for_test(), 2250u);
+    const uint32_t wait_ms = expectedWaitMs(h);
+    const size_t sends = h.tracker.sent_copies.size();
+
+    h.clock.tick(wait_ms - 40);
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends) << "not before the deadline";
+    h.clock.tick(80);
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the fallback burst";
+    EXPECT_NE(h.tracker.last_copies, 1);
+    EXPECT_TRUE(h.rol.op_short_wait_spent_for_test());
+    EXPECT_EQ(h.rol.opRetryCount(), 0u) << "a miss is not a counted retry";
+    // The proven-too-short tail is remembered: the NEXT deadline is longer.
+    EXPECT_EQ(h.rol.ack_latency_for_test().maxDelayMs(nowMs()), 2250u);
+    EXPECT_GT(h.rol.ack_latency_for_test().tailMs(nowMs()), 2250u);
+}
+
+TEST(AdaptiveAckWait, ANodeWithSlowHistoryWaitsLongerThanOneWithFastHistory) {
+    using namespace real_helpers;
+    int fast_ms = 0, slow_ms = 0;
+    uint32_t fast_tail = 0, slow_tail = 0;
+    for (int slow = 0; slow < 2; ++slow) {
+        RealHubHarness h{18, kMacRol2};
+        staleButOtherwiseGood(h);
+        h.rol.enable_optimistic_single_shot(true);
+        seedLatency(h, slow ? 2300 : 1100);
+        // Same placement for both: the mark may differ, so compare ms after it.
+        sendOpen(h);
+        ASSERT_EQ(h.tracker.last_copies, 1);
+        (slow ? slow_tail : fast_tail) = h.rol.op_first_tail_ms_for_test();
+        const int to_mark_ms = (int) (usToPlacedMark(h) / 1000);
+        const int burst_ms = msUntilBurst(h);
+        ASSERT_GT(burst_ms, 0) << "the burst must come";
+        (slow ? slow_ms : fast_ms) = burst_ms - to_mark_ms;   // ms AFTER the mark
+    }
+    EXPECT_LT(fast_tail, slow_tail);
+    EXPECT_LT(fast_ms, slow_ms) << "the slow node is given longer before a burst";
+    EXPECT_GE(fast_ms, (int) fast_tail) << "never earlier than the observed latency";
+    EXPECT_GE(slow_ms, (int) slow_tail);
+}
+
+TEST(AdaptiveAckWait, TheDeadlineNeverUndercutsTheObservedLatency) {
+    // For several latencies: an ack at exactly the slowest sample seen is in time.
+    using namespace real_helpers;
+    for (uint32_t lat : {900u, 1700u, 2200u, 2800u}) {
+        RealHubHarness h{18, kMacRol2};
+        staleButOtherwiseGood(h);
+        h.rol.enable_optimistic_single_shot(true);
+        seedLatency(h, lat);
+        sendOpen(h);
+        ASSERT_EQ(h.tracker.last_copies, 1);
+        const size_t sends = h.tracker.sent_copies.size();
+        proto_sim_timer_set_now_us(P(h).last_placed_t0_us_ + (int64_t) lat * 1000);
+        h.clock.tick(1);
+        EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "latency " << lat;
+        EXPECT_FALSE(h.rol.op_short_wait_spent_for_test()) << "latency " << lat;
+    }
+}
+
+TEST(AdaptiveAckWait, OnlyACleanSinglePlacedCopyFeedsTheHistory) {
+    using namespace real_helpers;
+    {   // a burst command (a session change refuses single shot): not a placed
+        // copy, so even though an OLD mark exists it is not this command's
+        RealHubHarness h{18, kMacRol2};
+        confirmedGrid(h);
+        h.rol.node_fw_version_ = 10104;
+        h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, true);
+        h.rol.send_login();
+        P(h).relogin_pending_ = false;
+        sendOpen(h);
+        ASSERT_NE(h.tracker.last_copies, 1);
+        h.clock.tick(500);
+        proto_sim_timer_advance_us(2'500'000);   // esp_timer is separate from the scheduler clock
+        deliverAck(h.rol, P(h).op_first_msgid_);
+        EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), 0u);
+    }
+    {   // an optimistic shot that missed and was answered after the fallback burst
+        RealHubHarness h{18, kMacRol2};
+        staleButOtherwiseGood(h);
+        h.rol.enable_optimistic_single_shot(true);
+        sendOpen(h);
+        h.clock.tick(expectedWaitMs(h) + 50);
+        ASSERT_TRUE(h.rol.op_short_wait_spent_for_test());
+        const unsigned before = h.rol.ack_latency_for_test().count(nowMs());
+        proto_sim_timer_advance_us(3'100'000);   // a positive, plausible mark->ack delay
+        deliverAck(h.rol, P(h).op_first_msgid_);
+        EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), before)
+            << "an ack after a burst says nothing about the single-shot path";
+    }
+    {   // a single shot the hub was ENTITLED to (not optimistic) feeds it too,
+        // so the history exists before the switch is ever turned on
+        RealHubHarness h{18, kMacRol2};
+        confirmedGrid(h);
+        h.rol.node_fw_version_ = 10104;
+        h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, true);
+        h.rol.enable_optimistic_single_shot(true);
+        sendOpen(h);
+        ASSERT_EQ(h.tracker.last_copies, 1);
+        ASSERT_FALSE(h.rol.op_sent_optimistic_for_test());
+        proto_sim_timer_set_now_us(P(h).last_placed_t0_us_ + 1'650'000);
+        deliverAck(h.rol, P(h).op_first_msgid_);
+        EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), 1u);
+        EXPECT_EQ(h.rol.ack_latency_for_test().maxDelayMs(nowMs()), 1650u);
+    }
+}
+
+TEST(AdaptiveAckWait, TheQueueDrainAndTheMarkAreNotCountedTwice) {
+    // The first version ran the wait through ack_wait_ms_(), which ADDS the
+    // drain, while the drain already contains the time to the mark. A deep
+    // queue (3 s here) must give "later of the two + tail", not a sum.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    seedLatency(h, 1700);                       // tail 2125
+    h.tracker.tx_drain_us = 3'000'000;
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    const int burst_ms = msUntilBurst(h);
+    EXPECT_NEAR(burst_ms, 3000 + 2125, 60) << "drain (the later of drain and mark) + tail, once";
+}
+
+TEST(AdaptiveAckWait, EachListenerKeepsItsOwnHistory) {
+    using namespace real_helpers;
+    RealHubHarness a{18, kMacRol2};
+    RealHubHarness b{18, kMacRol2};
+    seedLatency(a, 2400);
+    EXPECT_EQ(a.rol.ack_latency_for_test().count(nowMs()), 3u);
+    EXPECT_EQ(b.rol.ack_latency_for_test().count(nowMs()), 0u) << "no sharing between nodes";
+    EXPECT_EQ(b.rol.ack_latency_for_test().tailMs(nowMs()), singleshotwait::kDefaultTailMs);
 }
 
 // ---------------------------------------------------------------------------

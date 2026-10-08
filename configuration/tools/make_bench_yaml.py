@@ -40,6 +40,16 @@ n = [i for i, l in enumerate(out) if l == "    checkin_interval: 1h"]
 assert len(n) == 1, n
 out[n[0]] = "    checkin_interval: 5min   # BENCH ONLY (make_bench_yaml.py)"
 
+# The 23:00 nightly sleep deep-sleeps both nodes and ends any long Mode B hold
+# (it cost a 14.5 h soak on 2026-10-07: the nodes came back unpromoted and, on
+# the production profile, cannot re-promote). BENCH ONLY: replace the two sleep
+# actions with a log line so the `then:` list stays valid.
+for who in ("rol_1", "rol_2"):
+    idx = [i for i, l in enumerate(out) if l.strip() == f"- loracover.on_sleep_start: {who}"]
+    assert len(idx) == 1, (who, idx)
+    ind = out[idx[0]][:len(out[idx[0]]) - len(out[idx[0]].lstrip())]
+    out[idx[0]] = f'{ind}- logger.log: "BENCH ONLY: nightly sleep for {who} disabled (make_bench_yaml.py)"'
+
 # MAC-1 buttons: the shipped long runs are all counter-off. Same grid, counter ON,
 # so the delta against the MAC-0 long runs is MAC-1's cost.
 MAC1 = """  - platform: template

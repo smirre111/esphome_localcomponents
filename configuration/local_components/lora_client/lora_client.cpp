@@ -3234,10 +3234,12 @@ namespace esphome
         // overwrite it.
         this->op_sent_single_shot_ = this->last_placed_single_shot_;
         this->op_sent_optimistic_  = this->last_placed_optimistic_;
+        this->op_mark_us_          = this->last_placed_single_shot_ ? this->last_placed_t0_us_ : 0;
         free(buf);
       }
       else
       {
+        this->op_mark_us_ = 0;
         ESP_LOGE(TAG, "[%s] Failed to pack tracked operation", this->get_name().c_str());
       }
       return header.msgid;
@@ -3322,13 +3324,35 @@ namespace esphome
       // which is where the frame actually goes out, not from now.
       const bool short_wait = singleshotwait::useShortFirstWait(
           this->op_sent_optimistic_, this->op_retry_count_, this->op_short_wait_spent_);
-      uint32_t base_ms = kOpRetryIntervalMs;
+      uint32_t wait_ms = this->ack_wait_ms_(kOpRetryIntervalMs);
+      this->op_first_tail_ms_ = 0;
       if (short_wait)
       {
-        const int64_t us_to_t0 = this->last_placed_t0_us_ - esp_timer_get_time();
-        base_ms = singleshotwait::firstAckWaitMs(us_to_t0, kOpRetryIntervalMs);
+        // From NOW: whichever is later of the placed mark and the queue's drain
+        // (they estimate the same instant; ack_wait_ms_ must NOT be added on top,
+        // it would count the time to the mark twice), plus THIS node's measured
+        // mark->ack tail.
+        const int64_t  us_to_t0 = ((this->op_mark_us_ != 0) ? this->op_mark_us_
+                                                            : this->last_placed_t0_us_) -
+                                  esp_timer_get_time();
+        int64_t drain_ms = (this->parent_ != nullptr) ? this->parent_->txDrainUs() / 1000 : 0;
+        if (drain_ms < 0)
+          drain_ms = 0;
+        if (drain_ms > (int64_t) kMaxAckBacklogMs)
+          drain_ms = kMaxAckBacklogMs;
+        const uint32_t now_ms = (uint32_t) (esp_timer_get_time() / 1000);
+        const uint32_t tail   = this->ack_latency_.tailMs(now_ms);
+        this->op_first_tail_ms_ = tail;
+        wait_ms = singleshotwait::firstAckWaitMs(us_to_t0, (uint32_t) drain_ms, tail);
+        ESP_LOGI(TAG, "[%s] optimistic single shot: ack deadline %u ms from now "
+                      "(mark in %d ms, queue drain %d ms, tail %u ms; node history %u "
+                      "samples, max %u ms)",
+                 this->get_name().c_str(), (unsigned) wait_ms,
+                 (int) (us_to_t0 / 1000), (int) drain_ms, (unsigned) tail,
+                 (unsigned) this->ack_latency_.count(now_ms),
+                 (unsigned) this->ack_latency_.maxDelayMs(now_ms));
       }
-      this->set_timeout("op_retry", this->ack_wait_ms_(base_ms), [this, short_wait]() {
+      this->set_timeout("op_retry", wait_ms, [this, short_wait]() {
         if (!this->op_awaiting_ack_)
           return; // acked already; one-shot, nothing to re-arm
         // Security review finding 1: a relogin can start WHILE a retry is
@@ -3355,6 +3379,12 @@ namespace esphome
           // normal 3 s waits and the full kOpMaxRetries follow unchanged.
           this->op_short_wait_spent_ = true;
           this->belief_.single_shot_unacked = true;
+          // The tail just proved too short is a lower bound on this node's
+          // delay: remember it, so the next deadline is longer instead of the
+          // same mistake (and a node that never answers climbs to the normal
+          // wait, no further).
+          this->ack_latency_.note((uint32_t) (esp_timer_get_time() / 1000),
+                                  this->op_first_tail_ms_);
           ESP_LOGW(TAG, "[%s] optimistic single shot unacked — bursting now "
                         "(not counted against the retry budget)",
                    this->get_name().c_str());
@@ -3492,6 +3522,26 @@ namespace esphome
       this->set_command_failed_(false);
       ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
                (unsigned)ack_msg_id);
+      // Mark -> ack, for every command whose FIRST frame was a single placed
+      // copy (one INFO per user command: this is not a periodic log). It feeds
+      // the node's latency history only when clean (no retry, no fallback burst).
+      if (this->op_mark_us_ != 0)
+      {
+        const int64_t now_us   = esp_timer_get_time();
+        const int64_t delay_ms = (now_us - this->op_mark_us_) / 1000;
+        const bool clean = singleshotwait::isCleanSample(
+            true, this->op_retry_count_, this->op_short_wait_spent_, true);
+        bool kept = false;
+        if (clean && delay_ms >= 0)
+          kept = this->ack_latency_.note((uint32_t) (now_us / 1000), (uint32_t) delay_ms);
+        ESP_LOGI(TAG, "[%s] ack %lld ms after the mark (%s%s; first-ack tail %u ms; "
+                      "history now %u samples, max %u ms)",
+                 this->get_name().c_str(), (long long) delay_ms,
+                 clean ? "clean single shot" : "after a burst fallback or retry",
+                 kept ? ", recorded" : ", not recorded", (unsigned) this->op_first_tail_ms_,
+                 (unsigned) this->ack_latency_.count((uint32_t) (now_us / 1000)),
+                 (unsigned) this->ack_latency_.maxDelayMs((uint32_t) (now_us / 1000)));
+      }
     }
 
     void LORAListener::set_command_failed_(bool failed)
