@@ -5080,6 +5080,135 @@ struct RetagCase {
 };
 }  // namespace
 
+// Characterisation (CCN refactor of s_pack_operation_message): the sealed frame
+// is what an independent opener recovers, and every refusal/plaintext branch.
+namespace {
+struct ClearKeysProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::clearSessionKeys_;
+};
+struct PackCase {
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    TimeSync ts = TIME_SYNC__INIT;
+    explicit PackCase(uint32_t dest = 18, uint32_t msgid = 5) {
+        hdr.destaddress = dest; hdr.destsubnet = 2;
+        hdr.senderaddress = esphome::lora_tracker::kHubAddress;
+        hdr.msgid = msgid;
+        ts.epoch = 1787000000;
+        op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+        op.timesync = &ts;
+    }
+};
+}  // namespace
+
+TEST(MsgidGuard, ASealedFrameOpensToExactlyThePayloadOnlyInnerMessage) {
+    MsgidGuardFixture f;
+    PackCase c(18, 77);
+    uint8_t *buf = nullptr; size_t len = 0;
+    ASSERT_TRUE(f.rol.packOperationForTest(&c.op, true, &buf, &len));
+    ASSERT_NE(buf, nullptr);
+    ASSERT_GT(len, 0u);
+    LoraClientOperationMessage *w = lora_client_operation_message__unpack(nullptr, len, buf);
+    ASSERT_NE(w, nullptr);
+    free(buf);
+    ASSERT_EQ(w->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED);
+    ASSERT_NE(w->header, nullptr);
+    EXPECT_EQ(w->header->destaddress, 18u);
+    EXPECT_EQ(w->header->destsubnet, 2u);
+    EXPECT_EQ(w->header->senderaddress, (uint32_t) esphome::lora_tracker::kHubAddress);
+    EXPECT_EQ(w->header->msgid, 77u);
+    EXPECT_EQ(w->header->burstindex, 0u);
+    EXPECT_EQ(w->header->burstcount, 0u);
+    ASSERT_NE(w->encrypted, nullptr);
+    ASSERT_EQ(w->encrypted->tag.len, (size_t) framecrypto::kSessionCmacTagBytes);
+    for (size_t i = 0; i < w->encrypted->tag.len; ++i)
+        EXPECT_EQ(w->encrypted->tag.data[i], 0) << "the pack-time tag is a zero placeholder";
+
+    // The payload-only plaintext the node must recover.
+    LoraClientOperationMessage inner = c.op;
+    inner.header = nullptr;
+    std::vector<uint8_t> want(lora_client_operation_message__get_packed_size(&inner));
+    lora_client_operation_message__pack(&inner, want.data());
+    ASSERT_EQ(w->encrypted->ciphertext.len, want.size());
+
+    framecrypto::EtmHeaderFields fx{};
+    fx.downlink = true; fx.session_id = f.base;
+    fx.dest_address = 18; fx.dest_subnet = 2;
+    fx.sender_address = esphome::lora_tracker::kHubAddress; fx.msgid = 77;
+    uint8_t tag[framecrypto::kSessionCmacTagBytes];
+    proto_sim::encrypt_then_cmac_retag(f.base, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
+                                       18, true, fx, w->encrypted->ciphertext.data,
+                                       w->encrypted->ciphertext.len, tag);
+    auto opened = proto_sim::encrypt_then_cmac_open(
+        f.base, kTestNodeNonce, esphome::lora_tracker::kHubAddress, 18, true, fx,
+        w->encrypted->ciphertext.data, w->encrypted->ciphertext.len, tag, sizeof(tag));
+    ASSERT_TRUE(opened.has_value());
+    EXPECT_EQ(*opened, want) << "CTR block = (session, dest, downlink, msgid, block 0)";
+    lora_client_operation_message__free_unpacked(w, nullptr);
+
+    // A different msgid yields a different keystream.
+    PackCase c2(18, 78);
+    uint8_t *buf2 = nullptr; size_t len2 = 0;
+    ASSERT_TRUE(f.rol.packOperationForTest(&c2.op, true, &buf2, &len2));
+    LoraClientOperationMessage *w2 = lora_client_operation_message__unpack(nullptr, len2, buf2);
+    free(buf2);
+    ASSERT_NE(w2, nullptr);
+    std::vector<uint8_t> ct2(w2->encrypted->ciphertext.data,
+                             w2->encrypted->ciphertext.data + w2->encrypted->ciphertext.len);
+    EXPECT_NE(ct2, std::vector<uint8_t>(want)) << "ciphertext differs from plaintext";
+    lora_client_operation_message__free_unpacked(w2, nullptr);
+}
+
+TEST(MsgidGuard, PackRefusesBadArgumentsAndFallsBackToPlaintextWhenNotSealing) {
+    MsgidGuardFixture f;
+    PackCase c;
+    uint8_t *buf = nullptr; size_t len = 0;
+
+    EXPECT_FALSE(f.rol.packOperationForTest(nullptr, true, &buf, &len));
+    LoraClientOperationMessage nohdr = c.op; nohdr.header = nullptr;
+    EXPECT_FALSE(f.rol.packOperationForTest(&nohdr, true, &buf, &len));
+    EXPECT_FALSE(f.rol.packOperationForTest(&c.op, true, nullptr, &len));
+    EXPECT_FALSE(f.rol.packOperationForTest(&c.op, true, &buf, nullptr));
+    EXPECT_EQ(buf, nullptr);
+
+    // encrypt=false: the plain pack, byte for byte, even with a live session.
+    std::vector<uint8_t> plain(lora_client_operation_message__get_packed_size(&c.op));
+    lora_client_operation_message__pack(&c.op, plain.data());
+    ASSERT_TRUE(f.rol.packOperationForTest(&c.op, false, &buf, &len));
+    ASSERT_EQ(len, plain.size());
+    EXPECT_EQ(0, memcmp(buf, plain.data(), len));
+    free(buf); buf = nullptr;
+
+    // encrypt=true but the destination has no session at all: also plaintext.
+    PackCase stranger(77, 5);
+    std::vector<uint8_t> plain77(lora_client_operation_message__get_packed_size(&stranger.op));
+    lora_client_operation_message__pack(&stranger.op, plain77.data());
+    ASSERT_TRUE(f.rol.packOperationForTest(&stranger.op, true, &buf, &len));
+    ASSERT_EQ(len, plain77.size());
+    EXPECT_EQ(0, memcmp(buf, plain77.data(), len));
+    free(buf); buf = nullptr;
+}
+
+TEST(MsgidGuard, SealingWithoutDerivedKeysFailsAndLeavesNothingBehind) {
+    MsgidGuardFixture f;
+    static_cast<ClearKeysProbe &>(f.rol).clearSessionKeys_();   // the base nonce stays; the K_enc/K_mac are gone
+    PackCase c;
+    uint8_t *buf = nullptr; size_t len = 0;
+    EXPECT_FALSE(f.rol.packOperationForTest(&c.op, true, &buf, &len));
+    EXPECT_EQ(buf, nullptr);
+    EXPECT_FALSE(f.rol.msgidReloginPendingForTest()) << "not a msgid-space refusal";
+}
+
+TEST(MsgidGuard, ASessionIdOfZeroIsNotASessionToSealUnder) {
+    MsgidGuardFixture f;
+    ASSERT_TRUE(f.rol.deriveSessionKeysForTest(/*session_id=*/0u, kTestNodeNonce));
+    PackCase c;
+    uint8_t *buf = nullptr; size_t len = 0;
+    EXPECT_FALSE(f.rol.packOperationForTest(&c.op, true, &buf, &len))
+        << "an entry present but zero is 'found' for the plaintext decision, then refused";
+    EXPECT_EQ(buf, nullptr);
+}
+
 TEST(MsgidGuard, TheRetagIsExactlyTheCmacOverEveryBurstField) {
     MsgidGuardFixture f;
     f.rol.mark_session_confirmed_for_test();

@@ -219,6 +219,207 @@ static bool s_import_ctr_key(const uint8_t *key_material, size_t key_bytes, psa_
   return psa_import_key(&attrs, key_material, key_bytes, out_id) == PSA_SUCCESS;
 }
 
+// The session id the peer's keys were derived for (s_base_nonce_map); false
+// when the peer has no entry. An entry whose value is 0 is "found" with 0.
+static bool s_session_id_for(uint32_t peer, uint32_t *out)
+{
+  std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+  auto it = s_base_nonce_map.find(peer);
+  if (it == s_base_nonce_map.end()) return false;
+  *out = it->second;
+  return true;
+}
+
+// One AES-CTR pass (encrypt or decrypt) of in -> out under key_id. `out` must
+// hold in_len bytes. Shared by the downlink seal below and the uplink open in
+// handle_encrypted_. The caller holds s_session_keys_mutex whenever the key
+// could be destroyed concurrently.
+static bool s_ctr_pass(bool encrypt, psa_key_id_t key_id,
+                       const uint8_t (&ctr_block)[framecrypto::kCtrBlockBytes],
+                       const uint8_t *in, size_t in_len, uint8_t *out)
+{
+  psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
+  bool ok = (encrypt ? psa_cipher_encrypt_setup(&op, key_id, PSA_ALG_CTR)
+                     : psa_cipher_decrypt_setup(&op, key_id, PSA_ALG_CTR)) == PSA_SUCCESS;
+  if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
+  size_t out_total = 0, part_len = 0;
+  if (ok)
+  {
+    ok = psa_cipher_update(&op, in, in_len, out, in_len, &part_len) == PSA_SUCCESS;
+    out_total += part_len;
+  }
+  if (ok)
+  {
+    size_t finish_len = 0;
+    ok = psa_cipher_finish(&op, out + out_total, in_len - out_total, &finish_len) == PSA_SUCCESS;
+    out_total += finish_len;
+    ok = ok && (out_total == in_len);
+  }
+  else
+  {
+    psa_cipher_abort(&op);
+  }
+  return ok;
+}
+
+// The plaintext pack: *out is malloc'd, the caller frees it.
+static bool s_pack_plaintext(const LoraClientOperationMessage *plain, uint8_t **out, size_t *out_len)
+{
+  *out_len = lora_client_operation_message__get_packed_size(plain);
+  *out     = static_cast<uint8_t *>(malloc(*out_len));
+  if (!*out)
+    return false;
+  lora_client_operation_message__pack(plain, *out);
+  return true;
+}
+
+// Encrypt the payload ONLY — the inner message's header is redundant (the node
+// uses the plaintext outer header), so strip it before packing. *inner is
+// malloc'd, the caller frees it.
+static bool s_pack_inner(const LoraClientOperationMessage *plain, uint8_t **inner, size_t *inner_len)
+{
+  LoraClientOperationMessage inner_msg = *plain;
+  inner_msg.header = nullptr;
+  *inner_len = lora_client_operation_message__get_packed_size(&inner_msg);
+  *inner     = static_cast<uint8_t *>(malloc(*inner_len));
+  if (!*inner)
+    return false;
+  lora_client_operation_message__pack(&inner_msg, *inner);
+  return true;
+}
+
+enum class CtrSeal { NoKey, Failed, Ok };
+
+// The key id is read AND USED under s_session_keys_mutex. s_pack_operation_message
+// also runs on the esp_timer task (build_mac_ping_frame_) while the ESPHome loop
+// can install/destroy this peer's keys; reading the id, releasing the lock
+// and only then calling PSA would let the key be destroyed (and its volatile
+// slot reused) mid-operation. The critical section is one short CTR pass.
+//
+// Invariant I3: also snapshot which session generation this ciphertext is
+// sealed under, so sealBurstCopyTag() can refuse to retag it under a
+// DIFFERENT one later. The generation, not the psa_key_id_t: mbedTLS's
+// volatile key ids are reused slot indices, so a later generation could
+// otherwise be assigned the SAME id an earlier generation held.
+// No logging inside the critical section.
+static CtrSeal s_ctr_seal_locked(uint32_t dest, const uint8_t (&ctr_block)[framecrypto::kCtrBlockBytes],
+                                 const uint8_t *inner, size_t inner_len, uint8_t *cipher)
+{
+  std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+  auto kit = s_k_enc_map.find(dest);
+  const psa_key_id_t enc_key_id = (kit != s_k_enc_map.end()) ? kit->second : PSA_KEY_ID_NULL;
+  if (enc_key_id == PSA_KEY_ID_NULL)
+    return CtrSeal::NoKey;
+  auto git = s_session_generation_map.find(dest);
+  s_seal_generation_map[dest] = (git != s_session_generation_map.end()) ? git->second : 0;
+  return s_ctr_pass(true, enc_key_id, ctr_block, inner, inner_len, cipher) ? CtrSeal::Ok
+                                                                           : CtrSeal::Failed;
+}
+
+// Wrap the sealed ciphertext in the plaintext outer header and pack it.
+// The caller keeps ownership of `cipher`.
+static bool s_pack_sealed(const LoraClientOperationMessage *plain, uint8_t *cipher,
+                          size_t cipher_len, uint8_t **out, size_t *out_len)
+{
+  // Outer header mirrors the inner addressing + msgid. Encryption is
+  // signalled by the `encrypted` oneof case, not a header flag.
+  //
+  // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
+  // Encrypt-then-CMAC replaces AES-GCM. The ciphertext is sealed ONCE,
+  // here, under K_enc via CTR; the tag written here is only a PLACEHOLDER —
+  // the real tag, which DOES cover burstIndex/burstCount/onMark/
+  // fireStamped/fireRound/fireOffsetUs, is computed per copy by
+  // LORAListener::sealBurstCopyTag() inside the tracker's send loop, once
+  // those fields are actually stamped.
+  LoraHeader outer      = LORA_HEADER__INIT;
+  outer.destaddress     = plain->header->destaddress;
+  outer.destsubnet      = plain->header->destsubnet;
+  outer.senderaddress   = plain->header->senderaddress;
+  outer.msgid           = plain->header->msgid;
+
+  // Placeholder tag — see the comment above. Must be the right LENGTH
+  // (kSessionCmacTagBytes) since sealBurstCopyTag() overwrites in place
+  // without resizing. lora_client_operation_message__pack() below copies
+  // these bytes into *out immediately, so this local's lifetime is fine.
+  uint8_t placeholder_tag[framecrypto::kSessionCmacTagBytes] = {0};
+
+  EncryptedPayload enc     = ENCRYPTED_PAYLOAD__INIT;
+  enc.tag.data             = placeholder_tag;
+  enc.tag.len              = sizeof(placeholder_tag);
+  enc.ciphertext.data      = cipher;
+  enc.ciphertext.len       = cipher_len;
+
+  LoraClientOperationMessage wrapped = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+  wrapped.header    = &outer;
+  wrapped.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
+  wrapped.encrypted = &enc;
+
+  *out_len = lora_client_operation_message__get_packed_size(&wrapped);
+  *out     = static_cast<uint8_t *>(malloc(*out_len));
+  if (!*out)
+    return false;
+  lora_client_operation_message__pack(&wrapped, *out);
+  return true;
+}
+
+// The encrypted branch of s_pack_operation_message: a session (base nonce)
+// exists for `dest` and the caller asked for encryption.
+static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t dest,
+                            uint8_t **out, size_t *out_len, bool *msgid_refused)
+{
+  // The CTR counter block holds 31 bits of msgid but the CMAC covers 32, so a
+  // msgid >= 2^31 would reuse the keystream of (msgid - 2^31). The allocator
+  // (incrTxMessageId) never hands one out; this is the seal-point backstop for
+  // ids that bypass it (a restored counter, a reserved block).
+  if (!framecrypto::msgidFitsCtr(plain->header->msgid))
+  {
+    ESP_LOGE("lora_client", "Refusing to seal msgid %u for peer %u: beyond the CTR space",
+             (unsigned) plain->header->msgid, (unsigned) dest);
+    if (msgid_refused) *msgid_refused = true;
+    return false;
+  }
+
+  uint8_t *inner     = nullptr;
+  size_t   inner_len = 0;
+  if (!s_pack_inner(plain, &inner, &inner_len))
+    return false;
+
+  uint32_t session_id = 0;
+  s_session_id_for(dest, &session_id);
+  if (session_id == 0)
+  {
+    ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
+    free(inner);
+    return false;
+  }
+
+  uint8_t ctr_block[framecrypto::kCtrBlockBytes];
+  framecrypto::buildCtrInitialBlock(session_id, dest, /*downlink=*/true, plain->header->msgid,
+                                    /*block_idx=*/0, ctr_block);
+
+  uint8_t *cipher = static_cast<uint8_t *>(malloc(inner_len));
+  if (!cipher)
+  {
+    free(inner);
+    return false;
+  }
+
+  const CtrSeal sealed = s_ctr_seal_locked(dest, ctr_block, inner, inner_len, cipher);
+  if (sealed == CtrSeal::NoKey)
+    ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
+  if (sealed != CtrSeal::Ok)
+  {
+    free(inner);
+    free(cipher);
+    return false;
+  }
+  free(inner);
+
+  const bool packed = s_pack_sealed(plain, cipher, inner_len, out, out_len);
+  free(cipher);
+  return packed;
+}
+
 // Pack a downlink operation, encrypting it into an EncryptedPayload-wrapped
 // LoraClientOperationMessage when a session (base nonce) exists for the dest
 // node.  Falls back to a plaintext pack otherwise (e.g. pre-login bootstrap:
@@ -241,166 +442,12 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
   // Send plaintext when the caller hasn't confirmed the session (encrypt==false)
   // or no base nonce exists yet.  This keeps a node that never established
   // encryption controllable and avoids emitting ciphertext it cannot decrypt.
-  bool has_base_nonce;
-  {
-    std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-    has_base_nonce = s_base_nonce_map.find(dest) != s_base_nonce_map.end();
-  }
+  uint32_t unused_session_id = 0;
+  const bool has_base_nonce = s_session_id_for(dest, &unused_session_id);
   if (!encrypt || !has_base_nonce)
-  {
-    *out_len = lora_client_operation_message__get_packed_size(plain);
-    *out     = static_cast<uint8_t *>(malloc(*out_len));
-    if (!*out)
-      return false;
-    lora_client_operation_message__pack(plain, *out);
-    return true;
-  }
+    return s_pack_plaintext(plain, out, out_len);
 
-  // The CTR counter block holds 31 bits of msgid but the CMAC covers 32, so a
-  // msgid >= 2^31 would reuse the keystream of (msgid - 2^31). The allocator
-  // (incrTxMessageId) never hands one out; this is the seal-point backstop for
-  // ids that bypass it (a restored counter, a reserved block).
-  if (!framecrypto::msgidFitsCtr(plain->header->msgid))
-  {
-    ESP_LOGE("lora_client", "Refusing to seal msgid %u for peer %u: beyond the CTR space",
-             (unsigned) plain->header->msgid, (unsigned) dest);
-    if (msgid_refused) *msgid_refused = true;
-    return false;
-  }
-
-  // Encrypt the payload ONLY — the inner message's header is redundant (the node
-  // uses the plaintext outer header), so strip it before packing.
-  LoraClientOperationMessage inner_msg = *plain;
-  inner_msg.header = nullptr;
-  size_t   inner_len = lora_client_operation_message__get_packed_size(&inner_msg);
-  uint8_t *inner     = static_cast<uint8_t *>(malloc(inner_len));
-  if (!inner)
-    return false;
-  lora_client_operation_message__pack(&inner_msg, inner);
-
-  // Outer header mirrors the inner addressing + msgid. Encryption is
-  // signalled by the `encrypted` oneof case, not a header flag.
-  //
-  // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
-  // Encrypt-then-CMAC replaces AES-GCM. The ciphertext is sealed ONCE,
-  // here, under K_enc via CTR; the tag written here is only a PLACEHOLDER —
-  // the real tag, which DOES cover burstIndex/burstCount/onMark/
-  // fireStamped/fireRound/fireOffsetUs, is computed per copy by
-  // LORAListener::sealBurstCopyTag() inside the tracker's send loop, once
-  // those fields are actually stamped.
-  LoraHeader outer      = LORA_HEADER__INIT;
-  outer.destaddress     = plain->header->destaddress;
-  outer.destsubnet      = plain->header->destsubnet;
-  outer.senderaddress   = plain->header->senderaddress;
-  outer.msgid           = plain->header->msgid;
-
-  uint32_t session_id = 0;
-  {
-    std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-    auto it = s_base_nonce_map.find(dest);
-    if (it != s_base_nonce_map.end()) session_id = it->second;
-  }
-  if (session_id == 0)
-  {
-    ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
-    free(inner);
-    return false;
-  }
-
-  uint8_t ctr_block[framecrypto::kCtrBlockBytes];
-  framecrypto::buildCtrInitialBlock(session_id, dest, /*downlink=*/true, outer.msgid,
-                                    /*block_idx=*/0, ctr_block);
-
-  uint8_t *cipher = static_cast<uint8_t *>(malloc(inner_len));
-  if (!cipher)
-  {
-    free(inner);
-    return false;
-  }
-
-  // The key id is read AND USED under s_session_keys_mutex. This function also
-  // runs on the esp_timer task (build_mac_ping_frame_) while the ESPHome loop
-  // can install/destroy this peer's keys; reading the id, releasing the lock
-  // and only then calling PSA would let the key be destroyed (and its volatile
-  // slot reused) mid-operation. The critical section is one short CTR pass.
-  //
-  // Invariant I3: also snapshot which session generation this ciphertext is
-  // sealed under, so sealBurstCopyTag() can refuse to retag it under a
-  // DIFFERENT one later. The generation, not the psa_key_id_t: mbedTLS's
-  // volatile key ids are reused slot indices, so a later generation could
-  // otherwise be assigned the SAME id an earlier generation held.
-  bool have_key = false;
-  bool ctr_ok   = false;
-  {
-    std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-    auto kit = s_k_enc_map.find(dest);
-    const psa_key_id_t enc_key_id = (kit != s_k_enc_map.end()) ? kit->second : PSA_KEY_ID_NULL;
-    if (enc_key_id != PSA_KEY_ID_NULL)
-    {
-      have_key = true;
-      auto git = s_session_generation_map.find(dest);
-      s_seal_generation_map[dest] = (git != s_session_generation_map.end()) ? git->second : 0;
-
-      psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
-      bool ok = psa_cipher_encrypt_setup(&op, enc_key_id, PSA_ALG_CTR) == PSA_SUCCESS;
-      if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
-      size_t out_total = 0, part_len = 0;
-      if (ok)
-      {
-        ok = psa_cipher_update(&op, inner, inner_len, cipher, inner_len, &part_len) == PSA_SUCCESS;
-        out_total += part_len;
-      }
-      if (ok)
-      {
-        size_t finish_len = 0;
-        ok = psa_cipher_finish(&op, cipher + out_total, inner_len - out_total, &finish_len) == PSA_SUCCESS;
-        out_total += finish_len;
-        ok = ok && (out_total == inner_len);
-      }
-      else
-      {
-        psa_cipher_abort(&op);
-      }
-      ctr_ok = ok;
-    }
-  }
-  if (!have_key)
-    ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
-  if (!have_key || !ctr_ok)
-  {
-    free(inner);
-    free(cipher);
-    return false;
-  }
-  free(inner);
-
-  // Placeholder tag — see the comment above. Must be the right LENGTH
-  // (kSessionCmacTagBytes) since sealBurstCopyTag() overwrites in place
-  // without resizing. lora_client_operation_message__pack() below copies
-  // these bytes into *out immediately, so this local's lifetime is fine.
-  uint8_t placeholder_tag[framecrypto::kSessionCmacTagBytes] = {0};
-
-  EncryptedPayload enc     = ENCRYPTED_PAYLOAD__INIT;
-  enc.tag.data             = placeholder_tag;
-  enc.tag.len              = sizeof(placeholder_tag);
-  enc.ciphertext.data      = cipher;
-  enc.ciphertext.len       = inner_len;
-
-  LoraClientOperationMessage wrapped = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-  wrapped.header    = &outer;
-  wrapped.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
-  wrapped.encrypted = &enc;
-
-  *out_len = lora_client_operation_message__get_packed_size(&wrapped);
-  *out     = static_cast<uint8_t *>(malloc(*out_len));
-  if (!*out)
-  {
-    free(cipher);
-    return false;
-  }
-  lora_client_operation_message__pack(&wrapped, *out);
-  free(cipher);
-  return true;
+  return s_seal_downlink(plain, dest, out, out_len, msgid_refused);
 }
 
 namespace esphome
@@ -1719,16 +1766,6 @@ namespace esphome
     // logs while it is held.
 
     enum class RetagMac { Ok, Stale, Failed };
-
-    // The session id the peer's keys were derived for; false when it has none.
-    static bool s_session_id_for(uint32_t peer, uint32_t *out)
-    {
-      std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-      auto it = s_base_nonce_map.find(peer);
-      if (it == s_base_nonce_map.end()) return false;
-      *out = it->second;
-      return true;
-    }
 
     // The CMAC input of one downlink burst copy: the authenticated prefix
     // (header fields incl. the per-copy timing fields) then the ciphertext.
