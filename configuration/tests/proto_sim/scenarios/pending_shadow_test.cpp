@@ -218,6 +218,25 @@ TEST(PendingShadow, DescribeReasonsNamesThemAndNeverOverflows) {
 // Characterisation (CCN refactor): at EVERY buffer size the output is exactly
 // the full string cut to cap-1 characters -- including the sizes where a name
 // is split mid-way and where a comma is the last character that fits.
+TEST(PendingShadow, SinceLastTrafficUsTakesTheLatestOfHeardAndAddressed) {
+    // never heard, never addressed: unknown
+    EXPECT_EQ(sinceLastTrafficUs(0, 0, 5'000), -1);
+    // heard only
+    EXPECT_EQ(sinceLastTrafficUs(1'000, 0, 5'000), 4'000);
+    // addressed only (mark already past)
+    EXPECT_EQ(sinceLastTrafficUs(0, 2'000, 5'000), 3'000);
+    // both: the more recent wins, in either order
+    EXPECT_EQ(sinceLastTrafficUs(1'000, 2'000, 5'000), 3'000);
+    EXPECT_EQ(sinceLastTrafficUs(4'000, 2'000, 5'000), 1'000);
+    // a mark still ahead is clamped to now: the node was addressed "just now"
+    EXPECT_EQ(sinceLastTrafficUs(1'000, 9'000, 5'000), 0);
+    EXPECT_EQ(sinceLastTrafficUs(0, 9'000, 5'000), 0);
+    // a non-positive mark is no mark
+    EXPECT_EQ(sinceLastTrafficUs(1'000, -3, 5'000), 4'000);
+    // equal instants
+    EXPECT_EQ(sinceLastTrafficUs(2'000, 2'000, 5'000), 3'000);
+}
+
 TEST(PendingShadow, DescribeReasonsIsTheFullStringTruncatedAtEveryCapacity) {
     const uint32_t all = kOpAwaitingAck | kOpDeferredUntilLogin | kReloginPending |
                          kPushAwaitingAck | kTimeSyncDue | kQueuedFrames |

@@ -5698,6 +5698,56 @@ TEST(PendingShadowInputs, TheListenerReportsWhatItOwes) {
     EXPECT_EQ(in.since_last_traffic_us, -1) << "never heard, never addressed: unknown";
 }
 
+// Characterisation (CCN refactor of pending_shadow_inputs): every owed-push
+// condition is a reason on its own, and the schedule push only counts while it
+// still has retries left.
+TEST(PendingShadowInputs, EachOwedPushConditionIsAReasonOnItsOwn) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    const int64_t now = esp_timer_get_time();
+    auto settle = [&]() {
+        h.rol.session_confirmed_ = true;
+        P(h).relogin_pending_    = false;
+        h.rol.config_synced_     = true;
+        h.rol.config_push_pending_ = false;
+        h.rol.node_sched_version_ = h.rol.schedule_version();
+        h.rol.sched_dirty_       = false;
+        h.rol.sched_push_msgid_  = 0;
+        h.rol.sched_push_retries_ = 0;
+        h.rol.gridsync_msgid_count_ = 0;
+    };
+    settle();
+    ASSERT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "precondition";
+
+    h.rol.sched_push_msgid_ = 7;
+    h.rol.sched_push_retries_ = 0;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "push in flight";
+    h.rol.sched_push_retries_ = LORAClient::kSchedMaxRetries - 1;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "one retry left";
+    h.rol.sched_push_retries_ = LORAClient::kSchedMaxRetries;
+    EXPECT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack)
+        << "a push that has used every retry is no longer owed";
+    h.rol.sched_push_msgid_ = 0;
+    h.rol.sched_push_retries_ = 0;
+    EXPECT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack);
+
+    settle(); h.rol.sched_dirty_ = true;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "edit not yet pushed";
+    settle(); h.rol.config_synced_ = false;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "config not synced";
+    settle(); h.rol.config_push_pending_ = true;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "config push pending";
+    settle(); h.rol.gridsync_msgid_count_ = 1;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "GridSync unconfirmed";
+    settle(); h.rol.node_sched_version_ ^= 1u;
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "schedule pending";
+    settle();
+    EXPECT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack);
+    EXPECT_FALSE(h.rol.pending_shadow_inputs(now).queued_frames)
+        << "nothing placed, nothing draining";
+}
+
 TEST(PendingShadowInputs, OpsAndDeferredOpsAreVisible) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};

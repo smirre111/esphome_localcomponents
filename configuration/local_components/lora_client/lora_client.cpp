@@ -778,11 +778,7 @@ namespace esphome
       // Anything the node has been sent and not confirmed, or is still owed:
       // a schedule push in flight or an edit not yet pushed, a GridSync, and
       // this boot's configuration push.
-      in.push_awaiting_ack =
-          (this->sched_push_msgid_ != 0 && this->sched_push_retries_ < kSchedMaxRetries) ||
-          this->sched_dirty_ || this->schedule_pending() ||
-          this->gridsync_msgid_count_ != 0 || !this->config_synced_ ||
-          this->config_push_pending_;
+      in.push_awaiting_ack = this->push_awaiting_ack_();
       in.timesync_due = timesyncpolicy::shouldSend(
           this->auto_mode_,
           this->last_timesync_sent_us_ == 0 ? -1 : now_us - this->last_timesync_sent_us_);
@@ -790,9 +786,7 @@ namespace esphome
       //
       // The hub's own transmit side is global, not per node: a frame placed for
       // this node that has not fired yet, or anything draining on the air.
-      in.queued_frames =
-          (this->last_placed_t0_us_ > now_us) ||
-          (this->parent_ != nullptr && this->parent_->txDrainUs() > 0);
+      in.queued_frames = this->frames_queued_(now_us);
       in.timed_mode_off = !this->timed_mode_enabled_;
       // THERE IS NO EXPLICIT LATENCY-TOLERANT FLAG. An automatic-mode node is
       // the only kind that is already unreachable between check-ins by design
@@ -801,14 +795,27 @@ namespace esphome
       // Traffic in EITHER direction: the last frame heard from it, or the last
       // downlink placed for it (that mark, once past, is the last time it was
       // addressed).
-      int64_t last = this->last_heard_us_;
-      if (this->last_placed_t0_us_ > 0)
-      {
-        const int64_t placed = this->last_placed_t0_us_ < now_us ? this->last_placed_t0_us_ : now_us;
-        if (placed > last) last = placed;
-      }
-      in.since_last_traffic_us = (last == 0) ? -1 : now_us - last;
+      in.since_last_traffic_us = pendingshadow::sinceLastTrafficUs(
+          this->last_heard_us_, this->last_placed_t0_us_, now_us);
       return in;
+    }
+
+    // Anything the node has been sent and not confirmed, or is still owed (the
+    // push_awaiting_ack input of pending_shadow_inputs).
+    bool LORAListener::push_awaiting_ack_()
+    {
+      return (this->sched_push_msgid_ != 0 && this->sched_push_retries_ < kSchedMaxRetries) ||
+             this->sched_dirty_ || this->schedule_pending() ||
+             this->gridsync_msgid_count_ != 0 || !this->config_synced_ ||
+             this->config_push_pending_;
+    }
+
+    // The hub's own transmit side is global, not per node: a frame placed for
+    // this node that has not fired yet, or anything draining on the air.
+    bool LORAListener::frames_queued_(int64_t now_us) const
+    {
+      return (this->last_placed_t0_us_ > now_us) ||
+             (this->parent_ != nullptr && this->parent_->txDrainUs() > 0);
     }
 
     bool LORAListener::is_node_awake_() const

@@ -87,6 +87,21 @@ struct NodeInputs {
     int64_t since_last_traffic_us{-1};
 };
 
+// Microseconds since a node was last heard from or addressed; -1 = never.
+// Traffic in EITHER direction counts: the last frame heard from it, or the
+// last downlink placed for it (that mark, once past, is the last time it was
+// addressed; a mark still in the future is clamped to `now_us`).
+inline int64_t sinceLastTrafficUs(int64_t last_heard_us, int64_t last_placed_t0_us,
+                                  int64_t now_us)
+{
+    int64_t last = last_heard_us;
+    if (last_placed_t0_us > 0) {
+        const int64_t placed = last_placed_t0_us < now_us ? last_placed_t0_us : now_us;
+        if (placed > last) last = placed;
+    }
+    return (last == 0) ? -1 : now_us - last;
+}
+
 // A node with no history at all is not "quiet", it is unknown, and unknown
 // listens. So "never" is treated as recent.
 constexpr bool recentTraffic(int64_t since_us, int64_t beacon_interval_us)

@@ -1397,6 +1397,9 @@ namespace esphome
 
 
       bool     is_node_awake_() const;
+      // Inputs of pending_shadow_inputs(), split out to keep it flat.
+      bool     push_awaiting_ack_();
+      bool     frames_queued_(int64_t now_us) const;
       uint32_t ms_until_node_awake_() const;
       void     schedule_startup_login_();
       void     do_login_and_arm_retry_();
