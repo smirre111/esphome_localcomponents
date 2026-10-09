@@ -1189,12 +1189,15 @@ switch:
   #
   # A switch rather than automatic, for the same reason Timed Mode above is:
   # it relaxes "any hub uncertainty -> burst", which is the safety argument.
+  # Default ON since 2026-10-09: the adaptive first-ack deadline was verified on
+  # hardware (12/12 optimistic ops acked, 0 premature bursts). Turn it off to
+  # fall back to the always-burst-when-unsure behaviour.
   - platform: template
     name: "Optimistic single shot (node 2)"
     id: rol_2_optimistic_single_shot
     entity_category: config
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON
     turn_on_action:
       - lambda: 'id(rol_2)->enable_optimistic_single_shot(true);'
     turn_off_action:
@@ -1205,7 +1208,7 @@ switch:
     id: rol_1_optimistic_single_shot
     entity_category: config
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON
     turn_on_action:
       - lambda: 'id(rol_1)->enable_optimistic_single_shot(true);'
     turn_off_action:
