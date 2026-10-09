@@ -1711,29 +1711,32 @@ namespace esphome
       return this->deriveSessionKeys_(session_id, node_nonce);
     }
 
-    bool LORAListener::sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header)
+    // ---- sealBurstCopyTag stages -------------------------------------------
+    //
+    // sealBurstCopyTag is the H-1-measured per-copy retag hot path. The split
+    // below keeps its shape: everything that needs no key runs BEFORE the key
+    // lock, the lock covers one psa_mac_compute and nothing else, and nothing
+    // logs while it is held.
+
+    enum class RetagMac { Ok, Stale, Failed };
+
+    // The session id the peer's keys were derived for; false when it has none.
+    static bool s_session_id_for(uint32_t peer, uint32_t *out)
     {
-      if (enc == nullptr || header == nullptr)
-        return false;
+      std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+      auto it = s_base_nonce_map.find(peer);
+      if (it == s_base_nonce_map.end()) return false;
+      *out = it->second;
+      return true;
+    }
 
-      // Invariant I3 (stale-generation refusal) and I3 (c) (key read AND used
-      // under s_session_keys_mutex) are implemented in the locked section below.
-      // The CTR space guard again, at the retag point (s_pack_operation_message
-      // already refused to seal such a frame, so this is defence in depth).
-      if (!framecrypto::msgidFitsCtr(header->msgid))
-        return false;
-
-      uint32_t session_id = 0;
-      {
-        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-        auto it = s_base_nonce_map.find(this->short_address_);
-        if (it == s_base_nonce_map.end()) return false;
-        session_id = it->second;
-      }
-
-      // Everything that needs no key is done BEFORE the key lock is taken, so
-      // the critical section below is one psa_mac_compute and nothing else
-      // (this is the H-1-measured retag path).
+    // The CMAC input of one downlink burst copy: the authenticated prefix
+    // (header fields incl. the per-copy timing fields) then the ciphertext.
+    // Needs no key, so it is built outside the key lock.
+    static std::vector<uint8_t> s_retag_mac_input(const ::EncryptedPayload *enc,
+                                                  const ::LoraHeader *header,
+                                                  uint32_t session_id)
+    {
       framecrypto::EtmHeaderFields etm{};
       etm.downlink       = true;
       etm.session_id     = session_id;
@@ -1754,36 +1757,64 @@ namespace esphome
       std::vector<uint8_t> mac_input(sizeof(prefix) + enc->ciphertext.len);
       memcpy(mac_input.data(), prefix, sizeof(prefix));
       memcpy(mac_input.data() + sizeof(prefix), enc->ciphertext.data, enc->ciphertext.len);
+      return mac_input;
+    }
+
+    // The ONLY step that holds s_session_keys_mutex. `generation` and `key_id`
+    // are taken BY REFERENCE and read inside the lock: the key id is read AND
+    // USED under the lock. The loop task's installSessionKeys_()/
+    // clearSessionKeys_() destroy the key under this same mutex, and a
+    // destroyed volatile key's slot id can be reused, so reading the id and
+    // calling PSA after releasing could MAC under a destroyed or a different
+    // session's key.
+    // Lock order: this mutex is taken before any PSA-internal lock and never
+    // while holding s_base_nonce_map_mutex, so there is no cycle.
+    // No logging inside the critical section.
+    static RetagMac s_retag_mac_locked(uint32_t dest, const uint32_t &generation,
+                                       const psa_key_id_t &key_id,
+                                       const std::vector<uint8_t> &mac_input,
+                                       uint8_t (&tag)[framecrypto::kSessionCmacTagBytes])
+    {
+      size_t tag_len = 0;
+      std::lock_guard<std::mutex> lock(s_session_keys_mutex);
+      auto it = s_seal_generation_map.find(dest);
+      if (it == s_seal_generation_map.end() || it->second != generation)
+        return RetagMac::Stale;
+      if (key_id == PSA_KEY_ID_NULL)
+        return RetagMac::Failed;
+      const bool mac_ok = psa_mac_compute(key_id,
+                                          PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(tag)),
+                                          mac_input.data(), mac_input.size(),
+                                          tag, sizeof(tag), &tag_len) == PSA_SUCCESS &&
+                          tag_len == sizeof(tag);
+      return mac_ok ? RetagMac::Ok : RetagMac::Failed;
+    }
+
+    bool LORAListener::sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header)
+    {
+      if (enc == nullptr || header == nullptr)
+        return false;
+
+      // Invariant I3 (stale-generation refusal) and I3 (c) (key read AND used
+      // under s_session_keys_mutex) are implemented in s_retag_mac_locked.
+      // The CTR space guard again, at the retag point (s_pack_operation_message
+      // already refused to seal such a frame, so this is defence in depth).
+      if (!framecrypto::msgidFitsCtr(header->msgid))
+        return false;
+
+      uint32_t session_id = 0;
+      if (!s_session_id_for(this->short_address_, &session_id))
+        return false;
+
+      // Everything that needs no key is done BEFORE the key lock is taken, so
+      // the critical section is one psa_mac_compute and nothing else (this is
+      // the H-1-measured retag path).
+      const std::vector<uint8_t> mac_input = s_retag_mac_input(enc, header, session_id);
 
       uint8_t tag[framecrypto::kSessionCmacTagBytes];
-      size_t tag_len = 0;
-      bool stale = false;
-      bool mac_ok = false;
-      {
-        // The key id is read AND USED under the lock. The loop task's
-        // installSessionKeys_()/clearSessionKeys_() destroy the key under this
-        // same mutex, and a destroyed volatile key's slot id can be reused, so
-        // reading the id here and calling PSA after releasing (the previous
-        // shape) could MAC under a destroyed or a different session's key.
-        // Lock order: this mutex is taken before any PSA-internal lock and
-        // never while holding s_base_nonce_map_mutex, so there is no cycle.
-        // No logging inside the critical section.
-        std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-        auto it = s_seal_generation_map.find(header->destaddress);
-        if (it == s_seal_generation_map.end() || it->second != this->session_generation_)
-        {
-          stale = true;
-        }
-        else if (this->k_mac_key_id_ != PSA_KEY_ID_NULL)
-        {
-          mac_ok = psa_mac_compute(this->k_mac_key_id_,
-                                   PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(tag)),
-                                   mac_input.data(), mac_input.size(),
-                                   tag, sizeof(tag), &tag_len) == PSA_SUCCESS &&
-                   tag_len == sizeof(tag);
-        }
-      }
-      if (stale)
+      const RetagMac verdict = s_retag_mac_locked(header->destaddress, this->session_generation_,
+                                                  this->k_mac_key_id_, mac_input, tag);
+      if (verdict == RetagMac::Stale)
       {
         // Invariant I3: refuse to retag a copy whose ciphertext was sealed
         // under a DIFFERENT session generation than the one current right now
@@ -1796,7 +1827,7 @@ namespace esphome
                  this->get_name().c_str(), (unsigned) this->tx_stale_session_drops_);
         return false;
       }
-      if (!mac_ok)
+      if (verdict != RetagMac::Ok)
         return false;
 
       // enc->tag already has kSessionCmacTagBytes allocated (sealed at pack

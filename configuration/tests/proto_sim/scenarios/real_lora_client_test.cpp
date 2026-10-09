@@ -5046,6 +5046,130 @@ TEST(MsgidGuard, TheRetagPointRefusesAMsgidBeyondTheCtrSpace) {
     for (uint8_t b : tag) EXPECT_EQ(b, 0) << "the tag bytes must be untouched";
 }
 
+// Characterisation (CCN refactor of sealBurstCopyTag): the written tag is
+// EXACTLY the independent oracle's CMAC over the header fields and the
+// ciphertext, so every field the retag point must cover is shown to reach the
+// MAC input; and every refusal leaves the caller's tag bytes alone.
+namespace {
+struct RetagCase {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    uint8_t ct[5] = {9, 8, 7, 6, 5};
+    uint8_t tag[framecrypto::kSessionCmacTagBytes] = {0};
+    EncryptedPayload enc = ENCRYPTED_PAYLOAD__INIT;
+    RetagCase() {
+        hdr.destaddress = 18; hdr.destsubnet = 2;
+        hdr.senderaddress = esphome::lora_tracker::kHubAddress;
+        hdr.msgid = 999; hdr.burstindex = 3; hdr.burstcount = 17;
+        hdr.onmark = true; hdr.firestamped = true;
+        hdr.fireround = 0x1234; hdr.fireoffsetus = 4567;
+        enc.ciphertext.data = ct; enc.ciphertext.len = sizeof(ct);
+        enc.tag.data = tag; enc.tag.len = sizeof(tag);
+    }
+    void oracle(uint32_t session_id, uint8_t out[framecrypto::kSessionCmacTagBytes]) const {
+        framecrypto::EtmHeaderFields fx{};
+        fx.downlink = true; fx.session_id = session_id;
+        fx.dest_address = hdr.destaddress; fx.dest_subnet = hdr.destsubnet;
+        fx.sender_address = hdr.senderaddress; fx.msgid = hdr.msgid;
+        fx.burst_index = hdr.burstindex; fx.burst_count = hdr.burstcount;
+        fx.on_mark = hdr.onmark; fx.fire_stamped = hdr.firestamped;
+        fx.fire_round = hdr.fireround; fx.fire_offset_us = hdr.fireoffsetus;
+        proto_sim::encrypt_then_cmac_retag(session_id, kTestNodeNonce,
+                                           esphome::lora_tracker::kHubAddress, 18,
+                                           /*downlink=*/true, fx, ct, enc.ciphertext.len, out);
+    }
+};
+}  // namespace
+
+TEST(MsgidGuard, TheRetagIsExactlyTheCmacOverEveryBurstField) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();   // snapshots the seal generation
+
+    auto expectMatches = [&](RetagCase &c, const char *what) {
+        memset(c.tag, 0xAA, sizeof(c.tag));
+        uint8_t want[framecrypto::kSessionCmacTagBytes];
+        c.oracle(f.base, want);
+        ASSERT_TRUE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << what;
+        EXPECT_EQ(0, memcmp(c.tag, want, sizeof(want))) << what;
+    };
+    RetagCase base;
+    expectMatches(base, "baseline");
+    uint8_t baseline_tag[framecrypto::kSessionCmacTagBytes];
+    memcpy(baseline_tag, base.tag, sizeof(baseline_tag));
+
+    // One field at a time: the tag follows it (oracle agrees) and moves.
+    auto vary = [&](const char *what, auto mutate) {
+        RetagCase c; mutate(c);
+        expectMatches(c, what);
+        EXPECT_NE(0, memcmp(c.tag, baseline_tag, sizeof(baseline_tag))) << what << " must change the tag";
+    };
+    vary("destsubnet",   [](RetagCase &c) { c.hdr.destsubnet = 3; });
+    vary("senderaddress",[](RetagCase &c) { c.hdr.senderaddress = 9; });
+    vary("msgid",        [](RetagCase &c) { c.hdr.msgid = 1000; });
+    vary("burstindex",   [](RetagCase &c) { c.hdr.burstindex = 4; });
+    vary("burstcount",   [](RetagCase &c) { c.hdr.burstcount = 16; });
+    vary("onmark",       [](RetagCase &c) { c.hdr.onmark = false; });
+    vary("firestamped",  [](RetagCase &c) { c.hdr.firestamped = false; });
+    vary("fireround",    [](RetagCase &c) { c.hdr.fireround = 0x1235; });
+    vary("fireoffsetus", [](RetagCase &c) { c.hdr.fireoffsetus = 4568; });
+    vary("ciphertext",   [](RetagCase &c) { c.ct[4] ^= 1; });
+    vary("ciphertext length", [](RetagCase &c) { c.enc.ciphertext.len = 4; });
+}
+
+TEST(MsgidGuard, EveryRetagRefusalLeavesTheTagBytesAlone) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();
+
+    auto untouched = [](const RetagCase &c) {
+        for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
+    };
+    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
+      ASSERT_TRUE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "control"; }
+
+    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(nullptr, &c.hdr)); untouched(c); }
+    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, nullptr)); untouched(c); }
+    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.len = sizeof(c.tag) - 1;
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "wrong tag length"; untouched(c); }
+    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.len = sizeof(c.tag) + 1;
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "wrong tag length"; untouched(c); }
+    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.data = nullptr;
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "no tag buffer"; untouched(c); }
+    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.hdr.msgid = 0x80000000u;
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "beyond the CTR space"; untouched(c); }
+    { // a destination that was never sealed under: generation lookup misses -> stale
+      RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.hdr.destaddress = 77;
+      const uint32_t before = f.rol.staleSessionDropsForTest();
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr));
+      EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1) << "counted as a stale-session drop";
+      untouched(c); }
+    { // no MAC key installed: not stale, not tagged, not counted
+      RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
+      const psa_key_id_t saved = f.rol.k_mac_key_id_;
+      const uint32_t before = f.rol.staleSessionDropsForTest();
+      f.rol.k_mac_key_id_ = PSA_KEY_ID_NULL;
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "no K_mac";
+      f.rol.k_mac_key_id_ = saved;
+      EXPECT_EQ(f.rol.staleSessionDropsForTest(), before);
+      untouched(c); }
+    { // a MAC key id PSA does not know: psa_mac_compute fails, nothing is written
+      RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
+      const psa_key_id_t saved = f.rol.k_mac_key_id_;
+      const uint32_t before = f.rol.staleSessionDropsForTest();
+      f.rol.k_mac_key_id_ = static_cast<psa_key_id_t>(0x7FFFFFF0u);
+      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "PSA rejects the key";
+      f.rol.k_mac_key_id_ = saved;
+      EXPECT_EQ(f.rol.staleSessionDropsForTest(), before);
+      untouched(c); }
+    { // a peer this hub has no session id for
+      LORAClient other; other.set_name("other"); other.set_short_address(77);
+      RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
+      EXPECT_FALSE(other.sealBurstCopyTag(&c.enc, &c.hdr)) << "no session id for the peer";
+      untouched(c); }
+}
+
 TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSession) {
     MsgidGuardFixture f;
     ASSERT_TRUE(f.rol.login_acked_);
