@@ -109,6 +109,8 @@ struct NodeProbe : CmdDispatcher {
     using CmdDispatcher::modeTestExpiredCb_;   // the node-owned deadline
     using CmdDispatcher::rx_timing_trusted_;     // FrameCanon verdict for the last frame
     using CmdDispatcher::noncanonical_frames_;
+    using CmdDispatcher::refused_since_fix_;     // samples the half-pitch rule refused
+    using CmdDispatcher::mac_ping_seq_hw_;       // the MAC ping high-water mark
     // What the HUB was last told, as distinct from what the console last saw.
     // The flicker test has to assert the state the hub ends up believing, and
     // that reason travels inside the beacon BODY (built later, in
@@ -7510,4 +7512,757 @@ TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
     EXPECT_FALSE(disp.pack_response_message(&msg, &buf, &len)) << "must not seal";
     EXPECT_EQ(buf, nullptr);
     EXPECT_TRUE(disp.msgidReloginPendingForTest());
+}
+
+// ===========================================================================
+// admitFrame characterization tests
+//
+// Added BEFORE the cyclomatic-complexity refactor of CmdDispatcher::admitFrame
+// (a ~600-line, CCN-66 receive-path gate, now an ordered pipeline of small
+// stages). A mutation run over the pre-refactor body found decision branches
+// that no existing test pinned; each test below closes one, and was verified
+// to PASS against the pre-refactor source before the refactor, then to FAIL
+// under the mutant it names. They pin observable behaviour only: what the
+// gate lets through, what it books, and what it does to the uplink target.
+// ===========================================================================
+namespace {
+
+// A plaintext SYSOP STATUS with every address field caller-controlled.
+std::vector<uint8_t> admit_plain_sysop(uint32_t dest, uint32_t sender, uint32_t subnet,
+                                       uint32_t msgid, bool on_mark) {
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = dest;
+    hdr.destsubnet    = subnet;
+    hdr.senderaddress = sender;
+    hdr.msgid         = msgid;
+    hdr.onmark        = on_mark;
+    op.header   = &hdr;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.sysop    = CLIENT_OPERATION__CMD_STATUS;
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+// A plaintext MAC ping from an arbitrary sender.
+std::vector<uint8_t> admit_plain_ping(uint32_t sender, uint32_t seq, uint32_t msgid) {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress   = kNodeAddr;
+    hdr.destsubnet    = kSubnet;
+    hdr.senderaddress = sender;
+    hdr.msgid         = msgid;
+    hdr.onmark        = true;
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind = MAC_CONTROL__KIND__MAC_PING;
+    mc.seq  = seq;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header     = &hdr;
+    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.maccontrol = &mc;
+    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, out.data());
+    return out;
+}
+
+// encrypt_op() with a burst position that the CMAC prefix also covers (its own
+// header never sets burstCount, which the freshness span depends on).
+std::vector<uint8_t> admit_enc_sysop_copy(CmdDispatcher &disp, uint32_t msgid,
+                                          uint32_t burst_index, uint32_t burst_count) {
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    inner.sysop    = CLIENT_OPERATION__CMD_STATUS;
+    std::vector<uint8_t> plain(lora_client_operation_message__get_packed_size(&inner));
+    lora_client_operation_message__pack(&inner, plain.data());
+
+    uint8_t ctr_iv[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(kMtNonce, kNodeAddr, /*downlink=*/true, msgid, 0, ctr_iv);
+    std::vector<uint8_t> ct(plain.size());
+    EXPECT_TRUE(disp.ctrEncryptForTest(ctr_iv, plain.data(), plain.size(), ct.data()));
+
+    framecrypto::EtmHeaderFields f{};
+    f.downlink = true; f.session_id = kMtNonce;
+    f.dest_address = kNodeAddr; f.dest_subnet = kSubnet; f.sender_address = kHubAddr;
+    f.msgid = msgid; f.burst_index = burst_index; f.burst_count = burst_count;
+    uint8_t prefix[framecrypto::kEtmPrefixBytes];
+    framecrypto::buildEtmCmacPrefix(f, static_cast<uint16_t>(ct.size()), prefix);
+    std::vector<uint8_t> mac_in(prefix, prefix + sizeof(prefix));
+    mac_in.insert(mac_in.end(), ct.begin(), ct.end());
+    uint8_t tag[framecrypto::kSessionCmacTagBytes];
+    EXPECT_TRUE(disp.cmacComputeForTest(mac_in.data(), mac_in.size(), tag, sizeof(tag)));
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
+    hdr.msgid = msgid; hdr.burstindex = burst_index; hdr.burstcount = burst_count;
+    EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
+    ep.tag.data = tag; ep.tag.len = sizeof(tag);
+    ep.ciphertext.data = ct.data(); ep.ciphertext.len = ct.size();
+    LoraClientOperationMessage outer = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    outer.header = &hdr;
+    outer.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
+    outer.encrypted = &ep;
+    std::vector<uint8_t> frame(lora_client_operation_message__get_packed_size(&outer));
+    lora_client_operation_message__pack(&outer, frame.data());
+    return frame;
+}
+
+// Deliver `f` with its T0 on `mark`, as the radio would.
+void admit_deliver_on_mark(CmdDispatcher &d, const std::vector<uint8_t> &f, int64_t mark) {
+    const int64_t rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
+    d.noteDriftSample(rx);
+    d.onReceiveNew(const_cast<uint8_t *>(f.data()), static_cast<int>(f.size()), rx);
+}
+
+}  // namespace
+
+// --- the unprovisioned-bootstrap carve-out of the plaintext gate -------------
+
+TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionAcceptsPlaintextCoverConfig) {
+    MotorCtrl     mot;
+    SystemCtrl    sys;          // cfgAddress=0: config lost, session survived in NVS
+    LoraInterface lif;
+    portMUX_TYPE  motorMux{}, buttonMux{};
+    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    disp.setBaseNonceForTest(1, 0xABCDEF01);
+    ASSERT_EQ(sys.getConfigAddress(), 0u);
+
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = 0; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr; hdr.msgid = 1;
+    op.header = &hdr;
+    CoverConfig cc = COVER_CONFIG__INIT;
+    cc.opentime = 61; cc.closetime = 66;
+    cc.blindheightmm = 2000.0f; cc.axlediametermm = 60.0f; cc.blindthicknessmm = 8.0f;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+    op.coverconfig = &cc;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    EXPECT_EQ(sys.open_time_s(), 61u)
+        << "CoverConfig provisions a node just as ClientConfig does: with no address "
+           "there is no provisioning for a session to protect";
+}
+
+TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionStillRefusesOtherPlaintext) {
+    MotorCtrl     mot;
+    SystemCtrl    sys;          // cfgAddress=0
+    LoraInterface lif;
+    portMUX_TYPE  motorMux{}, buttonMux{};
+    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    ASSERT_EQ(sys.getConfigAddress(), 0u);
+
+    // CONTROL: with no session the very same frame is admitted, and an admitted
+    // frame retargets the uplinks at its sender.
+    auto f1 = admit_plain_sysop(/*dest=*/0, /*sender=*/33, kSubnet, /*msgid=*/1, false);
+    disp.onReceiveNew(f1.data(), static_cast<int>(f1.size()));
+    ASSERT_EQ(disp.destAddress, 33u) << "control: a node without a session admits plaintext";
+
+    disp.setBaseNonceForTest(1, 0xABCDEF01);
+    auto f2 = admit_plain_sysop(/*dest=*/0, /*sender=*/77, kSubnet, /*msgid=*/2, false);
+    disp.onReceiveNew(f2.data(), static_cast<int>(f2.size()));
+    EXPECT_EQ(disp.destAddress, 33u)
+        << "only the provisioning frames are exempt, not every plaintext command a "
+           "node with no address receives";
+}
+
+// --- an admitted frame retargets the uplinks, a refused one does not ---------
+
+TEST_F(RealNodeFixture, AdmitFrame_AnAdmittedFrameRetargetsUplinksAtItsSender) {
+    auto f = admit_plain_sysop(kNodeAddr, /*sender=*/33, /*subnet=*/9, /*msgid=*/1, false);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
+    EXPECT_EQ(disp.destAddress, 33u);
+    EXPECT_EQ(disp.destSubnet, 9u);
+}
+
+// --- the ping exemption needs an armed test ---------------------------------
+
+TEST_F(RealNodeFixture, AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsArmed) {
+    // MAC-2 can be off OUTSIDE a test too (a bench node's MAC_CONFIG), which is the
+    // only state in which the gate's "a test is armed" term is not already implied
+    // by the crypto term. A plaintext ping must still be refused there.
+    disp.setBenchNode(true);
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    {
+        MacControl mc = MAC_CONTROL__INIT;
+        mc.kind = MAC_CONTROL__KIND__MAC_CONFIG;
+        mc.disablecrypto = true;
+        mc.durations = 60;
+        LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+        inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+        inner.maccontrol = &mc;
+        auto cfg = encrypt_op(disp, inner, /*msgid=*/2, kMtNonce, 0, false);
+        disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
+    }
+    ASSERT_FALSE(disp.macSublayers().crypto_enabled) << "precondition: MAC-2 is off";
+    ASSERT_FALSE(disp.modeTestActive()) << "precondition: and no test is armed";
+    ASSERT_EQ(disp.destAddress, kHubAddr);
+
+    // No test armed: refused at the gate. The handler would count it regardless of
+    // the test (it does not look at mode_test_active_), so the witness is the one
+    // thing only ADMISSION does -- retarget the uplinks at the sender.
+    auto p1 = admit_plain_ping(/*sender=*/77, /*seq=*/1, /*msgid=*/500);
+    disp.onReceiveNew(p1.data(), static_cast<int>(p1.size()));
+    EXPECT_EQ(disp.destAddress, kHubAddr)
+        << "a plaintext ping with no authenticated test armed is refused at the gate";
+    EXPECT_EQ(disp.macCounters().ping_rx, 0u);
+
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/3, 1093, 0, 0,
+                                 /*counter=*/true, /*mac_echo=*/true, /*crypto=*/false);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    ASSERT_TRUE(disp.modeTestActive());
+    ASSERT_FALSE(disp.macSublayers().crypto_enabled);
+    ASSERT_EQ(disp.destAddress, kHubAddr);
+
+    auto p2 = admit_plain_ping(/*sender=*/77, /*seq=*/2, /*msgid=*/501);
+    disp.onReceiveNew(p2.data(), static_cast<int>(p2.size()));
+    EXPECT_EQ(disp.destAddress, 77u) << "control: the same ping IS admitted while a test is armed";
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u);
+}
+
+// --- the freshness query's inputs -------------------------------------------
+
+TEST_F(RealNodeFixture, AdmitFrame_AForgedLoginAgainstARestoredSessionIsStale) {
+    // hasValidState() without session_proven_: a session restored from NVS (or
+    // just established by LOGIN) that no encrypted frame has proved yet. The
+    // existing H1 test proves the session first, so it cannot tell the two
+    // halves of "holds a session" apart.
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    ASSERT_FALSE(disp.isSessionProven()) << "precondition: LOGIN alone does not prove the session";
+    const int64_t baseline = disp.lastAddressedUsForTest();
+
+    proto_sim_timer_advance_us(60'000'000);   // past the LOGIN rate limit
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
+    hdr.msgid = 4;
+    op.header = &hdr;
+    LoginMsg forged = LOGIN_MSG__INIT;
+    forged.nonce = 0xDEADBEEFu;
+    uint8_t bad_mic[framecrypto::kSessionCmacTagBytes] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    forged.mic.data = bad_mic; forged.mic.len = sizeof(bad_mic);
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
+    op.login = &forged;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+
+    EXPECT_EQ(disp.sessionGenerationForTest(), 1u);
+    EXPECT_EQ(disp.lastAddressedUsForTest(), baseline)
+        << "a bad-MIC LOGIN against a node that holds a session must classify Stale";
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_ABurstCopyIsFreshOnlyInsideItsOwnSpan) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    ASSERT_EQ(disp.sessionGenerationForTest(), 1u);
+
+    constexpr uint32_t kCopies = 17;
+    constexpr int64_t  kT0 = 500'000'000;
+    proto_sim_timer_set_now_us(kT0);
+    auto copy0 = admit_enc_sysop_copy(disp, /*msgid=*/10, /*burst_index=*/0, kCopies);
+    disp.onReceiveNew(copy0.data(), static_cast<int>(copy0.size()));
+    const int64_t first = disp.lastAddressedUsForTest();
+    ASSERT_GT(first, 0) << "precondition: the first copy is New and books the arrival";
+
+    const int64_t span = mac1freshness::spanUs(kCopies, (uint32_t) copy0.size());
+
+    // (a) a later copy of the same burst, well inside the span: still fresh.
+    proto_sim_timer_set_now_us(kT0 + 5 * 88'000);
+    auto copy5 = admit_enc_sysop_copy(disp, 10, 5, kCopies);
+    disp.onReceiveNew(copy5.data(), static_cast<int>(copy5.size()));
+    EXPECT_GT(disp.lastAddressedUsForTest(), first)
+        << "copy 5 of a 17-copy burst, 440 ms in, is a CurrentBurstCopy";
+    const int64_t after_a = disp.lastAddressedUsForTest();
+
+    // (b) just past the span, measured from the FIRST copy's acceptance: stale.
+    proto_sim_timer_set_now_us(kT0 + span + 10'000);
+    auto late = admit_enc_sysop_copy(disp, 10, 15, kCopies);
+    disp.onReceiveNew(late.data(), static_cast<int>(late.size()));
+    EXPECT_EQ(disp.lastAddressedUsForTest(), after_a)
+        << "a copy past the burst's computed span (frame length priced in) is Stale";
+
+    // (c) just inside the span: fresh again -- the bound is the span, not less.
+    proto_sim_timer_set_now_us(kT0 + span - 10'000);
+    auto edge = admit_enc_sysop_copy(disp, 10, 15, kCopies);
+    disp.onReceiveNew(edge.data(), static_cast<int>(edge.size()));
+    EXPECT_GT(disp.lastAddressedUsForTest(), after_a)
+        << "a copy 10 ms inside the span is still a CurrentBurstCopy";
+
+    // (d) a copy of an old command long after: stale, whatever the burst count.
+    const int64_t after_c = disp.lastAddressedUsForTest();
+    proto_sim_timer_set_now_us(kT0 + 10'000'000);
+    auto old = admit_enc_sysop_copy(disp, 10, 1, kCopies);
+    disp.onReceiveNew(old.data(), static_cast<int>(old.size()));
+    EXPECT_EQ(disp.lastAddressedUsForTest(), after_c)
+        << "ten seconds on, a copy is a replay, not part of the burst";
+}
+
+// --- MAC ping freshness feeds the bounded phase fit --------------------------
+
+TEST_F(RealNodeFixture, AdmitFrame_APingFeedsThePhaseFitOnlyWhenItsSeqIsNew) {
+    holdSessionAndArmTest(disp, /*counter_on=*/true);
+    ASSERT_TRUE(disp.modeTestActive());
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/3);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_TRUE(disp.macSublayers().counter_enabled);
+    const uint32_t n0 = disp.phaseStats().n;
+
+    int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+    auto p1 = admit_plain_ping(kHubAddr, /*seq=*/1, /*msgid=*/600);
+    admit_deliver_on_mark(disp, p1, mark);
+    ASSERT_EQ(disp.macCounters().ping_rx, 1u) << "precondition: the first ping was admitted";
+    EXPECT_EQ(disp.phaseStats().n, n0 + 1u)
+        << "a ping whose seq is above the high-water mark is Unsequenced: it may feed the fit";
+
+    // The same seq again, one round later and on the mark: a replay. It is
+    // refused by the sequence check LATER in the pipeline, but the phase commit
+    // runs first and must already have declined it.
+    mark += timedgrid::kRoundUs;
+    auto p1b = admit_plain_ping(kHubAddr, /*seq=*/1, /*msgid=*/601);
+    admit_deliver_on_mark(disp, p1b, mark);
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u) << "the replayed ping is not admitted";
+    EXPECT_EQ(disp.phaseStats().n, n0 + 1u)
+        << "and a Stale (replayed seq) ping must not feed the phase fit";
+
+    // A genuinely new seq is fresh again.
+    mark += timedgrid::kRoundUs;
+    auto p2 = admit_plain_ping(kHubAddr, /*seq=*/2, /*msgid=*/602);
+    admit_deliver_on_mark(disp, p2, mark);
+    EXPECT_EQ(disp.macCounters().ping_rx, 2u);
+    EXPECT_EQ(disp.phaseStats().n, n0 + 2u);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_WithMac1OffEveryPingMayFeedThePhaseFit) {
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    ASSERT_TRUE(disp.modeTestActive());
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/3);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_FALSE(disp.macSublayers().counter_enabled);
+    const uint32_t n0 = disp.phaseStats().n;
+
+    int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+    auto p1 = admit_plain_ping(kHubAddr, /*seq=*/1, /*msgid=*/600);
+    admit_deliver_on_mark(disp, p1, mark);
+    mark += timedgrid::kRoundUs;
+    auto p1b = admit_plain_ping(kHubAddr, /*seq=*/1, /*msgid=*/601);
+    admit_deliver_on_mark(disp, p1b, mark);
+    EXPECT_EQ(disp.macCounters().ping_rx, 2u) << "with MAC-1 off nothing sequences a ping";
+    EXPECT_EQ(disp.phaseStats().n, n0 + 2u)
+        << "and with MAC-1 off an unsequenced ping is Unsequenced, never Stale";
+}
+
+// --- sequencing -------------------------------------------------------------
+
+TEST_F(RealNodeFixture, AdmitFrame_ThePingSeqHighWaterMarkOnlyAdvancesOnAcceptedPings) {
+    holdSessionAndArmTest(disp, /*counter_on=*/true);
+    ASSERT_TRUE(disp.modeTestActive());
+    auto p9 = admit_plain_ping(kHubAddr, 9, 700);
+    disp.onReceiveNew(p9.data(), static_cast<int>(p9.size()));
+    ASSERT_EQ(disp.macCounters().ping_rx, 1u);
+    auto p5 = admit_plain_ping(kHubAddr, 5, 701);
+    disp.onReceiveNew(p5.data(), static_cast<int>(p5.size()));
+    auto p7 = admit_plain_ping(kHubAddr, 7, 702);
+    disp.onReceiveNew(p7.data(), static_cast<int>(p7.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u)
+        << "a rejected low seq must not drag the high-water mark down";
+    auto p10 = admit_plain_ping(kHubAddr, 10, 703);
+    disp.onReceiveNew(p10.data(), static_cast<int>(p10.size()));
+    EXPECT_EQ(disp.macCounters().ping_rx, 2u);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_AnEncryptedMacConfigIsSequencedByNeitherRule) {
+    disp.setBenchNode(true);   // a degrading MAC_CONFIG is bench-only
+    holdSessionAndArmTest(disp, /*counter_on=*/true);
+    ASSERT_TRUE(disp.modeTestActive());
+    ASSERT_TRUE(disp.macSublayers().counter_enabled);
+
+    // A control frame with a msgid far outside the session's replay window and
+    // a seq of 0 (CONFIG carries none). Neither the ping rule (seq > high-water)
+    // nor the session window may touch it.
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind = MAC_CONTROL__KIND__MAC_CONFIG;
+    mc.disablecrypto = true;
+    mc.durations = 60;
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    inner.maccontrol = &mc;
+    auto cfg = encrypt_op(disp, inner, /*msgid=*/5000, kMtNonce, 0, false);
+    disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
+    EXPECT_FALSE(disp.macSublayers().crypto_enabled)
+        << "an authenticated MAC_CONFIG reaches MAC-0 whatever its msgid";
+    EXPECT_TRUE(disp.macSublayers().counter_enabled);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_ApplicationTrafficStaysSequencedWhenMac1IsOff) {
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    ASSERT_FALSE(disp.macSublayers().counter_enabled);
+
+    auto f = encrypted_sysop(disp, /*msgid=*/20, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
+    const uint32_t dups = disp.macFunnel().duplicates;
+    const uint32_t accepted = disp.macFunnel().counter_accepted;
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
+    EXPECT_EQ(disp.macFunnel().duplicates, dups + 1u)
+        << "MAC-1 can only be switched off for MAC CONTROL frames; a replayed "
+           "application command still faces the window";
+    EXPECT_EQ(disp.macFunnel().counter_accepted, accepted);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_TheFrameCounterFunnelCountsAcceptsAndDuplicates) {
+    auto a = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, /*msgid=*/30, false);
+    const uint32_t acc0 = disp.macFunnel().counter_accepted;
+    const uint32_t dup0 = disp.macFunnel().duplicates;
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    EXPECT_EQ(disp.macFunnel().counter_accepted, acc0 + 1u);
+    EXPECT_EQ(disp.macFunnel().duplicates, dup0);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    EXPECT_EQ(disp.macFunnel().counter_accepted, acc0 + 1u);
+    EXPECT_EQ(disp.macFunnel().duplicates, dup0 + 1u);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_ABurstCopyIsNeverReAckedAndALateRetryIsBounded) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto f = encrypted_sysop(disp, /*msgid=*/40, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
+    ASSERT_GE(drain_acks(disp), 1) << "precondition: the first copy was acked";
+
+    // Immediately: a burst copy. Silent.
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
+    EXPECT_EQ(drain_acks(disp), 0) << "a duplicate inside the burst span must stay silent";
+
+    // Past the span: a genuine retry, re-acked, and each re-ack is booked.
+    proto_sim_timer_advance_us(ackcache::kBurstSpanUs + 50'000);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
+    EXPECT_EQ(drain_acks(disp), 1) << "a retry after the span gets its ack back";
+    EXPECT_EQ(disp.ackCacheForTest().reacks(), 1) << "and the re-ack is booked against the cap";
+}
+
+// --- mark-hit bookkeeping ---------------------------------------------------
+
+TEST_F(RealNodeFixture, AdmitFrame_AReplayedUnicastFrameStillResetsMissedMarks) {
+    auto a = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, /*msgid=*/50, false);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    auto b = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, /*msgid=*/51, false);
+    disp.onReceiveNew(b.data(), static_cast<int>(b.size()));
+
+    disp.noteMarkArmed(kTestWindowGen);   disp.noteMarkMissed(kTestWindowGen);
+    disp.noteMarkArmed(kTestWindowGen);   disp.noteMarkMissed(kTestWindowGen);
+    ASSERT_EQ(disp.consecutiveMissedMarks(), 2u);
+    const int64_t addressed = disp.lastAddressedUsForTest();
+
+    // msgid 50 again: Stale (it is neither new nor the last accepted). It cannot
+    // vouch for the SEQUENCE, but a unicast frame still proves the hub is serving
+    // this node at all.
+    proto_sim_timer_advance_us(2'000'000);
+    disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
+    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
+        << "missed_marks_ answers 'is the hub serving this node AT ALL' -- not gated on freshness";
+    EXPECT_EQ(disp.lastAddressedUsForTest(), addressed)
+        << "but last_addressed_us_ (the SyncStale clock) is";
+}
+
+// --- the phase-sample commit gate, as composed in admitFrame ------------------
+
+TEST_F(RealNodeFixture, AdmitFrame_OnlyAPlacedUnicastFrameIsAPhaseSample) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/800);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.phaseStats().n, 0u);
+    int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+
+    // Unplaced and unstamped, but dead ON the mark: an error of zero cannot hide
+    // behind the half-pitch refusal, so only the placement gate can decline it.
+    auto unplaced = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, 801, /*on_mark=*/false);
+    admit_deliver_on_mark(disp, unplaced, mark);
+    EXPECT_EQ(disp.phaseStats().n, 0u) << "an unplaced frame says nothing about where the mark is";
+
+    // Placed but BROADCAST: the mark is a promise to send to THIS node.
+    mark += timedgrid::kRoundUs;
+    auto bcast = admit_plain_sysop(LoraInterface::broadcastAddressing, kHubAddr, kSubnet, 802, true);
+    admit_deliver_on_mark(disp, bcast, mark);
+    EXPECT_EQ(disp.phaseStats().n, 0u) << "a broadcast is not addressed to this node's mark";
+
+    // CONTROL: placed and unicast, same instant arithmetic -- the sample IS taken.
+    mark += timedgrid::kRoundUs;
+    auto placed = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, 803, true);
+    admit_deliver_on_mark(disp, placed, mark);
+    EXPECT_EQ(disp.phaseStats().n, 1u);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_AFrameWithoutAnArrivalStampIsNotEvenAttempted) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/810);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    const uint32_t refused0 = disp.refused_since_fix_;
+
+    // rx_us = 0: no ISR timestamp. A sample built from it would read as an error
+    // of the node's whole uptime and be REFUSED -- which is observable as a count,
+    // so the absence of the count proves the gate declined before measuring.
+    auto placed = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, 811, true);
+    disp.onReceiveNew(placed.data(), static_cast<int>(placed.size()), /*rx_us=*/0);
+    EXPECT_EQ(disp.refused_since_fix_, refused0);
+    EXPECT_EQ(disp.phaseStats().n, 0u);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_AFrameHalfARoundOffTheMarkBelongsToTheNextMark) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/820);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // Exactly midway between two marks the nearest-mark rule ties; the tie goes
+    // to the mark AHEAD (a frame a hair early belongs to it).
+    const int64_t prev = disp.expectedT0Us() + timedgrid::kRoundUs;
+    auto f = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, 821, true);
+    admit_deliver_on_mark(disp, f, prev + timedgrid::kRoundUs / 2);
+    EXPECT_EQ(disp.expectedT0Us(), prev + (int64_t) timedgrid::kRoundUs);
+}
+
+// --- the provisional re-solve needs a STAMPED frame ---------------------------
+
+TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnchor) {
+    constexpr uint32_t kSlot       = 4;
+    constexpr int64_t  kTrueAnchor = 90'000'000;
+    constexpr int64_t  kBootError  = 8'000;
+    nodeclock::setSettledForTest(false);
+
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
+    hdr.msgid = 830; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.firestamped = true; hdr.fireround = 0;
+    hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
+    GridSync g = GRID_SYNC__INIT;
+    g.enable = true; g.slotindex = kSlot; g.slotcount = timedgrid::kSlotCount;
+    g.roundus = timedgrid::kRoundUs; g.pitchus = timedgrid::kSlotPitchUs;
+    g.txround = 0; g.txslot = kSlot;
+    g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
+    g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+    const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
+    const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
+    disp.noteDriftSample(gs_rx);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError);
+
+    nodeclock::setSettledForTest(true);
+    // PLACED (onmark) but not STAMPED: a new frame on a settled clock, which may
+    // not re-solve the anchor -- only a frame that declares its instant can.
+    auto f = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, 831, /*on_mark=*/true);
+    const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+    admit_deliver_on_mark(disp, f, mark);
+    EXPECT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
+        << "an unstamped frame must not move a provisional anchor";
+}
+
+// --- more of the phase / re-anchor bookkeeping --------------------------------
+
+TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARateSpan) {
+    constexpr uint32_t kSlot       = 4;
+    constexpr int64_t  kTrueAnchor = 90'000'000;
+    constexpr int64_t  kBootError  = 8'000;
+    nodeclock::setSettledForTest(false);
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
+    hdr.msgid = 840; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.firestamped = true; hdr.fireround = 0;
+    hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
+    GridSync g = GRID_SYNC__INIT;
+    g.enable = true; g.slotindex = kSlot; g.slotcount = timedgrid::kSlotCount;
+    g.roundus = timedgrid::kRoundUs; g.pitchus = timedgrid::kSlotPitchUs;
+    g.txround = 0; g.txslot = kSlot;
+    g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
+    g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+    const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
+    const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
+    disp.noteDriftSample(gs_rx);
+    disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError);
+
+    nodeclock::setSettledForTest(true);
+    const uint32_t rearms = lif.rearmRequests();
+    auto f = pack_stamped_sysop(/*msgid=*/841, /*round=*/10, 300'000);
+    const int64_t rx = kTrueAnchor + 10 * (int64_t) timedgrid::kRoundUs + 300'000
+                     + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
+    ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor) << "precondition: the anchor was re-solved";
+    EXPECT_EQ(lif.rearmRequests(), rearms + 1u)
+        << "a moved anchor means the armed window is aimed at the old one: re-arm now";
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_AReplayedCopyCannotTriggerAnAnchorRecentre) {
+    disp.setTimedRxEnabled(true);
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
+    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/600);
+    const int64_t t0 = 40'000'000;
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()),
+                      t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    const int64_t anchor_before = disp.gridState().anchor_us;
+    constexpr int64_t kOffUs = 11'000;
+
+    // kPromotionPhaseSamples - 1 frames, every one 11 ms late.
+    framesOnMarks(disp, t0, timedmode::kPromotionPhaseSamples - 1, kOffUs, 610);
+    ASSERT_EQ(disp.gridState().anchor_us, anchor_before) << "precondition: not enough evidence yet";
+
+    // A second heard COPY of the last frame (same msgid, burst index 1, 88 ms later):
+    // a CurrentBurstCopy. It is a legitimate sample and brings the evidence to the
+    // threshold, but a copy must not be what TRIGGERS an unbounded anchor move.
+    const uint32_t last_msgid = 610 + (uint32_t) timedmode::kPromotionPhaseSamples - 2;
+    const int64_t mark = gridstate::nextT0Us(
+        disp.gridState(), t0 + (int64_t) (timedmode::kPromotionPhaseSamples - 2) * (int64_t) timedgrid::kRoundUs);
+    auto copy = pack_sysop_op(last_msgid, CLIENT_OPERATION__CMD_STATUS, /*burst_index=*/1);
+    const int64_t rx = mark + kOffUs + 88'000 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) copy.size());
+    disp.noteDriftSample(rx);
+    disp.onReceiveNew(copy.data(), static_cast<int>(copy.size()), rx);
+    ASSERT_GE(disp.phaseStats().n, timedmode::kPromotionPhaseSamples) << "precondition: the copy was sampled";
+    EXPECT_EQ(disp.gridState().anchor_us, anchor_before)
+        << "a replayed/duplicate copy cannot be the trigger for re-centring the anchor";
+
+    // A genuinely new frame is.
+    const uint32_t rearms = lif.rearmRequests();
+    framesOnMarks(disp, t0 + (int64_t) timedmode::kPromotionPhaseSamples * (int64_t) timedgrid::kRoundUs,
+                  1, kOffUs, last_msgid + 1);
+    EXPECT_NEAR((double) (disp.gridState().anchor_us - anchor_before), (double) kOffUs, 100.0);
+    EXPECT_EQ(lif.rearmRequests(), rearms + 1u) << "and the move re-arms the windows";
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_AnAddressedFrameLetsAStaleNodeAskForItsGridAgain) {
+    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
+    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_TRUE(disp.timedRxEnabledForTest());
+    ASSERT_EQ(disp.gridSyncRequests(), 0u);
+
+    // Well past the published resyncMaxS (350 s) with nothing correcting the anchor.
+    (void) drain_acks(disp);
+    proto_sim_timer_advance_us(400'000'000);
+    auto f = encrypted_sysop(disp, /*msgid=*/3, CLIENT_OPERATION__CMD_STATUS);
+    disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
+    EXPECT_GE(drain_acks(disp), 1) << "precondition: the frame was admitted and acked";
+    EXPECT_EQ(disp.gridSyncRequests(), 1u)
+        << "per addressed frame: no timer, no extra wake -- the frame IS the trigger";
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_AControlFrameNeverFeedsThePhaseFitUnlessItIsAPing) {
+    holdSessionAndArmTest(disp, /*counter_on=*/true);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/3);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    const uint32_t n0 = disp.phaseStats().n;
+    int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+
+    // A non-degrading MAC_CONFIG that nonetheless carries a seq above the ping
+    // high-water mark, placed on the mark. Only a PING is sequenced by `seq`.
+    MacControl mc = MAC_CONTROL__INIT;
+    mc.kind = MAC_CONTROL__KIND__MAC_CONFIG;
+    mc.seq  = 50;
+    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    inner.maccontrol = &mc;
+    auto cfg = encrypt_op(disp, inner, /*msgid=*/5000, kMtNonce, 0, /*on_mark=*/true);
+    admit_deliver_on_mark(disp, cfg, mark);
+    EXPECT_EQ(disp.phaseStats().n, n0)
+        << "a MAC_CONFIG is Stale for timing purposes whatever seq it carries";
+
+    // CONTROL: an ordinary placed frame on the next mark IS a sample.
+    mark += timedgrid::kRoundUs;
+    auto ok = encrypted_sysop(disp, /*msgid=*/4, CLIENT_OPERATION__CMD_STATUS);
+    admit_deliver_on_mark(disp, ok, mark);
+    EXPECT_EQ(disp.phaseStats().n, n0 + 1u);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_APingOnAnUnsequencedLinkIsUnsequencedWhateverTheOldSeq) {
+    holdSessionAndArmTest(disp, /*counter_on=*/false);
+    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/3);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_FALSE(disp.macSublayers().counter_enabled);
+    disp.mac_ping_seq_hw_ = 100;   // a high-water mark left by an earlier MAC-1-on run
+    const uint32_t n0 = disp.phaseStats().n;
+
+    const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+    auto p = admit_plain_ping(kHubAddr, /*seq=*/1, /*msgid=*/600);
+    admit_deliver_on_mark(disp, p, mark);
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u);
+    EXPECT_EQ(disp.phaseStats().n, n0 + 1u)
+        << "with MAC-1 off a ping below the old high-water mark is still Unsequenced, not Stale";
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_ANodeWithNoGridNeverAttemptsAPhaseSample) {
+    ASSERT_FALSE(disp.gridState().active);
+    const uint32_t refused0 = disp.refused_since_fix_;
+    auto f = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, /*msgid=*/850, /*on_mark=*/true);
+    admit_deliver_on_mark(disp, f, 40'000'000);
+    EXPECT_EQ(disp.phaseStats().n, 0u);
+    EXPECT_EQ(disp.refused_since_fix_, refused0)
+        << "with no grid there is nothing to measure against: not even a refused attempt";
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_ABeaconIsNotAPhaseSampleEvenWhenAddressedAndPlaced) {
+    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/860);
+    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
+    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_EQ(disp.phaseStats().n, 0u);
+
+    // A beacon addressed to THIS node (not the broadcast) and placed on its mark,
+    // for a slot that is not the node's beacon slot, so its handler ignores it.
+    // The beacon path has its own bounded sample; the generic commit must skip it.
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
+    hdr.msgid = 861; hdr.onmark = true;
+    op.header = &hdr;
+    GridBeacon gb = GRID_BEACON__INIT;
+    gb.txround = 5;
+    gb.txslot  = 3;   // not the beacon slot (kSlotCount - 1)
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON;
+    op.gridbeacon = &gb;
+    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
+    lora_client_operation_message__pack(&op, bytes.data());
+
+    const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
+    admit_deliver_on_mark(disp, bytes, mark);
+    EXPECT_EQ(disp.phaseStats().n, 0u);
+}
+
+TEST_F(RealNodeFixture, AdmitFrame_ARecentreCountsAsAnAnchorFixAndClearsTheRefusals) {
+    disp.setTimedRxEnabled(true);
+    disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
+    auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/870);
+    const int64_t t0 = 40'000'000;
+    disp.onReceiveNew(g.data(), static_cast<int>(g.size()),
+                      t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) g.size()));
+    ASSERT_TRUE(disp.gridState().active);
+
+    // One sample far beyond half a pitch from its mark: refused and counted.
+    const int64_t mark = gridstate::nextT0Us(disp.gridState(), t0 + (int64_t) timedgrid::kRoundUs);
+    auto far = pack_sysop_op(/*msgid=*/871, CLIENT_OPERATION__CMD_STATUS);
+    admit_deliver_on_mark(disp, far, mark + 463'000);
+    ASSERT_EQ(disp.refused_since_fix_, 1u) << "precondition: one refusal on the books";
+
+    // Then the bench case: every frame 11 ms after the mark. The node re-centres.
+    const int64_t anchor_before = disp.gridState().anchor_us;
+    framesOnMarks(disp, t0 + 4 * (int64_t) timedgrid::kRoundUs,
+                  timedmode::kPromotionPhaseSamples, 11'000, 880);
+    ASSERT_NEAR((double) (disp.gridState().anchor_us - anchor_before), 11'000.0, 100.0)
+        << "precondition: the anchor was re-centred";
+    EXPECT_EQ(disp.refused_since_fix_, 0u)
+        << "a re-centre is an anchor fix: the refusals counted against the old anchor are history";
 }
