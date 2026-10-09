@@ -1885,286 +1885,331 @@ namespace esphome
       return true;
     }
 
+    // ---- handle_encrypted_ stages ------------------------------------------
+
+    // The CMAC-covered header fields of an UPLINK, from the outer header. A
+    // missing header reads as all-zero (the same values the old per-field
+    // ternaries produced).
+    static framecrypto::EtmHeaderFields s_uplink_etm_fields(const ::LoraHeader *h,
+                                                            uint32_t session_id, uint32_t sender)
+    {
+      static const ::LoraHeader kNoHeader = LORA_HEADER__INIT;
+      const ::LoraHeader *hh = h ? h : &kNoHeader;
+      framecrypto::EtmHeaderFields etm{};
+      etm.downlink       = false;
+      etm.session_id     = session_id;
+      etm.dest_address   = hh->destaddress;
+      etm.dest_subnet    = hh->destsubnet;
+      etm.sender_address = sender;
+      etm.msgid          = hh->msgid;
+      etm.burst_index    = hh->burstindex;
+      etm.burst_count    = hh->burstcount;
+      etm.on_mark        = hh->onmark;
+      etm.fire_stamped   = hh->firestamped;
+      etm.fire_round     = hh->fireround;
+      etm.fire_offset_us = hh->fireoffsetus;
+      return etm;
+    }
+
+    enum class CmacVerify { Ok, NoMem, BadTag };
+
+    // Encrypt-then-CMAC replaces AES-GCM. Verify the tag BEFORE decrypting — a
+    // tampered ciphertext or header field fails the check without ever running
+    // the cipher over attacker-controlled bytes. Node uplinks never burst, so
+    // burstIndex/burstCount/onMark/fireStamped/fireRound/fireOffsetUs are
+    // always 0/false on this path (whatever the node actually sealed).
+    static CmacVerify s_verify_uplink_cmac(psa_key_id_t mac_key_id,
+                                           const framecrypto::EtmHeaderFields &etm,
+                                           const ::EncryptedPayload *enc)
+    {
+      size_t cipher_len = enc->ciphertext.len;
+
+      uint8_t cmac_prefix[framecrypto::kEtmPrefixBytes];
+      framecrypto::buildEtmCmacPrefix(etm, static_cast<uint16_t>(cipher_len), cmac_prefix);
+
+      uint8_t *mac_input = static_cast<uint8_t *>(malloc(sizeof(cmac_prefix) + cipher_len));
+      if (!mac_input)
+        return CmacVerify::NoMem;
+      memcpy(mac_input, cmac_prefix, sizeof(cmac_prefix));
+      memcpy(mac_input + sizeof(cmac_prefix), enc->ciphertext.data, cipher_len);
+
+      // NIT (security review): pin the received tag to exactly
+      // kSessionCmacTagBytes, same as LOGIN/REGISTER already require and
+      // the node's mirror of this check — the key policy floors
+      // truncation at 8 bytes regardless, so this is defense-in-depth,
+      // not a live exploit.
+      const bool mac_ok = enc->tag.len == framecrypto::kSessionCmacTagBytes &&
+                          psa_mac_verify(mac_key_id,
+                                         PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, enc->tag.len),
+                                         mac_input, sizeof(cmac_prefix) + cipher_len,
+                                         enc->tag.data, enc->tag.len) == PSA_SUCCESS;
+      free(mac_input);
+      return mac_ok ? CmacVerify::Ok : CmacVerify::BadTag;
+    }
+
+    // A candidate not yet installed must be destroyed on every exit that is not
+    // the install call at the end of a successful verify+decrypt.
+    void LORAListener::uplink_drop_candidate_(EncUplink &up)
+    {
+      if (up.candidate_enc_id != PSA_KEY_ID_NULL) psa_destroy_key(up.candidate_enc_id);
+      if (up.candidate_mac_id != PSA_KEY_ID_NULL) psa_destroy_key(up.candidate_mac_id);
+    }
+
+    // If we don't have a base nonce for this peer (e.g. recovery after reboot),
+    // re-provision one, send it, and discard this packet — the node will restart
+    // its encryption with the new nonce on the next transmission.
+    //
+    // Through send_login(): LoginMsg carries the base nonce and IS the
+    // bootstrap (MIC-authenticated, the one plaintext command a node holding
+    // a session accepts). BaseNonceExchange, which used to offer a key in
+    // plaintext, no longer exists on the wire.
+    //
+    // This matters most after a HUB reboot: s_base_nonce_map lives in RAM,
+    // so the hub comes back holding no nonce for any node while every node
+    // still holds its own in NVS. Re-provisioning by a route the node
+    // refuses would leave a whole provisioned fleet unreachable until it was
+    // re-flashed.
+    //
+    // False = the frame is discarded (a login was started).
+    bool LORAListener::uplink_check_base_nonce_(const EncUplink &up)
+    {
+      uint32_t unused_session_id = 0;
+      if (s_session_id_for(up.sender, &unused_session_id))
+        return true;
+      // Security review finding 9: go through do_login_and_arm_retry_(),
+      // not a bare send_login(). The bare call bypassed
+      // acquire_onboarding_() (the 2026-09-26 onboarding-storm fix —
+      // two nodes re-provisioning at once could still pile their
+      // ~1.85 s/frame downlink queues onto each other here) and armed
+      // no retry, so a dropped re-provisioning LoginMsg had no recovery
+      // until this node happened to send another encrypted uplink.
+      ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", up.sender);
+      this->do_login_and_arm_retry_();
+      return false;
+    }
+
+    // Tier 3 (mac-separation-implementation-plan.md section 2(b)): if
+    // this IS the session-opening uplink (sessionNonce present), derive
+    // a CANDIDATE K_enc/K_mac from it now — into fresh PSA key ids
+    // that are NOT installed as this listener's live keys yet.
+    //
+    // This is what lets the hub follow a node across ANY NUMBER of
+    // re-logins within one hub uptime, not just the first: the old code
+    // only derived "if this->k_enc_key_id_ == PSA_KEY_ID_NULL", so a
+    // node's SECOND-ever login in one hub uptime (a reflash, a REGISTER,
+    // a tracked-op giving up and re-logging in, ...) left the hub
+    // holding the FIRST session's keys forever — the session-opening
+    // uplink's real sessionNonce was simply never looked at again, and
+    // every uplink from the node failed CMAC until the hub itself
+    // rebooted. installed_session_id_ (set by installSessionKeys_)
+    // tracks which session_id the LIVE keys belong to, so a duplicate
+    // burst copy of a session-opening uplink ALREADY confirmed (same
+    // session_id) is recognised and skipped — it uses the live keys
+    // directly, with no new PSA import and no generation bump.
+    //
+    // Deriving before this frame is verified is safe PROVIDED the
+    // candidate is only ever used to try THIS frame, and only INSTALLED
+    // (replacing the live keys) if that verify succeeds — a
+    // forged sessionNonce then at most wastes one derivation, never
+    // pins attacker-chosen keys as live (the earlier version of this
+    // comment claimed deriving-and-installing immediately "doesn't
+    // move any committed state", which was wrong: it moved exactly the
+    // state — this->k_enc_key_id_/k_mac_key_id_ — that every later
+    // uplink's decrypt depends on).
+    //
+    // False = derivation failed, the frame is dropped.
+    bool LORAListener::uplink_select_keys_(EncUplink &up)
+    {
+      {
+        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
+        up.session_id = s_base_nonce_map[up.sender];
+      }
+      up.enc_key_id = this->k_enc_key_id_;
+      up.mac_key_id = this->k_mac_key_id_;
+      const ::LoraHeader *hdr = up.msg->header;
+      const bool is_session_opening = hdr && hdr->sessionnonce != 0;
+      up.needs_candidate =
+          is_session_opening &&
+          (this->k_enc_key_id_ == PSA_KEY_ID_NULL || this->installed_session_id_ != up.session_id);
+      if (!up.needs_candidate)
+        return true;
+      if (!this->deriveSessionKeyCandidate_(up.session_id, hdr->sessionnonce,
+                                            &up.candidate_enc_id, &up.candidate_mac_id))
+      {
+        ESP_LOGE(TAG, "Session key candidate derivation failed for peer %u", up.sender);
+        return false;
+      }
+      up.enc_key_id = up.candidate_enc_id;
+      up.mac_key_id = up.candidate_mac_id;
+      return true;
+    }
+
+    // Authenticate the frame: keys present, CMAC verifies, and the authentic
+    // msgid is inside the CTR space. Every failure destroys the candidate.
+    bool LORAListener::uplink_verify_(EncUplink &up)
+    {
+      if (up.enc_key_id == PSA_KEY_ID_NULL || up.mac_key_id == PSA_KEY_ID_NULL)
+      {
+        ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", up.sender);
+        this->uplink_drop_candidate_(up);
+        return false;
+      }
+
+      const framecrypto::EtmHeaderFields etm =
+          s_uplink_etm_fields(up.msg->header, up.session_id, up.sender);
+      up.msgid = etm.msgid;
+
+      const CmacVerify verdict = s_verify_uplink_cmac(up.mac_key_id, etm, up.msg->encrypted);
+      if (verdict == CmacVerify::NoMem)
+      {
+        ESP_LOGE(TAG, "Memory allocation failed for MAC input");
+        this->uplink_drop_candidate_(up);
+        return false;
+      }
+      if (verdict == CmacVerify::BadTag)
+      {
+        ESP_LOGE(TAG, "Encrypt-then-CMAC verification failed");
+        this->uplink_drop_candidate_(up);
+        return false;
+      }
+
+      // AUTHENTIC, but is its msgid inside the CTR space? The counter block
+      // holds 31 bits while the tag covers 32, so msgid X and X + 2^31 would
+      // decrypt under the same keystream. Checked only AFTER the tag verified:
+      // a forged frame must not be able to make the hub tear a session down.
+      // The peer has run its counter off the end; the repair is a fresh
+      // session (LOGIN resets both counters), requested once per exhaustion.
+      if (!framecrypto::msgidFitsCtr(etm.msgid))
+      {
+        ESP_LOGW(TAG, "[%s] Authentic uplink with msgid %u beyond the CTR space — refusing it",
+                 this->get_name().c_str(), (unsigned) etm.msgid);
+        this->uplink_drop_candidate_(up);
+        this->requestMsgidRelogin_("uplink");
+        return false;
+      }
+      return true;
+    }
+
+    // CTR-decrypt the verified ciphertext. Returns a malloc'd plaintext, or
+    // nullptr (candidate destroyed) on failure.
+    uint8_t *LORAListener::uplink_decrypt_(EncUplink &up)
+    {
+      const ::EncryptedPayload *enc = up.msg->encrypted;
+      size_t cipher_len = enc->ciphertext.len;
+
+      uint8_t ctr_block[framecrypto::kCtrBlockBytes];
+      framecrypto::buildCtrInitialBlock(up.session_id, up.sender, /*downlink=*/false,
+                                        up.msgid, /*block_idx=*/0, ctr_block);
+
+      uint8_t *plaintext = static_cast<uint8_t *>(malloc(cipher_len));
+      if (!plaintext)
+      {
+        ESP_LOGE(TAG, "Memory allocation failed for plaintext");
+        this->uplink_drop_candidate_(up);
+        return nullptr;
+      }
+
+      if (!s_ctr_pass(false, up.enc_key_id, ctr_block, enc->ciphertext.data, cipher_len, plaintext))
+      {
+        ESP_LOGE(TAG, "CTR decryption failed despite a verified CMAC — this should never happen");
+        this->uplink_drop_candidate_(up);
+        free(plaintext);
+        return nullptr;
+      }
+      return plaintext;
+    }
+
+    // The frame is authentic and decrypted: commit it, install the candidate
+    // session (if any), prove the node alive, confirm the session, and hand the
+    // inner payload on. Takes ownership of `plaintext`.
+    void LORAListener::uplink_accept_(EncUplink &up, uint8_t *plaintext)
+    {
+      // The tag verified: this frame is the node's, so its msgid is real and
+      // the replay counter may finally move.
+      this->commit_rx_msgid_(up.msg);
+
+      // The candidate (if one was derived) just proved itself by verifying
+      // THIS frame — install it as the live session now, replacing
+      // whatever was there before. This is the only path that installs a
+      // newly-derived candidate; every early return above destroyed it
+      // instead.
+      if (up.needs_candidate)
+        this->installSessionKeys_(up.session_id, up.candidate_enc_id, up.candidate_mac_id);
+
+      // A successful decrypt proves the node holds the matching base nonce —
+      // the encrypted session is confirmed both ways.  Only now do we treat
+      // login as acknowledged and allow the hub to encrypt downlink commands.
+      //
+      // (a'): an AUTHENTICATED uplink is also proof the node is awake right
+      // now — stamped only past the CMAC check, so a forged or foreign frame
+      // cannot move the sleep model.
+      this->note_node_heard_();
+      this->confirm_session_();
+
+      // The inner is now payload-only (no header).  Unpack it, resolve the F-4
+      // ack/position state machine, then RE-ATTACH the plaintext outer header
+      // and re-pack before forwarding to nodes (loracover requires a header for
+      // addressing — the header is no longer carried inside the ciphertext).
+      LoraClientResponseMessage *inner =
+          lora_client_response_message__unpack(NULL, up.msg->encrypted->ciphertext.len, plaintext);
+      free(plaintext);
+      if (inner)
+        this->forward_uplink_(inner, up.msg);
+    }
+
+    // Dispatch the decrypted payload on the hub, then forward it to the child
+    // nodes with the outer header borrowed from `outer`. Frees `inner`.
+    void LORAListener::forward_uplink_(LoraClientResponseMessage *inner,
+                                       const LoraClientResponseMessage *outer)
+    {
+      // Was a verbatim copy of dispatch_payload_'s chain. The comment on
+      // that function says the two paths are identical and must be split
+      // only deliberately — so call it rather than maintaining a second
+      // copy that a new message type can silently be added to just once.
+      this->dispatch_payload_(inner);
+
+      inner->header = outer->header; // borrow outer header for forwarding
+      size_t   fwd_len = lora_client_response_message__get_packed_size(inner);
+      uint8_t *fwd     = static_cast<uint8_t *>(malloc(fwd_len));
+      if (fwd)
+      {
+        lora_client_response_message__pack(inner, fwd);
+        for (size_t i = 0; i < this->nodes_.size(); i++)
+          this->nodes_[i]->set_response(fwd, fwd_len);
+        free(fwd);
+      }
+      inner->header = nullptr; // detach borrowed header before free (rcv_message owns it)
+      lora_client_response_message__free_unpacked(inner, NULL);
+    }
+
     // The encrypted uplink path: derive the IV, authenticate, unpack the inner
     // payload, confirm the session, then forward to the child nodes with the
     // plaintext outer header re-attached (loracover needs it for addressing).
+    // An ordered pipeline; each stage returns false when the frame is dropped.
     //
     // Does NOT own the message — see admit_frame_.
     void LORAListener::handle_encrypted_(LoraClientResponseMessage *rcv_message,
                                          uint8_t *data, size_t len)
     {
-        EncryptedPayload *enc = rcv_message->encrypted;
-        ESP_LOGI(TAG, "Received encrypted payload ciphertext=%d bytes", (int)enc->ciphertext.len);
+      EncryptedPayload *enc = rcv_message->encrypted;
+      ESP_LOGI(TAG, "Received encrypted payload ciphertext=%d bytes", (int)enc->ciphertext.len);
 
-        // Use the header's msgid as the unified frame counter.  Replay protection
-        // was already enforced above (msgid > frame_counter_.rx_message_id).
-        // The IV must equal base_nonce || (uint64_t)msgid; if it doesn't the
-        // CMAC tag will also fail, but checking up-front avoids the decrypt cost.
-        uint32_t sender      = rcv_message->header ? rcv_message->header->senderaddress : 0;
+      // Use the header's msgid as the unified frame counter.  Replay protection
+      // was already enforced above (msgid > frame_counter_.rx_message_id).
+      EncUplink up;
+      up.msg    = rcv_message;
+      up.sender = rcv_message->header ? rcv_message->header->senderaddress : 0;
 
-        // If we don't have a base nonce for this peer (e.g. recovery after reboot),
-        // re-provision one, send it, and discard this packet — the node will restart
-        // its encryption with the new nonce on the next transmission.
-        //
-        // Through send_login(): LoginMsg carries the base nonce and IS the
-        // bootstrap (MIC-authenticated, the one plaintext command a node holding
-        // a session accepts). BaseNonceExchange, which used to offer a key in
-        // plaintext, no longer exists on the wire.
-        //
-        // This matters most after a HUB reboot: s_base_nonce_map lives in RAM,
-        // so the hub comes back holding no nonce for any node while every node
-        // still holds its own in NVS. Re-provisioning by a route the node
-        // refuses would leave a whole provisioned fleet unreachable until it was
-        // re-flashed.
-        bool sender_has_base_nonce;
-        {
-          std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-          sender_has_base_nonce = s_base_nonce_map.find(sender) != s_base_nonce_map.end();
-        }
-        if (!sender_has_base_nonce)
-        {
-          // Security review finding 9: go through do_login_and_arm_retry_(),
-          // not a bare send_login(). The bare call bypassed
-          // acquire_onboarding_() (the 2026-09-26 onboarding-storm fix —
-          // two nodes re-provisioning at once could still pile their
-          // ~1.85 s/frame downlink queues onto each other here) and armed
-          // no retry, so a dropped re-provisioning LoginMsg had no recovery
-          // until this node happened to send another encrypted uplink.
-          ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", sender);
-          this->do_login_and_arm_retry_();
-          return;
-        }
-
-        // Tier 3 (mac-separation-implementation-plan.md section 2(b)): if
-        // this IS the session-opening uplink (sessionNonce present), derive
-        // a CANDIDATE K_enc/K_mac from it now — into fresh PSA key ids that
-        // are NOT installed as this listener's live keys yet.
-        //
-        // This is what lets the hub follow a node across ANY NUMBER of
-        // re-logins within one hub uptime, not just the first: the old code
-        // only derived "if this->k_enc_key_id_ == PSA_KEY_ID_NULL", so a
-        // node's SECOND-ever login in one hub uptime (a reflash, a REGISTER,
-        // a tracked-op giving up and re-logging in, ...) left the hub
-        // holding the FIRST session's keys forever — the session-opening
-        // uplink's real sessionNonce was simply never looked at again, and
-        // every uplink from the node failed CMAC until the hub itself
-        // rebooted. installed_session_id_ (set by installSessionKeys_)
-        // tracks which session_id the LIVE keys belong to, so a duplicate
-        // burst copy of a session-opening uplink ALREADY confirmed (same
-        // session_id) is recognised and skipped — it uses the live keys
-        // directly, with no new PSA import and no generation bump.
-        //
-        // Deriving before this frame is verified is safe PROVIDED the
-        // candidate is only ever used to try THIS frame, and only INSTALLED
-        // (replacing the live keys) if that verify succeeds below — a
-        // forged sessionNonce then at most wastes one derivation, never
-        // pins attacker-chosen keys as live (the earlier version of this
-        // comment claimed deriving-and-installing immediately "doesn't
-        // move any committed state", which was wrong: it moved exactly the
-        // state — this->k_enc_key_id_/k_mac_key_id_ — that every later
-        // uplink's decrypt depends on).
-        uint32_t session_id = 0;
-        {
-          std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-          session_id = s_base_nonce_map[sender];
-        }
-        psa_key_id_t enc_key_id = this->k_enc_key_id_;
-        psa_key_id_t mac_key_id = this->k_mac_key_id_;
-        psa_key_id_t candidate_enc_id = PSA_KEY_ID_NULL;
-        psa_key_id_t candidate_mac_id = PSA_KEY_ID_NULL;
-        const bool is_session_opening =
-            rcv_message->header && rcv_message->header->sessionnonce != 0;
-        const bool needs_candidate =
-            is_session_opening &&
-            (this->k_enc_key_id_ == PSA_KEY_ID_NULL || this->installed_session_id_ != session_id);
-        if (needs_candidate)
-        {
-          if (!this->deriveSessionKeyCandidate_(session_id, rcv_message->header->sessionnonce,
-                                                &candidate_enc_id, &candidate_mac_id))
-          {
-            ESP_LOGE(TAG, "Session key candidate derivation failed for peer %u", sender);
-            return;
-          }
-          enc_key_id = candidate_enc_id;
-          mac_key_id = candidate_mac_id;
-        }
-
-        // A candidate not yet installed must be destroyed on every exit
-        // from here on that is not the install call at the bottom of a
-        // successful verify+decrypt.
-        auto destroy_candidate = [&]() {
-          if (candidate_enc_id != PSA_KEY_ID_NULL) psa_destroy_key(candidate_enc_id);
-          if (candidate_mac_id != PSA_KEY_ID_NULL) psa_destroy_key(candidate_mac_id);
-        };
-
-        // Encrypt-then-CMAC replaces AES-GCM. Verify the tag BEFORE
-        // decrypting — a tampered ciphertext or header field fails the
-        // check without ever running the cipher over attacker-controlled
-        // bytes. Node uplinks never burst, so burstIndex/burstCount/
-        // onMark/fireStamped/fireRound/fireOffsetUs are always 0/false on
-        // this path (whatever the node actually sealed).
-        if (enc_key_id == PSA_KEY_ID_NULL || mac_key_id == PSA_KEY_ID_NULL)
-        {
-          ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", sender);
-          destroy_candidate();
-          return;
-        }
-
-        size_t cipher_len = enc->ciphertext.len;
-
-        framecrypto::EtmHeaderFields etm{};
-        etm.downlink       = false;
-        etm.session_id     = session_id;
-        etm.dest_address   = rcv_message->header ? rcv_message->header->destaddress   : 0;
-        etm.dest_subnet    = rcv_message->header ? rcv_message->header->destsubnet    : 0;
-        etm.sender_address = sender;
-        etm.msgid          = rcv_message->header ? rcv_message->header->msgid         : 0;
-        etm.burst_index    = rcv_message->header ? rcv_message->header->burstindex    : 0;
-        etm.burst_count    = rcv_message->header ? rcv_message->header->burstcount    : 0;
-        etm.on_mark        = rcv_message->header ? rcv_message->header->onmark        : false;
-        etm.fire_stamped   = rcv_message->header ? rcv_message->header->firestamped   : false;
-        etm.fire_round     = rcv_message->header ? rcv_message->header->fireround     : 0;
-        etm.fire_offset_us = rcv_message->header ? rcv_message->header->fireoffsetus  : 0;
-
-        uint8_t cmac_prefix[framecrypto::kEtmPrefixBytes];
-        framecrypto::buildEtmCmacPrefix(etm, static_cast<uint16_t>(cipher_len), cmac_prefix);
-
-        uint8_t *mac_input = static_cast<uint8_t *>(malloc(sizeof(cmac_prefix) + cipher_len));
-        if (!mac_input)
-        {
-          ESP_LOGE(TAG, "Memory allocation failed for MAC input");
-          destroy_candidate();
-          return;
-        }
-        memcpy(mac_input, cmac_prefix, sizeof(cmac_prefix));
-        memcpy(mac_input + sizeof(cmac_prefix), enc->ciphertext.data, cipher_len);
-
-        // NIT (security review): pin the received tag to exactly
-        // kSessionCmacTagBytes, same as LOGIN/REGISTER already require and
-        // the node's mirror of this check — the key policy floors
-        // truncation at 8 bytes regardless, so this is defense-in-depth,
-        // not a live exploit.
-        const bool mac_ok = enc->tag.len == framecrypto::kSessionCmacTagBytes &&
-                            psa_mac_verify(mac_key_id,
-                                           PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, enc->tag.len),
-                                           mac_input, sizeof(cmac_prefix) + cipher_len,
-                                           enc->tag.data, enc->tag.len) == PSA_SUCCESS;
-        free(mac_input);
-        if (!mac_ok)
-        {
-          ESP_LOGE(TAG, "Encrypt-then-CMAC verification failed");
-          destroy_candidate();
-          return;
-        }
-
-        // AUTHENTIC, but is its msgid inside the CTR space? The counter block
-        // holds 31 bits while the tag covers 32, so msgid X and X + 2^31 would
-        // decrypt under the same keystream. Checked only AFTER the tag verified:
-        // a forged frame must not be able to make the hub tear a session down.
-        // The peer has run its counter off the end; the repair is a fresh
-        // session (LOGIN resets both counters), requested once per exhaustion.
-        if (!framecrypto::msgidFitsCtr(etm.msgid))
-        {
-          ESP_LOGW(TAG, "[%s] Authentic uplink with msgid %u beyond the CTR space — refusing it",
-                   this->get_name().c_str(), (unsigned) etm.msgid);
-          destroy_candidate();
-          this->requestMsgidRelogin_("uplink");
-          return;
-        }
-
-        uint8_t ctr_block[framecrypto::kCtrBlockBytes];
-        framecrypto::buildCtrInitialBlock(session_id, sender, /*downlink=*/false,
-                                          etm.msgid, /*block_idx=*/0, ctr_block);
-
-        uint8_t *plaintext = static_cast<uint8_t *>(malloc(cipher_len));
-        if (!plaintext)
-        {
-          ESP_LOGE(TAG, "Memory allocation failed for plaintext");
-          destroy_candidate();
-          return;
-        }
-
-        {
-          psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
-          bool ok = psa_cipher_decrypt_setup(&op, enc_key_id, PSA_ALG_CTR) == PSA_SUCCESS;
-          if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
-          size_t out_total = 0, part_len = 0;
-          if (ok)
-          {
-            ok = psa_cipher_update(&op, enc->ciphertext.data, cipher_len, plaintext, cipher_len, &part_len) == PSA_SUCCESS;
-            out_total += part_len;
-          }
-          if (ok)
-          {
-            size_t finish_len = 0;
-            ok = psa_cipher_finish(&op, plaintext + out_total, cipher_len - out_total, &finish_len) == PSA_SUCCESS;
-            out_total += finish_len;
-            ok = ok && (out_total == cipher_len);
-          }
-          else
-          {
-            psa_cipher_abort(&op);
-          }
-          if (!ok)
-          {
-            ESP_LOGE(TAG, "CTR decryption failed despite a verified CMAC — this should never happen");
-            destroy_candidate();
-            free(plaintext);
-            return;
-          }
-        }
-
-        // The tag verified: this frame is the node's, so its msgid is real and
-        // the replay counter may finally move.
-        this->commit_rx_msgid_(rcv_message);
-
-        // The candidate (if one was derived) just proved itself by verifying
-        // THIS frame — install it as the live session now, replacing
-        // whatever was there before. This is the only path that installs a
-        // newly-derived candidate; every early return above destroyed it
-        // instead.
-        if (needs_candidate)
-          this->installSessionKeys_(session_id, candidate_enc_id, candidate_mac_id);
-
-        // A successful decrypt proves the node holds the matching base nonce —
-        // the encrypted session is confirmed both ways.  Only now do we treat
-        // login as acknowledged and allow the hub to encrypt downlink commands.
-        //
-        // (a'): an AUTHENTICATED uplink is also proof the node is awake right
-        // now — stamped only past the CMAC check, so a forged or foreign frame
-        // cannot move the sleep model.
-        this->note_node_heard_();
-        this->confirm_session_();
-
-        // The inner is now payload-only (no header).  Unpack it, resolve the F-4
-        // ack/position state machine, then RE-ATTACH the plaintext outer header
-        // and re-pack before forwarding to nodes (loracover requires a header for
-        // addressing — the header is no longer carried inside the ciphertext).
-        LoraClientResponseMessage *inner =
-            lora_client_response_message__unpack(NULL, cipher_len, plaintext);
-        free(plaintext);
-        if (inner)
-        {
-          // Was a verbatim copy of dispatch_payload_'s chain. The comment on
-          // that function says the two paths are identical and must be split
-          // only deliberately — so call it rather than maintaining a second
-          // copy that a new message type can silently be added to just once.
-          this->dispatch_payload_(inner);
-
-          inner->header = rcv_message->header; // borrow outer header for forwarding
-          size_t   fwd_len = lora_client_response_message__get_packed_size(inner);
-          uint8_t *fwd     = static_cast<uint8_t *>(malloc(fwd_len));
-          if (fwd)
-          {
-            lora_client_response_message__pack(inner, fwd);
-            for (size_t i = 0; i < this->nodes_.size(); i++)
-              this->nodes_[i]->set_response(fwd, fwd_len);
-            free(fwd);
-          }
-          inner->header = nullptr; // detach borrowed header before free (rcv_message owns it)
-          lora_client_response_message__free_unpacked(inner, NULL);
-        }
+      if (!this->uplink_check_base_nonce_(up))
         return;
+      if (!this->uplink_select_keys_(up))
+        return;
+      if (!this->uplink_verify_(up))
+        return;
+      uint8_t *plaintext = this->uplink_decrypt_(up);
+      if (plaintext == nullptr)
+        return;
+      this->uplink_accept_(up, plaintext);
     }
 
     // ACK / POSITION / BEACON, for both the encrypted and the plaintext path.

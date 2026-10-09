@@ -6439,3 +6439,224 @@ TEST(OpRetry, TheShortWaitIsMeasuredFromTheOpMarkWhenThereIsOneElseFromTheLastPl
         EXPECT_NEAR(got, (int) want, 20) << "op mark present: " << have_op_mark;
     }
 }
+
+// ---------------------------------------------------------------------------
+// handle_encrypted_ characterisation (CCN refactor): the receive/authenticate/
+// confirm pipeline, branch by branch, in the order it must run.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<uint8_t> sealed_uplink_bytes(uint32_t base, uint32_t msgid,
+                                         const std::vector<uint8_t> &plain,
+                                         uint32_t session_nonce = 0,
+                                         bool corrupt_tag = false,
+                                         uint32_t sender = 18) {
+    proto_sim::LoraHeader h;
+    h.destAddress   = esphome::lora_tracker::kHubAddress;
+    h.destSubnet    = 2;
+    h.senderAddress = sender;
+    h.msgId         = msgid;
+    h.sessionNonce  = session_nonce;
+    auto enc = seal_uplink_like_node(base, h, plain);
+    if (corrupt_tag) enc.tag[0] ^= 0x01;
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = h;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
+    outer.encrypted.ciphertext = enc.ciphertext;
+    return proto_sim::serialize_resp(outer);
+}
+
+std::vector<uint8_t> avail_payload() {
+    proto_sim::LoraClientResponseMessage inner;
+    inner.proto           = proto_sim::LoraClientResponseMessage::Proto::Avail;
+    inner.avail.available = true;
+    return proto_sim::serialize_resp_payload(inner);
+}
+
+struct EncProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::clearSessionKeys_;
+    using esphome::lora_tracker::LORAListener::installed_session_id_;
+    using esphome::lora_tracker::LORAListener::last_heard_us_;
+    using esphome::lora_tracker::LORAListener::login_acked_;
+};
+EncProbe &EP(LORAClient &c) { return static_cast<EncProbe &>(c); }
+
+}  // namespace
+
+TEST(EncUplink, NoBaseNonceForTheSenderStartsAFreshLoginAndDiscardsTheFrame) {
+    using namespace real_helpers;
+    RealHubHarness h{201, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    RecordingNode node;
+    h.rol.register_lora_node(&node);
+    const size_t before = count_logins_since(h.radio, 0);
+    auto bytes = sealed_uplink_bytes(/*base=*/0x1111, /*msgid=*/2, avail_payload(), 0, false, /*sender=*/201);
+    h.rol.set_response(bytes.data(), bytes.size());
+    h.clock.tick(60'000);
+    EXPECT_GE(count_logins_since(h.radio, 0), before + 1) << "re-provisioning goes through a LOGIN";
+    EXPECT_TRUE(node.got.empty()) << "and the frame itself is discarded, never forwarded";
+    EXPECT_EQ(h.rol.frame_counter_.rx_message_id, 0u) << "the replay counter does not move";
+    EXPECT_FALSE(h.rol.session_confirmed_);
+}
+
+TEST(EncUplink, WithoutDerivedKeysAndNoSessionNonceTheFrameIsDroppedUntouched) {
+    MsgidGuardFixture f;
+    RecordingNode node;
+    f.rol.register_lora_node(&node);
+    ASSERT_TRUE(f.rol.session_confirmed_);
+    EP(f.rol).clearSessionKeys_();               // base nonce stays, keys go
+    proto_sim_timer_set_now_us(900'000'000);
+    const uint32_t rx_before   = f.rol.frame_counter_.rx_message_id;
+    const int64_t  heard_before = EP(f.rol).last_heard_us_;
+    auto bytes = sealed_uplink_bytes(f.base, rx_before + 1, avail_payload());
+    f.rol.set_response(bytes.data(), bytes.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before) << "no msgid committed";
+    EXPECT_EQ(EP(f.rol).last_heard_us_, heard_before) << "an unauthenticated frame proves nothing alive";
+    EXPECT_TRUE(node.got.empty());
+}
+
+TEST(EncUplink, AForgedSessionOpeningFrameLeavesTheLiveSessionExactlyAsItWas) {
+    MsgidGuardFixture f;
+    RecordingNode node;
+    f.rol.register_lora_node(&node);
+    const uint32_t gen = f.rol.sessionGenerationForTest();
+    const uint32_t installed = EP(f.rol).installed_session_id_;
+    const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
+    ASSERT_EQ(installed, f.base);
+
+    // A session-opening frame (sessionNonce != 0) carrying a bad tag: a candidate
+    // is derived, fails the CMAC, and must be thrown away -- never installed.
+    auto bad = sealed_uplink_bytes(f.base, rx_before + 1, avail_payload(),
+                                   /*session_nonce=*/0xBADC0DE5u, /*corrupt_tag=*/true);
+    f.rol.set_response(bad.data(), bad.size());
+    EXPECT_EQ(f.rol.sessionGenerationForTest(), gen);
+    EXPECT_EQ(EP(f.rol).installed_session_id_, installed);
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before);
+    EXPECT_TRUE(node.got.empty());
+
+    // The live keys still verify the next genuine frame.
+    auto good = sealed_uplink_bytes(f.base, rx_before + 2, avail_payload());
+    f.rol.set_response(good.data(), good.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before + 2);
+    EXPECT_EQ(f.rol.sessionGenerationForTest(), gen) << "no new generation for an ordinary frame";
+}
+
+TEST(EncUplink, ADuplicateSessionOpeningCopyOfTheInstalledSessionUsesTheLiveKeys) {
+    MsgidGuardFixture f;
+    const uint32_t gen = f.rol.sessionGenerationForTest();
+    ASSERT_EQ(EP(f.rol).installed_session_id_, f.base);
+    const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
+    // Same session id, sessionNonce present again (another burst copy of the
+    // opening uplink): verified under the live keys, no new import, no bump.
+    auto dup = sealed_uplink_bytes(f.base, rx_before + 1, avail_payload(), /*session_nonce=*/kTestNodeNonce);
+    f.rol.set_response(dup.data(), dup.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before + 1) << "accepted";
+    EXPECT_EQ(f.rol.sessionGenerationForTest(), gen) << "no new generation";
+}
+
+TEST(EncUplink, AVerifiedFrameWhosePayloadIsNotAMessageStillCommitsAndConfirmsButForwardsNothing) {
+    MsgidGuardFixture f;
+    RecordingNode node;
+    f.rol.register_lora_node(&node);
+    f.rol.session_confirmed_ = false;            // let the confirm step show itself
+    proto_sim_timer_set_now_us(900'000'000);
+    const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
+    const int64_t  heard_before = EP(f.rol).last_heard_us_;
+    std::vector<uint8_t> garbage = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01};
+    auto bytes = sealed_uplink_bytes(f.base, rx_before + 1, garbage);
+    f.rol.set_response(bytes.data(), bytes.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before + 1) << "the tag verified: the msgid is real";
+    EXPECT_NE(EP(f.rol).last_heard_us_, heard_before) << "and the node is proven awake";
+    EXPECT_TRUE(f.rol.session_confirmed_) << "the session is confirmed by the verified frame";
+    EXPECT_TRUE(node.got.empty()) << "but there is nothing to dispatch or forward";
+}
+
+TEST(EncUplink, AnAuthenticBeaconIsForwardedToTheChildNodesWithTheOuterHeaderReattached) {
+    MsgidGuardFixture f;
+    RecordingNode node;
+    f.rol.register_lora_node(&node);
+    constexpr std::time_t kHubEpoch = 1787000000;
+    const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
+    send_encrypted_uplink(f.rol, f.base, rx_before + 1, 18, 2,
+                          make_beacon(kHubEpoch + 7, /*clock_valid=*/true));
+    ASSERT_EQ(node.got.size(), 1u);
+    LoraClientResponseMessage *fwd = lora_client_response_message__unpack(
+        nullptr, node.got[0].size(), node.got[0].data());
+    ASSERT_NE(fwd, nullptr);
+    ASSERT_NE(fwd->header, nullptr) << "loracover needs the addressing header";
+    EXPECT_EQ(fwd->header->senderaddress, 18u);
+    EXPECT_EQ(fwd->header->destaddress, (uint32_t) esphome::lora_tracker::kHubAddress);
+    EXPECT_EQ(fwd->header->msgid, rx_before + 1);
+    EXPECT_EQ(fwd->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON);
+    ASSERT_NE(fwd->beacon, nullptr);
+    EXPECT_EQ(fwd->beacon->nodeepoch, (uint64_t) (kHubEpoch + 7));
+    lora_client_response_message__free_unpacked(fwd, nullptr);
+    // The hub itself also acted on the inner payload (dispatch_payload_).
+    EXPECT_TRUE(f.rol.clock_offset_valid_);
+    EXPECT_EQ(f.rol.clock_offset_s_, 7);
+}
+
+TEST(EncUplink, AFramePastTheTagCheckIsStillRefusedWhenItsMsgidBreaksTheReplayWindow) {
+    MsgidGuardFixture f;
+    RecordingNode node;
+    f.rol.register_lora_node(&node);
+    const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
+    auto replay = sealed_uplink_bytes(f.base, rx_before, avail_payload());   // not above the high-water mark
+    f.rol.set_response(replay.data(), replay.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before);
+    EXPECT_TRUE(node.got.empty());
+}
+
+TEST(EncUplink, ASessionOpeningUplinkWhoseSessionDiffersFromTheInstalledOneReplacesTheLiveKeys) {
+    // installed_session_id_ drifting from the session the peer is on (a re-login
+    // whose old keys were never cleared): the session-opening uplink must derive
+    // a candidate and, once it verifies, install it -- not ride the stale keys.
+    MsgidGuardFixture f;
+    const uint32_t gen = f.rol.sessionGenerationForTest();
+    ASSERT_EQ(EP(f.rol).installed_session_id_, f.base);
+    EP(f.rol).installed_session_id_ = f.base ^ 0x5A5A5A5Au;
+    const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
+    auto open = sealed_uplink_bytes(f.base, rx_before + 1, avail_payload(), /*session_nonce=*/kTestNodeNonce);
+    f.rol.set_response(open.data(), open.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before + 1);
+    EXPECT_EQ(f.rol.sessionGenerationForTest(), gen + 1) << "a fresh candidate was installed";
+    EXPECT_EQ(EP(f.rol).installed_session_id_, f.base);
+}
+
+TEST(EncUplink, EveryTimingFieldOfTheOuterHeaderIsUnderTheUplinkCmac) {
+    // Node uplinks never burst, so these are 0 on the wire in practice -- but the
+    // hub must still verify over what the header CARRIES: a tag sealed over
+    // non-zero fields is accepted, and a header altered after sealing is refused.
+    MsgidGuardFixture f;
+    auto build = [&](uint32_t msgid, bool tamper_after_seal) {
+        proto_sim::LoraHeader h;
+        h.destAddress   = esphome::lora_tracker::kHubAddress;
+        h.destSubnet    = 2;
+        h.senderAddress = 18;
+        h.msgId         = msgid;
+        if (!tamper_after_seal) {
+            h.burstIndex = 3; h.burstCount = 17; h.fireRound = 0x1234; h.fireOffsetUs = 777;
+        }
+        auto enc = seal_uplink_like_node(f.base, h, avail_payload());
+        if (tamper_after_seal) {
+            h.burstIndex = 3; h.burstCount = 17; h.fireRound = 0x1234; h.fireOffsetUs = 777;
+        }
+        proto_sim::LoraClientResponseMessage outer;
+        outer.header               = h;
+        outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+        outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
+        outer.encrypted.ciphertext = enc.ciphertext;
+        return proto_sim::serialize_resp(outer);
+    };
+    const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
+    auto tampered = build(rx_before + 1, /*tamper_after_seal=*/true);
+    f.rol.set_response(tampered.data(), tampered.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before) << "a header changed after sealing is refused";
+
+    auto honest = build(rx_before + 1, /*tamper_after_seal=*/false);
+    f.rol.set_response(honest.data(), honest.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before + 1)
+        << "the same fields sealed in are accepted";
+}

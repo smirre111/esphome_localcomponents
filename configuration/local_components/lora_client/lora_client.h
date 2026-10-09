@@ -1331,6 +1331,28 @@ namespace esphome
       void handle_register_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
       bool admit_frame_(::LoraClientResponseMessage *rcv_message);
       void handle_encrypted_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
+      // Working state of one encrypted-uplink receive: the ordered stages of
+      // handle_encrypted_ share it instead of a dozen locals.
+      struct EncUplink
+      {
+        ::LoraClientResponseMessage *msg{nullptr};
+        uint32_t     sender{0};
+        uint32_t     session_id{0};
+        psa_key_id_t enc_key_id{PSA_KEY_ID_NULL};       // the keys this frame is tried under
+        psa_key_id_t mac_key_id{PSA_KEY_ID_NULL};       // (live, or the unverified candidate)
+        psa_key_id_t candidate_enc_id{PSA_KEY_ID_NULL};
+        psa_key_id_t candidate_mac_id{PSA_KEY_ID_NULL};
+        bool         needs_candidate{false};
+        uint32_t     msgid{0};
+      };
+      bool     uplink_check_base_nonce_(const EncUplink &up);
+      bool     uplink_select_keys_(EncUplink &up);
+      bool     uplink_verify_(EncUplink &up);
+      uint8_t *uplink_decrypt_(EncUplink &up);
+      void     uplink_accept_(EncUplink &up, uint8_t *plaintext);
+      void     uplink_drop_candidate_(EncUplink &up);
+      void     forward_uplink_(::LoraClientResponseMessage *inner,
+                               const ::LoraClientResponseMessage *outer);
       // Two stages of set_response(): the length re-encode check, and the
       // plaintext-uplink gate (true = the frame may be acted on).
       void check_uplink_canonical_(const ::LoraClientResponseMessage *rcv_message, size_t len);
