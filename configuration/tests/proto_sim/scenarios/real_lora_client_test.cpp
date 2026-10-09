@@ -6273,3 +6273,169 @@ TEST(AckPath, OnlyACleanSingleShotAckFeedsTheLatencyHistory) {
     EXPECT_EQ(count(), 2u) << "no mark (a burst first shot): nothing to measure";
     EXPECT_FALSE(AP(h).op_awaiting_ack_) << "but the ack itself is still accepted";
 }
+
+// ---------------------------------------------------------------------------
+// schedule_op_retry_ characterisation (CCN refactor): the queue-drain clamp in
+// both waits, a timer that fires with nothing left to retry, a retry that falls
+// inside a relogin, and the exhaustion path.
+// ---------------------------------------------------------------------------
+namespace {
+struct ReArmProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::schedule_op_retry_;
+};
+}  // namespace
+
+TEST(OpRetry, TheShortWaitClampsTheQueueDrainToZeroAndToTheBacklogCeiling) {
+    using namespace real_helpers;
+    struct Case { int64_t drain_us; uint32_t drain_ms; };
+    const Case cases[] = {
+        {-5'000'000, 0}, {0, 0}, {2'000'000, 2000}, {200'000'000, LORAClient::kMaxAckBacklogMs}};
+    for (const Case &c : cases) {
+        RealHubHarness h{18, kMacRol2};
+        staleButOtherwiseGood(h);
+        h.rol.enable_optimistic_single_shot(true);
+        h.tracker.tx_drain_us = c.drain_us;
+        sendOpen(h);
+        ASSERT_EQ(h.tracker.last_copies, 1) << "drain " << c.drain_us;
+        const uint32_t want = singleshotwait::firstAckWaitMs(
+            usToPlacedMark(h), c.drain_ms, h.rol.op_first_tail_ms_for_test());
+        const int got = msUntilBurst(h, 140000);
+        ASSERT_GT(got, 0) << "the burst fallback must leave (drain " << c.drain_us << ")";
+        EXPECT_NEAR(got, (int) want, 20) << "drain " << c.drain_us;
+    }
+}
+
+TEST(OpRetry, TheNormalWaitAddsTheClampedQueueDrain) {
+    using namespace real_helpers;
+    struct Case { int64_t drain_us; uint32_t drain_ms; };
+    const Case cases[] = {{-5'000'000, 0}, {2'000'000, 2000},
+                          {200'000'000, LORAClient::kMaxAckBacklogMs}};
+    for (const Case &c : cases) {
+        RealHubHarness h{18, kMacRol2};
+        staleButOtherwiseGood(h);
+        h.tracker.tx_drain_us = c.drain_us;
+        sendOpen(h);
+        ASSERT_NE(h.tracker.last_copies, 1);
+        const uint32_t want = 3000u + c.drain_ms;   // kOpRetryIntervalMs
+        const size_t sends = h.tracker.sent_copies.size();
+        h.clock.tick(want - 100);
+        EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "drain " << c.drain_us;
+        h.clock.tick(200);
+        EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "drain " << c.drain_us;
+    }
+}
+
+TEST(OpRetry, ATimerThatFiresAfterTheOpIsNoLongerAwaitedDoesNothingAndDoesNotRearm) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    AP(h).op_awaiting_ack_ = false;     // not via an ack: the timer is still armed
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(40'000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends);
+    EXPECT_EQ(h.rol.opRetryCount(), 0u);
+    EXPECT_FALSE(h.rol.commandFailed());
+}
+
+TEST(OpRetry, ARetryThatFallsInsideARelogin_DefersWithoutSpendingTheBudget) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    const size_t sends = h.tracker.sent_copies.size();
+    P(h).relogin_pending_ = true;
+    h.clock.tick(30'000);                         // ten intervals' worth
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "nothing is sent into a session that does not exist";
+    EXPECT_EQ(h.rol.opRetryCount(), 0u) << "and no retry is charged";
+    EXPECT_FALSE(h.rol.commandFailed());
+    EXPECT_TRUE(h.rol.awaitingAck());
+
+    P(h).relogin_pending_ = false;                // the deferral re-armed itself
+    h.clock.tick(4'000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the retry resumes";
+    EXPECT_EQ(h.rol.opRetryCount(), 1u);
+}
+
+TEST(OpRetry, ExhaustingTheRetriesFailsTheCommandAndForcesAFreshSession) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.session_confirmed_ = true;
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    for (uint32_t i = 1; i <= 4; ++i) {
+        h.clock.tick(3000 + 50);
+        EXPECT_EQ(h.rol.opRetryCount(), i);
+        EXPECT_TRUE(h.rol.awaitingAck());
+        EXPECT_TRUE(h.rol.session_confirmed_);
+    }
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(3000 + 50);
+    EXPECT_TRUE(h.rol.commandFailed());
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.session_confirmed_) << "the session is presumed dead";
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1)
+        << "exactly one frame leaves: the fresh LoginMsg, not another op retransmit";
+    h.clock.tick(60'000);
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+TEST(OpRetry, ANormalRetryOfASingleShotPutsTheNodeBackOnBursts) {
+    // Rule 4: a single shot the hub was entitled to, left unacked, ends the
+    // node's single-shot standing at the retry -- not only at the next uplink.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    confirmedGrid(h);
+    h.rol.node_fw_version_ = 10104;
+    h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, true);   // fresh evidence
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None);
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    ASSERT_FALSE(h.rol.hubBelief().single_shot_unacked);
+    h.clock.tick(3000 + 50);
+    EXPECT_EQ(h.rol.opRetryCount(), 1u);
+    EXPECT_NE(h.tracker.last_copies, 1) << "the retry is a burst";
+    EXPECT_TRUE(h.rol.hubBelief().single_shot_unacked);
+    EXPECT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::SingleShotUnacked);
+}
+
+TEST(OpRetry, AMissedGuessRemembersTheTailThatProvedTooShort) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    seedLatency(h, 300, 3);
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    const uint32_t tail = h.rol.op_first_tail_ms_for_test();
+    ASSERT_GT(tail, 0u);
+    const unsigned before = h.rol.ack_latency_for_test().count(nowMs());
+    h.clock.tick(expectedWaitMs(h) + 50);
+    ASSERT_TRUE(h.rol.op_short_wait_spent_for_test());
+    EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), before + 1)
+        << "the tail that was too short is itself a sample (a lower bound)";
+    EXPECT_GE(h.rol.ack_latency_for_test().maxDelayMs(nowMs()), tail);
+}
+
+TEST(OpRetry, TheShortWaitIsMeasuredFromTheOpMarkWhenThereIsOneElseFromTheLastPlacedMark) {
+    using namespace real_helpers;
+    for (int have_op_mark = 0; have_op_mark < 2; ++have_op_mark) {
+        RealHubHarness h{18, kMacRol2};
+        staleButOtherwiseGood(h);
+        h.rol.enable_optimistic_single_shot(true);
+        sendOpen(h);
+        ASSERT_EQ(h.tracker.last_copies, 1);
+        const int64_t now = esp_timer_get_time();
+        P(h).last_placed_t0_us_ = now + 900'000;
+        AP(h).op_mark_us_       = have_op_mark ? now + 400'000 : 0;
+        static_cast<ReArmProbe &>(h.rol).schedule_op_retry_();   // re-arm the first wait
+        const int64_t to_mark_us = have_op_mark ? 400'000 : 900'000;
+        const uint32_t want = singleshotwait::firstAckWaitMs(to_mark_us, 0, h.rol.op_first_tail_ms_for_test());
+        const int got = msUntilBurst(h);
+        ASSERT_GT(got, 0);
+        EXPECT_NEAR(got, (int) want, 20) << "op mark present: " << have_op_mark;
+    }
+}

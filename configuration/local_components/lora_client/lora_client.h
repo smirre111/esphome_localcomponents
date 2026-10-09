@@ -1495,6 +1495,11 @@ namespace esphome
       // jitter fired the first cover-op retransmit almost immediately.  The
       // timeout re-arms itself after each retransmit; cancelled on ack.
       void     schedule_op_retry_();
+      // Stages of schedule_op_retry_() and of its one-shot timer.
+      uint32_t short_first_wait_ms_();
+      void     on_op_retry_timeout_(bool short_wait);
+      void     op_short_wait_missed_();
+      void     op_retries_exhausted_();
 
       ESPPreferenceObject rtc_;
     };
