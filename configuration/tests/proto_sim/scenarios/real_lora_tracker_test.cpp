@@ -1596,3 +1596,169 @@ TEST(RealTrackerBeaconShadow, TheVerdictIsCountedAndRemembered) {
     EXPECT_EQ(t.shadowBeaconsWithClear(), 1u) << "a beacon with nothing cleared is not counted";
     EXPECT_EQ(t.shadowLastMask(), pending::allListening());
 }
+
+// ---------------------------------------------------------------------------
+// serviceBeacon characterisation (CCN refactor): the early-return ladder and
+// the two refusals that must NOT be recorded as "queued".
+// ---------------------------------------------------------------------------
+namespace {
+struct BeaconProbe : TxProbe {
+    using LORATracker::net_key_;
+    using LORATracker::listeners_;
+    using LORATracker::beacon_round_queued_;
+    using LORATracker::grid_started_;
+};
+}  // namespace
+
+TEST(RealTrackerBeacon, ABeaconThatCannotBeSignedIsNotSentAndIsNotRecordedAsQueued) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    BeaconProbe t;
+    t.init();
+    t.startGrid();
+    uint8_t saved[sizeof(t.net_key_)];
+    memcpy(saved, t.net_key_, sizeof(saved));
+    ASSERT_NE(t.netKeyId(), 0u);
+    memset(t.net_key_, 0, sizeof(t.net_key_));      // a hub that lost its key
+
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 0u) << "no beacon rather than an unsigned one";
+    EXPECT_EQ(t.shadowBeacons(), 0u) << "and no shadow line for a beacon never queued";
+    EXPECT_EQ(t.beacon_round_queued_, 0xFFFFFFFFu) << "not recorded, so the next pass retries";
+    EXPECT_EQ(t.txDrainUs(), 0) << "nothing entered the transmit queue";
+
+    memcpy(t.net_key_, saved, sizeof(saved));       // the key is back
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 1u);
+    EXPECT_EQ(t.shadowBeacons(), 1u);
+}
+
+TEST(RealTrackerBeacon, ABeaconDroppedForWantOfABufferIsRetriedNotRecorded) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    BeaconProbe t;
+    t.init();
+    t.startGrid();
+    auto frame = tagged(0x5A);
+    int placed = 0;
+    while (placed < 32 && t.send(frame.data(), frame.size(), TxPolicy{/*copies=*/1}))
+        ++placed;
+    ASSERT_EQ(placed, POOL_SIZE) << "precondition: the pool is exhausted";
+
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 0u) << "dropped, not queued";
+    EXPECT_EQ(t.shadowBeacons(), 0u);
+    EXPECT_EQ(t.beacon_round_queued_, 0xFFFFFFFFu) << "recording it would hide a hub that stopped beaconing";
+
+    while (t.serviceTxQueue(1'000'000)) {}          // drain the pool
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 1u) << "and the next pass places it";
+}
+
+TEST(RealTrackerBeacon, NullListenerEntriesAreSkippedWhenGatheringTheShadow) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    BeaconProbe t;
+    t.init();
+    t.startGrid();
+    t.listeners_.push_back(nullptr);
+    t.listeners_.push_back(nullptr);
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 1u);
+    EXPECT_EQ(t.shadowBeacons(), 1u);
+    EXPECT_EQ(t.shadowLastMask(), pending::allListening());
+}
+
+TEST(RealTrackerBeacon, ARepeatedPassForTheSameRoundNeverQueuesTwiceEvenAfterTheMarkPasses) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    BeaconProbe t;
+    t.init();
+    t.startGrid();
+    t.serviceBeacon();
+    ASSERT_EQ(t.beaconsSent(), 1u);
+    const uint32_t queued_round = t.beacon_round_queued_;
+    ASSERT_NE(queued_round, 0xFFFFFFFFu);
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 1u);
+    EXPECT_EQ(t.beacon_round_queued_, queued_round);
+}
+
+TEST(RealTrackerBeacon, ABeaconIsNotQueuedWhenItsMarkIsTooCloseOrTooFar) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    BeaconProbe t;
+    t.init();
+    proto_sim_timer_set_now_us(1'000'000);
+    t.startGrid();
+    const int64_t t0   = t.nextBeaconT0Us(1'000'000);
+    const int64_t fire = loratiming::fireInstantUs(t0, 0);
+    ASSERT_GT(t0, 0);
+
+    // Too close: less than the queue's prepare lead before the fire instant.
+    proto_sim_timer_set_now_us(fire - LORATracker::kPrepareLeadUs + 1);
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 0u) << "too close for the queue to place it";
+
+    // Too far: more than a round ahead.
+    proto_sim_timer_set_now_us(fire - (int64_t) timedgrid::kRoundUs - 1);
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 0u) << "too far ahead to hold a buffer for";
+
+    // Exactly on the boundaries it is queued.
+    proto_sim_timer_set_now_us(fire - LORATracker::kPrepareLeadUs);
+    t.serviceBeacon();
+    EXPECT_EQ(t.beaconsSent(), 1u);
+}
+
+TEST(RealTrackerBeacon, ALaterBeaconCarriesItsOwnRoundAndTheFullBroadcastHeader) {
+    // Round 0 hides a wrong or dropped txround (0 == 0). The SECOND beacon is a
+    // whole cadence later, so every header and body field is non-trivial.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(1'000'000);
+    BeaconProbe t;
+    t.init();
+    t.startGrid();
+    t.serviceBeacon();
+    ASSERT_EQ(t.beaconsSent(), 1u);
+    const int64_t first = t.nextBeaconT0Us(esp_timer_get_time());
+    proto_sim_timer_set_now_us(first + 1);
+    const int64_t second = t.nextBeaconT0Us(first + 1);
+    const int64_t fire   = loratiming::fireInstantUs(second, 0);
+
+    // The very edge of the window: exactly one round ahead is still queued.
+    proto_sim_timer_set_now_us(fire - (int64_t) timedgrid::kRoundUs);
+    t.serviceBeacon();
+    ASSERT_EQ(t.beaconsSent(), 2u) << "lead == one round is inside the window";
+
+    lorahal::rec().reset();
+    proto_sim_timer_set_now_us(fire - LORATracker::kPrepareLeadUs);
+    while (t.serviceTxQueue(fire - LORATracker::kPrepareLeadUs)) {}
+    ASSERT_GE(lorahal::rec().packets.size(), (size_t) 1);
+    const auto &bytes = lorahal::rec().packets.back();
+    LoraClientOperationMessage *msg = lora_client_operation_message__unpack(
+        nullptr, bytes.size(), bytes.data());
+    ASSERT_NE(msg, nullptr);
+    ASSERT_EQ(msg->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON);
+    const uint32_t want_round = t.beaconRoundForT0(second);
+    ASSERT_GT(want_round, 0u) << "precondition: not round 0";
+    EXPECT_EQ(msg->gridbeacon->txround, want_round);
+    EXPECT_EQ(msg->header->destaddress, (uint32_t) LORATracker::broadcastAddressing);
+    EXPECT_EQ(msg->header->destsubnet, (uint32_t) LORATracker::subnetAddressing);
+    EXPECT_EQ(msg->header->senderaddress, (uint32_t) esphome::lora_tracker::kHubAddress);
+    EXPECT_EQ(msg->header->msgid, 0u);
+    EXPECT_EQ(msg->header->burstindex, 0u);
+    EXPECT_EQ(msg->header->burstcount, 1u) << "one copy, not a burst";
+    uint8_t expect[framecrypto::kBeaconMacBytes];
+    ASSERT_TRUE(t.beaconMac(msg->gridbeacon->txround, msg->gridbeacon->txslot,
+                            msg->gridbeacon->pendingmask, msg->gridbeacon->pendingmaskvalid,
+                            msg->header->burstindex, expect, sizeof(expect)));
+    EXPECT_EQ(memcmp(expect, msg->gridbeacon->mac.data, sizeof(expect)), 0);
+    EXPECT_EQ(t.postTxHoldMs(), 0u) << "a broadcast nobody answers: no hold after it";
+    lora_client_operation_message__free_unpacked(msg, nullptr);
+}

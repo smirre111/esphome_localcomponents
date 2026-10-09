@@ -472,6 +472,15 @@ namespace esphome
       uint32_t worst_poll_gap_us() const { return this->worst_poll_gap_us_; }
 
     protected:
+      // Stages of serviceBeacon().
+      enum class BeaconBuild { Ok, Unsigned, TooBig };
+      bool         beacon_due_(int64_t &now, int64_t &t0, uint32_t &round, int64_t &fire);
+      void         gather_shadow_inputs_(int64_t now,
+                                         std::vector<pendingshadow::NodeInputs> &shadow_in,
+                                         std::vector<std::string> &shadow_names);
+      BeaconBuild  build_beacon_(uint32_t round, std::vector<uint8_t> &buf);
+      bool         queue_beacon_(std::vector<uint8_t> &buf, int64_t fire, uint32_t round);
+
       int   last_packet_rssi_{0};
       float last_packet_snr_{0.0f};
 

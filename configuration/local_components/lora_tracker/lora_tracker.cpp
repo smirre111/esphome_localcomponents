@@ -705,36 +705,43 @@ namespace esphome
     // nothing. Cost to the hub is FLAT IN NODE COUNT: one broadcast, 13.1 s of
     // air per day at the default cadence, against 80.1 s/day for today's
     // bursts.
-    void LORATracker::serviceBeacon()
+    // Whether a beacon should be queued on this pass, and for which round.
+    // False = nothing to do now (no grid, already placed for this round, or the
+    // mark is not within the window where holding a buffer for it pays).
+    bool LORATracker::beacon_due_(int64_t &now, int64_t &t0, uint32_t &round, int64_t &fire)
     {
       if (!this->grid_started_ || timedgrid::kBeaconEveryRounds == 0)
-        return;
+        return false;
 
-      const int64_t now = esp_timer_get_time();
-      const int64_t t0  = this->nextBeaconT0Us(now);
+      now = esp_timer_get_time();
+      t0  = this->nextBeaconT0Us(now);
       if (t0 <= 0)
-        return;
+        return false;
 
-      const uint32_t round = this->beaconRoundForT0(t0);
+      round = this->beaconRoundForT0(t0);
       if (round == this->beacon_round_queued_)
-        return;                       // already placed for this beacon
+        return false;                 // already placed for this beacon
 
       // Queue only once the mark is close enough that a placed frame is worth
       // holding a buffer for, and no closer than the queue can fire on. The
       // buffer pool is five deep, so a beacon queued minutes ahead would hold a
       // fifth of it for the whole interval.
-      const int64_t fire = loratiming::fireInstantUs(t0, 0);
+      fire = loratiming::fireInstantUs(t0, 0);
       const int64_t lead = fire - now;
       if (lead > (int64_t) timedgrid::kRoundUs || lead < txqueue::kPrepareLeadUs)
-        return;
+        return false;
+      return true;
+    }
 
-      // SHADOW pending mask: gather what each node's bit WOULD depend on, here,
-      // before this beacon enters the transmit queue (so the beacon itself does
-      // not count as "queued frames" for every node). Evaluated and logged only
-      // once the beacon is actually queued, below. The node states are read on
-      // this loop task, which is where they are written.
-      std::vector<pendingshadow::NodeInputs> shadow_in;
-      std::vector<std::string>               shadow_names;
+    // SHADOW pending mask: gather what each node's bit WOULD depend on, here,
+    // before this beacon enters the transmit queue (so the beacon itself does
+    // not count as "queued frames" for every node). Evaluated and logged only
+    // once the beacon is actually queued. The node states are read on this loop
+    // task, which is where they are written.
+    void LORATracker::gather_shadow_inputs_(int64_t now,
+                                            std::vector<pendingshadow::NodeInputs> &shadow_in,
+                                            std::vector<std::string> &shadow_names)
+    {
       shadow_in.reserve(this->listeners_.size());
       shadow_names.reserve(this->listeners_.size());
       for (LORAListener *l : this->listeners_)
@@ -744,7 +751,11 @@ namespace esphome
         shadow_in.push_back(l->pending_shadow_inputs(now));
         shadow_names.push_back(l->get_name());
       }
+    }
 
+    // Builds and packs the signed beacon for `round` into `buf`.
+    LORATracker::BeaconBuild LORATracker::build_beacon_(uint32_t round, std::vector<uint8_t> &buf)
+    {
       LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = LORATracker::broadcastAddressing;
@@ -806,7 +817,7 @@ namespace esphome
         // beaconing.
         ESP_LOGE(TAG, "beacon for round %u could not be signed — not sent",
                  (unsigned) round);
-        return;
+        return BeaconBuild::Unsigned;
       }
       gb.netkeyid  = this->net_key_id_;
       gb.mac.data  = mac;
@@ -819,12 +830,16 @@ namespace esphome
       if (len == 0 || len > BUFFER_SIZE)
       {
         ESP_LOGE(TAG, "beacon would not fit (%u B)", (unsigned) len);
-        this->beacon_round_queued_ = round;   // do not retry it every loop
-        return;
+        return BeaconBuild::TooBig;
       }
-      std::vector<uint8_t> buf(len);
+      buf.resize(len);
       lora_client_operation_message__pack(&op, buf.data());
+      return BeaconBuild::Ok;
+    }
 
+    // Places the packed beacon on its mark. False = dropped (no pool buffer).
+    bool LORATracker::queue_beacon_(std::vector<uint8_t> &buf, int64_t fire, uint32_t round)
+    {
       TxPolicy p;
       p.copies      = 1;              // one broadcast, on one mark
       p.stride_ms   = 0;
@@ -838,8 +853,34 @@ namespace esphome
         // hub that has stopped beaconing entirely.
         ESP_LOGW(TAG, "beacon for round %u was dropped, not queued",
                  (unsigned) round);
+        return false;
+      }
+      return true;
+    }
+
+    void LORATracker::serviceBeacon()
+    {
+      int64_t  now = 0, t0 = 0, fire = 0;
+      uint32_t round = 0;
+      if (!this->beacon_due_(now, t0, round, fire))
+        return;
+
+      std::vector<pendingshadow::NodeInputs> shadow_in;
+      std::vector<std::string>               shadow_names;
+      this->gather_shadow_inputs_(now, shadow_in, shadow_names);
+
+      std::vector<uint8_t> buf;
+      const BeaconBuild built = this->build_beacon_(round, buf);
+      if (built == BeaconBuild::Unsigned)
+        return;
+      if (built == BeaconBuild::TooBig)
+      {
+        this->beacon_round_queued_ = round;   // do not retry it every loop
         return;
       }
+
+      if (!this->queue_beacon_(buf, fire, round))
+        return;
 
       this->beacon_round_queued_ = round;
       this->beacons_sent_++;
