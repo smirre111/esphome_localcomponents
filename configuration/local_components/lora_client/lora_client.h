@@ -1331,6 +1331,10 @@ namespace esphome
       void handle_register_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
       bool admit_frame_(::LoraClientResponseMessage *rcv_message);
       void handle_encrypted_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
+      // Two stages of set_response(): the length re-encode check, and the
+      // plaintext-uplink gate (true = the frame may be acted on).
+      void check_uplink_canonical_(const ::LoraClientResponseMessage *rcv_message, size_t len);
+      bool accept_plaintext_uplink_(::LoraClientResponseMessage *rcv_message);
       // Tier 3: derive this listener's K_enc/K_mac from (K_root, session_id,
       // node_nonce, hub/node addresses) and install them immediately,
       // destroying whatever was there before only on success — mirrors

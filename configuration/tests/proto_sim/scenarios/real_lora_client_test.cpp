@@ -872,6 +872,89 @@ TEST(RealLoraClient, PlaintextIsStillTheBootstrapBeforeASessionExists) {
         << "and with nothing to authenticate with, the msgid is the only sequencing there is";
 }
 
+// Characterisation (CCN refactor of set_response): the branches no other test
+// reaches -- undecodable bytes, the never-legitimate plaintext LOGIN uplink,
+// and the fan-out of an admitted plaintext frame to the child nodes.
+namespace {
+struct RecordingNode : esphome::lora_tracker::LORAClientNode {
+    std::vector<std::vector<uint8_t>> got;
+    void set_response(uint8_t *d, size_t n) override { got.emplace_back(d, d + n); }
+    void send_remote_config() override {}
+};
+
+std::vector<uint8_t> plaintext_login_uplink(uint32_t msgid) {
+    LoraHeader hdr       = LORA_HEADER__INIT;
+    hdr.destaddress      = esphome::lora_tracker::kHubAddress;
+    hdr.destsubnet       = 2;
+    hdr.senderaddress    = 18;
+    hdr.msgid            = msgid;
+    LoginMsg login       = LOGIN_MSG__INIT;
+    login.nonce          = 0x1234;
+    LoraClientResponseMessage resp = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    resp.header          = &hdr;
+    resp.proto_case      = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN;
+    resp.login           = &login;
+    std::vector<uint8_t> out(lora_client_response_message__get_packed_size(&resp));
+    lora_client_response_message__pack(&resp, out.data());
+    return out;
+}
+}  // namespace
+
+TEST(RealLoraClient, UndecodableBytesAreDroppedWithoutAnyEffect) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    RecordingNode node;
+    h.rol.register_lora_node(&node);
+    const size_t tx_before = h.radio.transcript().size();
+    uint8_t garbage[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x02};
+    h.rol.set_response(garbage, sizeof(garbage));
+    EXPECT_EQ(h.rol.nonCanonicalFrames(), 0u) << "never got as far as the length check";
+    EXPECT_EQ(h.rol.frame_counter_.rx_message_id, 0u);
+    EXPECT_TRUE(node.got.empty());
+    EXPECT_EQ(h.radio.transcript().size(), tx_before);
+}
+
+TEST(RealLoraClient, AnUnauthenticatedLoginUplinkIsIgnoredAndTearsNothingDown) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_        = true;
+    h.rol.session_confirmed_ = true;
+    RecordingNode node;
+    h.rol.register_lora_node(&node);
+    const size_t tx_before = h.radio.transcript().size();
+    auto frame = plaintext_login_uplink(/*msgid=*/5);
+    h.rol.set_response(frame.data(), frame.size());
+    EXPECT_TRUE(h.rol.session_confirmed_) << "a plaintext LOGIN must not tear a session down";
+    EXPECT_EQ(h.radio.transcript().size(), tx_before) << "and must not provoke a LOGIN of ours";
+    EXPECT_EQ(h.rol.plaintextRefused(), 0u) << "dropped before the plaintext gate";
+    EXPECT_EQ(h.rol.frame_counter_.rx_message_id, 0u) << "the counter must not move";
+    EXPECT_TRUE(node.got.empty());
+}
+
+TEST(RealLoraClient, AnAdmittedPlaintextFrameIsFannedOutVerbatimToTheChildNodes) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;           // no session: plaintext is the bootstrap
+    RecordingNode a, b;
+    h.rol.register_lora_node(&a);
+    h.rol.register_lora_node(&b);
+    auto frame = plaintext_ack_frame(/*msgid=*/5, /*ack_msg_id=*/1, /*timed=*/false);
+    h.rol.set_response(frame.data(), frame.size());
+    ASSERT_EQ(a.got.size(), 1u);
+    ASSERT_EQ(b.got.size(), 1u);
+    EXPECT_EQ(a.got[0], frame);
+    EXPECT_EQ(b.got[0], frame);
+
+    // Once a session is confirmed the same frame is refused outright: no fan-out.
+    h.rol.session_confirmed_ = true;
+    auto again = plaintext_ack_frame(/*msgid=*/6, /*ack_msg_id=*/1, /*timed=*/false);
+    h.rol.set_response(again.data(), again.size());
+    EXPECT_EQ(a.got.size(), 1u);
+    EXPECT_EQ(b.got.size(), 1u);
+    EXPECT_EQ(h.rol.plaintextRefused(), 1u);
+}
+
 TEST(RealLoraClient, ARequestWithTimedModeOffIsNotAnswered) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};

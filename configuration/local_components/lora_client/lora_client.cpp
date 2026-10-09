@@ -456,6 +456,15 @@ namespace esphome
   {
     static const char *const TAG = "lora_client";
 
+    // Ownership of an unpacked uplink for the rest of set_response(). release()
+    // hands it to a callee that takes ownership (handle_register_).
+    struct OwnedResponse
+    {
+      LoraClientResponseMessage *p;
+      ~OwnedResponse() { if (p) lora_client_response_message__free_unpacked(p, NULL); }
+      LoraClientResponseMessage *release() { auto *t = p; p = nullptr; return t; }
+    };
+
     void LORAListener::dump_config()
     {
 
@@ -2659,32 +2668,11 @@ namespace esphome
         return;
       }
 
-      // Length re-encode check (mac-separation-implementation-plan.md, receiver
-      // order step 1): the hub's T0 stamp for this uplink is derived from the
-      // on-air length, which the CMAC does not cover. DEMOTE, DO NOT DROP --
-      // see FrameCanon.h. The frame is processed as usual; only its use as a
-      // timing origin (noteAuthenticatedUplink_) is withheld.
-      this->rx_timing_trusted_ = framecanon::timingTrusted(framecanon::classify(
-          {(uint32_t) len,
-           (uint32_t) lora_client_response_message__get_packed_size(rcv_message),
-           rcv_message->base.n_unknown_fields +
-               (rcv_message->header ? rcv_message->header->base.n_unknown_fields : 0u)}));
-      if (!this->rx_timing_trusted_)
-      {
-        this->noncanonical_frames_++;
-        ESP_LOGW(TAG, "%s: non-canonical uplink (len %u) -- processed, but its length is "
-                      "not used for timing (%u so far)",
-                 this->get_name().c_str(), (unsigned) len, (unsigned) this->noncanonical_frames_);
-      }
+      this->check_uplink_canonical_(rcv_message, len);
 
       // Ownership for the rest of the function. Before this, every early exit
       // freed by hand — a dozen sites, each one an edit away from a leak.
-      struct Owned
-      {
-        LoraClientResponseMessage *p;
-        ~Owned() { if (p) lora_client_response_message__free_unpacked(p, NULL); }
-        LoraClientResponseMessage *release() { auto *t = p; p = nullptr; return t; }
-      } owned{rcv_message};
+      OwnedResponse owned{rcv_message};
 
       // REGISTER first: it must bypass the address and replay filters below, so
       // the order of these two tests is load-bearing. handle_register_ takes
@@ -2723,39 +2711,8 @@ namespace esphome
         return;
       }
 
-      // Plaintext path. Before the handshake there is nothing to authenticate
-      // with and the msgid is the only sequencing the hub has, so the counter
-      // moves here and the frame is acted on — that is the bootstrap.
-      //
-      // ONCE THE SESSION IS CONFIRMED, IT IS REFUSED OUTRIGHT (review finding 1,
-      // 2026-09-15). Suppressing duplicates was not enough, because dispatch is
-      // not inert and the msgid is plaintext in every header, so anyone in radio
-      // range can pick one above the high-water mark and be acted on ONCE, which
-      // is all it takes:
-      //   * a forged CommandAck naming a msgid in the tracked command's range
-      //     cancels its retransmissions and clears "command failed" — the command
-      //     is lost while Home Assistant shows it delivered;
-      //   * the same ack confirms a GridSync or a ScheduleConfig push;
-      //   * the PhaseReport it carries sets the hub's single-shot belief, which the
-      //     plan describes as authenticated by the beacon's CMAC tag — on this path
-      //     it was not.
-      // This is the mirror of the node's default-deny gate (CmdDispatcher). REGISTER
-      // and LOGIN are the two exemptions and both return before this point: REGISTER
-      // is the bootstrap, LOGIN carries the base nonce and is the recovery path.
-      if (!this->session_confirmed_)
-      {
-        this->commit_rx_msgid_(rcv_message);
-      }
-      else
-      {
-        this->plaintext_refused_++;
-        ESP_LOGW(TAG, "[%s] refusing a PLAINTEXT uplink (proto_case=%d, msgid=%u) — "
-                      "this node holds a confirmed session (%u refused)",
-                 this->get_name().c_str(), (int) rcv_message->proto_case,
-                 (unsigned) (rcv_message->header != nullptr ? rcv_message->header->msgid : 0u),
-                 (unsigned) this->plaintext_refused_);
+      if (!this->accept_plaintext_uplink_(rcv_message))
         return;
-      }
       // The high-water mark that used to suppress plaintext duplicates here is
       // gone with the frames it bounded: on a confirmed session none of them
       // reach this point any more. It is still maintained in commit_rx_msgid_,
@@ -2763,6 +2720,64 @@ namespace esphome
       this->dispatch_payload_(rcv_message);
       for (size_t i = 0; i < this->nodes_.size(); i++)
         this->nodes_[i]->set_response(data, len);
+    }
+
+    // Length re-encode check (mac-separation-implementation-plan.md, receiver
+    // order step 1): the hub's T0 stamp for this uplink is derived from the
+    // on-air length, which the CMAC does not cover. DEMOTE, DO NOT DROP --
+    // see FrameCanon.h. The frame is processed as usual; only its use as a
+    // timing origin (noteAuthenticatedUplink_) is withheld.
+    void LORAListener::check_uplink_canonical_(const LoraClientResponseMessage *rcv_message, size_t len)
+    {
+      this->rx_timing_trusted_ = framecanon::timingTrusted(framecanon::classify(
+          {(uint32_t) len,
+           (uint32_t) lora_client_response_message__get_packed_size(rcv_message),
+           rcv_message->base.n_unknown_fields +
+               (rcv_message->header ? rcv_message->header->base.n_unknown_fields : 0u)}));
+      if (!this->rx_timing_trusted_)
+      {
+        this->noncanonical_frames_++;
+        ESP_LOGW(TAG, "%s: non-canonical uplink (len %u) -- processed, but its length is "
+                      "not used for timing (%u so far)",
+                 this->get_name().c_str(), (unsigned) len, (unsigned) this->noncanonical_frames_);
+      }
+    }
+
+    // Plaintext path. Before the handshake there is nothing to authenticate
+    // with and the msgid is the only sequencing the hub has, so the counter
+    // moves here and the frame is acted on — that is the bootstrap.
+    //
+    // ONCE THE SESSION IS CONFIRMED, IT IS REFUSED OUTRIGHT (review finding 1,
+    // 2026-09-15). Suppressing duplicates was not enough, because dispatch is
+    // not inert and the msgid is plaintext in every header, so anyone in radio
+    // range can pick one above the high-water mark and be acted on ONCE, which
+    // is all it takes:
+    //   * a forged CommandAck naming a msgid in the tracked command's range
+    //     cancels its retransmissions and clears "command failed" — the command
+    //     is lost while Home Assistant shows it delivered;
+    //   * the same ack confirms a GridSync or a ScheduleConfig push;
+    //   * the PhaseReport it carries sets the hub's single-shot belief, which the
+    //     plan describes as authenticated by the beacon's CMAC tag — on this path
+    //     it was not.
+    // This is the mirror of the node's default-deny gate (CmdDispatcher). REGISTER
+    // and LOGIN are the two exemptions and both return before this point: REGISTER
+    // is the bootstrap, LOGIN carries the base nonce and is the recovery path.
+    //
+    // Returns true when the frame may be acted on.
+    bool LORAListener::accept_plaintext_uplink_(LoraClientResponseMessage *rcv_message)
+    {
+      if (!this->session_confirmed_)
+      {
+        this->commit_rx_msgid_(rcv_message);
+        return true;
+      }
+      this->plaintext_refused_++;
+      ESP_LOGW(TAG, "[%s] refusing a PLAINTEXT uplink (proto_case=%d, msgid=%u) — "
+                    "this node holds a confirmed session (%u refused)",
+               this->get_name().c_str(), (int) rcv_message->proto_case,
+               (unsigned) (rcv_message->header != nullptr ? rcv_message->header->msgid : 0u),
+               (unsigned) this->plaintext_refused_);
+      return false;
     }
 
     // ---------------------------------------------------------------------------
