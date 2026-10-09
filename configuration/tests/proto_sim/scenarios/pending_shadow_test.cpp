@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <vector>
 
 #include "PendingShadow.h"
 
@@ -212,4 +213,33 @@ TEST(PendingShadow, DescribeReasonsNamesThemAndNeverOverflows) {
     describeReasons(0xFFFFFFFFu, tiny, sizeof(tiny));
     EXPECT_LT(std::string(tiny).size(), sizeof(tiny)) << "always NUL-terminated inside the buffer";
     describeReasons(1, nullptr, 0);   // must not crash
+}
+
+// Characterisation (CCN refactor): at EVERY buffer size the output is exactly
+// the full string cut to cap-1 characters -- including the sizes where a name
+// is split mid-way and where a comma is the last character that fits.
+TEST(PendingShadow, DescribeReasonsIsTheFullStringTruncatedAtEveryCapacity) {
+    const uint32_t all = kOpAwaitingAck | kOpDeferredUntilLogin | kReloginPending |
+                         kPushAwaitingAck | kTimeSyncDue | kQueuedFrames |
+                         kTimedModeOff | kNotLatencyTolerant | kRecentTraffic;
+    const std::string full =
+        "op-ack,op-deferred,relogin,push,timesync,queued,timed-off,not-tolerant,recent";
+    char big[128];
+    describeReasons(all, big, sizeof(big));
+    ASSERT_EQ(std::string(big), full);
+    for (size_t cap = 1; cap <= full.size() + 4; ++cap) {
+        std::vector<char> buf(cap + 8, 'X');   // 8 guard bytes past the capacity
+        describeReasons(all, buf.data(), cap);
+        const std::string got(buf.data());
+        EXPECT_EQ(got, full.substr(0, cap - 1)) << "cap=" << cap;
+        for (size_t g = cap; g < buf.size(); ++g)
+            EXPECT_EQ(buf[g], 'X') << "wrote past the capacity, cap=" << cap;
+    }
+    // A sparse set skips the bits it does not hold.
+    describeReasons(kTimeSyncDue | kRecentTraffic, big, sizeof(big));
+    EXPECT_STREQ(big, "timesync,recent");
+    // "none" is also cut at the capacity.
+    char three[3];
+    describeReasons(0, three, sizeof(three));
+    EXPECT_STREQ(three, "no");
 }

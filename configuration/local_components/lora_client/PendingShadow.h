@@ -167,6 +167,20 @@ inline const char *reasonName(uint32_t reason_bit)
     }
 }
 
+// Appends one reason name (comma-separated after the first) at buf + used.
+// Returns false when the caller must stop: the buffer is full or snprintf
+// failed. `used` always stays below `cap`, so the buffer stays terminated.
+inline bool appendReason(char *buf, size_t cap, size_t &used, uint32_t reason_bit)
+{
+    if (used + 1 >= cap) return false;
+    const int w = snprintf(buf + used, cap - used, "%s%s", used ? "," : "",
+                           reasonName(reason_bit));
+    if (w < 0) return false;
+    used += (size_t) w;
+    if (used >= cap) { used = cap - 1; return false; }
+    return true;
+}
+
 // "op-ack,push" for a reason set; "none" for an empty one. Always terminates.
 inline void describeReasons(uint32_t reasons, char *buf, size_t cap)
 {
@@ -176,12 +190,7 @@ inline void describeReasons(uint32_t reasons, char *buf, size_t cap)
     size_t used = 0;
     for (uint32_t b = 1; b != 0 && b <= kRecentTraffic; b <<= 1) {
         if ((reasons & b) == 0) continue;
-        if (used + 1 >= cap) break;
-        const int w = snprintf(buf + used, cap - used, "%s%s", used ? "," : "",
-                               reasonName(b));
-        if (w < 0) break;
-        used += (size_t) w;
-        if (used >= cap) { used = cap - 1; break; }
+        if (!appendReason(buf, cap, used, b)) break;
     }
 }
 
