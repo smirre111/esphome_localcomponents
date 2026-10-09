@@ -29,6 +29,7 @@
 
 #include <gtest/gtest.h>
 #include "esphome/components/switch/switch.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
 
 using esphome::lora_tracker::LORAClient;
 using esphome::lora_tracker::LORATracker;
@@ -6128,4 +6129,147 @@ TEST(PendingShadowInputs, TrafficAgeComesFromHearingAndFromAddressingTheNode) {
     P(h).last_placed_t0_us_ = 0;
     h.tracker.tx_drain_us = 1'000'000;
     EXPECT_TRUE(h.rol.pending_shadow_inputs(esp_timer_get_time()).queued_frames);
+}
+
+// ---------------------------------------------------------------------------
+// handle_command_ack_ characterisation (CCN refactor): which of the three
+// things an ack can confirm wins, what each one clears, and when the ack
+// latency history is fed.
+// ---------------------------------------------------------------------------
+namespace {
+struct AckPathProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::op_awaiting_ack_;
+    using esphome::lora_tracker::LORAListener::op_first_msgid_;
+    using esphome::lora_tracker::LORAListener::op_last_msgid_;
+    using esphome::lora_tracker::LORAListener::op_mark_us_;
+    using esphome::lora_tracker::LORAListener::op_retry_count_;
+    using esphome::lora_tracker::LORAListener::op_short_wait_spent_;
+    using esphome::lora_tracker::LORAListener::command_failed_;
+};
+AckPathProbe &AP(real_helpers::RealHubHarness &h) { return static_cast<AckPathProbe &>(h.rol); }
+}  // namespace
+
+TEST(AckPath, AScheduleAckClearsThePushAndTellsHomeAssistant) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::binary_sensor::BinarySensor bs;
+    h.rol.set_schedule_pending_binary_sensor(&bs);
+    bs.publish_state(true);
+    h.rol.sched_push_msgid_   = 9;
+    h.rol.sched_push_retries_ = 2;
+    h.rol.node_sched_version_ = h.rol.schedule_version() ^ 1u;
+
+    deliverAck(h.rol, 8);   // not ours
+    EXPECT_EQ(h.rol.sched_push_msgid_, 9u);
+    EXPECT_EQ(h.rol.sched_push_retries_, 2);
+    EXPECT_TRUE(bs.state);
+    EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
+
+    deliverAck(h.rol, 9);
+    EXPECT_EQ(h.rol.sched_push_msgid_, 0u);
+    EXPECT_EQ(h.rol.sched_push_retries_, 0);
+    EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
+    EXPECT_FALSE(bs.state) << "Schedule Pending clears without waiting for the next beacon";
+
+    // No binary sensor wired: the same ack must not touch a null pointer.
+    h.rol.set_schedule_pending_binary_sensor(nullptr);
+    h.rol.sched_push_msgid_   = 9;
+    h.rol.node_sched_version_ = h.rol.schedule_version() ^ 1u;
+    deliverAck(h.rol, 9);
+    EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
+
+    // msgid 0 means "no push in flight": an ack naming 0 confirms nothing.
+    h.rol.sched_push_msgid_   = 0;
+    h.rol.node_sched_version_ = h.rol.schedule_version() ^ 1u;
+    deliverAck(h.rol, 0);
+    EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
+}
+
+TEST(AckPath, AGridSyncAckIsConsumedBeforeAScheduleAckWithTheSameId) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.gridsync_msgids_[0]   = 9;
+    h.rol.gridsync_msgid_count_ = 1;
+    h.rol.sched_push_msgid_     = 9;
+    h.rol.node_sched_version_   = h.rol.schedule_version() ^ 1u;
+    deliverAck(h.rol, 9);
+    EXPECT_EQ(h.rol.gridsync_msgid_count_, 0) << "the GridSync takes it";
+    EXPECT_EQ(h.rol.sched_push_msgid_, 9u) << "and the schedule push is left waiting";
+    EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
+
+    // The second of several published GridSync ids matches too.
+    h.rol.gridsync_msgids_[0]   = 4;
+    h.rol.gridsync_msgids_[1]   = 5;
+    h.rol.gridsync_msgid_count_ = 2;
+    deliverAck(h.rol, 6);
+    EXPECT_EQ(h.rol.gridsync_msgid_count_, 2) << "an id outside the list changes nothing";
+    deliverAck(h.rol, 5);
+    EXPECT_EQ(h.rol.gridsync_msgid_count_, 0);
+}
+
+TEST(AckPath, ATrackedOpIsAckedByAnyMsgidInItsRangeAndOnlyWhileAwaiting) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    auto arm = [&]() {
+        AP(h).op_awaiting_ack_ = true;
+        AP(h).op_first_msgid_  = 10;
+        AP(h).op_last_msgid_   = 12;
+        AP(h).command_failed_  = true;
+    };
+    arm();
+    deliverAck(h.rol, 9);
+    EXPECT_TRUE(AP(h).op_awaiting_ack_) << "below the range";
+    deliverAck(h.rol, 13);
+    EXPECT_TRUE(AP(h).op_awaiting_ack_) << "above the range";
+    EXPECT_TRUE(AP(h).command_failed_);
+    for (uint32_t id : {10u, 11u, 12u}) {
+        arm();
+        deliverAck(h.rol, id);
+        EXPECT_FALSE(AP(h).op_awaiting_ack_) << "id " << id;
+        EXPECT_FALSE(AP(h).command_failed_) << "an ack clears 'command failed'";
+    }
+    // Nothing awaiting: an in-range ack is not an event.
+    arm();
+    AP(h).op_awaiting_ack_ = false;
+    deliverAck(h.rol, 11);
+    EXPECT_TRUE(AP(h).command_failed_) << "must not be touched when nothing is awaiting";
+}
+
+TEST(AckPath, OnlyACleanSingleShotAckFeedsTheLatencyHistory) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    proto_sim_timer_set_now_us(500'000'000);
+    auto count = [&]() { return h.rol.ack_latency_for_test().count((uint32_t) (esp_timer_get_time() / 1000)); };
+    auto maxd  = [&]() { return h.rol.ack_latency_for_test().maxDelayMs((uint32_t) (esp_timer_get_time() / 1000)); };
+    auto arm = [&](int64_t mark_us, uint8_t retries, bool short_spent) {
+        AP(h).op_awaiting_ack_ = true;
+        AP(h).op_first_msgid_  = AP(h).op_last_msgid_ = 10;
+        AP(h).op_mark_us_      = mark_us;
+        AP(h).op_retry_count_  = retries;
+        AP(h).op_short_wait_spent_ = short_spent;
+    };
+    ASSERT_EQ(count(), 0u);
+
+    arm(esp_timer_get_time() - 40'000, 0, false);
+    deliverAck(h.rol, 10);
+    EXPECT_EQ(count(), 1u) << "a clean single shot is recorded";
+    EXPECT_EQ(maxd(), 40u);
+
+    arm(esp_timer_get_time(), 0, false);          // acked in the same millisecond: delay 0
+    deliverAck(h.rol, 10);
+    EXPECT_EQ(count(), 2u) << "a zero delay is a valid sample";
+
+    arm(esp_timer_get_time() - 90'000, 1, false);
+    deliverAck(h.rol, 10);
+    EXPECT_EQ(count(), 2u) << "after a retry it is not";
+    arm(esp_timer_get_time() - 90'000, 0, true);
+    deliverAck(h.rol, 10);
+    EXPECT_EQ(count(), 2u) << "after the burst fallback it is not";
+    arm(esp_timer_get_time() + 90'000, 0, false);
+    deliverAck(h.rol, 10);
+    EXPECT_EQ(count(), 2u) << "a mark still ahead gives a negative delay: not recorded";
+    arm(0, 0, false);
+    deliverAck(h.rol, 10);
+    EXPECT_EQ(count(), 2u) << "no mark (a burst first shot): nothing to measure";
+    EXPECT_FALSE(AP(h).op_awaiting_ack_) << "but the ack itself is still accepted";
 }

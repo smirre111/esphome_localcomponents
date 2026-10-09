@@ -1484,6 +1484,10 @@ namespace esphome
       // msgid, arm ack tracking, and schedule the first retransmit.
       void     begin_tracked_op_(uint32_t msgid, const char *what);
       void     handle_command_ack_(uint32_t ack_msg_id);
+      // Stages of handle_command_ack_: each returns true when it consumed the ack.
+      bool     ack_gridsync_(uint32_t ack_msg_id);
+      bool     ack_schedule_push_(uint32_t ack_msg_id);
+      void     record_ack_latency_();
       void     set_command_failed_(bool failed);
       // Arm a ONE-SHOT retransmit timer.  Uses set_timeout (deterministic
       // now+delay) rather than set_interval, whose first firing is randomly

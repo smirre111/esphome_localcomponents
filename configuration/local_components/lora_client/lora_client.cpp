@@ -3569,9 +3569,10 @@ namespace esphome
       return this->op_frame_msgid_;
     }
 
-    void LORAListener::handle_command_ack_(uint32_t ack_msg_id)
+    // The node confirming a GridSync: it is on the grid, stop re-publishing.
+    // True when `ack_msg_id` was one of the published GridSync ids.
+    bool LORAListener::ack_gridsync_(uint32_t ack_msg_id)
     {
-      // The node confirming a GridSync: it is on the grid, stop re-publishing.
       for (uint8_t i = 0; i < this->gridsync_msgid_count_; ++i)
       {
         if (this->gridsync_msgids_[i] != ack_msg_id)
@@ -3581,25 +3582,58 @@ namespace esphome
                  (unsigned) this->gridsync_retries_);
         this->cancel_timeout("gridsync_retry");
         this->gridsync_msgid_count_ = 0;
-        return;
+        return true;
       }
+      return false;
+    }
 
-      // A schedule push is acked by the node; that is the only positive
-      // confirmation the hub gets that the schedule actually landed.
-      if (this->sched_push_msgid_ != 0 && ack_msg_id == this->sched_push_msgid_)
-      {
-        ESP_LOGI(TAG, "[%s] ScheduleConfig acknowledged (version=0x%08x)",
-                 this->get_name().c_str(), (unsigned) this->schedule_version());
-        this->cancel_timeout("schedule_retry");
-        this->sched_push_msgid_  = 0;
-        this->sched_push_retries_ = 0;
-        // The node now holds our version; reflect that without waiting for its
-        // next beacon, so "Schedule Pending" clears promptly in Home Assistant.
-        this->node_sched_version_ = this->schedule_version();
-        if (this->schedule_pending_bsensor_ != nullptr)
-          this->schedule_pending_bsensor_->publish_state(false);
+    // A schedule push is acked by the node; that is the only positive
+    // confirmation the hub gets that the schedule actually landed.
+    // True when `ack_msg_id` was the schedule push in flight.
+    bool LORAListener::ack_schedule_push_(uint32_t ack_msg_id)
+    {
+      if (this->sched_push_msgid_ == 0 || ack_msg_id != this->sched_push_msgid_)
+        return false;
+      ESP_LOGI(TAG, "[%s] ScheduleConfig acknowledged (version=0x%08x)",
+               this->get_name().c_str(), (unsigned) this->schedule_version());
+      this->cancel_timeout("schedule_retry");
+      this->sched_push_msgid_  = 0;
+      this->sched_push_retries_ = 0;
+      // The node now holds our version; reflect that without waiting for its
+      // next beacon, so "Schedule Pending" clears promptly in Home Assistant.
+      this->node_sched_version_ = this->schedule_version();
+      if (this->schedule_pending_bsensor_ != nullptr)
+        this->schedule_pending_bsensor_->publish_state(false);
+      return true;
+    }
+
+    // Mark -> ack, for every command whose FIRST frame was a single placed
+    // copy (one INFO per user command: this is not a periodic log). It feeds
+    // the node's latency history only when clean (no retry, no fallback burst).
+    void LORAListener::record_ack_latency_()
+    {
+      const int64_t now_us   = esp_timer_get_time();
+      const int64_t delay_ms = (now_us - this->op_mark_us_) / 1000;
+      const bool clean = singleshotwait::isCleanSample(
+          true, this->op_retry_count_, this->op_short_wait_spent_, true);
+      bool kept = false;
+      if (clean && delay_ms >= 0)
+        kept = this->ack_latency_.note((uint32_t) (now_us / 1000), (uint32_t) delay_ms);
+      ESP_LOGI(TAG, "[%s] ack %lld ms after the mark (%s%s; first-ack tail %u ms; "
+                    "history now %u samples, max %u ms)",
+               this->get_name().c_str(), (long long) delay_ms,
+               clean ? "clean single shot" : "after a burst fallback or retry",
+               kept ? ", recorded" : ", not recorded", (unsigned) this->op_first_tail_ms_,
+               (unsigned) this->ack_latency_.count((uint32_t) (now_us / 1000)),
+               (unsigned) this->ack_latency_.maxDelayMs((uint32_t) (now_us / 1000)));
+    }
+
+    void LORAListener::handle_command_ack_(uint32_t ack_msg_id)
+    {
+      if (this->ack_gridsync_(ack_msg_id))
         return;
-      }
+      if (this->ack_schedule_push_(ack_msg_id))
+        return;
 
       if (!this->op_awaiting_ack_)
         return;
@@ -3612,26 +3646,8 @@ namespace esphome
       this->set_command_failed_(false);
       ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
                (unsigned)ack_msg_id);
-      // Mark -> ack, for every command whose FIRST frame was a single placed
-      // copy (one INFO per user command: this is not a periodic log). It feeds
-      // the node's latency history only when clean (no retry, no fallback burst).
       if (this->op_mark_us_ != 0)
-      {
-        const int64_t now_us   = esp_timer_get_time();
-        const int64_t delay_ms = (now_us - this->op_mark_us_) / 1000;
-        const bool clean = singleshotwait::isCleanSample(
-            true, this->op_retry_count_, this->op_short_wait_spent_, true);
-        bool kept = false;
-        if (clean && delay_ms >= 0)
-          kept = this->ack_latency_.note((uint32_t) (now_us / 1000), (uint32_t) delay_ms);
-        ESP_LOGI(TAG, "[%s] ack %lld ms after the mark (%s%s; first-ack tail %u ms; "
-                      "history now %u samples, max %u ms)",
-                 this->get_name().c_str(), (long long) delay_ms,
-                 clean ? "clean single shot" : "after a burst fallback or retry",
-                 kept ? ", recorded" : ", not recorded", (unsigned) this->op_first_tail_ms_,
-                 (unsigned) this->ack_latency_.count((uint32_t) (now_us / 1000)),
-                 (unsigned) this->ack_latency_.maxDelayMs((uint32_t) (now_us / 1000)));
-      }
+        this->record_ack_latency_();
     }
 
     void LORAListener::set_command_failed_(bool failed)
