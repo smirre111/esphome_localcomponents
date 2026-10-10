@@ -1389,12 +1389,32 @@ switch:
   # Turning this on makes Mode B REACHABLE, not active — the node's own policy
   # still gates promotion on ppm validity, phase trustworthiness, missed marks
   # and the RTC source.
+  #
+  # STAYS ON ACROSS SLEEP, NODE REBOOT AND HUB REBOOT (2026-10-10). The switch is
+  # RESTORE_DEFAULT_OFF: what the operator last chose is what comes back after a
+  # hub restart (a never-touched switch stays OFF). A restored ON is applied by
+  # the template switch at boot (setup priority 798, before the listener's 600
+  # and the radio's 300), so enable_timed_mode(true) only records the intent
+  # then (LORAListener::restore_timed_mode_at_boot_) and the grid is published,
+  # encrypted, at each node's first confirmed session as it always is.
+  #
+  # Publishing the grid is not enough - a node adopts it but never promotes by
+  # itself (docs/bench-runbook.md, "waiting for the node to promote on its own is
+  # a deadlock"). So the hub ALSO supervises every node whose switch is ON
+  # (lora_client/ModeBSupervisor.h): whenever the node is logged in, awake, on an
+  # acknowledged and settled grid and NOT reported promoted, it runs a 60 s
+  # single-copy ModeTest B warm-up (the 'Mode Test B - timed windows' primitive),
+  # one node at a time hub-wide, never over a cover op, retried on a 2 / 5 / 15
+  # min then hourly backoff. Look for 'Mode B warm-up START' and 'Mode B
+  # RE-ESTABLISHED' in the hub log. NOTE: ESPHome buffers the restored state
+  # (preferences: flash_write_interval), so a switch flipped within 30 min of a
+  # hub restart can come back in its old position - press 'Hub Restart' to flush.
   - platform: template
     name: "Timed Mode (Mode B) — Node 2"
     id: rol_2_timed_mode
     entity_category: config
     optimistic: true
-    restore_mode: ALWAYS_OFF
+    restore_mode: RESTORE_DEFAULT_OFF
     turn_on_action:
       - lambda: 'id(rol_2)->enable_timed_mode(true);'
     turn_off_action:
@@ -1405,7 +1425,7 @@ switch:
     id: rol_1_timed_mode
     entity_category: config
     optimistic: true
-    restore_mode: ALWAYS_OFF
+    restore_mode: RESTORE_DEFAULT_OFF
     turn_on_action:
       - lambda: 'id(rol_1)->enable_timed_mode(true);'
     turn_off_action:
