@@ -187,6 +187,7 @@ namespace esphome
       lora_setInterruptMode(1 /* DIO1 */, LORA_IRQ_DIO1_RXTIMEOUT);
 
       spawn_send_task();
+      this->setup_done_ = true;
     }
 
     void LORATracker::loop()

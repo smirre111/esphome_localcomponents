@@ -17,6 +17,7 @@
 // Hub-only: the first ack wait of an optimistic single shot, and the shadow
 // pending-data mask (computed and logged, never transmitted).
 #include "esphome/components/lora_client/SingleShotAckWait.h"
+#include "esphome/components/lora_client/ModeBSupervisor.h"
 #include "esphome/components/lora_client/PendingShadow.h"
 
 #include "esphome/core/automation.h"
@@ -554,9 +555,7 @@ namespace esphome
       // member here and stamped into the struct by hubBeliefNow_(), rather
       // than a field of belief_. belief_ carries only what the hub has
       // observed; a setter on it would be exactly the "claim" §4.6 rejects.
-      void enable_optimistic_single_shot(bool on) {
-        this->optimistic_single_shot_ = on;
-      }
+      void enable_optimistic_single_shot(bool on);
       bool optimistic_single_shot() const { return this->optimistic_single_shot_; }
       // §4.6's hub belief, as the policy sees it. Read-only: every field is
       // maintained from an observed event, and a setter would be the "claim"
@@ -1058,6 +1057,40 @@ namespace esphome
       // When a GridSync was last published (esp_timer us, 0 = never), for the
       // once-a-minute bound on answering a node's request.
       int64_t       last_gridsync_publish_us_{0};
+      // When the node last ACKNOWLEDGED a GridSync (esp_timer us, 0 = since the last
+      // session never). ModeBSupervisor settles on it; see mbs_grid_acked_().
+      int64_t       last_gridsync_ack_us_{0};
+
+      // --- ModeBSupervisor glue (ModeBSupervisor.h) ------------------------
+      // Keeps a node whose Timed Mode switch is ON in Mode B across node sleep,
+      // node reboot and hub reboot, by running a short ModeTest B warm-up
+      // whenever the node is logged in but not promoted.
+      modebsup::Supervisor mbs_;
+      bool          mbs_owns_test_{false};   // the ModeTest on the air is the supervisor's
+      bool          mbs_starting_{false};    // set only while the supervisor calls start_mode_test
+      ModeTestSummary mbs_summary_before_{};   // the last report held when the warm-up started
+      uint32_t      mbs_warmups_started_{0}; // diagnostic: warm-ups begun since boot
+      // ONE token hub-wide: shared by every listener.
+      static modebsup::Arbiter &mbs_arbiter_();
+      static void resetModeBArbiterForTest() { mbs_arbiter_().reset(); }
+      uint32_t mbs_id_() const { return this->short_address_; }
+      uint32_t mbs_now_s_() const;
+      void start_mode_b_supervisor_();
+      void mbs_tick_();
+      bool mbs_supervised_() const;
+      bool mbs_other_test_() const;
+      modebsup::Inputs mbs_inputs_() const;
+      void mbs_apply_(modebsup::Event ev);
+      void mbs_start_warmup_();
+      void mbs_abort_warmup_(bool send_stop);
+      void mbs_send_stop_frame_();
+      void mbs_yield_to_op_();
+      void mbs_restart_();
+      bool mbs_grid_acked_() const;
+      bool mbs_report_fresh_() const;
+      void restore_timed_mode_at_boot_();
+      void stop_mode_test_(bool send_stop);
+      const modebsup::Supervisor &modeBSupervisor() const { return this->mbs_; }
       uint32_t      gridsync_requests_answered_{0};
       uint32_t      gridsync_requests_ignored_{0};
       uint32_t      plaintext_refused_{0};

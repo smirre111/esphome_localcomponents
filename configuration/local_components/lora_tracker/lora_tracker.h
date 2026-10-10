@@ -300,6 +300,12 @@ namespace esphome
                                                  uint32_t round);
       int64_t   gridAnchorUs() const { return this->grid_anchor_us_; }
       bool      gridStarted() const  { return this->grid_started_; }
+      // True once setup() has finished: the radio is configured and the send task
+      // is running. Component setup order puts the template switches (798) and the
+      // listeners (600) BEFORE this component (300), so a switch restored at boot
+      // runs its action while this is still false - see
+      // LORAListener::restore_timed_mode_at_boot_.
+      bool      setupDone() const    { return this->setup_done_; }
 
       // The next T0 for `slot` at or after `now_us`. Returns now_us itself when
       // the grid has not started, so a caller that ignores gridStarted() sends
@@ -512,6 +518,7 @@ namespace esphome
       uint32_t shadow_beacons_with_clear_{0};
       uint32_t shadow_last_mask_{0xFFFFFFFFu};
       bool    grid_started_{false};
+      bool    setup_done_{false};
       // Section 4.4's fleet key. Minted in startGrid(), published inside each
       // node's already-encrypted GridSync, never sent in the clear.
       uint8_t  net_key_[framecrypto::kNetKeyBytes]{};

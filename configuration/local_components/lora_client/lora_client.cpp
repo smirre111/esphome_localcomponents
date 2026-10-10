@@ -3059,9 +3059,20 @@ namespace esphome
       if (this->parent_ == nullptr)
         return;
       if (on == this->timed_mode_enabled_)
+      {
+        ESP_LOGI(TAG, "[%s] timed mode %s (unchanged)", this->get_name().c_str(), on ? "ON" : "OFF");
         return;
+      }
+
+      if (on && !this->parent_->setupDone())
+      {
+        this->restore_timed_mode_at_boot_();
+        return;
+      }
 
       this->timed_mode_enabled_ = on;
+      this->mbs_restart_();
+      this->start_mode_b_supervisor_();
 
       if (on)
       {
@@ -3407,6 +3418,7 @@ namespace esphome
       // queue is now stale. Bumped before the pack, so the frame carries the
       // generation that supersedes it. See txqueue::SupersedeTable.
       this->op_generation_++;
+      this->mbs_yield_to_op_();
 
       // Security review finding 1: see op_deferred_until_login_'s comment.
       // The op's parameters above are already stored on `this`, so
@@ -3433,6 +3445,7 @@ namespace esphome
       this->op_sysop_ = sysop;
 
       this->op_generation_++;   // same reasoning as send_cover_operation
+      this->mbs_yield_to_op_();
 
       // See send_cover_operation()'s identical guard just above.
       if (this->relogin_pending_)
@@ -3650,6 +3663,7 @@ namespace esphome
                  (unsigned) this->gridsync_retries_);
         this->cancel_timeout("gridsync_retry");
         this->gridsync_msgid_count_ = 0;
+        this->last_gridsync_ack_us_ = esp_timer_get_time();
         return true;
       }
       return false;
@@ -3951,6 +3965,8 @@ namespace esphome
       this->belief_.phase_reported  = false;
       this->belief_.phase_samples   = 0;
       this->have_phase_report_      = false;
+      this->last_gridsync_ack_us_   = 0;
+      this->mbs_restart_();
 
       // A new session is also a new sequencing space for unauthenticated
       // frames; a high-water mark from the old one means nothing here.
@@ -4591,6 +4607,7 @@ namespace esphome
       if (copies > 17) copies = 17;
 
       this->mode_test_active_      = true;
+      this->mbs_owns_test_         = this->mbs_starting_;
       this->mt_duration_s_         = duration_s;
       this->mt_grid_ms_            = grid_ms;
       this->mt_mode_               = mode;
@@ -4656,6 +4673,12 @@ namespace esphome
 
     void LORAListener::stop_mode_test()
     {
+      this->stop_mode_test_(true);
+    }
+
+    // send_stop = false is the supervisor's quiet abort (see mbs_abort_warmup_).
+    void LORAListener::stop_mode_test_(bool send_stop)
+    {
       if (!this->mode_test_active_)
         return;
       this->mode_test_active_ = false;
@@ -4667,9 +4690,12 @@ namespace esphome
 
       // One last frame with enable=false, so a node that is still running ends
       // now rather than at its own deadline.
-      this->build_mode_test_frame_(false);
-      if (this->mt_frame_len_ > 0)
-        this->parent_->send(this->mt_frame_, this->mt_frame_len_);
+      if (send_stop)
+      {
+        this->build_mode_test_frame_(false);
+        if (this->mt_frame_len_ > 0)
+          this->parent_->send(this->mt_frame_, this->mt_frame_len_);
+      }
 
       ESP_LOGI(TAG, "[%s] ModeTest STOP (%u marks sent)",
                this->get_name().c_str(), (unsigned) this->mt_seq_);
@@ -5786,6 +5812,209 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       }
       this->parent_->send(txBuf, len);
       free(txBuf);
+    }
+
+    // =====================================================================
+    // ModeBSupervisor glue. Policy: ModeBSupervisor.h.
+    // =====================================================================
+
+    modebsup::Arbiter &LORAListener::mbs_arbiter_()
+    {
+      static modebsup::Arbiter arbiter;
+      return arbiter;
+    }
+
+    uint32_t LORAListener::mbs_now_s_() const
+    {
+      return (uint32_t) (esp_timer_get_time() / 1000000);
+    }
+
+    void LORAListener::start_mode_b_supervisor_()
+    {
+      this->set_interval("mbs_tick", modebsup::kTickS * 1000, [this]() { this->mbs_tick_(); });
+    }
+
+    // Only a node whose Timed Mode switch is ON is ever supervised, and never an
+    // auto-mode node (it deep-sleeps between events: Mode B cannot hold there).
+    bool LORAListener::mbs_supervised_() const
+    {
+      return this->timed_mode_enabled_ && this->grid_aligned_ && this->parent_ != nullptr &&
+             this->parent_->gridStarted() && !this->auto_mode_ &&
+             this->node_mode_ != (uint32_t) NODE_MODE__MODE_AUTO;
+    }
+
+    // Somebody else's measurement is on the air for this node.
+    bool LORAListener::mbs_other_test_() const
+    {
+      return (this->mode_test_active_ && !this->mbs_owns_test_) || this->mac_ping_active_ ||
+             this->drift_test_active_;
+    }
+
+    modebsup::Inputs LORAListener::mbs_inputs_() const
+    {
+      modebsup::Inputs in;
+      in.supervised = this->mbs_supervised_();
+      in.session_ok = this->session_confirmed_ && !this->relogin_pending_;
+      in.awake      = this->is_node_awake_();
+      in.s_since_grid_ack =
+          this->mbs_grid_acked_()
+              ? (uint32_t) ((esp_timer_get_time() - this->last_gridsync_ack_us_) / 1000000)
+              : 0xFFFFFFFFu;
+      // The node's own word (PhaseReport.timedRxActive), and only since the last
+      // session: a login clears have_phase_report_.
+      in.promoted       = this->have_phase_report_ && this->belief_.node_timed_rx;
+      in.busy           = this->op_awaiting_ack_ || this->op_deferred_until_login_;
+      in.other_test     = this->mbs_other_test_();
+      in.warmup_running = this->mode_test_active_ && this->mbs_owns_test_;
+      in.report_ok      = this->mbs_report_fresh_();
+      return in;
+    }
+
+    void LORAListener::mbs_tick_()
+    {
+      const modebsup::Event ev = this->mbs_.tick(this->mbs_inputs_(), this->mbs_now_s_(),
+                                                 esp_random(), mbs_arbiter_(), this->mbs_id_());
+      if (ev != modebsup::Event::None)
+        this->mbs_apply_(ev);
+    }
+
+    void LORAListener::mbs_apply_(modebsup::Event ev)
+    {
+      const char *who = this->get_name().c_str();
+      switch (ev)
+      {
+        case modebsup::Event::Start:
+          this->mbs_start_warmup_();
+          break;
+        case modebsup::Event::Yield:
+          ESP_LOGI(TAG, "[%s] Mode B warm-up: node busy or another test running — retry in %u s",
+                   who, (unsigned) modebsup::kYieldRetryS);
+          this->mbs_abort_warmup_(true);
+          break;
+        case modebsup::Event::DropOut:
+          ESP_LOGW(TAG, "[%s] Mode B warm-up abandoned (node asleep, session lost or token lost)", who);
+          this->mbs_abort_warmup_(false);
+          break;
+        case modebsup::Event::Succeeded:
+          ESP_LOGW(TAG, "[%s] Mode B RE-ESTABLISHED (node phase report %d, ModeTest report %d)",
+                   who, (int) (this->have_phase_report_ && this->belief_.node_timed_rx),
+                   (int) this->mbs_report_fresh_());
+          break;
+        case modebsup::Event::Failed:
+          ESP_LOGW(TAG, "[%s] Mode B warm-up FAILED (consecutive failures %u) — retry in %u s",
+                   who, (unsigned) this->mbs_.failures(),
+                   (unsigned) modebsup::backoffS(this->mbs_.failures()));
+          break;
+        default:
+          break;
+      }
+    }
+
+    // The warm-up primitive: the SAME ModeTest B the bench's "Mode Test B - timed
+    // windows" button runs (single-copy placed marks every 1500 ms, production
+    // power profile, MAC echo on), for kWarmupS instead of 300 s. Measured to
+    // promote in 13.6 s; the node then holds Mode B on its own.
+    void LORAListener::mbs_start_warmup_()
+    {
+      this->mbs_summary_before_ = this->mode_test_summary_;
+      this->mbs_starting_  = true;
+      this->start_mode_test(modebsup::kWarmupS, 1500, 2, 1, true, false, false, true);
+      this->mbs_starting_  = false;
+      ++this->mbs_warmups_started_;
+      ESP_LOGW(TAG, "[%s] Mode B warm-up START (attempt %u, %u s of single-copy marks)",
+               this->get_name().c_str(), (unsigned) this->mbs_.failures() + 1,
+               (unsigned) modebsup::kWarmupS);
+    }
+
+    // Give up OUR warm-up without delaying anything: the marks stop at once. With
+    // send_stop the node is also told to end its test, but only after the cover
+    // op that caused the abort has had its first burst out (and only if nobody
+    // started another test meanwhile).
+    void LORAListener::mbs_abort_warmup_(bool send_stop)
+    {
+      if (!this->mbs_owns_test_ || !this->mode_test_active_)
+        return;
+      this->stop_mode_test_(false);
+      if (send_stop)
+        this->set_timeout("mbs_stop", 4000, [this]() { this->mbs_send_stop_frame_(); });
+    }
+
+    void LORAListener::mbs_send_stop_frame_()
+    {
+      if (this->mode_test_active_ || this->parent_ == nullptr)
+        return;
+      this->build_mode_test_frame_(false);
+      if (this->mt_frame_len_ > 0)
+        this->parent_->send(this->mt_frame_, this->mt_frame_len_);
+    }
+
+    // A cover op / sysop was just issued for this node: never fight it.
+    void LORAListener::mbs_yield_to_op_()
+    {
+      const uint32_t now_s = this->mbs_now_s_();
+      mbs_arbiter_().holdOff(now_s, modebsup::kOpHoldOffS);
+      if (!this->mbs_.yieldToOp(mbs_arbiter_(), this->mbs_id_(), now_s))
+        return;
+      ESP_LOGW(TAG, "[%s] Mode B warm-up aborted: cover op/sysop issued — retry in %u s",
+               this->get_name().c_str(), (unsigned) modebsup::kYieldRetryS);
+      this->mbs_abort_warmup_(true);
+    }
+
+    // The node rebooted, re-logged-in or woke, or the switch changed: the backoff
+    // and any warm-up in progress describe a situation that no longer exists.
+    void LORAListener::mbs_restart_()
+    {
+      this->mbs_.restart(mbs_arbiter_(), this->mbs_id_());
+      this->mbs_abort_warmup_(false);
+    }
+
+    // A GridSync of ours has been acknowledged and nothing newer is outstanding.
+    // Derived from the two timestamps rather than kept as a flag, so none of the
+    // publish paths has to remember to clear it: a new publish (whose stamp is
+    // later than the ack) or a new session (which zeroes the ack stamp) simply
+    // makes it false. Strictly later: an ack is always after the publish it answers.
+    bool LORAListener::mbs_grid_acked_() const
+    {
+      return this->last_gridsync_ack_us_ != 0 &&
+             this->last_gridsync_ack_us_ > this->last_gridsync_publish_us_;
+    }
+
+    // The warm-up's own ModeTest REPORT showed timed windows. A report is "new"
+    // when it differs from the one held when the warm-up started - the summary
+    // carries no timestamp, and clearing it would blank an operator's last result.
+    bool LORAListener::mbs_report_fresh_() const
+    {
+      const ModeTestSummary &s = this->mode_test_summary_;
+      const ModeTestSummary &b = this->mbs_summary_before_;
+      const bool changed = s.valid && (!b.valid || s.elapsed_s != b.elapsed_s ||
+                                       s.windows_armed != b.windows_armed ||
+                                       s.windows_hit != b.windows_hit ||
+                                       s.phase_p50_us != b.phase_p50_us);
+      return changed && modebsup::reportShowsModeB(s.mode, s.windows_armed, s.windows_hit);
+    }
+
+    // The 'Timed Mode' switch restored ON before the radio was up (hub reboot).
+    // Sending now would put a GridSync on the air in the clear and without its
+    // fleet key (no session yet), then re-publish it five times. So only the
+    // intent is recorded; confirm_session_ publishes the grid, encrypted, at the
+    // node's first confirmed session, and the supervisor warms the node up after.
+    void LORAListener::restore_timed_mode_at_boot_()
+    {
+      this->timed_mode_enabled_ = true;
+      this->set_grid_aligned(true);
+      this->belief_               = timedmode::HubBelief{};
+      this->last_in_slot_us_      = 0;
+      this->have_in_slot_confirm_ = false;
+      this->start_mode_b_supervisor_();
+      ESP_LOGW(TAG, "[%s] timed mode RESTORED ON at boot — nothing sent yet; the grid is "
+                    "published at this node's first confirmed session, then Mode B is warmed up",
+               this->get_name().c_str());
+    }
+
+    void LORAListener::enable_optimistic_single_shot(bool on)
+    {
+      this->optimistic_single_shot_ = on;
+      ESP_LOGI(TAG, "[%s] optimistic single shot %s", this->get_name().c_str(), on ? "ON" : "OFF");
     }
 
   } // namespace lora_tracker

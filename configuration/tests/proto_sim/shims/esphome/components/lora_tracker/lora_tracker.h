@@ -72,6 +72,10 @@ public:
     void    startGrid();
     int64_t gridAnchorUs() const { return grid_anchor_us_; }
     bool    gridStarted() const  { return grid_started_; }
+    // Mirrors production: false until setup() has finished. The shim never runs
+    // setup(), so it defaults to true; a test that models a hub boot clears it.
+    bool    setupDone() const    { return setup_done; }
+    bool    setup_done{true};
     int64_t nextT0ForSlotUs(uint8_t slot, int64_t now_us) const;
     // Section 4.4: the round a slot's mark falls in. Mirrors production — a
     // placed frame declares it so both ends number rounds the same way.

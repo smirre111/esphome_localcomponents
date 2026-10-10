@@ -6660,3 +6660,663 @@ TEST(EncUplink, EveryTimingFieldOfTheOuterHeaderIsUnderTheUplinkCmac) {
     EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before + 1)
         << "the same fields sealed in are accepted";
 }
+
+// ---------------------------------------------------------------------------
+// ModeBSupervisor through the REAL listener (policy: ModeBSupervisor.h, tested
+// in mode_b_supervisor_test.cpp). A node whose Timed Mode switch is ON must be
+// put back into Mode B after sleep, reboot and hub reboot, by a short ModeTest B
+// warm-up, serialised hub-wide, without ever fighting a cover op.
+//
+// Time: SimClock drives the listener's timers, esp_timer drives the ack-age and
+// uptime arithmetic, so secs() advances both together.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr std::time_t kModeBNow = 1787000000;
+
+struct ModeBProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::mt_mode_;
+    using esphome::lora_tracker::LORAListener::mt_duration_s_;
+    using esphome::lora_tracker::LORAListener::mt_grid_ms_;
+    using esphome::lora_tracker::LORAListener::mt_copies_;
+    using esphome::lora_tracker::LORAListener::mt_keep_power_profile_;
+    using esphome::lora_tracker::LORAListener::mt_mac_echo_;
+    using esphome::lora_tracker::LORAListener::mt_enable_counter_;
+    using esphome::lora_tracker::LORAListener::command_failed_;
+    using esphome::lora_tracker::LORAListener::is_node_awake_;
+    using esphome::lora_tracker::LORAListener::mode_test_summary_;
+};
+ModeBProbe &P(LORAClient &c) { return static_cast<ModeBProbe &>(c); }
+
+struct ModeBRig : real_helpers::RealHubHarness {
+    uint32_t base{0};
+
+    ModeBRig() : real_helpers::RealHubHarness(18, kMacRol2) {
+        proto_sim_timer_reset();
+        LORAClient::resetModeBArbiterForTest();
+        time.set_now(kModeBNow, /*valid=*/true);
+    }
+
+    void secs(uint32_t s) {
+        for (uint32_t i = 0; i < s; ++i) {
+            proto_sim_timer_advance_us(1'000'000);
+            clock.tick(1000);
+        }
+    }
+
+    // REGISTER -> login -> encrypted ack: a confirmed session.
+    void session() {
+        base = drive_session(clock, radio, rol);
+        proto_sim_timer_advance_us(
+            (int64_t) (esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200) * 1000);
+        secs(3);
+    }
+
+    void ackGrid() {
+        ASSERT_TRUE(rol.gridSyncAwaitingAck()) << "a GridSync is outstanding";
+        proto_sim_timer_advance_us(2000);   // the node answers after the frame was sent
+        deliverAck(rol, rol.gridsync_msgids_[0]);
+        ASSERT_FALSE(rol.gridSyncAwaitingAck());
+    }
+
+    // Seconds until a supervised warm-up is on the air, or -1.
+    int untilWarmup(uint32_t limit_s) {
+        for (uint32_t i = 0; i < limit_s; ++i) {
+            if (rol.mode_test_active() && rol.mbs_owns_test_)
+                return (int) i;
+            secs(1);
+        }
+        return (rol.mode_test_active() && rol.mbs_owns_test_) ? (int) limit_s : -1;
+    }
+
+    // Run until the supervisor has counted `n` consecutive failures.
+    bool untilFailures(uint32_t n, uint32_t limit_s) {
+        for (uint32_t i = 0; i < limit_s; ++i) {
+            if (rol.modeBSupervisor().failures() >= n)
+                return true;
+            secs(1);
+        }
+        return false;
+    }
+};
+
+}  // namespace
+
+// SWITCH ON -> the node is logged in -> exactly one warm-up, after the settle.
+TEST(ModeBListener, SwitchOnThenLoginWarmsTheNodeUpExactlyOnce) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+
+    r.secs(modebsup::kGridSettleS - 2);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "never into a grid that has not settled";
+    EXPECT_FALSE(r.rol.mode_test_active());
+
+    ASSERT_GE(r.untilWarmup(modebsup::kJitterMaxS + 3 * modebsup::kTickS), 0);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
+    // The primitive: the bench's "Mode Test B - timed windows" ModeTest, shortened.
+    EXPECT_EQ(P(r.rol).mt_mode_, 2u);
+    EXPECT_EQ(P(r.rol).mt_duration_s_, modebsup::kWarmupS);
+    EXPECT_EQ(P(r.rol).mt_grid_ms_, 1500u);
+    EXPECT_EQ(P(r.rol).mt_copies_, 1u) << "single-copy placed marks, not bursts";
+    EXPECT_TRUE(P(r.rol).mt_keep_power_profile_);
+    EXPECT_TRUE(P(r.rol).mt_mac_echo_);
+    EXPECT_FALSE(P(r.rol).mt_enable_counter_);
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Warming);
+
+    // It ends by itself (the hub's stop timer: duration + 5 s) ...
+    r.secs(modebsup::kWarmupS + 6);
+    EXPECT_FALSE(r.rol.mode_test_active());
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Verifying);
+
+    // ... and the node's own announcement that it is promoted ends the story.
+    r.rol.notePhaseReportForTest(/*crystal*/ 2, 100, 200, 12, 0, /*node_timed_rx=*/true);
+    r.secs(2 * modebsup::kTickS);
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u);
+
+    r.secs(1200);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u) << "a promoted node is not warmed up again";
+}
+
+TEST(ModeBListener, ANodeThatIsAlreadyPromotedIsNeverWarmedUp) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    // The GridSync ack carries the node's PhaseReport (dispatch_payload_).
+    r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, /*node_timed_rx=*/true);
+    r.secs(400);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+    EXPECT_FALSE(r.rol.mode_test_active());
+}
+
+// NODE REBOOT / RELOGIN -> warm-up again, with the backoff reset
+TEST(ModeBListener, ANodeRebootAfterAFailedWarmupDropsTheBackoffAndWarmsUpAgain) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    ASSERT_TRUE(r.untilFailures(1, modebsup::kWarmupS + modebsup::kVerifyGraceS + 30))
+        << "the node never reported Mode B: the attempt fails";
+    ASSERT_EQ(r.rol.mbs_warmups_started_, 1u);
+
+    // The node reboots: a fresh REGISTER, then login.
+    auto reg = real_helpers::serialize_register(kMacRol2);
+    r.rol.set_response(reg.data(), reg.size());
+    // The session is confirmed ~800 ms later, and the grid is published 1250 ms
+    // after that. In between, the OLD acknowledgement must not count: the node
+    // has rebooted and holds no grid.
+    proto_sim_timer_advance_us(900 * 1000);
+    r.clock.tick(900);
+    EXPECT_FALSE(r.rol.gridSyncAwaitingAck()) << "precondition: before the D1 publish";
+    EXPECT_FALSE(r.rol.mbs_grid_acked_()) << "a reboot voids the grid acknowledgement";
+    r.secs(4);
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u)
+        << "the login that follows the REGISTER forgets the backoff";
+    // The D1 path re-publishes the grid at the confirmed session; ack it.
+    ASSERT_TRUE(r.rol.gridSyncAwaitingAck());
+    r.ackGrid();
+    // Well inside the 2-minute backoff the failed attempt would have imposed.
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 2u);
+}
+
+// HUB REBOOT: the switch restores ON before the radio is up.
+TEST(ModeBListener, ARestoredSwitchSendsNothingUntilTheNodeHasASessionThenWarmsItUp) {
+    ensure_psa_ready();
+    ModeBRig r;
+    // Component order: the template switches (798) run before the listener's
+    // setup() (600) and the tracker's (300).
+    r.tracker.setup_done = false;
+    r.rol.enable_optimistic_single_shot(true);
+    r.rol.enable_timed_mode(true);
+    EXPECT_TRUE(r.rol.timed_mode_enabled());
+    EXPECT_TRUE(r.rol.grid_aligned());
+    EXPECT_FALSE(r.rol.gridSyncAwaitingAck()) << "no plaintext GridSync into a radio that is not up";
+    EXPECT_EQ(r.radio.hub_to_node_frames().size(), 0u);
+
+    r.rol.setup();      // sends the startup broadcast demote
+    EXPECT_TRUE(r.rol.timed_mode_enabled()) << "setup() must not undo what the switch restored";
+    EXPECT_TRUE(r.rol.optimistic_single_shot());
+    r.tracker.startGrid();      // LORATracker::setup() does this ...
+    r.tracker.setup_done = true;   // ... and finishes before any node can log in
+
+    r.session();        // the node logs in
+    EXPECT_TRUE(r.rol.gridSyncAwaitingAck()) << "the grid is published at the first confirmed session";
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0)
+        << "and the supervisor then puts the node back into Mode B";
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
+}
+
+// A FAILED WARM-UP -> 2, 5, 15 min
+TEST(ModeBListener, FailedWarmupsAreRetriedOnTheBackoffSchedule) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    ASSERT_TRUE(r.untilFailures(1, 200));
+
+    r.secs(110);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u) << "inside the 2-minute backoff";
+    ASSERT_GE(r.untilWarmup(30), 0);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 2u) << "after it";
+
+    ASSERT_TRUE(r.untilFailures(2, 200));
+    r.secs(290);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 2u) << "inside the 5-minute backoff";
+    ASSERT_GE(r.untilWarmup(30), 0);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 3u);
+}
+
+// COVER OP PENDING -> the warm-up yields
+TEST(ModeBListener, ANodeWithACoverOpInFlightIsNotWarmedUp) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    auto &op = static_cast<TrackedOpProbe &>(r.rol);
+    op.op_awaiting_ack_ = true;                 // a command nobody has acked yet
+    r.secs(modebsup::kGridSettleS + modebsup::kJitterMaxS + 30);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "the cover op owns the node";
+    op.op_awaiting_ack_ = false;                // acked
+    ASSERT_GE(r.untilWarmup(modebsup::kJitterMaxS + 20), 0);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
+}
+
+TEST(ModeBListener, ACoverOpIssuedDuringTheWarmupAbortsItAndIsStillSent) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.secs(5);
+    ASSERT_TRUE(r.rol.mode_test_active());
+
+    const size_t frames_before = r.radio.hub_to_node_frames().size();
+    r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    auto &op = static_cast<TrackedOpProbe &>(r.rol);
+    EXPECT_TRUE(op.op_awaiting_ack_) << "the cover op went out as always";
+    EXPECT_GT(r.radio.hub_to_node_frames().size(), frames_before);
+    EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stopped the moment the op was issued";
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+
+    deliverAck(r.rol, op.op_last_msgid_);
+    EXPECT_FALSE(op.op_awaiting_ack_);
+    EXPECT_FALSE(P(r.rol).command_failed_) << "the warm-up never costs a command";
+
+    // It tries again after the yield delay.
+    r.secs(modebsup::kYieldRetryS - 6);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
+    ASSERT_GE(r.untilWarmup(modebsup::kJitterMaxS + 20), 0);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 2u);
+}
+
+// THE MODETEST REPORT ALONE (the node's mode-change announcement lost or late)
+TEST(ModeBListener, AReportShowingModeBWindowsEndsTheVerification) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.secs(modebsup::kWarmupS + 6);
+    ASSERT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Verifying);
+
+    // An OLD report (from before this warm-up) must not count ...
+    EXPECT_FALSE(r.rol.mbs_report_fresh_());
+    // ... the warm-up's own must.
+    auto &sum = P(r.rol).mode_test_summary_;
+    sum.valid = true; sum.mode = 2; sum.elapsed_s = 60; sum.windows_armed = 38; sum.windows_hit = 38;
+    EXPECT_TRUE(r.rol.mbs_report_fresh_());
+    r.secs(2 * modebsup::kTickS);
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u);
+}
+
+TEST(ModeBListener, AReportFromAModeARunDoesNotCount) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    auto &sum = P(r.rol).mode_test_summary_;
+    sum.valid = true; sum.mode = 1; sum.elapsed_s = 60; sum.windows_armed = 0; sum.windows_hit = 0;
+    EXPECT_FALSE(r.rol.mbs_report_fresh_()) << "mode=2 windows 0/0 and Mode A runs are not promotions";
+    sum.mode = 2;
+    EXPECT_FALSE(r.rol.mbs_report_fresh_()) << "timed RX enabled but never active (windows 0/0)";
+}
+
+// SWITCH OFF AGAIN: supervision ends at once
+TEST(ModeBListener, SwitchingTimedModeOffEndsTheSupervision) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.secs(20);
+    r.rol.enable_timed_mode(false);
+    r.secs(900);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+    EXPECT_FALSE(r.rol.mode_test_active());
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+}
+
+TEST(ModeBListener, SwitchingOffDuringAWarmupStopsTheMarksAtOnce) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.rol.enable_timed_mode(false);
+    EXPECT_FALSE(r.rol.mode_test_active());
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+}
+
+// MODE A / AUTO MODE / SWITCH OFF: untouched
+TEST(ModeBListener, ANodeWithTimedModeOffIsNeverTouched) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.secs(900);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+    EXPECT_FALSE(r.rol.mode_test_active());
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+}
+
+TEST(ModeBListener, AnAutoModeNodeIsNeverTouchedEvenWithTimedModeOn) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;   // it reports it runs on a schedule
+    r.secs(900);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+    EXPECT_FALSE(r.rol.mode_test_active());
+}
+
+TEST(ModeBListener, ASleepingNodeIsNotWarmedUp) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    // Told to sleep AFTER it was last heard: the 23:00 nightly sleep.
+    r.rol.last_sleep_epoch_ = kModeBNow + 10;
+    r.rol.last_heard_epoch_ = kModeBNow;
+    ASSERT_FALSE(P(r.rol).is_node_awake_());
+    r.secs(900);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+}
+
+// A MANUAL TEST on the node is somebody's measurement: left alone
+TEST(ModeBListener, AManualModeTestIsNeverStartedOverOrTakenOver) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.start_mode_test(900, 1500, 2, 1, true, true, false, true);   // the operator's button
+    ASSERT_TRUE(r.rol.mode_test_active());
+    ASSERT_FALSE(r.rol.mbs_owns_test_) << "a manual start is not the supervisor's";
+    r.secs(400);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+    EXPECT_TRUE(r.rol.mode_test_active()) << "and the operator's test runs on";
+}
+
+TEST(ModeBListener, AnAutoModeFlaggedNodeIsNeverTouchedEvenIfItAnnouncesNothing) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.rol.set_auto_mode_default(true);   // the YAML seed: no sysop is sent (set_auto_mode would send one)
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.last_sleep_epoch_ = 0;
+    r.rol.last_heard_epoch_ = kModeBNow;
+    ASSERT_TRUE(P(r.rol).is_node_awake_()) << "precondition: only the auto-mode flag rules it out";
+    ASSERT_TRUE(r.rol.get_auto_mode());
+    r.secs(900);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+}
+
+TEST(ModeBListener, AMacPingOrDriftTestOnTheNodeIsNeverStartedOver) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.start_mac_ping(900, 1100, true, 0);
+    ASSERT_TRUE(r.rol.mac_ping_active());
+    r.secs(300);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "a MAC ping is somebody else's measurement";
+    r.rol.stop_mac_ping();
+    r.rol.start_drift_test(900, 1500);
+    ASSERT_TRUE(r.rol.drift_test_active());
+    r.secs(300);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "so is a drift test";
+}
+
+TEST(ModeBListener, ANodeWithoutAConfirmedSessionIsNotWarmedUp) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.session_confirmed_ = false;     // e.g. a login challenge in flight
+    r.secs(900);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+}
+
+// After a reboot the PREVIOUS report must not be believed.
+TEST(ModeBListener, AStalePromotedFlagFromBeforeTheRebootIsNotBelieved) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, /*node_timed_rx=*/true);   // it WAS in Mode B
+    ASSERT_TRUE(r.rol.hubBelief().node_timed_rx);
+
+    auto reg = real_helpers::serialize_register(kMacRol2);   // ... and rebooted
+    r.rol.set_response(reg.data(), reg.size());
+    proto_sim_timer_advance_us(
+        (int64_t) (esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200) * 1000);
+    r.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    r.secs(3);
+    ASSERT_TRUE(r.rol.gridSyncAwaitingAck());
+    r.ackGrid();
+    EXPECT_TRUE(r.rol.hubBelief().node_timed_rx) << "the flag itself survives a login ...";
+    EXPECT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0)
+        << "... but without a report since the reboot the node is not known to be promoted";
+}
+
+// THE COVER OP'S ABORT IS QUIET: no STOP burst in front of the command.
+TEST(ModeBListener, TheWarmupAbortSendsNoStopFrameAheadOfTheCommandButOneAfterIt) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.secs(5);
+    const size_t before = r.radio.hub_to_node_frames().size();
+    r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    auto &op = static_cast<TrackedOpProbe &>(r.rol);
+    const size_t after_op = r.radio.hub_to_node_frames().size();
+    EXPECT_EQ(after_op - before, 1u) << "only the command itself: the stop is not in front of it";
+    deliverAck(r.rol, op.op_last_msgid_);
+    r.secs(5);
+    EXPECT_EQ(r.radio.hub_to_node_frames().size() - after_op, 1u)
+        << "the node is told to end its test, after the command had its turn";
+}
+
+// A SYSOP (OTA, sleep, ...) is a tracked op like a cover op: the warm-up gives way to it too.
+TEST(ModeBListener, ASysopIssuedDuringTheWarmupAbortsItToo) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.rol.triggerOTA();
+    EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stopped the moment the sysop was issued";
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u);
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+}
+
+TEST(ModeBListener, TheDelayedStopIsNotSentIntoAnOperatorsTest) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    auto &op = static_cast<TrackedOpProbe &>(r.rol);
+    deliverAck(r.rol, op.op_last_msgid_);
+    r.rol.start_mode_test(900, 1500, 2, 1, true, true, false, true);   // the operator, at once
+    const size_t before = r.radio.hub_to_node_frames().size();
+    r.secs(5);
+    EXPECT_TRUE(r.rol.mode_test_active()) << "the operator's test is untouched";
+    EXPECT_EQ(r.radio.hub_to_node_frames().size(), before) << "and no stop frame was aimed into it";
+}
+
+// ANY node's cover op briefly holds off the NEXT warm-up grant.
+TEST(ModeBListener, AnOpOnOneNodeHoldsOffTheTokenForEveryone) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    auto &arb = LORAClient::mbs_arbiter_();
+    const uint32_t now_s = r.rol.mbs_now_s_();
+    ASSERT_TRUE(arb.request(77));
+    EXPECT_FALSE(arb.granted(77, now_s)) << "a command was just issued";
+    EXPECT_FALSE(arb.granted(77, now_s + modebsup::kOpHoldOffS - 1));
+    EXPECT_TRUE(arb.granted(77, now_s + modebsup::kOpHoldOffS));
+}
+
+TEST(ModeBListener, AHubWhoseGridAlignmentIsOffDoesNotRunMarks) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.set_grid_aligned(false);
+    r.secs(300);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+    r.rol.set_grid_aligned(true);
+    EXPECT_GE(r.untilWarmup(modebsup::kJitterMaxS + 10), 0) << "and starts once the grid is back";
+}
+
+TEST(ModeBListener, ARepublishedGridVoidsTheAcknowledgement) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_TRUE(r.rol.mbs_grid_acked_());
+    r.secs(10);
+    r.rol.send_grid_sync(true);                 // e.g. the node asked for its grid again
+    EXPECT_FALSE(r.rol.mbs_grid_acked_()) << "the node has not heard THIS one yet";
+    r.ackGrid();
+    EXPECT_TRUE(r.rol.mbs_grid_acked_());
+}
+
+TEST(ModeBListener, ANodeThatFallsAsleepMidWarmupHasItsMarksStopped) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.secs(5);
+    ASSERT_TRUE(r.rol.mode_test_active());
+    r.rol.last_sleep_epoch_ = kModeBNow + 10;   // told to sleep after it was last heard
+    r.rol.last_heard_epoch_ = kModeBNow;
+    ASSERT_FALSE(P(r.rol).is_node_awake_());
+    r.secs(2 * modebsup::kTickS);
+    EXPECT_FALSE(r.rol.mode_test_active()) << "no marks into a sleeping node";
+    EXPECT_FALSE(LORAClient::mbs_arbiter_().held()) << "and the token is free";
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u);
+}
+
+TEST(ModeBListener, AnOperatorTakingOverMidWarmupEndsOurClaimAtOnce) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    ASSERT_TRUE(LORAClient::mbs_arbiter_().held());
+    r.rol.start_mode_test(900, 1500, 2, 1, true, true, false, true);   // the operator's button
+    r.secs(2 * modebsup::kTickS);
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Verifying);
+    EXPECT_FALSE(LORAClient::mbs_arbiter_().held()) << "the token is not held for somebody else's test";
+}
+
+// A report that was already there when the warm-up started is not evidence.
+TEST(ModeBListener, AnOlderModeBReportDoesNotCountForThisWarmup) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    auto &sum = P(r.rol).mode_test_summary_;     // an operator's earlier run, Mode B and good
+    sum.valid = true; sum.mode = 2; sum.elapsed_s = 300; sum.windows_armed = 190; sum.windows_hit = 190;
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    EXPECT_FALSE(r.rol.mbs_report_fresh_())
+        << "the report that was already there must not end the verification";
+    r.secs(modebsup::kWarmupS + 6);
+    r.secs(2 * modebsup::kTickS);
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Verifying)
+        << "still waiting for THIS warm-up's own report";
+    sum.elapsed_s = 60; sum.windows_armed = 38; sum.windows_hit = 37;       // the new one
+    r.secs(2 * modebsup::kTickS);
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+}
+
+// TWO NODES WAKING TOGETHER: serialised, never overlapping
+namespace {
+struct SecondNode {
+    LORAClient rol2;
+    explicit SecondNode(ModeBRig &r) {
+        rol2.set_name("rol2");
+        rol2.set_short_address(19);
+        rol2.set_subnet_address(2);
+        rol2.set_sleep_duration(21600);
+        rol2.set_address(0xE08CFE5F9EC5ULL);
+        rol2.set_time(&r.time);
+        r.tracker.register_client(&rol2);
+        rol2.registered_ = true;
+        rol2.enable_timed_mode(true);          // plaintext GridSync is fine for this test
+        proto_sim_timer_advance_us(2000);
+        deliverAck(rol2, rol2.gridsync_msgids_[0]);
+        rol2.session_confirmed_ = true;
+        rol2.login_acked_       = true;
+        rol2.note_node_heard_();
+    }
+};
+}  // namespace
+
+TEST(ModeBListener, TwoNodesThatWakeTogetherAreWarmedUpOneAfterTheOther) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    SecondNode b(r);
+    ASSERT_TRUE(b.rol2.timed_mode_enabled());
+
+    uint32_t overlap_s = 0;
+    // 300 s: both warm-ups done, and inside the 2-minute backoff of the first
+    // (nobody reports Mode B here, so the first would otherwise try again).
+    for (uint32_t t = 0; t < 300; ++t) {
+        if (r.rol.mode_test_active() && b.rol2.mode_test_active())
+            ++overlap_s;
+        r.secs(1);
+    }
+    EXPECT_EQ(overlap_s, 0u) << "never two warm-ups on the air at once";
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
+    EXPECT_EQ(b.rol2.mbs_warmups_started_, 1u) << "the second node got its turn";
+}
+
+// OPTIMISTIC SINGLE SHOT: the switch's restore action is just this setter; it must
+// take effect and survive setup().
+TEST(ModeBListener, TheOptimisticSwitchRestoredBeforeSetupSurvivesSetup) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.tracker.setup_done = false;
+    r.rol.enable_optimistic_single_shot(true);       // template switch restore, priority 798
+    ASSERT_TRUE(r.rol.optimistic_single_shot());
+    r.rol.setup();                                   // listener setup, priority 600
+    EXPECT_TRUE(r.rol.optimistic_single_shot()) << "setup() must not reset it";
+    EXPECT_TRUE(r.rol.hubBelief().optimistic_single_shot) << "and it reaches the decision ladder";
+    r.rol.enable_optimistic_single_shot(false);
+    EXPECT_FALSE(r.rol.hubBelief().optimistic_single_shot);
+}
+
+// A hub reboot empties the learned ack-latency history; the 3 s default tail
+// must be what a node with no history gets.
+TEST(ModeBListener, WithNoAckLatencyHistoryTheWaitIsTheSafeDefault) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.rol.enable_optimistic_single_shot(true);
+    EXPECT_EQ(r.rol.ack_latency_for_test().count(0), 0u) << "RAM only: a hub reboot empties it";
+    EXPECT_EQ(r.rol.ack_latency_for_test().tailMs(0), singleshotwait::kDefaultTailMs)
+        << "no history -> the normal 3 s wait: nothing gained, nothing risked";
+    EXPECT_EQ(singleshotwait::kDefaultTailMs, 3000u);
+}
