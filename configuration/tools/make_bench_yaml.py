@@ -50,60 +50,10 @@ for who in ("rol_1", "rol_2"):
     ind = out[idx[0]][:len(out[idx[0]]) - len(out[idx[0]].lstrip())]
     out[idx[0]] = f'{ind}- logger.log: "BENCH ONLY: nightly sleep for {who} disabled (make_bench_yaml.py)"'
 
-# MAC-1 buttons: the shipped long runs are all counter-off. Same grid, counter ON,
-# so the delta against the MAC-0 long runs is MAC-1's cost.
-MAC1 = """  - platform: template
-    name: "Mode Test A — long, MAC-0 baseline (node 2)"
-    id: rol_2_modetest_a_long
-    entity_category: diagnostic
-    on_press:
-      # Counter OFF, crypto OFF: the pure MAC-0 numbers (FER_link, ppm, ping
-      # turnaround). tools/mac1_turnaround.py step T0 presses exactly this name,
-      # and a missing button made that step time out (~20 min) on 2026-10-09.
-      - lambda: 'id(rol_2)->start_mode_test(900, 1093, 1, 1, true, false, false, true);'
-  - platform: template
-    name: "Mode Test A — long, MAC-1 counter (node 2)"
-    id: rol_2_modetest_a_long_mac1
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mode_test(900, 1093, 1, 1, true, true, false, true);'
-  - platform: template
-    name: "Mode Test B — long, MAC-1 counter (node 2)"
-    id: rol_2_modetest_b_long_mac1
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, true, true, false, true);'
-  - platform: template
-    name: "Mode Test A — long, MAC-1 + MAC-2 (node 2)"
-    id: rol_2_modetest_a_long_mac2
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mode_test(900, 1093, 1, 1, true, true, true, true);'
-  - platform: template
-    name: "Mode Test B — long, MAC-1 + MAC-2 (node 2)"
-    id: rol_2_modetest_b_long_mac2
-    entity_category: diagnostic
-    on_press:
-      - lambda: 'id(rol_2)->start_mode_test(900, 1500, 2, 1, true, true, true, true);'
-  - platform: template
-    name: "MAC Ping Start long (node 2)"
-    id: rol_2_mac_ping_start_long
-    entity_category: diagnostic
-    on_press:
-      # Pressed ~20 s AFTER a 900 s ModeTest starts: the node answers a plaintext
-      # ping only while an authenticated ModeTest is armed (fw 1.1.5).
-      - lambda: 'id(rol_2)->start_mac_ping(860, 1100, true, 0);'
-  - platform: template
-    name: "MAC Ping Start long, MAC-2 (node 2)"
-    id: rol_2_mac_ping_start_long_mac2
-    entity_category: diagnostic
-    on_press:
-      # Same as the plain long-ping button, but requesting encryption: pressed
-      # ~20 s AFTER a "with MAC-1 + MAC-2" ModeTest starts, so the node's
-      # crypto_enabled sublayer is on and cryptoRequired() (fw 1.1.7) refuses a
-      # plaintext ping, accepting only this encrypted one.
-      - lambda: 'id(rol_2)->start_mac_ping(860, 1100, true, 0, true);'""".splitlines()
-anchor = next(i for i, l in enumerate(out) if 'name: "Mode Test B — long, sleep off (node 2)"' in l or 'long, sleep off (node 2)' in l)
-out[anchor - 1:anchor - 1] = MAC1          # anchor-1 is its "- platform: template" line
+# Guard: the bench file must be production + exactly the three changed lines above
+# (an injected block, or a revert of commented lines, would show up here).
+assert len(out) == len(work), (len(out), len(work))
+assert sum(a != b for a, b in zip(out, work)) == 3, "bench differs from production by more than the bench-only tweaks"
+
 open("loradevices.bench.yml", "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")
 print(f"reverted {reverted} commented lines, kept {kept} other changed lines")
