@@ -53,6 +53,15 @@ for who in ("rol_1", "rol_2"):
 # MAC-1 buttons: the shipped long runs are all counter-off. Same grid, counter ON,
 # so the delta against the MAC-0 long runs is MAC-1's cost.
 MAC1 = """  - platform: template
+    name: "Mode Test A — long, MAC-0 baseline (node 2)"
+    id: rol_2_modetest_a_long
+    entity_category: diagnostic
+    on_press:
+      # Counter OFF, crypto OFF: the pure MAC-0 numbers (FER_link, ppm, ping
+      # turnaround). tools/mac1_turnaround.py step T0 presses exactly this name,
+      # and a missing button made that step time out (~20 min) on 2026-10-09.
+      - lambda: 'id(rol_2)->start_mode_test(900, 1093, 1, 1, true, false, false, true);'
+  - platform: template
     name: "Mode Test A — long, MAC-1 counter (node 2)"
     id: rol_2_modetest_a_long_mac1
     entity_category: diagnostic
