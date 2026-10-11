@@ -9701,3 +9701,55 @@ TEST(TimeSyncSleepOk, TheNodeMayOnlySleepWhenTheHubOwesItNothing) {
         EXPECT_EQ(sleepOkAfterTimesync(r), 0) << "login still settling";
     }
 }
+
+// =============================================================================
+// 2026-10-11: a node that REBOOTS on a RESUMED session (no REGISTER, no LOGIN)
+// lost its RAM grid but the hub never re-published GridSync: the D1 publish lives
+// in confirm_session_ only. The supervisor's gate trusted the pre-reboot ack.
+// =============================================================================
+namespace {
+// What the node sends after esp_restart(): a beacon with a non-deep-sleep reset
+// reason and a PhaseReport that says it is NOT in timed RX.
+void deliverRebootBeacon(LORAClient &rol, WakeReason reason, uint32_t reset_reason,
+                         bool timed_rx = false, NodeMode mode = NODE_MODE__MODE_INTERACTIVE) {
+    ::PhaseReport pr = PHASE_REPORT__INIT;
+    pr.timedrxactive = timed_rx;
+    NodeWakeBeacon b = NODE_WAKE_BEACON__INIT;
+    b.reason       = reason;
+    b.resetreason  = reset_reason;
+    b.mode         = mode;
+    b.fwversion    = 0x00010203;
+    b.sessionresume = true;
+    b.phase        = &pr;
+    static_cast<BeaconProbe &>(rol).handle_beacon_(&b);
+}
+
+constexpr uint32_t kResetSw = 3, kResetDeepSleep = 8, kResetPoweron = 1;
+
+// Timed Mode ON, grid acknowledged, node promoted, settled: the state before the reboot.
+void promotedNode(ModeBRig &r) {
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, /*node_timed_rx=*/true);
+    r.secs(modebsup::kGridSettleS + 5);
+}
+}  // namespace
+
+TEST(RebootRegrid, KnownBug_ASoftRebootOnAResumedSessionNeverRepublishesTheGrid) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    ASSERT_TRUE(r.rol.mbs_grid_acked_());
+
+    testing::internal::CaptureStderr();
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(6);
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(occurrences(log, "GridSync PUBLISHED (slot"), 0) << "KnownBug: no re-publish";
+    EXPECT_TRUE(r.rol.mbs_grid_acked_()) << "KnownBug: the pre-reboot ack is still trusted";
+    // ... so the supervisor warms up into a node that holds no grid.
+    EXPECT_GE(r.untilWarmup(modebsup::kJitterMaxS + 3 * modebsup::kTickS), 0);
+}
