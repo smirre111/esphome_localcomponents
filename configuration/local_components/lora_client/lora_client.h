@@ -1149,6 +1149,20 @@ namespace esphome
       int64_t       last_gridsync_ack_us_{0};
       // A re-publish after a node reboot / NoGrid refusal is scheduled and not yet sent.
       bool          regrid_pending_{false};
+      // When we last advanced tx_message_id for a node boot (0 = never) and for which
+      // wake (the beacon's prevBeaconMsgId); when the last reboot-driven re-publish
+      // was decided; when a spent ladder last forced a LOGIN.
+      int64_t       last_boot_advance_us_{0};
+      uint32_t      last_wake_key_{0};
+      int64_t       last_regrid_us_{0};
+      int64_t       last_forced_relogin_us_{0};
+      // Any ack from the node since the session was last confirmed; and whether the
+      // post-sleep login fallback has already looked once more.
+      bool          acked_since_confirm_{false};
+      bool          fallback_rechecked_{false};
+      void advance_tx_for_boot_(const ::NodeWakeBeacon *b);
+      void post_sleep_fallback_fire_();
+      uint32_t s_since_(int64_t t_us) const;
 
       // --- ModeBSupervisor glue (ModeBSupervisor.h) ------------------------
       // Keeps a node whose Timed Mode switch is ON in Mode B across node sleep,

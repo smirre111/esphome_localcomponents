@@ -148,6 +148,51 @@ constexpr bool regridDue(bool pending, bool awaiting_ack, uint32_t s_since_publi
     return !pending && !awaiting_ack && s_since_publish >= kRegridMinGapS;
 }
 
+// --- The downlink counter across a node boot (2026-10-11) ---------------------
+//
+// The node's SessionManager::load() restores rx_id_ = persisted + 16 with a
+// fully-set bitmap over the margin (kRxPersistMargin), on EVERY boot - a soft
+// reboot and a deep-sleep wake alike. A hub downlink whose msgid is not above
+// that mark is silently dropped. The hub therefore advances its own counter by
+// the margin once per boot.
+//
+// It used to do so only when the beacon's reset REASON changed, so the second of
+// two consecutive SW reboots (two OTA restarts) advanced nothing: the node
+// dropped TimeSync, GridSync and ScheduleConfig for good. A spurious advance is
+// harmless (a forward jump inside the node's window), a missing one wedges the
+// node, so the rule errs towards advancing; only the pair (MODE_CHANGED + BOOT)
+// and duplicates inside kRegridMinGapS count once.
+static constexpr uint32_t kTxBootMargin = 16;   // node kRxPersistMargin
+
+// A deep-sleep wake has no BOOT beacon; its beacons all carry the PREVIOUS wake's
+// beacon msgid, which is what tells one wake from the next (`new_wake`).
+constexpr bool bootAdvancesTx(uint32_t wake_reason, uint32_t reset_reason,
+                              bool reset_reason_changed, bool resumed, bool new_wake,
+                              uint32_t s_since_advance)
+{
+    if (s_since_advance < kRegridMinGapS)
+        return false;
+    if (reset_reason == kResetDeepSleep)
+        return resumed && new_wake;
+    return reset_reason_changed || wake_reason == kWakeBoot || wake_reason == kWakeModeChanged;
+}
+
+// A GridSync ladder spent with NOT ONE ack, soon after we saw the node reboot,
+// means the node is deaf to our downlinks (counters out of step): a fresh LOGIN
+// resets them. Rate-limited so a node that is simply gone cannot cause a storm.
+static constexpr uint32_t kWedgeWindowS      = 300;
+static constexpr uint32_t kForcedReloginGapS = 600;
+constexpr bool reloginAfterSpentLadder(uint32_t s_since_regrid, bool acked_any,
+                                       uint32_t s_since_forced)
+{
+    return !acked_any && s_since_regrid <= kWedgeWindowS && s_since_forced >= kForcedReloginGapS;
+}
+
+// After a deep-sleep wake on a resumed session the post-sleep login fallback is
+// only needed if the node never acknowledged anything we sent it. Looked at once
+// more after this long before giving up on the wake.
+static constexpr uint32_t kFallbackRecheckMs = 15000;
+
 // An uptime-seconds comparison that survives uint32 wrap.
 constexpr bool reached(uint32_t now_s, uint32_t t_s)
 {

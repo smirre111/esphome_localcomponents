@@ -1558,6 +1558,7 @@ namespace esphome
       {
         this->login_acked_         = true;
         this->login_retry_count_   = 0;
+        this->acked_since_confirm_ = false;
         this->cancel_timeout("login_retry");
         ESP_LOGI(TAG, "[%s] Login acknowledged by node (encrypted session confirmed)",
                  this->get_name().c_str());
@@ -3103,6 +3104,15 @@ namespace esphome
                     "the node stays in Mode A until its next login",
                this->get_name().c_str(), (unsigned) kGridSyncMaxRepublishes);
       this->mac().acks.clear();
+      if (modebsup::reloginAfterSpentLadder(this->s_since_(this->last_regrid_us_),
+                                            this->last_gridsync_ack_us_ != 0,
+                                            this->s_since_(this->last_forced_relogin_us_)))
+      {
+        ESP_LOGW(TAG, "[%s] Not one ack since the reboot — the node is deaf to our downlinks; forcing a LOGIN",
+                 this->get_name().c_str());
+        this->last_forced_relogin_us_ = std::max<int64_t>(esp_timer_get_time(), 1);
+        this->set_timeout("gridsync_wedge_relogin", 0, [this]() { this->do_login_and_arm_retry_(); });
+      }
     }
 
     // Withdrawing the grid is NOT a delivery: a plain, unplaced burst, never
@@ -4051,6 +4061,7 @@ namespace esphome
 
     void LORAListener::handle_command_ack_(uint32_t ack_msg_id)
     {
+      this->acked_since_confirm_ = true;
       this->dlv_ack_(ack_msg_id);
     }
 
@@ -4169,8 +4180,34 @@ namespace esphome
       ESP_LOGI(TAG, "[%s] Sleep acknowledged — login fallback timer in %u s (%u s sleep + %u s boot margin + %u s stagger)",
                this->get_name().c_str(), total_ms / 1000,
                wake_ms / 1000, NODE_BOOT_MARGIN_MS / 1000, stagger_ms / 1000);
-      this->set_timeout("login_startup", total_ms,
-                        [this]() { this->do_login_and_arm_retry_(); });
+      this->fallback_rechecked_ = false;
+      this->set_timeout("login_startup", total_ms, [this]() { this->post_sleep_fallback_fire_(); });
+    }
+
+    // The fallback is for a wake whose REGISTER was lost. If the node instead
+    // resumed its session (a decrypted uplink confirmed it) a second LOGIN and the
+    // GridSync it triggers are pure waste - but only once the node has shown it
+    // hears us (acked something since the confirmation), because a resumed node
+    // that drops our downlinks is exactly what a fresh LOGIN repairs.
+    void LORAListener::post_sleep_fallback_fire_()
+    {
+      if (this->login_acked_ && this->session_confirmed_)
+      {
+        if (this->acked_since_confirm_)
+        {
+          ESP_LOGI(TAG, "[%s] Post-sleep login fallback not needed: the node resumed its session and acks",
+                   this->get_name().c_str());
+          return;
+        }
+        if (!this->fallback_rechecked_)
+        {
+          this->fallback_rechecked_ = true;
+          this->set_timeout("login_startup", modebsup::kFallbackRecheckMs,
+                            [this]() { this->post_sleep_fallback_fire_(); });
+          return;
+        }
+      }
+      this->do_login_and_arm_retry_();
     }
 
     // Every retry was spent and the node never acked CMD_SLEEP. Unlike any other
@@ -5515,19 +5552,31 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       // downlink counter to match, once per actual reboot (not once per
       // beacon — DEEPSLEEP wakes report the same reason on every beacon).
       const bool changed = (b->resetreason != this->last_handled_reset_reason_);
-      if (changed)
-      {
-        this->last_handled_reset_reason_ = b->resetreason;
-        if (b->resetreason != 8 /* DEEPSLEEP */)
-        {
-          this->frame_counter_.tx_message_id += 16;
-          ESP_LOGI(TAG, "[%s] Node reset (%s, non-deep-sleep) — advancing tx_message_id by 16 to %u",
-                   this->get_name().c_str(), s_reset_reason_name(b->resetreason),
-                   (unsigned) this->frame_counter_.tx_message_id);
-        }
-      }
-
+      this->last_handled_reset_reason_ = b->resetreason;
+      if (modebsup::bootAdvancesTx((uint32_t) b->reason, b->resetreason, changed, b->sessionresume,
+                                   b->prevbeaconmsgid != this->last_wake_key_,
+                                   this->s_since_(this->last_boot_advance_us_)))
+        this->advance_tx_for_boot_(b);
       return changed;
+    }
+
+    uint32_t LORAListener::s_since_(int64_t t_us) const
+    {
+      return (t_us == 0) ? 0xFFFFFFFFu : (uint32_t) ((esp_timer_get_time() - t_us) / 1000000);
+    }
+
+    // Once per node boot (see modebsup::bootAdvancesTx): the node restored its
+    // replay mark kRxPersistMargin ahead of what it had persisted.
+    void LORAListener::advance_tx_for_boot_(const ::NodeWakeBeacon *b)
+    {
+      const int64_t now_us = esp_timer_get_time();
+      this->last_boot_advance_us_ = (now_us > 0) ? now_us : 1;
+      this->last_wake_key_        = b->prevbeaconmsgid;
+      this->frame_counter_.tx_message_id += modebsup::kTxBootMargin;
+      ESP_LOGI(TAG, "[%s] Node reset (%s%s) — advancing tx_message_id by %u to %u",
+               this->get_name().c_str(), s_reset_reason_name(b->resetreason),
+               b->resetreason == modebsup::kResetDeepSleep ? ", resumed wake" : ", non-deep-sleep",
+               (unsigned) modebsup::kTxBootMargin, (unsigned) this->frame_counter_.tx_message_id);
     }
 
     void LORAListener::note_beacon_clock_(const ::NodeWakeBeacon *b)
@@ -6460,6 +6509,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       ESP_LOGW(TAG, "[%s] %s — forgetting its grid acknowledgement, GridSync in %u ms",
                this->get_name().c_str(), why, (unsigned) modebsup::kRegridDelayMs);
       this->forget_node_grid_();
+      this->last_regrid_us_ = std::max<int64_t>(esp_timer_get_time(), 1);
       this->regrid_pending_ = true;
       this->set_timeout("gridsync_regrid", modebsup::kRegridDelayMs, [this]() { this->regrid_fire_(); });
       return true;
