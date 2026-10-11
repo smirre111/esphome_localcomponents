@@ -114,6 +114,78 @@ namespace esphome
 
  
 
+    // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
+    // delivery refactor). Everything the tracked-command machinery used to keep
+    // as loose op_* members on the listener. One request per channel at a time;
+    // only the Control channel (cover operations and sysops) is used so far, the
+    // Config and Mac channels are for the later steps.
+    struct DeliverySlot
+    {
+      // What tx_tracked_op_ rebuilds on each (re)transmission.
+      enum class Kind : uint8_t { COVER, SYSOP };
+      Kind     kind{Kind::COVER};
+      bool     awaiting_ack{false};
+      uint32_t first_msgid{0};   // first msgid used for the current logical command
+      uint32_t last_msgid{0};    // msgid of the most recent (re)transmission
+      // Which LOGICAL command this is, for txqueue::SupersedeTable. Bumped once
+      // per command from Home Assistant — never per retransmission, which must
+      // stay under the generation it belongs to.
+      //
+      // Deliberately NOT msgid, even though msgid is also monotonic: a LoginMsg
+      // ZEROES the message counters, so a generation taken from msgid would go
+      // backwards after a re-login and the first command afterwards would be
+      // dropped as stale by frames queued before it. Starts at 1 because 0 is
+      // the table's "takes no part in this" value.
+      uint32_t generation{1};
+      uint8_t  retry_count{0};
+      // Stored operation, replayed on each retransmission with a fresh msgid.
+      uint32_t covop_case{0};
+      int32_t  operation{0};
+      float    position{0.0f};
+      int32_t  sysop{0};         // ClientOperation value when kind == SYSOP
+      // The exact bytes sent (pack once), and the msgid they carry.
+      std::vector<uint8_t> frame;
+      uint32_t             frame_msgid{0};
+      // Security review finding 1: a cover op / sysop issued while
+      // relogin_pending_ is true would otherwise pack plaintext (session not
+      // confirmed yet) and get stored — then every retry is rejected by the
+      // node's own plaintext-gate (it already holds a session), and after
+      // kOpMaxRetries the hub tears down the session it just rebuilt. Set by
+      // send_cover_operation()/send_tracked_sysop_() when deferring instead
+      // of sending; consumed by confirm_session_(), which actually sends it
+      // once encryption is possible.
+      bool     deferred_until_login{false};
+      // Whether the frame currently awaiting an ack went out as a single copy.
+      // Rule 4 bounds the exposure to ONE frame: the first retry of a single
+      // shot puts the node back on bursts until it is confirmed again.
+      bool     sent_single_shot{false};
+      // The command's first shot was an optimistic single shot, so its first ack
+      // wait is the short one (SingleShotAckWait.h).
+      bool     sent_optimistic{false};
+      // The short wait has been used for this command. It is used at most once,
+      // and is never counted against kOpMaxRetries.
+      bool     short_wait_spent{false};
+      // The mark the command's FIRST frame was placed on, 0 when that frame was
+      // not a single placed copy. Captured at send time: other placements move
+      // last_placed_t0_us_ before the ack arrives.
+      int64_t  mark_us{0};
+      // The tail (ms after the mark) the first ack wait used; 0 = none.
+      uint32_t first_tail_ms{0};
+      // True from "retries exhausted, no ack" until the node is next heard
+      // (CMD_SLEEP only; see on_sleep_unconfirmed_).
+      bool     sleep_unconfirmed{false};
+    };
+
+    // The delivery channels. A request occupies one channel until it is acked,
+    // fails, or is superseded; channels do not block each other.
+    enum DeliveryChannel : uint8_t
+    {
+      CH_CONTROL = 0,   // cover operations and sysops
+      CH_CONFIG  = 1,   // ScheduleConfig, ClientConfig / CoverConfig (later steps)
+      CH_MAC     = 2,   // GridSync (later steps)
+      kDeliveryChannels = 3
+    };
+
     class LORAListener : public EntityBase, public Component
     {
     public:
@@ -597,10 +669,10 @@ namespace esphome
       // const because schedule_version() lazily recomputes its CRC.
       pendingshadow::NodeInputs pending_shadow_inputs(int64_t now_us);
       // For tests: optimistic-single-shot bookkeeping of the tracked command.
-      bool op_short_wait_spent_for_test() const { return this->op_short_wait_spent_; }
-      bool op_sent_optimistic_for_test() const  { return this->op_sent_optimistic_; }
+      bool op_short_wait_spent_for_test() const { return this->ctl().short_wait_spent; }
+      bool op_sent_optimistic_for_test() const  { return this->ctl().sent_optimistic; }
       singleshotwait::AckLatency &ack_latency_for_test() { return this->ack_latency_; }
-      uint32_t op_first_tail_ms_for_test() const { return this->op_first_tail_ms_; }
+      uint32_t op_first_tail_ms_for_test() const { return this->ctl().first_tail_ms; }
 
       // Test seam: send_aligned_ is protected, and the alignment POLICY is the
       // part worth testing directly rather than only through a full command.
@@ -635,13 +707,13 @@ namespace esphome
       // diagnostic could publish: is this listener still waiting for an ack,
       // did it give up, and is a schedule push outstanding. All three were
       // observable only through a log line or a binary sensor.
-      bool     awaitingAck() const     { return this->op_awaiting_ack_; }
+      bool     awaitingAck() const     { return this->ctl().awaiting_ack; }
       bool     commandFailed() const   { return this->command_failed_; }
-      // For tests: whether the tracked-op retry buffer (op_frame_, the ONE
+      // For tests: whether the tracked-op retry buffer (frame, the ONE
       // place a sealed ciphertext is stored and re-sent later) is empty —
       // invariant I3 (a) needs this cleared on every fresh send_login()
       // challenge, see clearSessionKeys_().
-      bool     trackedOpFrameEmptyForTest() const { return this->op_frame_.empty(); }
+      bool     trackedOpFrameEmptyForTest() const { return this->ctl().frame.empty(); }
       uint32_t schedulePushMsgid() const { return this->sched_push_msgid_; }
       // A published GridSync the node has not confirmed yet, and how many times
       // it has been re-published for that.
@@ -654,7 +726,7 @@ namespace esphome
       uint32_t plaintextRefused() const { return this->plaintext_refused_; }
       uint32_t nonCanonicalFrames() const { return this->noncanonical_frames_; }
       bool     rxTimingTrusted() const { return this->rx_timing_trusted_; }
-      uint32_t opRetryCount() const    { return this->op_retry_count_; }
+      uint32_t opRetryCount() const    { return this->ctl().retry_count; }
       // Why the node says it is NOT in Mode B, and whether it says it IS. Both
       // arrive in every decrypted beacon's PhaseReport and were stored in
       // belief_ without ever being published — so a bench operator could only
@@ -865,37 +937,21 @@ namespace esphome
       // pinned the hub to bursts.
       bool     have_in_slot_confirm_{false};
       int64_t  last_in_slot_us_{0};
-      // Whether the frame currently awaiting an ack went out as a single copy.
-      // Rule 4 bounds the exposure to ONE frame: the first retry of a single
-      // shot puts the node back on bursts until it is confirmed again.
-      bool     op_sent_single_shot_{false};
       // The shape of the LAST frame send_aligned_ placed, whoever placed it.
-      // Distinct from op_sent_single_shot_ above, which is the TRACKED
+      // Distinct from sent_single_shot above, which is the TRACKED
       // COMMAND's shape and the one Rule 4 judges: every producer through
       // send_aligned_ would otherwise overwrite it, and a grid publication
       // already did.
       bool     last_placed_single_shot_{false};
       // Whether the frame send_aligned_ last placed was a single shot ONLY
       // because the optimistic switch bypassed ConfirmationStale. Same
-      // ownership rule as op_sent_single_shot_ above: the tracked command copies
-      // it into op_sent_optimistic_ itself.
+      // ownership rule as sent_single_shot above: the tracked command copies
+      // it into sent_optimistic itself.
       bool     last_placed_optimistic_{false};
-      // The tracked command's first shot was such an optimistic single shot, so
-      // its first ack wait is the short one (SingleShotAckWait.h).
-      bool     op_sent_optimistic_{false};
-      // The short wait has been used for this command. It is used at most once,
-      // and is never counted against kOpMaxRetries.
-      bool     op_short_wait_spent_{false};
       // THIS node's measured mark->ack delays for single placed copies, and what
       // they make the first ack wait of an optimistic shot (SingleShotAckWait.h).
       // One per listener, so 32 nodes never share a latency.
       singleshotwait::AckLatency ack_latency_;
-      // The mark the tracked command's FIRST frame was placed on, 0 when that
-      // frame was not a single placed copy. Captured at send time: other
-      // placements move last_placed_t0_us_ before the ack arrives.
-      int64_t  op_mark_us_{0};
-      // The tail (ms after the mark) the first ack wait used; 0 = none.
-      uint32_t op_first_tail_ms_{0};
       // The mark the last placed downlink for this node was aimed at, so a
       // second command inside the same round goes to the FOLLOWING mark instead
       // of on top of the first. 0 = nothing placed yet.
@@ -952,17 +1008,6 @@ namespace esphome
       bool     mac_ping_crypto_{false};
       uint32_t mac_ping_crypto_next_msgid_{0};
       uint32_t mac_ping_crypto_last_msgid_{0};   // 0 = range exhausted
-      std::vector<uint8_t> op_frame_;
-      uint32_t             op_frame_msgid_{0};
-      // Security review finding 1: a cover op / sysop issued while
-      // relogin_pending_ is true would otherwise pack plaintext (session not
-      // confirmed yet) and get stored — then every retry is rejected by the
-      // node's own plaintext-gate (it already holds a session), and after
-      // kOpMaxRetries the hub tears down the session it just rebuilt. Set by
-      // send_cover_operation()/send_tracked_sysop_() when deferring instead
-      // of sending; consumed by confirm_session_(), which actually sends it
-      // once encryption is possible.
-      bool     op_deferred_until_login_{false};
       esp_timer_handle_t mac_ping_timer_{nullptr};
       uint8_t  mac_ping_frame_[192]{};
       size_t   mac_ping_frame_len_{0};
@@ -1425,7 +1470,13 @@ namespace esphome
       // authenticated, or one that arrived before any session existed.
       void commit_rx_msgid_(const ::LoraClientResponseMessage *rcv_message);
       void dispatch_payload_(::LoraClientResponseMessage *msg);
+      void dispatch_mac_payload_(::LoraClientResponseMessage *msg);
       void confirm_session_();
+      void send_deferred_tracked_op_();
+      void send_deferred_config_push_();
+      void schedule_config_sync_relogin_();
+      bool more_traffic_owed_();
+      bool timesync_due_();
 
       // Login scheduling helpers
       // Epoch of the node's next wake, or 0 if the hub cannot tell.
@@ -1486,29 +1537,14 @@ namespace esphome
       // One reusable tracked-delivery state machine backs BOTH cover operations
       // and one-shot system operations (OTA etc.): (re)transmit with a fresh
       // incrementing msgid until the node returns a CommandAck, then mark failed
-      // + force re-login after kOpMaxRetries.  op_kind_ selects what tx_tracked_op_
+      // + force re-login after kOpMaxRetries.  kind selects what tx_tracked_op_
       // rebuilds on each retransmission.
-      enum class TrackedOpKind : uint8_t { COVER, SYSOP };
-      TrackedOpKind op_kind_{TrackedOpKind::COVER};
-      bool     op_awaiting_ack_{false};
-      uint32_t op_first_msgid_{0};   // first msgid used for the current logical command
-      uint32_t op_last_msgid_{0};    // msgid of the most recent (re)transmission
-      // Which LOGICAL command this is, for txqueue::SupersedeTable. Bumped once
-      // per command from Home Assistant — never per retransmission, which must
-      // stay under the generation it belongs to.
-      //
-      // Deliberately NOT msgid, even though msgid is also monotonic: a LoginMsg
-      // ZEROES the message counters, so a generation taken from msgid would go
-      // backwards after a re-login and the first command afterwards would be
-      // dropped as stale by frames queued before it. Starts at 1 because 0 is
-      // the table's "takes no part in this" value.
-      uint32_t op_generation_{1};
-      uint8_t  op_retry_count_{0};
-      // Stored operation, replayed on each retransmission with a fresh msgid.
-      uint32_t op_covop_case_{0};
-      int32_t  op_operation_{0};
-      float    op_position_{0.0f};
-      int32_t  op_sysop_{0};         // ClientOperation value when op_kind_ == SYSOP
+      using TrackedOpKind = DeliverySlot::Kind;
+      // The per-channel request state (DeliverySlot above). Only the Control
+      // channel is in use: ctl() is the tracked cover-op / sysop slot.
+      DeliverySlot slots_[kDeliveryChannels];
+      DeliverySlot       &ctl()       { return this->slots_[CH_CONTROL]; }
+      const DeliverySlot &ctl() const { return this->slots_[CH_CONTROL]; }
       bool     command_failed_{false};
       binary_sensor::BinarySensor *command_failed_bsensor_{nullptr};
       switch_::Switch             *auto_mode_switch_{nullptr};
@@ -1575,8 +1611,6 @@ namespace esphome
       void     arm_pending_sleep_expiry_();
       void     expire_pending_sleep_();
       static constexpr uint32_t kPendingSleepExpiryMs = 180000;
-      // True from "retries exhausted, no ack" until the node is next heard.
-      bool     sleep_unconfirmed_{false};
 
       ESPPreferenceObject rtc_;
     };

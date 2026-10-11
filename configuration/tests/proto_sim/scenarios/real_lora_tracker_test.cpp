@@ -1242,7 +1242,7 @@ TEST(RealTrackerBeacon, TheNextBeaconIsAWholeCadenceAfterTheLast) {
 // that is right for two commands a person actually asked for.
 //
 // It was wrong for a superseded one. The hub tracks exactly ONE command per
-// node: begin_tracked_op_ overwrites op_first_msgid_, so the moment the second
+// node: begin_tracked_op_ overwrites first_msgid, so the moment the second
 // arrives the hub will neither accept the first's ack nor retry it. Sending it
 // anyway made the blind move to the first position and then, 1.5 s later, to
 // the second — and the ack for the one it executed was logged as rejected.

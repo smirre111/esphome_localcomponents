@@ -94,7 +94,7 @@ static std::mutex                       s_session_keys_mutex;
 //
 // This is dest-keyed, not per-frame: two frames for the SAME dest in flight
 // at once, straddling a re-login, could still mis-attribute — BUT the one
-// place a ciphertext is actually stored and re-sent later (op_frame_, the
+// place a ciphertext is actually stored and re-sent later (frame, the
 // tracked-op retry buffer) is cleared on every fresh send_login() challenge
 // (see clearSessionKeys_()), which is the only way a "frame still in flight
 // across a re-login" can arise in this codebase: pack-once never re-seals
@@ -816,10 +816,10 @@ namespace esphome
 
     void LORAListener::note_node_heard_()
     {
-      if (this->sleep_unconfirmed_)
+      if (this->ctl().sleep_unconfirmed)
       {
         // See on_sleep_unconfirmed_(): the node is awake (again), whichever it was.
-        this->sleep_unconfirmed_ = false;
+        this->ctl().sleep_unconfirmed = false;
         if (this->op_is_sleep_())   // a later op's failure is that op's own
           this->set_command_failed_(false);
         ESP_LOGW(TAG, "[%s] Node heard again after an UNCONFIRMED sleep command — treating it as awake",
@@ -835,8 +835,8 @@ namespace esphome
     {
       pendingshadow::NodeInputs in;
       in.slot = static_cast<uint8_t>(this->grid_slot_ % timedgrid::kSlotCount);
-      in.op_awaiting_ack          = this->op_awaiting_ack_;
-      in.op_deferred_until_login  = this->op_deferred_until_login_;
+      in.op_awaiting_ack          = this->ctl().awaiting_ack;
+      in.op_deferred_until_login  = this->ctl().deferred_until_login;
       // "Login still settling" counts with an explicit relogin: both mean the
       // hub is mid-conversation with this node (TimeSync's sleepOk reads the same).
       in.relogin_pending          = this->relogin_pending_ || !this->session_confirmed_;
@@ -847,7 +847,7 @@ namespace esphome
       in.timesync_due = timesyncpolicy::shouldSend(
           this->auto_mode_,
           this->last_timesync_sent_us_ == 0 ? -1 : now_us - this->last_timesync_sent_us_);
-      // OTA is a tracked sysop, so op_awaiting_ack_ above already covers it.
+      // OTA is a tracked sysop, so awaiting_ack above already covers it.
       //
       // The hub's own transmit side is global, not per node: a frame placed for
       // this node that has not fired yet, or anything draining on the air.
@@ -1481,39 +1481,25 @@ namespace esphome
     // Deliberately NOT triggered by a plaintext frame bumping the msgid — that
     // does not prove the node holds the session key, and treating it as proof
     // once left a node that missed the LoginMsg unable to decrypt commands.
-    void LORAListener::confirm_session_()
+    // The tracked op that send_cover_operation()/send_tracked_sysop_() deferred
+    // behind a relogin, sent now that the session can encrypt it. (Moved out of
+    // confirm_session_ unchanged.)
+    void LORAListener::send_deferred_tracked_op_()
     {
-      this->session_confirmed_ = true;
-      this->relogin_pending_   = false;
-
-      // Security review finding 1: send the tracked op that send_cover_
-      // operation()/send_tracked_sysop_() deferred instead of packing
-      // plaintext. Unlike the config/TimeSync/GridSync deferrals below, this
-      // is NOT gated on !login_acked_ — a tracked op can be deferred by any
-      // relogin, not just the hub's first one this process, so it must fire
-      // on every confirm that finds one waiting.
-      if (this->op_deferred_until_login_)
+      if (this->ctl().deferred_until_login)
       {
-        this->op_deferred_until_login_ = false;
+        this->ctl().deferred_until_login = false;
         ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred tracked op",
                  this->get_name().c_str());
         this->begin_tracked_op_(this->tx_tracked_op_(),
-                                this->op_kind_ == TrackedOpKind::SYSOP ? "Sysop" : "Cover op");
+                                this->ctl().kind == TrackedOpKind::SYSOP ? "Sysop" : "Cover op");
       }
+    }
 
-      // The settle clock for the onboarding gate starts here: the pushes that
-      // follow a confirmation are queued over the next ~2 s.
-      if (this->onboarding_held_ && !this->onboarding_confirmed_)
-      {
-        this->onboarding_confirmed_        = true;
-        this->onboarding_since_confirm_ms_ = 0;
-      }
-
-      // The deferred config push from handle_register_. This is the first
-      // moment it can be encrypted, and a provisioned node will not accept it
-      // any other way. config_synced_ is set HERE rather than at the point the
-      // push was decided, so a push that never happened is not recorded as one
-      // that did.
+    // The config push handle_register_ deferred until the session could encrypt
+    // it. (Moved out of confirm_session_ unchanged.)
+    void LORAListener::send_deferred_config_push_()
+    {
       if (this->config_push_pending_)
       {
         this->config_push_pending_ = false;
@@ -1529,6 +1515,35 @@ namespace esphome
         }
         this->config_synced_ = true;
       }
+    }
+
+    void LORAListener::confirm_session_()
+    {
+      this->session_confirmed_ = true;
+      this->relogin_pending_   = false;
+
+      // Security review finding 1: send the tracked op that send_cover_
+      // operation()/send_tracked_sysop_() deferred instead of packing
+      // plaintext. Unlike the config/TimeSync/GridSync deferrals below, this
+      // is NOT gated on !login_acked_ — a tracked op can be deferred by any
+      // relogin, not just the hub's first one this process, so it must fire
+      // on every confirm that finds one waiting.
+      this->send_deferred_tracked_op_();
+
+      // The settle clock for the onboarding gate starts here: the pushes that
+      // follow a confirmation are queued over the next ~2 s.
+      if (this->onboarding_held_ && !this->onboarding_confirmed_)
+      {
+        this->onboarding_confirmed_        = true;
+        this->onboarding_since_confirm_ms_ = 0;
+      }
+
+      // The deferred config push from handle_register_. This is the first
+      // moment it can be encrypted, and a provisioned node will not accept it
+      // any other way. config_synced_ is set HERE rather than at the point the
+      // push was decided, so a push that never happened is not recorded as one
+      // that did.
+      this->send_deferred_config_push_();
       // U2 (Tier-1 interim mitigation, round 12): clear pending_login_nonce_
       // unconditionally on every confirm, not only on the first ack. Three
       // call paths reach send_login() while login_acked_ is already true
@@ -1620,20 +1635,27 @@ namespace esphome
         // so a node that ignores the flag (older firmware) simply re-acks without
         // re-entering here.  Re-checked in the lambda in case a REGISTER already
         // synced config in the meantime.
-        if (!this->config_synced_)
-        {
-          ESP_LOGI(TAG, "[%s] Session resumed without config sync this boot — scheduling re-login to push config",
-                   this->get_name().c_str());
-          this->set_timeout("config_sync_relogin", 500, [this]() {
-            // Same reasoning as finding 9's handle_encrypted_ fix: go
-            // through do_login_and_arm_retry_(), not a bare send_login(),
-            // so this also respects acquire_onboarding_() and arms a retry
-            // instead of being a one-shot that silently does nothing if
-            // this particular LoginMsg is lost.
-            if (!this->config_synced_)
-              this->do_login_and_arm_retry_();
-          });
-        }
+        this->schedule_config_sync_relogin_();
+      }
+    }
+
+    // The resume-path config-sync guarantee of confirm_session_ (moved out
+    // unchanged): a fresh login when config is still unsynced this boot.
+    void LORAListener::schedule_config_sync_relogin_()
+    {
+      if (!this->config_synced_)
+      {
+        ESP_LOGI(TAG, "[%s] Session resumed without config sync this boot — scheduling re-login to push config",
+                 this->get_name().c_str());
+        this->set_timeout("config_sync_relogin", 500, [this]() {
+          // Same reasoning as finding 9's handle_encrypted_ fix: go
+          // through do_login_and_arm_retry_(), not a bare send_login(),
+          // so this also respects acquire_onboarding_() and arms a retry
+          // instead of being a one-shot that silently does nothing if
+          // this particular LoginMsg is lost.
+          if (!this->config_synced_)
+            this->do_login_and_arm_retry_();
+        });
       }
     }
 
@@ -1756,10 +1778,10 @@ namespace esphome
       // verified-CMAC-but-wrong-key decrypt would hand the garbage result
       // straight to the response handlers. Dropping it here means the
       // in-flight command is simply lost — the existing kOpMaxRetries/
-      // op_awaiting_ack_ machinery already handles "no ack arrived" as a
+      // awaiting_ack machinery already handles "no ack arrived" as a
       // user-visible failure, which is what this now also is.
-      this->op_frame_.clear();
-      this->op_frame_msgid_ = 0;
+      this->ctl().frame.clear();
+      this->ctl().frame_msgid = 0;
     }
 
     bool LORAListener::deriveRootKeyForTest(uint8_t out[16])
@@ -2224,7 +2246,7 @@ namespace esphome
     // ACK / POSITION / BEACON, for both the encrypted and the plaintext path.
     //
     // These were two separate ladders. They were compared line by line before
-    // merging — identical, including the `op_awaiting_ack_` guard that lets a
+    // merging — identical, including the `awaiting_ack` guard that lets a
     // position report count as delivery confirmation. If the plaintext path
     // should ever accept LESS than the encrypted one (a defensible security
     // position), split them again deliberately rather than by drift.
@@ -2529,12 +2551,20 @@ namespace esphome
         this->handle_command_ack_(msg->ack->ack_msg_id);
       }
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
-               this->op_awaiting_ack_)
-        this->handle_command_ack_(this->op_last_msgid_); // position confirms delivery
+               this->ctl().awaiting_ack)
+        this->handle_command_ack_(this->ctl().last_msgid); // position confirms delivery
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && msg->beacon)
         this->handle_beacon_(msg->beacon);
+      else
+        this->dispatch_mac_payload_(msg);
+    }
+
+    // The MAC-layer tail of dispatch_payload_ (moved out unchanged): consumed
+    // here, never forwarded to a cover or a schedule.
+    void LORAListener::dispatch_mac_payload_(LoraClientResponseMessage *msg)
+    {
       // MAC-0: consumed here, never forwarded to a cover or a schedule.
-      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL &&
+      if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL &&
                msg->maccontrol)
         this->handle_mac_echo_(msg->maccontrol);
       // ModeTest results. Also MAC-layer: never forwarded to a cover.
@@ -3239,14 +3269,14 @@ namespace esphome
       // The SHAPE of the frame just placed, which is not the same thing as the
       // shape of the tracked command.
       //
-      // This used to assign op_sent_single_shot_ directly, and Rule 4 reads
+      // This used to assign sent_single_shot directly, and Rule 4 reads
       // that to decide whether an unacked command costs this node its
       // single-shot confidence. Every other producer through send_aligned_ then
       // clobbered it: a grid publication asks for the burst explicitly, so
       // publishing a grid CLEARED the flag and Rule 4 could not fire for a
       // single shot that really had gone unacked. Routing TimeSync and
       // ScheduleConfig through here would have made that routine rather than
-      // rare. The tracked-op senders copy it into op_sent_single_shot_
+      // rare. The tracked-op senders copy it into sent_single_shot
       // themselves, so the flag belongs to the command it describes.
       this->last_placed_single_shot_ = single_shot;
       // Was the optimistic switch what made this a single shot? Judged by asking
@@ -3339,23 +3369,23 @@ namespace esphome
       // The tracked op is either a cover operation or a system operation; both are
       // (re)built here with a fresh msgid so the retransmit path is identical.
       LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
-      if (this->op_kind_ == TrackedOpKind::SYSOP)
+      if (this->ctl().kind == TrackedOpKind::SYSOP)
       {
         op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
-        op_message.sysop    = static_cast<ClientOperation>(this->op_sysop_);
+        op_message.sysop    = static_cast<ClientOperation>(this->ctl().sysop);
       }
       else
       {
         op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
-        if (this->op_covop_case_ == LORA_COVER_OPERATION__COVOP_POSITION)
+        if (this->ctl().covop_case == LORA_COVER_OPERATION__COVOP_POSITION)
         {
           covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
-          covop.position   = this->op_position_;
+          covop.position   = this->ctl().position;
         }
         else
         {
           covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
-          covop.operation  = static_cast<CovOperation>(this->op_operation_);
+          covop.operation  = static_cast<CovOperation>(this->ctl().operation);
         }
         op_message.operation = &covop;
       }
@@ -3372,13 +3402,13 @@ namespace esphome
         // Re-packing was two bugs at once. It minted a fresh msgid, so the
         // node's replay filter admitted the retry and executed the command a
         // SECOND time — a blind that moves twice. And tx_tracked_op_ re-reads
-        // op_position_ at pack time, so a user moving the blind mid-retry
+        // position at pack time, so a user moving the blind mid-retry
         // produced different plaintext under a msgid-derived CTR counter block; with
         // a reused msgid that is keystream reuse, and with a fresh one it is a
         // duplicate command. Storing the frame removes both: same msgid, same
         // ciphertext, and the node can recognise a duplicate and re-ack it.
-        this->op_frame_.assign(buf, buf + len);
-        this->op_frame_msgid_ = header.msgid;
+        this->ctl().frame.assign(buf, buf + len);
+        this->ctl().frame_msgid = header.msgid;
 
         // The tracked command downlink is the one B1's gate is about: with
         // alignment on, this is the burst that must observably start on the
@@ -3387,14 +3417,14 @@ namespace esphome
         // Rule 4's exposure is THIS command's, so the shape is recorded here
         // rather than inside send_aligned_, where every other producer would
         // overwrite it.
-        this->op_sent_single_shot_ = this->last_placed_single_shot_;
-        this->op_sent_optimistic_  = this->last_placed_optimistic_;
-        this->op_mark_us_          = this->last_placed_single_shot_ ? this->last_placed_t0_us_ : 0;
+        this->ctl().sent_single_shot = this->last_placed_single_shot_;
+        this->ctl().sent_optimistic  = this->last_placed_optimistic_;
+        this->ctl().mark_us          = this->last_placed_single_shot_ ? this->last_placed_t0_us_ : 0;
         free(buf);
       }
       else
       {
-        this->op_mark_us_ = 0;
+        this->ctl().mark_us = 0;
         ESP_LOGE(TAG, "[%s] Failed to pack tracked operation", this->get_name().c_str());
       }
       return header.msgid;
@@ -3402,11 +3432,11 @@ namespace esphome
 
     void LORAListener::begin_tracked_op_(uint32_t msgid, const char *what)
     {
-      this->op_first_msgid_  = msgid;
-      this->op_last_msgid_   = msgid;
-      this->op_retry_count_  = 0;
-      this->op_awaiting_ack_ = true;
-      this->op_short_wait_spent_ = false;
+      this->ctl().first_msgid  = msgid;
+      this->ctl().last_msgid   = msgid;
+      this->ctl().retry_count  = 0;
+      this->ctl().awaiting_ack = true;
+      this->ctl().short_wait_spent = false;
       this->set_command_failed_(false);
 
       ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
@@ -3418,29 +3448,29 @@ namespace esphome
 
     void LORAListener::send_cover_operation(uint32_t covop_case, int32_t operation, float position)
     {
-      this->op_kind_       = TrackedOpKind::COVER;
-      this->op_covop_case_ = covop_case;
-      this->op_operation_  = operation;
-      this->op_position_   = position;
+      this->ctl().kind       = TrackedOpKind::COVER;
+      this->ctl().covop_case = covop_case;
+      this->ctl().operation  = operation;
+      this->ctl().position   = position;
 
       // A NEW logical command, so a previous one still sitting in the transmit
       // queue is now stale. Bumped before the pack, so the frame carries the
       // generation that supersedes it. See txqueue::SupersedeTable.
-      this->op_generation_++;
+      this->ctl().generation++;
       this->mbs_yield_to_op_();
 
-      // Security review finding 1: see op_deferred_until_login_'s comment.
+      // Security review finding 1: see deferred_until_login's comment.
       // The op's parameters above are already stored on `this`, so
       // confirm_session_() can replay this exact call once encryption is
       // possible, rather than this sending a plaintext frame now that the
       // node (already holding a session) will reject outright.
       if (this->relogin_pending_)
       {
-        this->op_deferred_until_login_ = true;
+        this->ctl().deferred_until_login = true;
         ESP_LOGD(TAG, "[%s] Cover op deferred — session being rebuilt", this->get_name().c_str());
         return;
       }
-      this->op_deferred_until_login_ = false;
+      this->ctl().deferred_until_login = false;
       this->begin_tracked_op_(this->tx_tracked_op_(), "Cover op");
     }
 
@@ -3450,20 +3480,20 @@ namespace esphome
       // replay-rejected frame was lost with no recovery.  Route them through the
       // exact same tracked machinery as cover ops so a miss is retransmitted (with
       // a fresh incrementing msgid) until the node acks, then fails + re-logins.
-      this->op_kind_  = TrackedOpKind::SYSOP;
-      this->op_sysop_ = sysop;
+      this->ctl().kind  = TrackedOpKind::SYSOP;
+      this->ctl().sysop = sysop;
 
-      this->op_generation_++;   // same reasoning as send_cover_operation
+      this->ctl().generation++;   // same reasoning as send_cover_operation
       this->mbs_yield_to_op_();
 
       // See send_cover_operation()'s identical guard just above.
       if (this->relogin_pending_)
       {
-        this->op_deferred_until_login_ = true;
+        this->ctl().deferred_until_login = true;
         ESP_LOGD(TAG, "[%s] Sysop deferred — session being rebuilt", this->get_name().c_str());
         return;
       }
-      this->op_deferred_until_login_ = false;
+      this->ctl().deferred_until_login = false;
       this->begin_tracked_op_(this->tx_tracked_op_(), "Sysop");
     }
 
@@ -3480,9 +3510,9 @@ namespace esphome
       // SingleShotAckWait.h for the derivation. Measured from the placed mark,
       // which is where the frame actually goes out, not from now.
       const bool short_wait = deliverypolicy::isShortFirstWait(
-          this->op_sent_optimistic_, this->op_retry_count_, this->op_short_wait_spent_);
+          this->ctl().sent_optimistic, this->ctl().retry_count, this->ctl().short_wait_spent);
       uint32_t wait_ms = this->ack_wait_ms_(kOpRetryIntervalMs);
-      this->op_first_tail_ms_ = 0;
+      this->ctl().first_tail_ms = 0;
       if (short_wait)
         wait_ms = this->short_first_wait_ms_();
       this->set_timeout("op_retry", wait_ms, [this, short_wait]() {
@@ -3491,14 +3521,14 @@ namespace esphome
     }
 
     // The short first ack wait of an optimistic single shot, in ms from NOW.
-    // Records the node's mark->ack tail in op_first_tail_ms_.
+    // Records the node's mark->ack tail in first_tail_ms.
     uint32_t LORAListener::short_first_wait_ms_()
     {
       // From NOW: whichever is later of the placed mark and the queue's drain
       // (they estimate the same instant; ack_wait_ms_ must NOT be added on top,
       // it would count the time to the mark twice), plus THIS node's measured
       // mark->ack tail.
-      const int64_t  us_to_t0 = ((this->op_mark_us_ != 0) ? this->op_mark_us_
+      const int64_t  us_to_t0 = ((this->ctl().mark_us != 0) ? this->ctl().mark_us
                                                           : this->last_placed_t0_us_) -
                                 esp_timer_get_time();
       int64_t drain_ms = (this->parent_ != nullptr) ? this->parent_->txDrainUs() / 1000 : 0;
@@ -3508,7 +3538,7 @@ namespace esphome
         drain_ms = kMaxAckBacklogMs;
       const uint32_t now_ms = (uint32_t) (esp_timer_get_time() / 1000);
       const uint32_t tail   = this->ack_latency_.tailMs(now_ms);
-      this->op_first_tail_ms_ = tail;
+      this->ctl().first_tail_ms = tail;
       const uint32_t wait_ms = singleshotwait::firstAckWaitMs(us_to_t0, (uint32_t) drain_ms, tail);
       ESP_LOGI(TAG, "[%s] optimistic single shot: ack deadline %u ms from now "
                     "(mark in %d ms, queue drain %d ms, tail %u ms; node history %u "
@@ -3526,16 +3556,16 @@ namespace esphome
       // The decision is deliverypolicy::onAckTimeout (DeliveryPolicy.h); this
       // function only performs it.
       const deliverypolicy::TimeoutDecision d = deliverypolicy::onAckTimeout(
-          {this->op_awaiting_ack_, this->relogin_pending_, short_wait,
-           this->op_retry_count_, kOpMaxRetries});
-      this->op_retry_count_ = d.retries_spent;
+          {this->ctl().awaiting_ack, this->relogin_pending_, short_wait,
+           this->ctl().retry_count, kOpMaxRetries});
+      this->ctl().retry_count = d.retries_spent;
       switch (d.action)
       {
       case deliverypolicy::TimeoutAction::Stale:
         return; // acked already; one-shot, nothing to re-arm
       case deliverypolicy::TimeoutAction::DeferRelogin:
         // Security review finding 1: a relogin can start WHILE a retry is
-        // already in flight (clearSessionKeys_() empties op_frame_ right
+        // already in flight (clearSessionKeys_() empties frame right
         // out from under it). Sending now would just be a plaintext frame
         // the node — still holding its old session — rejects outright, and
         // counting it would burn a retry for nothing. Wait for
@@ -3557,7 +3587,7 @@ namespace esphome
       // Rule 4: a single shot that went unacked puts this node back on bursts
       // immediately, and stays that way until a fresh in-slot uplink. One
       // frame is the whole exposure — the retry below is already a burst.
-      if (deliverypolicy::marksSingleShotUnacked(this->op_sent_single_shot_,
+      if (deliverypolicy::marksSingleShotUnacked(this->ctl().sent_single_shot,
                                                  this->belief_.single_shot_unacked))
       {
         this->belief_.single_shot_unacked = true;
@@ -3566,30 +3596,30 @@ namespace esphome
       }
 
       // NOT tx_tracked_op_(): that re-packs from live state with a fresh
-      // msgid. op_last_msgid_ deliberately does NOT move — the retry IS the
+      // msgid. last_msgid deliberately does NOT move — the retry IS the
       // original command, and the ack window must keep accepting its id.
       uint32_t msgid = this->retransmit_tracked_op_();
       ESP_LOGW(TAG, "[%s] Tracked op retransmit %u/%u (msgid=%u)", this->get_name().c_str(),
-               (unsigned)this->op_retry_count_, (unsigned)kOpMaxRetries, (unsigned)msgid);
+               (unsigned)this->ctl().retry_count, (unsigned)kOpMaxRetries, (unsigned)msgid);
       this->schedule_op_retry_(); // re-arm the next one-shot
     }
 
     // The optimistic guess missed. Burst NOW (Rule 4 below marks the node
     // unacked, so retransmit_tracked_op_() places a full burst), but do
-    // NOT count it: op_retry_count_ is the budget that ends in "command
+    // NOT count it: retry_count is the budget that ends in "command
     // failed, tear the session down", and a guess the operator
     // opted into is not evidence the session is dead. The
     // normal 3 s waits and the full kOpMaxRetries follow unchanged.
     void LORAListener::op_short_wait_missed_()
     {
-      this->op_short_wait_spent_ = true;
+      this->ctl().short_wait_spent = true;
       this->belief_.single_shot_unacked = true;
       // The tail just proved too short is a lower bound on this node's
       // delay: remember it, so the next deadline is longer instead of the
       // same mistake (and a node that never answers climbs to the normal
       // wait, no further).
       this->ack_latency_.note((uint32_t) (esp_timer_get_time() / 1000),
-                              this->op_first_tail_ms_);
+                              this->ctl().first_tail_ms);
       ESP_LOGW(TAG, "[%s] optimistic single shot unacked — bursting now "
                     "(not counted against the retry budget)",
                this->get_name().c_str());
@@ -3612,7 +3642,7 @@ namespace esphome
       }
       ESP_LOGE(TAG, "[%s] Tracked op not acknowledged after %u retries — marking failed",
                this->get_name().c_str(), (unsigned)kOpMaxRetries);
-      this->op_awaiting_ack_ = false;
+      this->ctl().awaiting_ack = false;
       this->set_command_failed_(true);
       // Session recovery.  A command that goes fully unacked means the session
       // is effectively dead — either the hub never confirmed it (node re-keyed
@@ -3637,40 +3667,40 @@ namespace esphome
     {
       TxPolicy p;
       p.supersede_key = this->short_address_;
-      p.supersede_gen = this->op_generation_;
+      p.supersede_gen = this->ctl().generation;
       return p;
     }
 
     uint32_t LORAListener::retransmit_tracked_op_()
     {
-      if (this->op_frame_.empty())
+      if (this->ctl().frame.empty())
       {
         // Nothing stored (a retry whose session was cleared mid-flight, or a
         // first send that failed to pack). Falling back to a fresh pack is
         // correct: it is a new command, and the node will treat it as one —
-        // which per security review finding 1 means op_first_msgid_/
-        // op_last_msgid_ must move to match. tx_tracked_op_() allocates a
+        // which per security review finding 1 means first_msgid/
+        // last_msgid must move to match. tx_tracked_op_() allocates a
         // fresh msgid from a counter that was just reset by the relogin that
-        // cleared op_frame_, so without this the old range (from before the
+        // cleared frame, so without this the old range (from before the
         // reset) would reject the node's ack to this new attempt outright —
         // handle_command_ack_ never seeing it, "command failed" even though
         // the blind did move.
         ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing",
                  this->get_name().c_str());
         const uint32_t msgid = this->tx_tracked_op_();
-        this->op_first_msgid_ = msgid;
-        this->op_last_msgid_  = msgid;
+        this->ctl().first_msgid = msgid;
+        this->ctl().last_msgid  = msgid;
         return msgid;
       }
 
       // Under the SAME generation as the original: a retransmission is the same
       // logical command, and giving it a fresh one would let a retry supersede
       // the frame it is a retry of.
-      this->send_aligned_(this->op_frame_.data(), this->op_frame_.size(),
+      this->send_aligned_(this->ctl().frame.data(), this->ctl().frame.size(),
                           this->tracked_op_policy_());
-      this->op_sent_single_shot_ = this->last_placed_single_shot_;
-      this->op_sent_optimistic_  = this->last_placed_optimistic_;
-      return this->op_frame_msgid_;
+      this->ctl().sent_single_shot = this->last_placed_single_shot_;
+      this->ctl().sent_optimistic  = this->last_placed_optimistic_;
+      return this->ctl().frame_msgid;
     }
 
     // The node confirming a GridSync: it is on the grid, stop re-publishing.
@@ -3715,9 +3745,9 @@ namespace esphome
     void LORAListener::record_ack_latency_()
     {
       const int64_t now_us   = esp_timer_get_time();
-      const int64_t delay_ms = (now_us - this->op_mark_us_) / 1000;
+      const int64_t delay_ms = (now_us - this->ctl().mark_us) / 1000;
       const bool clean = singleshotwait::isCleanSample(
-          true, this->op_retry_count_, this->op_short_wait_spent_, true);
+          true, this->ctl().retry_count, this->ctl().short_wait_spent, true);
       bool kept = false;
       if (clean && delay_ms >= 0)
         kept = this->ack_latency_.note((uint32_t) (now_us / 1000), (uint32_t) delay_ms);
@@ -3725,7 +3755,7 @@ namespace esphome
                     "history now %u samples, max %u ms)",
                this->get_name().c_str(), (long long) delay_ms,
                clean ? "clean single shot" : "after a burst fallback or retry",
-               kept ? ", recorded" : ", not recorded", (unsigned) this->op_first_tail_ms_,
+               kept ? ", recorded" : ", not recorded", (unsigned) this->ctl().first_tail_ms,
                (unsigned) this->ack_latency_.count((uint32_t) (now_us / 1000)),
                (unsigned) this->ack_latency_.maxDelayMs((uint32_t) (now_us / 1000)));
     }
@@ -3739,15 +3769,15 @@ namespace esphome
 
       // Accept an ack for any msgid in the current command's transmit range
       // (first .. last) since each retransmit uses a fresh, higher msgid.
-      if (!deliverypolicy::acceptsRangeAck(this->op_awaiting_ack_, ack_msg_id,
-                                           this->op_first_msgid_, this->op_last_msgid_))
+      if (!deliverypolicy::acceptsRangeAck(this->ctl().awaiting_ack, ack_msg_id,
+                                           this->ctl().first_msgid, this->ctl().last_msgid))
         return;
-      this->op_awaiting_ack_ = false;
+      this->ctl().awaiting_ack = false;
       this->cancel_timeout("op_retry");
       this->set_command_failed_(false);
       ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
                (unsigned)ack_msg_id);
-      if (this->op_mark_us_ != 0)
+      if (this->ctl().mark_us != 0)
         this->record_ack_latency_();
       // The nightly sleep takes effect on the hub only now: the node has heard it.
       if (this->op_is_sleep_())
@@ -3810,12 +3840,12 @@ namespace esphome
 
     bool LORAListener::op_is_sleep_() const
     {
-      return this->op_kind_ == TrackedOpKind::SYSOP && this->op_sysop_ == CLIENT_OPERATION__CMD_SLEEP;
+      return this->ctl().kind == TrackedOpKind::SYSOP && this->ctl().sysop == CLIENT_OPERATION__CMD_SLEEP;
     }
 
     bool LORAListener::sleep_op_in_flight_() const
     {
-      return this->op_is_sleep_() && (this->op_awaiting_ack_ || this->op_deferred_until_login_);
+      return this->op_is_sleep_() && (this->ctl().awaiting_ack || this->ctl().deferred_until_login);
     }
 
     // The node acknowledged CMD_SLEEP: it has heard it and is about to deep-sleep
@@ -3823,7 +3853,7 @@ namespace esphome
     // code did eagerly happens here instead.
     void LORAListener::on_sleep_acknowledged_()
     {
-      this->sleep_unconfirmed_ = false;
+      this->ctl().sleep_unconfirmed = false;
       this->stamp_sleep_epoch_();
       this->login_acked_         = false;
       this->login_retry_count_   = 0;
@@ -3886,8 +3916,8 @@ namespace esphome
     // normal path handles; one that did not is simply heard.
     void LORAListener::on_sleep_unconfirmed_()
     {
-      this->op_awaiting_ack_   = false;
-      this->sleep_unconfirmed_ = true;
+      this->ctl().awaiting_ack   = false;
+      this->ctl().sleep_unconfirmed = true;
       this->set_command_failed_(true);
       ESP_LOGE(TAG, "[%s] SLEEP command UNCONFIRMED after %u retries — the node may have "
                     "slept (ack lost) or never heard it. Session KEPT, sleep NOT recorded; "
@@ -3911,7 +3941,7 @@ namespace esphome
       // a deferred op, so it alone says "still waiting for a session".)
       if (!this->sleep_op_in_flight_() || !this->relogin_pending_)
         return;
-      this->op_deferred_until_login_ = false;
+      this->ctl().deferred_until_login = false;
       this->cancel_timeout("op_retry");
       ESP_LOGW(TAG, "[%s] Sleep still waiting for a session after %u s — dropped, not sent late",
                this->get_name().c_str(), (unsigned) (kPendingSleepExpiryMs / 1000));
@@ -5593,16 +5623,19 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       return ClassAPlacement::Placed;
     }
 
-    void LORAListener::send_timesync()
+    // Whether a TimeSync should go out now, and if so the throttle clock is
+    // stamped. (The guard prefix of send_timesync, moved out unchanged except
+    // that `return` became `return false`.)
+    bool LORAListener::timesync_due_()
     {
       if (this->parent_ == nullptr)
-        return;
+        return false;
       // See relogin_pending_: confirm_session_ sends the TimeSync again 750 ms
       // after the node proves the key.
       if (this->relogin_pending_)
       {
         ESP_LOGD(TAG, "[%s] TimeSync deferred — session being rebuilt", this->get_name().c_str());
-        return;
+        return false;
       }
       if (this->time == nullptr || !this->time->now().is_valid())
       {
@@ -5610,7 +5643,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         // next login re-runs this, and the node keeps whatever clock it has.
         ESP_LOGW(TAG, "[%s] TimeSync skipped — hub clock not valid yet",
                  this->get_name().c_str());
-        return;
+        return false;
       }
 
       // Mode B and plain interactive nodes are unthrottled — this only narrows
@@ -5625,9 +5658,26 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       {
         ESP_LOGD(TAG, "[%s] TimeSync skipped — automatic-mode weekly resync not due yet",
                  this->get_name().c_str());
-        return;
+        return false;
       }
       this->last_timesync_sent_us_ = timesync_now_us;
+      return true;
+    }
+
+    // Anything that might mean more traffic for this node (TimeSync's sleepOk is
+    // the negation). (Moved out of send_timesync unchanged.)
+    bool LORAListener::more_traffic_owed_()
+    {
+      return this->schedule_pending() ||          // a ScheduleConfig push is due
+             this->sched_dirty_ ||                // an edit not yet turned into one
+             this->ctl().awaiting_ack ||          // a command awaiting its ack
+             !this->session_confirmed_;           // login still settling
+    }
+
+    void LORAListener::send_timesync()
+    {
+      if (!this->timesync_due_())
+        return;
 
       const auto     now       = this->time->now();
       const uint64_t epoch     = static_cast<uint64_t>(now.timestamp);
@@ -5668,12 +5718,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // Conservative by construction: anything that might mean more traffic
       // leaves sleepOk false, which is precisely today's behaviour. A false
       // negative costs one wake's power; a false POSITIVE drops a command.
-      const bool more_to_send =
-          this->schedule_pending() ||          // a ScheduleConfig push is due
-          this->sched_dirty_ ||                // an edit not yet turned into one
-          this->op_awaiting_ack_ ||            // a command awaiting its ack
-          !this->session_confirmed_;           // login still settling
-      ts.sleepok = !more_to_send;
+      ts.sleepok = !this->more_traffic_owed_();
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
       op_message.timesync = &ts;
 
@@ -5948,7 +5993,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // The node's own word (PhaseReport.timedRxActive), and only since the last
       // session: a login clears have_phase_report_.
       in.promoted       = this->have_phase_report_ && this->belief_.node_timed_rx;
-      in.busy           = this->op_awaiting_ack_ || this->op_deferred_until_login_;
+      in.busy           = this->ctl().awaiting_ack || this->ctl().deferred_until_login;
       in.other_test     = this->mbs_other_test_();
       in.warmup_running = this->mode_test_active_ && this->mbs_owns_test_;
       in.report_ok      = this->mbs_report_fresh_();
