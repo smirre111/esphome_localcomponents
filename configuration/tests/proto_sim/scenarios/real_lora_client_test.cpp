@@ -10064,3 +10064,70 @@ TEST(RebootRegrid, OtherRefusalsAndAnOperatorsTestDoNotRepublish) {
         EXPECT_TRUE(r.rol.mbs_grid_acked_());
     }
 }
+
+// --- one publish whatever order the login and the BOOT beacon arrive in (2026-10-11 hardware) ---
+namespace {
+// The node's REGISTER; the hub logs it in ~800 ms later.
+void nodeRegisters(ModeBRig &r) {
+    auto reg = real_helpers::serialize_register(kMacRol2);
+    r.rol.set_response(reg.data(), reg.size());
+}
+void advanceMs(ModeBRig &r, uint32_t ms) {
+    proto_sim_timer_advance_us((int64_t) ms * 1000);
+    r.clock.tick(ms);
+}
+}  // namespace
+
+TEST(RegridOnce, ALoginThenABootBeacon36MsLaterPublishesOnce) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    testing::internal::CaptureStderr();
+    nodeRegisters(r);
+    advanceMs(r, 900);                         // login acknowledged: session confirmed
+    advanceMs(r, 36);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(5);
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(occurrences(log, "GridSync PUBLISHED (slot"), 1) << log;
+    EXPECT_EQ(occurrences(log, "Node rebooted without a login"), 0) << "there WAS a login";
+}
+
+TEST(RegridOnce, ABootBeaconThenTheLoginPublishesOnce) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    testing::internal::CaptureStderr();
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    advanceMs(r, 36);
+    nodeRegisters(r);
+    advanceMs(r, 900);
+    r.secs(5);
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(occurrences(log, "GridSync PUBLISHED (slot"), 1) << log;
+}
+
+TEST(RegridOnce, AResumedSessionRebootWithNoLoginStillPublishesOnce) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    testing::internal::CaptureStderr();
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(5);
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(occurrences(log, "GridSync PUBLISHED (slot"), 1) << log;
+    EXPECT_EQ(occurrences(log, "Node rebooted without a login"), 1);
+}
+
+TEST(RegridOnce, ASecondGenuineRebootMinutesLaterPublishesAgain) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(publishesDuring(r, 3), 1);
+    r.ackGrid();
+    r.secs(60);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(publishesDuring(r, 3), 1) << "a new reboot is a new event";
+}

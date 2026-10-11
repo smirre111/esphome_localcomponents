@@ -1593,10 +1593,11 @@ namespace esphome
         if (this->timed_mode_enabled_ && this->parent_ != nullptr &&
             this->parent_->gridStarted())
         {
-          this->set_timeout("gridsync_relogin", 1250, [this]() {
-            if (this->timed_mode_enabled_)
-              this->send_grid_sync(true);
-          });
+          // ONE "grid publish scheduled" timer shared with the beacon-driven
+          // re-publish (regrid_node_): whichever trigger comes first, and
+          // whatever the order, there is exactly one publish.
+          this->regrid_pending_ = true;
+          this->set_timeout("gridsync_regrid", 1250, [this]() { this->regrid_fire_(); });
         }
 
         // F1: push the schedule here TOO, not only from handle_beacon_().
