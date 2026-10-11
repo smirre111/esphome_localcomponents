@@ -3826,8 +3826,7 @@ namespace esphome
       this->login_acked_         = false;
       this->login_retry_count_   = 0;
       this->pending_login_nonce_ = 0;   // sleep ends the session; mint fresh on wake
-      this->cancel_timeout("login_startup");
-      this->cancel_timeout("login_retry");
+      this->cancel_timeout("login_retry");   // ("login_startup" is replaced by the arming below)
       // incrTxMessageId() no longer persists last_sleep_epoch_ as a side effect.
       this->save_state_(true);
       this->arm_post_sleep_login_fallback_();
@@ -3906,8 +3905,9 @@ namespace esphome
     void LORAListener::expire_pending_sleep_()
     {
       // Actively retrying with a live session: its own retry budget ends it.
-      if (!this->sleep_op_in_flight_() ||
-          !(this->op_deferred_until_login_ || this->relogin_pending_))
+      // (relogin_pending_ is cleared only by confirm_session_(), which also sends
+      // a deferred op, so it alone says "still waiting for a session".)
+      if (!this->sleep_op_in_flight_() || !this->relogin_pending_)
         return;
       this->op_deferred_until_login_ = false;
       this->cancel_timeout("op_retry");

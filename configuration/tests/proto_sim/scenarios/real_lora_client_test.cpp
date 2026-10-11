@@ -7344,6 +7344,7 @@ struct SleepProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::rtc_;
     using esphome::lora_tracker::LORAListener::login_slot_;
     using esphome::lora_tracker::LORAListener::confirm_session_;
+    using esphome::lora_tracker::LORAListener::do_login_and_arm_retry_;
 };
 SleepProbe &SP(LORAClient &c) { return static_cast<SleepProbe &>(c); }
 
@@ -7800,4 +7801,38 @@ TEST(NightlySleep, WithoutAValidClockTheSleepIsStillAckedAndTheFallbackStillArme
     const int logins0 = countLoginFrames(h);
     h.clock.tick(60u * 1000u + 5000u + 100u);
     EXPECT_EQ(countLoginFrames(h), logins0 + 1);
+}
+
+TEST(NightlySleep, ANewSleepAckedAfterAnUnconfirmedOneClearsTheUnconfirmedFlag) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.enterSleep();
+    exhaustRetries(h);
+    ASSERT_TRUE(SP(h.rol).sleep_unconfirmed_);
+
+    h.rol.enterSleep();                           // the operator tries again
+    ASSERT_TRUE(h.rol.awaitingAck()) << "an unconfirmed sleep does not block a new request";
+    deliverAck(h.rol, SP(h.rol).op_last_msgid_);  // (no note_node_heard_: the flag is the ack's to clear)
+
+    EXPECT_FALSE(SP(h.rol).sleep_unconfirmed_);
+    EXPECT_NE(h.rol.last_sleep_epoch_, 0u);
+}
+
+TEST(NightlySleep, AnAckedSleepCancelsALoginRetryThatWasAlreadyRunning) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.set_sleep_duration(60);
+    SP(h.rol).do_login_and_arm_retry_();          // a login challenge in flight, retry timer armed
+    const int logins0 = countLoginFrames(h);
+    ASSERT_GE(logins0, 1);
+    SP(h.rol).relogin_pending_ = false;           // (the retry timer is what this test is about)
+    h.rol.enterSleep();
+    ASSERT_TRUE(h.rol.awaitingAck()) << "sent, not deferred";
+    ackSleep(h);
+
+    h.clock.tick(40'000);                         // well past the first retry, before the wake
+
+    EXPECT_EQ(countLoginFrames(h), logins0) << "no login retry into a node that was just told to sleep";
 }
