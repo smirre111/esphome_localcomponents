@@ -316,7 +316,10 @@ namespace {
 struct AckProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::handle_command_ack_;
     using esphome::lora_tracker::LORAListener::cfg;
+    using esphome::lora_tracker::LORAListener::mac;
     using esphome::lora_tracker::LORAListener::delivery_busy_;
+    using esphome::lora_tracker::LORAListener::on_grid_sync_acked_;
+    using esphome::lora_tracker::LORAListener::on_grid_sync_failed_;
     // Put a ScheduleConfig push "in flight" the way the glue would have left it:
     // sent under `id`, which stands for schedule version `tag`, with `retries`
     // spent. No timer is armed (the tests that need one send for real).
@@ -331,6 +334,29 @@ struct AckProbe : LORAClient {
         s.acks.add(id, tag);
         s.awaiting_ack = true;
         s.retry_count  = retries;
+    }
+    // A GridSync "in flight" the way the glue would have left it: published under
+    // every id in `ids` (each its own tag, as in production), no timer armed.
+    void gridInFlight(std::initializer_list<uint32_t> ids) {
+        this->cancel_timeout("dlv_mac");
+        auto &s = this->mac();
+        s.req = {};
+        s.req.what    = "GridSync";
+        s.req.policy  = deliverypolicy::kGridSyncPolicy;
+        s.req.on_ack  = [this](uint32_t id) { return this->on_grid_sync_acked_(id); };
+        s.req.on_fail = [this]() { this->on_grid_sync_failed_(); };
+        s.acks.clear();
+        for (uint32_t id : ids) s.acks.add(id, id);
+        s.awaiting_ack = true;
+        s.retry_count  = 0;
+    }
+    // No GridSync on record at all.
+    void noGrid() {
+        this->cancel_timeout("dlv_mac");
+        auto &s = this->mac();
+        s.awaiting_ack = false;
+        s.retry_count  = 0;
+        s.acks.clear();
     }
     // No push on record at all.
     void noPush() {
@@ -353,7 +379,7 @@ TEST(RealLoraClient, AnUnconfirmedGridSyncIsRepublishedUntilTheNodeAcksIt) {
     h.rol.registered_ = true;
     h.rol.enable_timed_mode(true);
     ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
-    const uint32_t first = h.rol.gridsync_msgids_[0];
+    const uint32_t first = AK(h.rol).mac().acks.id[0];
 
     h.clock.tick(esphome::lora_tracker::LORAListener::kGridSyncRetryMs + 1);
     EXPECT_EQ(h.rol.gridSyncRepublishes(), 1u) << "no confirmation: published again";
@@ -371,7 +397,7 @@ TEST(RealLoraClient, AnAckForAnotherFrameDoesNotConfirmTheGrid) {
     h.rol.registered_ = true;
     h.rol.enable_timed_mode(true);
     ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
-    deliverAck(h.rol, h.rol.gridsync_msgids_[0] + 100);
+    deliverAck(h.rol, AK(h.rol).mac().acks.id[0] + 100);
     EXPECT_TRUE(h.rol.gridSyncAwaitingAck())
         << "only an ack naming a GridSync's own msgid confirms the grid";
 }
@@ -452,7 +478,7 @@ void confirmedGrid(real_helpers::RealHubHarness &h) {
     h.rol.registered_ = true;
     h.rol.enable_timed_mode(true);
     ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
-    deliverAck(h.rol, h.rol.gridsync_msgids_[0]);
+    deliverAck(h.rol, AK(h.rol).mac().acks.id[0]);
     ASSERT_FALSE(h.rol.gridSyncAwaitingAck());
 }
 }  // namespace
@@ -6059,8 +6085,7 @@ TEST(PendingShadowInputs, TheListenerReportsWhatItOwes) {
     // A published GridSync nobody has confirmed yet is something the node is owed.
     // Set directly: whether enable_timed_mode() manages to pack one depends on
     // session-key state that is static across tests in one process.
-    h.rol.gridsync_msgids_[0]    = 0x1234;
-    h.rol.gridsync_msgid_count_  = 1;
+    AK(h.rol).gridInFlight({0x1234});
     ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
     in = h.rol.pending_shadow_inputs(now);
     EXPECT_TRUE(in.push_awaiting_ack) << "GridSync awaiting its ack";
@@ -6096,7 +6121,7 @@ TEST(PendingShadowInputs, EachOwedPushConditionIsAReasonOnItsOwn) {
         h.rol.node_sched_version_ = h.rol.schedule_version();
         h.rol.sched_dirty_       = false;
         AK(h.rol).noPush();
-        h.rol.gridsync_msgid_count_ = 0;
+        AK(h.rol).noGrid();
     };
     settle();
     ASSERT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "precondition";
@@ -6117,7 +6142,7 @@ TEST(PendingShadowInputs, EachOwedPushConditionIsAReasonOnItsOwn) {
     EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "config not synced";
     settle(); h.rol.config_push_pending_ = true;
     EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "config push pending";
-    settle(); h.rol.gridsync_msgid_count_ = 1;
+    settle(); AK(h.rol).gridInFlight({1});
     EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "GridSync unconfirmed";
     settle(); h.rol.node_sched_version_ ^= 1u;
     EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "schedule pending";
@@ -6225,23 +6250,20 @@ TEST(AckPath, AScheduleAckClearsThePushAndTellsHomeAssistant) {
 TEST(AckPath, AGridSyncAckIsConsumedBeforeAScheduleAckWithTheSameId) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    h.rol.gridsync_msgids_[0]   = 9;
-    h.rol.gridsync_msgid_count_ = 1;
+    AK(h.rol).gridInFlight({9});
     AK(h.rol).pushInFlight(9, 0, h.rol.schedule_version());
     h.rol.node_sched_version_   = h.rol.schedule_version() ^ 1u;
     deliverAck(h.rol, 9);
-    EXPECT_EQ(h.rol.gridsync_msgid_count_, 0) << "the GridSync takes it";
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck()) << "the GridSync takes it";
     EXPECT_EQ(h.rol.schedulePushMsgid(), 9u) << "and the schedule push is left waiting";
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
 
     // The second of several published GridSync ids matches too.
-    h.rol.gridsync_msgids_[0]   = 4;
-    h.rol.gridsync_msgids_[1]   = 5;
-    h.rol.gridsync_msgid_count_ = 2;
+    AK(h.rol).gridInFlight({4, 5});
     deliverAck(h.rol, 6);
-    EXPECT_EQ(h.rol.gridsync_msgid_count_, 2) << "an id outside the list changes nothing";
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck()) << "an id outside the list changes nothing";
     deliverAck(h.rol, 5);
-    EXPECT_EQ(h.rol.gridsync_msgid_count_, 0);
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
 }
 
 TEST(AckPath, ATrackedOpIsAckedByAnyMsgidInItsRangeAndOnlyWhileAwaiting) {
@@ -6752,7 +6774,7 @@ struct ModeBRig : real_helpers::RealHubHarness {
     void ackGrid() {
         ASSERT_TRUE(rol.gridSyncAwaitingAck()) << "a GridSync is outstanding";
         proto_sim_timer_advance_us(2000);   // the node answers after the frame was sent
-        deliverAck(rol, rol.gridsync_msgids_[0]);
+        deliverAck(rol, AK(rol).mac().acks.id[0]);
         ASSERT_FALSE(rol.gridSyncAwaitingAck());
     }
 
@@ -7301,7 +7323,7 @@ struct SecondNode {
         rol2.registered_ = true;
         rol2.enable_timed_mode(true);          // plaintext GridSync is fine for this test
         proto_sim_timer_advance_us(2000);
-        deliverAck(rol2, rol2.gridsync_msgids_[0]);
+        deliverAck(rol2, AK(rol2).mac().acks.id[0]);
         rol2.session_confirmed_ = true;
         rol2.login_acked_       = true;
         rol2.note_node_heard_();
@@ -8242,10 +8264,9 @@ TEST(SchedPush, AGridSyncInFlightCountsAsBusyForTheWarmUp) {
     r.ackGrid();
     AK(r.rol).noPush();
     ASSERT_FALSE(AK(r.rol).delivery_busy_());
-    r.rol.gridsync_msgids_[0]   = 0x4321;
-    r.rol.gridsync_msgid_count_ = 1;
+    AK(r.rol).gridInFlight({0x4321});
     EXPECT_TRUE(AK(r.rol).delivery_busy_());
-    r.rol.gridsync_msgid_count_ = 0;
+    AK(r.rol).noGrid();
     EXPECT_FALSE(AK(r.rol).delivery_busy_());
 }
 
@@ -8411,7 +8432,7 @@ TEST(GridSyncLadder, RunningOutOfRepublishesClearsTheWaitAndALateAckIsIgnored) {
     h.rol.enable_timed_mode(true);
     ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
     const size_t sends0 = h.tracker.sent_copies.size();
-    const uint32_t first = h.rol.gridsync_msgids_[0];
+    const uint32_t first = AK(h.rol).mac().acks.id[0];
     for (int i = 0; i < 12; ++i)
         h.clock.tick(LORAClient::kGridSyncRetryMs + 50);
 
@@ -8453,8 +8474,8 @@ TEST(GridSyncLadder, EveryPublishOfTheLadderIsAckableUntilTheWaitIsCleared) {
     for (int i = 0; i < 3; ++i)
         h.clock.tick(LORAClient::kGridSyncRetryMs + 50);
     ASSERT_EQ(h.rol.gridSyncRepublishes(), 3);
-    ASSERT_EQ(h.rol.gridsync_msgid_count_, 4) << "four publishes are on record";
-    const uint32_t third = h.rol.gridsync_msgids_[2];
+    ASSERT_EQ(AK(h.rol).mac().acks.n, 4) << "four publishes are on record";
+    const uint32_t third = AK(h.rol).mac().acks.id[2];
     deliverAck(h.rol, third);                          // an ack of a middle publish confirms the grid
     EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
     const size_t sends = h.tracker.sent_copies.size();

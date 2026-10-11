@@ -871,7 +871,7 @@ namespace esphome
     {
       return this->sched_push_outstanding_() ||
              this->sched_dirty_ || this->schedule_pending() ||
-             this->gridsync_msgid_count_ != 0 || !this->config_synced_ ||
+             this->mac().awaiting_ack || !this->config_synced_ ||
              this->config_push_pending_;
     }
 
@@ -2594,7 +2594,7 @@ namespace esphome
       const bool answer = timedmode::hubAnswersSyncRequest(
           this->timed_mode_enabled_,
           this->parent_ != nullptr && this->parent_->gridStarted(),
-          this->gridsync_msgid_count_ != 0, s_since_publish);
+          this->mac().awaiting_ack, s_since_publish);
       ESP_LOGW(TAG, "[%s] node asks for its grid (reason %u, anchor %u s old, %u samples "
                     "refused) \u2014 %s",
                this->get_name().c_str(), (unsigned) r->reason,
@@ -2884,15 +2884,145 @@ namespace esphome
     // -----------------------------------------------------------------------
     void LORAListener::send_grid_sync(bool enable)
     {
+      if (!enable)
+      {
+        this->withdraw_grid_sync_();
+        return;
+      }
       // Publishing a grid needs the key it carries to be encrypted, so it waits
       // for the session (see relogin_pending_); confirm_session_ publishes it
       // again if timed mode is on. WITHDRAWING one is not deferred: it is the safe
       // direction and carries no key.
-      if (enable && this->relogin_pending_)
+      if (this->relogin_pending_)
       {
         ESP_LOGD(TAG, "[%s] GridSync deferred — session being rebuilt", this->get_name().c_str());
         return;
       }
+      // The publish is the Mac channel's request: re-published until the node's
+      // CommandAck names one of its msgids (the set), a re-publish is REBUILT, and
+      // giving up only logs (the node stays in Mode A, the session is fine).
+      DeliveryRequest req;
+      req.what        = "GridSync";
+      req.resend_verb = "re-publishing";
+      req.policy      = deliverypolicy::kGridSyncPolicy;
+      req.build       = [this](bool retry, uint32_t *msgid) { return this->tx_grid_sync_(retry, msgid); };
+      req.on_ack      = [this](uint32_t msgid) { return this->on_grid_sync_acked_(msgid); };
+      req.on_fail     = [this]() { this->on_grid_sync_failed_(); };
+      this->deliver_(CH_MAC, std::move(req));
+    }
+
+    // The mark a publish will be placed on, chosen BEFORE the frame is built,
+    // because the frame declares it. 0 = not on a running grid (unplaced).
+    //
+    // The length is a BOUND rather than the real figure, and it has to be:
+    // gs.txround is computed from planned_t0, so the mark must be chosen before
+    // the frame exists to be measured. Over-estimating is the safe direction — it
+    // only makes the clearance search stricter, never places a frame into
+    // occupied air. Observed GridSync frames run 93-95 B (94 B with the fleet
+    // key); 128 is comfortably above that and far under the 256 B buffer. The
+    // copy count matches what is actually requested in tx_grid_sync_.
+    int64_t LORAListener::grid_sync_planned_t0_()
+    {
+      static constexpr size_t kGridSyncLenBound = 128;
+      return (this->grid_aligned_ && this->parent_->gridStarted())
+                 ? this->nextPlacementT0_(esp_timer_get_time(),
+                                          this->parent_->defaultBurstCopies(),
+                                          kGridSyncLenBound,
+                                          /*expects_reply=*/false)
+                 : 0;
+    }
+
+    // The fields of a PUBLISH (enable = true), declaring the frame's own position.
+    void LORAListener::fill_grid_sync_(::GridSync *gs_out, int64_t planned_t0)
+    {
+      GridSync &gs = *gs_out;
+      gs.enable = true;
+      gs.slotindex        = this->grid_slot_;
+      gs.slotcount        = timedgrid::kSlotCount;
+      gs.roundus          = timedgrid::kRoundUs;
+      gs.pitchus          = timedgrid::kSlotPitchUs;
+      gs.beaconslotindex  = kBeaconSlotIndex;
+      gs.beaconeveryrounds = kBeaconEveryRounds;
+      gs.symtimeout       = timedgrid::kSymbolTimeoutSymbols;
+      gs.resyncmaxs       = timedgrid::maxResyncIntervalS(20) / 2;   // half the
+                                                                     // +/-20 ppm
+                                                                     // ceiling
+      // Remember what we published: it is the bound txPolicyFor judges the
+      // age of the node's phase report against.
+      this->published_resync_max_s_ = gs.resyncmaxs;
+      gs.uloffsetus       = LORAListener::kUplinkOffsetUs;
+
+      // This frame's own position. It is what the node anchors on, so it must
+      // describe where the frame will ACTUALLY be transmitted. That was an
+      // assertion nothing enforced: send_grid_sync called parent_->send()
+      // directly, so the frame left whenever the queue drained and declared a
+      // slot it did not occupy. It is now PLACED (tx_grid_sync_), so copy 0
+      // really is at this slot's mark.
+      //
+      // txround stays 0 while the frame goes out in some later round. That is
+      // sound for the ANCHOR, which is the thing the node solves: shifting the
+      // declared round by n shifts the solved anchor by n*kRoundUs, and the
+      // mark set is invariant modulo kRoundUs, so every mark lands in the same
+      // place. It is NOT sound for the round COUNTER, which beacon_every_rounds
+      // phases off — hub and node can disagree about which round is a beacon
+      // round. Pre-existing, unchanged here, and recorded in the plan.
+      // THE ROUND THIS FRAME ACTUALLY GOES OUT IN.
+      //
+      // It was hardcoded 0, and that was sound for the ANCHOR — shifting the
+      // declared round by n shifts the solved anchor by n*kRoundUs, and the
+      // mark set is invariant modulo kRoundUs — but not for the round
+      // COUNTER, which beacon_every_rounds phases off. With 0 declared, the
+      // node numbered its rounds from whenever this frame happened to land,
+      // so hub and node disagreed about which round is a beacon round by a
+      // random offset, and section 4.4's beacon window would have opened at
+      // the wrong time on every node. It is placed on `planned_t0` below, so
+      // the round is knowable here rather than approximated.
+      gs.txround = this->parent_->roundForSlotT0(this->grid_slot_, planned_t0);
+      gs.txslot  = this->grid_slot_;
+
+      // The pending-data bitmap (section 4.4): ALL LISTENING, this node's bit
+      // included — the same promise the beacon makes, for the same reason.
+      //
+      // It used to clear this node's bit whenever nothing was queued for it at
+      // the moment of publication. An empty bit is a licence to skip the
+      // private window for a whole beacon interval (~5.8 min), and "nothing
+      // queued right now" is not "nothing for 5.8 minutes": Home Assistant can
+      // produce a command at any instant, and a ModeTest sends a mark every
+      // round from a timer that queues nothing in advance. Measured 2026-09-14
+      // on node 2 (Mode B production 900 s): enabling timed mode published a
+      // cleared bit, the node promoted and then opened only BEACON windows —
+      // 1611 s to ~2067 s, two beacon intervals, not one mark heard. Once it
+      // listened, it caught 168 of 168.
+      gs.pendingmask      = pending::allListening();
+      gs.pendingmaskvalid = true;
+
+      // Section 4.4's fleet key, and the one condition on carrying it.
+      //
+      // ONLY WHEN THIS FRAME WILL BE ENCRYPTED. s_pack_operation_message
+      // encrypts when a session exists and packs plaintext otherwise, so
+      // assigning the key unconditionally would put it on the air in the
+      // clear on exactly the path where no session had been established yet
+      // — which is every bootstrap, and would make the beacon's MAC
+      // decorative for the whole fleet. This is the §11a lesson in a new
+      // place: a rule is only shipped when the caller satisfies it.
+      //
+      // A node that gets a keyless GridSync simply holds no key and treats
+      // beacons the way it did before this existed: bounded re-anchor, no
+      // mask. The hub re-publishes on the next grid change.
+      if (this->session_confirmed_ && this->parent_ != nullptr &&
+          this->parent_->netKeyId() != 0)
+      {
+        gs.netkey.data = const_cast<uint8_t *>(this->parent_->netKey());
+        gs.netkey.len  = framecrypto::kNetKeyBytes;
+        gs.netkeyid    = this->parent_->netKeyId();
+      }
+    }
+
+    // ONE attempt at publishing the grid, built from the grid's position NOW (a
+    // re-publish re-declares the position it will actually occupy, so a stale one
+    // cannot anchor the node wrong). Returns its msgid, 0 when it did not pack.
+    uint32_t LORAListener::tx_grid_sync_(bool retry, uint32_t *msgid_tag)
+    {
       LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = this->short_address_;
@@ -2901,114 +3031,93 @@ namespace esphome
       header.msgid         = this->incrTxMessageId();
 
       // Chosen BEFORE the frame is built, because the frame declares it.
-      //
-      // The length is a BOUND rather than the real figure, and it has to be:
-      // gs.txround below is computed from planned_t0, so the mark must be chosen
-      // before the frame exists to be measured. Over-estimating is the safe
-      // direction — it only makes the clearance search stricter, never places a
-      // frame into occupied air. Observed GridSync frames run 93-95 B (94 B with
-      // the fleet key); 128 is comfortably above that and far under the 256 B
-      // buffer. The copy count matches what is actually requested below.
-      static constexpr size_t kGridSyncLenBound = 128;
-      const int64_t planned_t0 =
-          (enable && this->grid_aligned_ && this->parent_->gridStarted())
-              ? this->nextPlacementT0_(esp_timer_get_time(),
-                                       this->parent_->defaultBurstCopies(),
-                                       kGridSyncLenBound,
-                                       /*expects_reply=*/false)
-              : 0;
+      const int64_t planned_t0 = this->grid_sync_planned_t0_();
+      this->gridsync_republishes_ = retry ? (uint8_t) (this->gridsync_republishes_ + 1) : 0;
 
       GridSync gs = GRID_SYNC__INIT;
-      gs.enable = enable;
-      if (enable)
+      this->fill_grid_sync_(&gs, planned_t0);
+
+      op_message.header   = &header;
+      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+      op_message.gridsync = &gs;
+
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      if (!this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
       {
-        gs.slotindex        = this->grid_slot_;
-        gs.slotcount        = timedgrid::kSlotCount;
-        gs.roundus          = timedgrid::kRoundUs;
-        gs.pitchus          = timedgrid::kSlotPitchUs;
-        gs.beaconslotindex  = kBeaconSlotIndex;
-        gs.beaconeveryrounds = kBeaconEveryRounds;
-        gs.symtimeout       = timedgrid::kSymbolTimeoutSymbols;
-        gs.resyncmaxs       = timedgrid::maxResyncIntervalS(20) / 2;   // half the
-                                                                       // +/-20 ppm
-                                                                       // ceiling
-        // Remember what we published: it is the bound txPolicyFor judges the
-        // age of the node's phase report against.
-        this->published_resync_max_s_ = gs.resyncmaxs;
-        gs.uloffsetus       = LORAListener::kUplinkOffsetUs;
-
-        // This frame's own position. It is what the node anchors on, so it must
-        // describe where the frame will ACTUALLY be transmitted. That was an
-        // assertion nothing enforced: send_grid_sync called parent_->send()
-        // directly, so the frame left whenever the queue drained and declared a
-        // slot it did not occupy. It is now PLACED (below), so copy 0 really is
-        // at this slot's mark.
-        //
-        // txround stays 0 while the frame goes out in some later round. That is
-        // sound for the ANCHOR, which is the thing the node solves: shifting the
-        // declared round by n shifts the solved anchor by n*kRoundUs, and the
-        // mark set is invariant modulo kRoundUs, so every mark lands in the same
-        // place. It is NOT sound for the round COUNTER, which beacon_every_rounds
-        // phases off — hub and node can disagree about which round is a beacon
-        // round. Pre-existing, unchanged here, and recorded in the plan.
-        // THE ROUND THIS FRAME ACTUALLY GOES OUT IN.
-        //
-        // It was hardcoded 0, and that was sound for the ANCHOR — shifting the
-        // declared round by n shifts the solved anchor by n*kRoundUs, and the
-        // mark set is invariant modulo kRoundUs — but not for the round
-        // COUNTER, which beacon_every_rounds phases off. With 0 declared, the
-        // node numbered its rounds from whenever this frame happened to land,
-        // so hub and node disagreed about which round is a beacon round by a
-        // random offset, and section 4.4's beacon window would have opened at
-        // the wrong time on every node. It is placed on `planned_t0` below, so
-        // the round is knowable here rather than approximated.
-        gs.txround = this->parent_->roundForSlotT0(this->grid_slot_, planned_t0);
-        gs.txslot  = this->grid_slot_;
-
-        // The pending-data bitmap (section 4.4): ALL LISTENING, this node's bit
-        // included — the same promise the beacon makes, for the same reason.
-        //
-        // It used to clear this node's bit whenever nothing was queued for it at
-        // the moment of publication. An empty bit is a licence to skip the
-        // private window for a whole beacon interval (~5.8 min), and "nothing
-        // queued right now" is not "nothing for 5.8 minutes": Home Assistant can
-        // produce a command at any instant, and a ModeTest sends a mark every
-        // round from a timer that queues nothing in advance. Measured 2026-09-14
-        // on node 2 (Mode B production 900 s): enabling timed mode published a
-        // cleared bit, the node promoted and then opened only BEACON windows —
-        // 1611 s to ~2067 s, two beacon intervals, not one mark heard. Once it
-        // listened, it caught 168 of 168.
-        gs.pendingmask      = pending::allListening();
-        gs.pendingmaskvalid = true;
-
-        // Section 4.4's fleet key, and the one condition on carrying it.
-        //
-        // ONLY WHEN THIS FRAME WILL BE ENCRYPTED. s_pack_operation_message
-        // encrypts when a session exists and packs plaintext otherwise, so
-        // assigning the key unconditionally would put it on the air in the
-        // clear on exactly the path where no session had been established yet
-        // — which is every bootstrap, and would make the beacon's MAC
-        // decorative for the whole fleet. This is the §11a lesson in a new
-        // place: a rule is only shipped when the caller satisfies it.
-        //
-        // A node that gets a keyless GridSync simply holds no key and treats
-        // beacons the way it did before this existed: bounded re-anchor, no
-        // mask. The hub re-publishes on the next grid change.
-        if (this->session_confirmed_ && this->parent_ != nullptr &&
-            this->parent_->netKeyId() != 0)
-        {
-          gs.netkey.data = const_cast<uint8_t *>(this->parent_->netKey());
-          gs.netkey.len  = framecrypto::kNetKeyBytes;
-          gs.netkeyid    = this->parent_->netKeyId();
-        }
+        ESP_LOGE(TAG, "[%s] failed to pack GridSync", this->get_name().c_str());
+        return 0;
       }
-      else
+      // PLACED, so the declaration above is true. Not through the bare send():
+      // the node solves its anchor from where this frame ARRIVES, so an
+      // unplaced GridSync displaces every mark the node will ever arm — by an
+      // arbitrary amount, since "whenever the queue drains" is unbounded, and
+      // past the guard band that is a missed window every round rather than a
+      // late one.
+      //
+      // The copy count is asked for EXPLICITLY. send_aligned_ reads
+      // copies == 0 as "no shape requested" and may then reduce the frame to a
+      // single copy under §4.6 — which would be exactly wrong here: a node
+      // being told about the grid is by definition not yet on it, so it is
+      // sweeping a free-running window and would miss a single copy most of
+      // the time. Copy 0 lands on the mark and the rest follow at the burst
+      // stride; the node backs out its own copy's offset with burstIndex.
+      TxPolicy p;
+      p.copies = this->parent_->defaultBurstCopies();
+      // The mark the declaration above was computed from, so the frame goes
+      // out where it says it does.
+      p.earliest_us = (planned_t0 != 0)
+                          ? loratiming::fireInstantUs(planned_t0, 0) : 0;
+      this->send_aligned_(buf, len, p);
       {
-        // A withdrawal takes the bound with it: no published interval means no
-        // promotion, which is where a node that has just lost its grid belongs.
-        this->published_resync_max_s_ = 0;
+        const int64_t published_us = esp_timer_get_time();
+        this->last_gridsync_publish_us_ = (published_us > 0) ? published_us : 1;
       }
+      free(buf);
+      ESP_LOGI(TAG, "[%s] GridSync PUBLISHED (slot %u)", this->get_name().c_str(),
+               (unsigned) this->grid_slot_);
+      // The tag is the msgid itself: it is what the ack log names.
+      *msgid_tag = header.msgid;
+      return header.msgid;
+    }
 
+    // The node confirmed the grid (any of the published msgids): it is on the
+    // grid, stop re-publishing.
+    bool LORAListener::on_grid_sync_acked_(uint32_t msgid)
+    {
+      ESP_LOGI(TAG, "[%s] GridSync acknowledged (msgid=%u, %u re-publishes)",
+               this->get_name().c_str(), (unsigned) msgid,
+               (unsigned) this->gridsync_republishes_);
+      this->last_gridsync_ack_us_ = esp_timer_get_time();
+      return true;
+    }
+
+    // The ladder is spent. The session is fine; the node is simply still in Mode A
+    // and a late ack is no longer recognised (the ids are dropped).
+    void LORAListener::on_grid_sync_failed_()
+    {
+      ESP_LOGE(TAG, "[%s] GridSync not acknowledged after %u re-publishes — "
+                    "the node stays in Mode A until its next login",
+               this->get_name().c_str(), (unsigned) kGridSyncMaxRepublishes);
+      this->mac().acks.clear();
+    }
+
+    // Withdrawing the grid is NOT a delivery: a plain, unplaced burst, never
+    // awaited or re-published.
+    void LORAListener::withdraw_grid_sync_()
+    {
+      // A withdrawal takes the bound with it: no published interval means no
+      // promotion, which is where a node that has just lost its grid belongs.
+      this->published_resync_max_s_ = 0;
+      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = this->incrTxMessageId();
+
+      GridSync gs = GRID_SYNC__INIT;
+      gs.enable = false;
       op_message.header   = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
       op_message.gridsync = &gs;
@@ -3020,75 +3129,16 @@ namespace esphome
         ESP_LOGE(TAG, "[%s] failed to pack GridSync", this->get_name().c_str());
         return;
       }
-      if (enable)
-      {
-        // PLACED, so the declaration above is true. Not through the bare send():
-        // the node solves its anchor from where this frame ARRIVES, so an
-        // unplaced GridSync displaces every mark the node will ever arm — by an
-        // arbitrary amount, since "whenever the queue drains" is unbounded, and
-        // past the guard band that is a missed window every round rather than a
-        // late one.
-        //
-        // The copy count is asked for EXPLICITLY. send_aligned_ reads
-        // copies == 0 as "no shape requested" and may then reduce the frame to a
-        // single copy under §4.6 — which would be exactly wrong here: a node
-        // being told about the grid is by definition not yet on it, so it is
-        // sweeping a free-running window and would miss a single copy most of
-        // the time. Copy 0 lands on the mark and the rest follow at the burst
-        // stride; the node backs out its own copy's offset with burstIndex.
-        TxPolicy p;
-        p.copies = this->parent_->defaultBurstCopies();
-        // The mark the declaration above was computed from, so the frame goes
-        // out where it says it does.
-        p.earliest_us = (planned_t0 != 0)
-                            ? loratiming::fireInstantUs(planned_t0, 0) : 0;
-        this->send_aligned_(buf, len, p);
-        {
-          const int64_t published_us = esp_timer_get_time();
-          this->last_gridsync_publish_us_ = (published_us > 0) ? published_us : 1;
-        }
-
-        // Awaiting the node's confirmation: remember this msgid and re-publish if
-        // none arrives. A re-publish is a fresh GridSync (new placement, new
-        // msgid), and an ack for ANY of them confirms the grid.
-        if (this->gridsync_msgid_count_ == 0)
-          this->gridsync_retries_ = 0;
-        if (this->gridsync_msgid_count_ < kGridSyncMaxRepublishes + 1)
-          this->gridsync_msgids_[this->gridsync_msgid_count_++] = header.msgid;
-        this->cancel_timeout("gridsync_retry");
-        this->set_timeout("gridsync_retry", this->ack_wait_ms_(kGridSyncRetryMs), [this]() {
-          if (this->gridsync_msgid_count_ == 0 || !this->timed_mode_enabled_)
-            return;
-          if (this->gridsync_retries_ >= kGridSyncMaxRepublishes)
-          {
-            ESP_LOGE(TAG, "[%s] GridSync not acknowledged after %u re-publishes — "
-                          "the node stays in Mode A until its next login",
-                     this->get_name().c_str(), (unsigned) kGridSyncMaxRepublishes);
-            this->gridsync_msgid_count_ = 0;
-            return;
-          }
-          this->gridsync_retries_++;
-          ESP_LOGW(TAG, "[%s] GridSync not acknowledged — re-publishing (%u/%u)",
-                   this->get_name().c_str(), (unsigned) this->gridsync_retries_,
-                   (unsigned) kGridSyncMaxRepublishes);
-          this->send_grid_sync(true);
-        });
-      }
-      else
-      {
-        // A withdrawal ends any wait for a confirmation of the grid.
-        this->cancel_timeout("gridsync_retry");
-        this->gridsync_msgid_count_ = 0;
-        // The withdrawal stays a plain burst. It is broadcast on the demote
-        // path, and it is addressed to nodes whose anchor may already be wrong
-        // — placing it on a mark they may not agree about is the one thing it
-        // must not depend on.
-        this->parent_->send(buf, len);
-      }
+      // A withdrawal ends any wait for a confirmation of the grid.
+      this->dlv_cancel_(CH_MAC);
+      // The withdrawal stays a plain burst. It is broadcast on the demote
+      // path, and it is addressed to nodes whose anchor may already be wrong
+      // — placing it on a mark they may not agree about is the one thing it
+      // must not depend on.
+      this->parent_->send(buf, len);
       free(buf);
-
-      ESP_LOGI(TAG, "[%s] GridSync %s (slot %u)", this->get_name().c_str(),
-               enable ? "PUBLISHED" : "WITHDRAWN", (unsigned) this->grid_slot_);
+      ESP_LOGI(TAG, "[%s] GridSync WITHDRAWN (slot %u)", this->get_name().c_str(),
+               (unsigned) this->grid_slot_);
     }
 
     // B3's entry point. See the banner on the declaration for why this is an
@@ -3703,22 +3753,6 @@ namespace esphome
       return this->ctl().frame_msgid;
     }
 
-    // The node confirming a GridSync: it is on the grid, stop re-publishing.
-    // True when `ack_msg_id` was one of the published GridSync ids.
-    bool LORAListener::ack_gridsync_(uint32_t ack_msg_id)
-    {
-      if (!deliverypolicy::msgIdInSet(this->gridsync_msgids_, this->gridsync_msgid_count_,
-                                      ack_msg_id))
-        return false;
-      ESP_LOGI(TAG, "[%s] GridSync acknowledged (msgid=%u, %u re-publishes)",
-               this->get_name().c_str(), (unsigned) ack_msg_id,
-               (unsigned) this->gridsync_retries_);
-      this->cancel_timeout("gridsync_retry");
-      this->gridsync_msgid_count_ = 0;
-      this->last_gridsync_ack_us_ = esp_timer_get_time();
-      return true;
-    }
-
     // ---- the generic delivery glue (step 3 of the unified MAC delivery refactor) ----
     //
     // One request per channel. The DECISIONS (when to retry, when to give up, which
@@ -3797,8 +3831,9 @@ namespace esphome
       case deliverypolicy::TimeoutAction::Retransmit:
         break;
       }
-      ESP_LOGW(TAG, "[%s] %s not acknowledged — resending (%u/%u)", this->get_name().c_str(),
-               s.req.what, (unsigned) s.retry_count, (unsigned) s.req.policy.max_retries);
+      ESP_LOGW(TAG, "[%s] %s not acknowledged — %s (%u/%u)", this->get_name().c_str(),
+               s.req.what, s.req.resend_verb, (unsigned) s.retry_count,
+               (unsigned) s.req.policy.max_retries);
       this->dlv_tx_(ch, true);
     }
 
@@ -3820,22 +3855,27 @@ namespace esphome
     // attempt was answered (its tag) and says whether that completes it.
     bool LORAListener::dlv_ack_(uint32_t ack_msg_id)
     {
-      for (uint8_t c = CH_CONFIG; c < kDeliveryChannels; ++c)
+      // Highest channel first: a GridSync takes an id before a schedule push would.
+      for (uint8_t c = kDeliveryChannels; c-- > CH_CONFIG;)
       {
         DeliverySlot &s = this->slots_[c];
         const int i = s.acks.find(ack_msg_id);
         if (i < 0)
           continue;
         if (!s.req.on_ack || s.req.on_ack(s.acks.tag[i]))
-        {
-          this->cancel_timeout(dlv_timer_((DeliveryChannel) c));
-          s.awaiting_ack = false;
-          s.retry_count  = 0;
-          s.acks.clear();
-        }
+          this->dlv_cancel_((DeliveryChannel) c);
         return true;
       }
       return false;
+    }
+
+    void LORAListener::dlv_cancel_(DeliveryChannel ch)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      this->cancel_timeout(dlv_timer_(ch));
+      s.awaiting_ack = false;
+      s.retry_count  = 0;
+      s.acks.clear();
     }
 
     // A new login restarts the msgid space, so ids on record would alias new ones.
@@ -3849,7 +3889,7 @@ namespace esphome
     bool LORAListener::delivery_busy_() const
     {
       return this->ctl().awaiting_ack || this->ctl().deferred_until_login ||
-             this->cfg().awaiting_ack || this->gridsync_msgid_count_ != 0;
+             this->cfg().awaiting_ack || this->mac().awaiting_ack;
     }
 
     // ---- ScheduleConfig as a request ----
@@ -3908,8 +3948,6 @@ namespace esphome
 
     void LORAListener::handle_command_ack_(uint32_t ack_msg_id)
     {
-      if (this->ack_gridsync_(ack_msg_id))
-        return;
       if (this->dlv_ack_(ack_msg_id))
         return;
 

@@ -50,6 +50,7 @@ struct NodeWakeBeacon;
 struct MacControl;                  // MAC-0 ping / echo, taken by pointer
 struct ModeTestReport;              // ModeTest results, taken by pointer
 struct GridSyncRequest;             // a node asking for its grid again, by pointer
+struct GridSync;                    // the grid being published, filled by fill_grid_sync_
 struct PhaseReport;                 // §4.6's promotion evidence, by pointer
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
 struct LoraClientOperationMessage;  // send_downlink takes it by pointer
@@ -122,6 +123,7 @@ namespace esphome
     struct DeliveryRequest
     {
       const char *what{"request"};          // for the log
+      const char *resend_verb{"resending"}; // how a counted retry is logged
       deliverypolicy::Policy policy{};
       // Send ONE attempt (the first, or a retry when `retry` is true) and return
       // the msgid it went out under, 0 when it could not be packed. `*tag` is
@@ -210,7 +212,7 @@ namespace esphome
     {
       CH_CONTROL = 0,   // cover operations and sysops
       CH_CONFIG  = 1,   // ScheduleConfig, ClientConfig / CoverConfig (later steps)
-      CH_MAC     = 2,   // GridSync (later steps)
+      CH_MAC     = 2,   // GridSync (enable)
       kDeliveryChannels = 3
     };
 
@@ -748,8 +750,8 @@ namespace esphome
       uint32_t schedulePushMsgid() const { return this->cfg().acks.last(); }
       // A published GridSync the node has not confirmed yet, and how many times
       // it has been re-published for that.
-      bool     gridSyncAwaitingAck() const { return this->gridsync_msgid_count_ != 0; }
-      uint8_t  gridSyncRepublishes() const { return this->gridsync_retries_; }
+      bool     gridSyncAwaitingAck() const { return this->mac().awaiting_ack; }
+      uint8_t  gridSyncRepublishes() const { return this->gridsync_republishes_; }
       // Node-initiated GridSync requests, answered and not (hubAnswersSyncRequest).
       uint32_t gridSyncRequestsAnswered() const { return this->gridsync_requests_answered_; }
       uint32_t gridSyncRequestsIgnored() const  { return this->gridsync_requests_ignored_; }
@@ -1125,11 +1127,12 @@ namespace esphome
       // login was lost (the node spent the burst in CAD retries) and nothing
       // re-sent it — 13 minutes in Mode A with Timed Mode ON. Exact msgids, not a
       // range: a tracked op sent in between must not be mistaken for it.
-      static constexpr uint8_t  kGridSyncMaxRepublishes = 5;
-      static constexpr uint32_t kGridSyncRetryMs        = 6000;
-      uint32_t      gridsync_msgids_[kGridSyncMaxRepublishes + 1]{};
-      uint8_t       gridsync_msgid_count_{0};
-      uint8_t       gridsync_retries_{0};
+      // It is the Mac channel's request (slots_[CH_MAC], deliver_): the ids are
+      // its ack-id SET, the ladder is deliverypolicy::kGridSyncPolicy.
+      static constexpr uint8_t  kGridSyncMaxRepublishes = deliverypolicy::kGridSyncPolicy.max_retries;
+      static constexpr uint32_t kGridSyncRetryMs        = deliverypolicy::kGridSyncPolicy.base_wait_ms;
+      // Re-publishes of the latest ladder (kept after the ack, for the log and tests).
+      uint8_t       gridsync_republishes_{0};
       // When a GridSync was last published (esp_timer us, 0 = never), for the
       // once-a-minute bound on answering a node's request.
       int64_t       last_gridsync_publish_us_{0};
@@ -1578,6 +1581,8 @@ namespace esphome
       const DeliverySlot &ctl() const { return this->slots_[CH_CONTROL]; }
       DeliverySlot       &cfg()       { return this->slots_[CH_CONFIG]; }
       const DeliverySlot &cfg() const { return this->slots_[CH_CONFIG]; }
+      DeliverySlot       &mac()       { return this->slots_[CH_MAC]; }
+      const DeliverySlot &mac() const { return this->slots_[CH_MAC]; }
 
       // ---- the generic delivery glue (Config channel; Control and Mac to follow) ----
       // Start `req` on channel `ch`, superseding one already in flight there (its
@@ -1590,6 +1595,8 @@ namespace esphome
       void     dlv_give_up_(DeliveryChannel ch);
       // The node acknowledged `ack_msg_id`: true when a Config / Mac request owns it.
       bool     dlv_ack_(uint32_t ack_msg_id);
+      // Forget the request on `ch`: its timer, its wait and its ack ids.
+      void     dlv_cancel_(DeliveryChannel ch);
       // A new session restarts the msgid space: ids on record would alias new ones.
       void     dlv_forget_ids_();
       static const char *dlv_timer_(DeliveryChannel ch);
@@ -1598,6 +1605,14 @@ namespace esphome
       bool     on_schedule_acked_(uint32_t version);
       void     on_schedule_failed_();
       bool     sched_push_outstanding_() const;
+      // GridSync (enable), as a request. send_grid_sync(false) is NOT: a withdrawal
+      // is a plain burst, never awaited or re-published.
+      uint32_t tx_grid_sync_(bool retry, uint32_t *msgid);
+      bool     on_grid_sync_acked_(uint32_t msgid);
+      void     on_grid_sync_failed_();
+      void     withdraw_grid_sync_();
+      int64_t  grid_sync_planned_t0_();
+      void     fill_grid_sync_(::GridSync *gs, int64_t planned_t0);
       // Something is being delivered to this node that a Mode B warm-up must not
       // run into: a cover op / sysop, a ScheduleConfig, a GridSync.
       bool     delivery_busy_() const;
@@ -1633,7 +1648,6 @@ namespace esphome
       void     begin_tracked_op_(uint32_t msgid, const char *what);
       void     handle_command_ack_(uint32_t ack_msg_id);
       // Stages of handle_command_ack_: each returns true when it consumed the ack.
-      bool     ack_gridsync_(uint32_t ack_msg_id);
       void     record_ack_latency_();
       void     set_command_failed_(bool failed);
       // Arm a ONE-SHOT retransmit timer.  Uses set_timeout (deterministic

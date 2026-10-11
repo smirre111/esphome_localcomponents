@@ -213,6 +213,16 @@ struct Policy
 constexpr Policy kSchedulePolicy = {Mode::Acked, Shape::Auto, Resend::Rebuild, 3, 5000,
                                     GiveUpAction::FailKeep, false, true, true};
 
+// GridSync (enable): a full burst PLACED on a pre-planned grid mark, because a node
+// being told about the grid is by definition not yet on it. Re-published up to five
+// times, each one REBUILT so it re-declares the position it will actually occupy on
+// the grid (a stale position would anchor the node wrong). An ack for any of the
+// ids published (a SET) confirms the grid. A failed publish is only logged: the node
+// stays in Mode A, the session is fine, and the next login or node request starts a
+// fresh ladder.
+constexpr Policy kGridSyncPolicy = {Mode::Acked, Shape::Burst, Resend::Rebuild, 5, 6000,
+                                    GiveUpAction::FailKeep, false, true, false};
+
 // A ladder is live and still has a counted retry to spend: the push is "owed"
 // to the pending-shadow and holds the onboarding gate. (The final wait, after
 // the last retry, no longer does.)
