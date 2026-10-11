@@ -4330,6 +4330,25 @@ TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheSchedulePushIsUnacknowledged
     EXPECT_FALSE(h.rol_1.onboarding_held_for_test());
 }
 
+TEST(OnboardingGateHub, ASchedulePushWithNoRetryLeftNoLongerHoldsTheGate) {
+    // The last wait of the ladder (every retry spent) is not part of bringing the
+    // node up any more: nothing more will be sent, so the other nodes go ahead.
+    TwoNodeHub h(/*answer_1=*/true, /*answer_2=*/true);
+    h.bothRegister();
+    h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
+    ASSERT_TRUE(h.rol_1.session_confirmed_);
+    ASSERT_TRUE(h.rol_1.onboarding_held_for_test()) << "precondition: the push holds the gate";
+
+    AK(h.rol_1).pushInFlight(7, LORAClient::kSchedMaxRetries - 1, h.rol_1.schedule_version());
+    h.clock.tick(2 * onboarding::kPollMs + 100);
+    EXPECT_TRUE(h.rol_1.onboarding_held_for_test()) << "one retry left: still bringing the node up";
+
+    AK(h.rol_1).pushInFlight(7, LORAClient::kSchedMaxRetries, h.rol_1.schedule_version());
+    h.clock.tick(2 * onboarding::kPollMs + 100);
+    EXPECT_FALSE(h.rol_1.onboarding_held_for_test()) << "every retry spent: the gate is released";
+}
+
 TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheNodesOwnFramesAreStillQueued) {
     // Confirmed, settled by the clock, schedule acked - but the hub's queue still
     // holds this node's pushes. Freeing the gate now lets the next node's login
@@ -8196,6 +8215,22 @@ TEST(SchedPush, NoModeBWarmUpStartsWhileAPushIsInFlightAndOneStartsAfter) {
     deliverAck(r.rol, 9);                                     // delivered
     ASSERT_GE(r.untilWarmup(modebsup::kJitterMaxS + modebsup::kYieldRetryS + 20), 0);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
+}
+
+// A cover op parked behind a relogin is busy too (it will go out the moment the
+// session is confirmed).
+TEST(SchedPush, ACoverOpDeferredBehindAReloginCountsAsBusyForTheWarmUp) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    AK(r.rol).noPush();
+    ASSERT_FALSE(AK(r.rol).delivery_busy_());
+    static_cast<TrackedOpProbe &>(r.rol).ctl().deferred_until_login = true;
+    EXPECT_TRUE(AK(r.rol).delivery_busy_());
+    r.secs(modebsup::kGridSettleS + modebsup::kJitterMaxS + 30);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "the parked op owns the node";
 }
 
 // A GridSync in flight is busy too (the grid is not settled until it is acked).

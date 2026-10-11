@@ -3737,8 +3737,9 @@ namespace esphome
       DeliverySlot &s = this->slots_[ch];
       // A request already in flight is REPLACED by this one, with a fresh ladder
       // of its own (the budget is per request). Its msgids stay on record in
-      // s.acks, so a late ack for the old request is still recognised.
-      this->cancel_timeout(dlv_timer_(ch));
+      // s.acks, so a late ack for the old request is still recognised. Its timer
+      // needs no cancelling: the first attempt re-arms the same named one, and a
+      // request that never arms one leaves it to find nothing awaited.
       s.req          = std::move(req);
       s.retry_count  = 0;
       s.awaiting_ack = false;
