@@ -46,7 +46,10 @@ out[n[0]] = "    checkin_interval: 5min   # BENCH ONLY (make_bench_yaml.py)"
 # actions with a log line so the `then:` list stays valid.
 for who in ("rol_1", "rol_2"):
     idx = [i for i, l in enumerate(out) if l.strip() == f"- loracover.on_sleep_start: {who}"]
-    assert len(idx) == 1, (who, idx)
+    # Two uses: the nightly `time:` trigger (first in the file) and the production
+    # "Sleep now" diagnostic button, which must keep working on the bench.
+    assert len(idx) == 2, (who, idx)
+    assert idx[0] < next(i for i, l in enumerate(out) if l == "button:"), "nightly trigger comes first"
     ind = out[idx[0]][:len(out[idx[0]]) - len(out[idx[0]].lstrip())]
     out[idx[0]] = f'{ind}- logger.log: "BENCH ONLY: nightly sleep for {who} disabled (make_bench_yaml.py)"'
 

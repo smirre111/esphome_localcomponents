@@ -751,6 +751,24 @@ button:
     on_press:
       - lambda: 'id(rol_1)->start_mac_ping(860, 1100, true, 0, true);'
 
+  # The 23:00 nightly sleep, on demand (2026-10-11). The same action the `time:`
+  # trigger above fires, so a press is a faithful rehearsal: a tracked sysop that
+  # is retransmitted until the node acks it, after which the node deep-sleeps for
+  # `sleep_duration` and the hub arms its wake-time login fallback. An
+  # auto-mode node is skipped, exactly as at 23:00.
+  - platform: template
+    name: "Sleep now (node 1)"
+    id: rol_1_sleep_now
+    entity_category: diagnostic
+    on_press:
+      - loracover.on_sleep_start: rol_1
+  - platform: template
+    name: "Sleep now (node 2)"
+    id: rol_2_sleep_now
+    entity_category: diagnostic
+    on_press:
+      - loracover.on_sleep_start: rol_2
+
 # number:
 #   # HW-2's arm offset, in microseconds. The procedure needs 500 us steps around
 #   # a +/-14 080 us guard to find the reception edge; until this existed the only
