@@ -10489,6 +10489,62 @@ TEST(FireDelivery, ATimeSyncForAClassANodeWhoseWindowsHaveClosedIsDroppedAndSays
     EXPECT_EQ(h.rol.class_a_stats().offered, 0u);
 }
 
+TEST(FireDelivery, ATimeSyncForAClassANodeTheHubHasNeverHeardIsABurstToo) {
+    // Class A but no uplink stamp: the hub does not know where the node listens,
+    // so the burst spans every window it might open. Only "known to be asleep" drops.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
+    ASSERT_EQ(h.rol.last_uplink_t0_us_, 0);
+    const size_t sends0 = h.tracker.sent_copies.size();
+
+    testing::internal::CaptureStderr();
+    h.rol.send_timesync();
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends0 + 1);
+    EXPECT_EQ(h.tracker.last_copies, h.tracker.defaultBurstCopies());
+    EXPECT_EQ(occurrences(log, "TimeSync sent (epoch="), 1) << log;
+    EXPECT_EQ(h.rol.class_a_stats().offered, 0u) << "a burst is not an aimed offer";
+}
+
+TEST(FireDelivery, ACoverConfigReportsWhetherItWentOut) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    CoverConfig cc = COVER_CONFIG__INIT;
+    cc.opentime  = 60;
+    cc.closetime = 61;
+
+    EXPECT_TRUE(h.rol.send_cover_config(cc));
+    h.tracker.drop_next_sends = 1;
+    EXPECT_FALSE(h.rol.send_cover_config(cc)) << "the transmit pool refused it";
+    EXPECT_TRUE(h.rol.send_cover_config(cc)) << "and the next one is a fresh attempt";
+}
+
+TEST(FireDelivery, AClientConfigCarriesEveryFieldTheNodeIsProvisionedFrom) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.set_battery_update_interval(1234);
+
+    h.rol.send_remote_config();
+
+    int seen = 0;
+    const auto frames = h.radio.hub_to_node_frames();
+    for (const auto &f : frames) {
+        auto m = proto_sim::as_op(f);
+        if (!m || m->cmd != OpCmd::ClientConfig) continue;
+        ++seen;
+        EXPECT_EQ(m->clientconfig.mac_addr, kMacRol2);
+        EXPECT_EQ(m->clientconfig.addr, 18u);
+        EXPECT_EQ(m->clientconfig.subnt, 2u);
+        EXPECT_EQ(m->clientconfig.name, "rol");
+        EXPECT_EQ(m->clientconfig.sleepDuration, 21600u);
+        EXPECT_EQ(m->clientconfig.batteryInterval, 1234u);
+    }
+    EXPECT_EQ(seen, 1);
+}
+
 TEST(FireDelivery, ATimeSyncSentLogLineNamesTheEpochTheOffsetAndTheMsgidOnTheAir) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
