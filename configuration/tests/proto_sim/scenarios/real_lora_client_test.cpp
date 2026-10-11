@@ -315,10 +315,36 @@ namespace {
 // this function in production (set_response -> handle_command_ack_).
 struct AckProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::handle_command_ack_;
+    using esphome::lora_tracker::LORAListener::cfg;
+    using esphome::lora_tracker::LORAListener::delivery_busy_;
+    // Put a ScheduleConfig push "in flight" the way the glue would have left it:
+    // sent under `id`, which stands for schedule version `tag`, with `retries`
+    // spent. No timer is armed (the tests that need one send for real).
+    void pushInFlight(uint32_t id, uint8_t retries, uint32_t tag) {
+        this->cancel_timeout("dlv_cfg");
+        auto &s = this->cfg();
+        s.req = {};
+        s.req.what   = "ScheduleConfig";
+        s.req.policy = deliverypolicy::kSchedulePolicy;
+        s.req.on_ack = [this](uint32_t v) { return this->on_schedule_acked_(v); };
+        s.acks.clear();
+        s.acks.add(id, tag);
+        s.awaiting_ack = true;
+        s.retry_count  = retries;
+    }
+    // No push on record at all.
+    void noPush() {
+        this->cancel_timeout("dlv_cfg");
+        auto &s = this->cfg();
+        s.awaiting_ack = false;
+        s.retry_count  = 0;
+        s.acks.clear();
+    }
 };
 void deliverAck(LORAClient &rol, uint32_t msgid) {
     static_cast<AckProbe &>(rol).handle_command_ack_(msgid);
 }
+AckProbe &AK(LORAClient &rol) { return static_cast<AckProbe &>(rol); }
 }  // namespace
 
 TEST(RealLoraClient, AnUnconfirmedGridSyncIsRepublishedUntilTheNodeAcksIt) {
@@ -4293,13 +4319,13 @@ TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheSchedulePushIsUnacknowledged
     // ScheduleConfig it was sent.
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
     ASSERT_TRUE(h.rol_1.session_confirmed_);
-    ASSERT_NE(h.rol_1.sched_push_msgid_, 0u) << "precondition: a ScheduleConfig is outstanding";
+    ASSERT_NE(h.rol_1.schedulePushMsgid(), 0u) << "precondition: a ScheduleConfig is outstanding";
     EXPECT_TRUE(h.rol_1.onboarding_held_for_test())
         << "still bringing node 17 up: its schedule has not landed";
     EXPECT_EQ(h.loginsTo(18), 0);
 
     // The node acknowledges it: the gate frees within a poll or two.
-    static_cast<AckProbe&>(h.rol_1).handle_command_ack_(h.rol_1.sched_push_msgid_);
+    static_cast<AckProbe&>(h.rol_1).handle_command_ack_(h.rol_1.schedulePushMsgid());
     h.clock.tick(2 * onboarding::kPollMs + 100);
     EXPECT_FALSE(h.rol_1.onboarding_held_for_test());
 }
@@ -4313,10 +4339,10 @@ TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheNodesOwnFramesAreStillQueued
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
     ASSERT_TRUE(h.rol_1.session_confirmed_);
-    ASSERT_NE(h.rol_1.sched_push_msgid_, 0u);
+    ASSERT_NE(h.rol_1.schedulePushMsgid(), 0u);
 
     h.tracker.tx_drain_us = 20'000'000;
-    static_cast<AckProbe&>(h.rol_1).handle_command_ack_(h.rol_1.sched_push_msgid_);
+    static_cast<AckProbe&>(h.rol_1).handle_command_ack_(h.rol_1.schedulePushMsgid());
     h.clock.tick(10000);
     EXPECT_TRUE(h.rol_1.onboarding_held_for_test())
         << "20 s of its own frames are still queued";
@@ -6009,7 +6035,7 @@ TEST(PendingShadowInputs, TheListenerReportsWhatItOwes) {
     h.rol.set_auto_mode_default(true);
     h.rol.node_sched_version_ = h.rol.schedule_version();
     h.rol.sched_dirty_ = false;
-    h.rol.sched_push_msgid_ = 0;
+    AK(h.rol).noPush();
     P(h).last_timesync_sent_us_ = now - 1000;
     // A published GridSync nobody has confirmed yet is something the node is owed.
     // Set directly: whether enable_timed_mode() manages to pack one depends on
@@ -6050,23 +6076,20 @@ TEST(PendingShadowInputs, EachOwedPushConditionIsAReasonOnItsOwn) {
         h.rol.config_push_pending_ = false;
         h.rol.node_sched_version_ = h.rol.schedule_version();
         h.rol.sched_dirty_       = false;
-        h.rol.sched_push_msgid_  = 0;
-        h.rol.sched_push_retries_ = 0;
+        AK(h.rol).noPush();
         h.rol.gridsync_msgid_count_ = 0;
     };
     settle();
     ASSERT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "precondition";
 
-    h.rol.sched_push_msgid_ = 7;
-    h.rol.sched_push_retries_ = 0;
+    AK(h.rol).pushInFlight(7, 0, h.rol.schedule_version());
     EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "push in flight";
-    h.rol.sched_push_retries_ = LORAClient::kSchedMaxRetries - 1;
+    AK(h.rol).pushInFlight(7, LORAClient::kSchedMaxRetries - 1, h.rol.schedule_version());
     EXPECT_TRUE(h.rol.pending_shadow_inputs(now).push_awaiting_ack) << "one retry left";
-    h.rol.sched_push_retries_ = LORAClient::kSchedMaxRetries;
+    AK(h.rol).pushInFlight(7, LORAClient::kSchedMaxRetries, h.rol.schedule_version());
     EXPECT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack)
         << "a push that has used every retry is no longer owed";
-    h.rol.sched_push_msgid_ = 0;
-    h.rol.sched_push_retries_ = 0;
+    AK(h.rol).noPush();
     EXPECT_FALSE(h.rol.pending_shadow_inputs(now).push_awaiting_ack);
 
     settle(); h.rol.sched_dirty_ = true;
@@ -6150,31 +6173,31 @@ TEST(AckPath, AScheduleAckClearsThePushAndTellsHomeAssistant) {
     esphome::binary_sensor::BinarySensor bs;
     h.rol.set_schedule_pending_binary_sensor(&bs);
     bs.publish_state(true);
-    h.rol.sched_push_msgid_   = 9;
-    h.rol.sched_push_retries_ = 2;
+    AK(h.rol).pushInFlight(9, 2, h.rol.schedule_version());
     h.rol.node_sched_version_ = h.rol.schedule_version() ^ 1u;
 
     deliverAck(h.rol, 8);   // not ours
-    EXPECT_EQ(h.rol.sched_push_msgid_, 9u);
-    EXPECT_EQ(h.rol.sched_push_retries_, 2);
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 9u);
+    EXPECT_EQ(AK(h.rol).cfg().retry_count, 2);
     EXPECT_TRUE(bs.state);
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
 
     deliverAck(h.rol, 9);
-    EXPECT_EQ(h.rol.sched_push_msgid_, 0u);
-    EXPECT_EQ(h.rol.sched_push_retries_, 0);
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
+    EXPECT_EQ(AK(h.rol).cfg().retry_count, 0);
+    EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack);
     EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
     EXPECT_FALSE(bs.state) << "Schedule Pending clears without waiting for the next beacon";
 
     // No binary sensor wired: the same ack must not touch a null pointer.
     h.rol.set_schedule_pending_binary_sensor(nullptr);
-    h.rol.sched_push_msgid_   = 9;
+    AK(h.rol).pushInFlight(9, 0, h.rol.schedule_version());
     h.rol.node_sched_version_ = h.rol.schedule_version() ^ 1u;
     deliverAck(h.rol, 9);
     EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
 
     // msgid 0 means "no push in flight": an ack naming 0 confirms nothing.
-    h.rol.sched_push_msgid_   = 0;
+    AK(h.rol).noPush();
     h.rol.node_sched_version_ = h.rol.schedule_version() ^ 1u;
     deliverAck(h.rol, 0);
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
@@ -6185,11 +6208,11 @@ TEST(AckPath, AGridSyncAckIsConsumedBeforeAScheduleAckWithTheSameId) {
     RealHubHarness h{18, kMacRol2};
     h.rol.gridsync_msgids_[0]   = 9;
     h.rol.gridsync_msgid_count_ = 1;
-    h.rol.sched_push_msgid_     = 9;
+    AK(h.rol).pushInFlight(9, 0, h.rol.schedule_version());
     h.rol.node_sched_version_   = h.rol.schedule_version() ^ 1u;
     deliverAck(h.rol, 9);
     EXPECT_EQ(h.rol.gridsync_msgid_count_, 0) << "the GridSync takes it";
-    EXPECT_EQ(h.rol.sched_push_msgid_, 9u) << "and the schedule push is left waiting";
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 9u) << "and the schedule push is left waiting";
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
 
     // The second of several published GridSync ids matches too.
@@ -7877,8 +7900,8 @@ void schedReady(real_helpers::RealHubHarness &h) {
 }  // namespace
 
 // (a) The ScheduleConfig ladder: the first push plus kSchedMaxRetries resends,
-// each a FRESH frame (new msgid), then an error log and silence. Giving up keeps
-// the session and the stale msgid.
+// each a FRESH frame (new msgid), then a WARNING and silence. Giving up keeps the
+// session, and every msgid of the ladder stays on record.
 TEST(SchedPush, TheLadderIsOnePushPlusKSchedMaxRetriesResendsThenItGivesUpAndKeepsTheSession) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
@@ -7893,8 +7916,10 @@ TEST(SchedPush, TheLadderIsOnePushPlusKSchedMaxRetriesResendsThenItGivesUpAndKee
     ASSERT_EQ(ids.size(), 1u + LORAClient::kSchedMaxRetries) << "first push + the counted resends";
     for (size_t i = 1; i < ids.size(); ++i)
         EXPECT_GT(ids[i], ids[i - 1]) << "every resend is a new frame with a new msgid";
-    EXPECT_EQ(h.rol.sched_push_retries_, LORAClient::kSchedMaxRetries);
-    EXPECT_EQ(h.rol.sched_push_msgid_, ids.back()) << "the stale msgid is kept after giving up";
+    EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack) << "the ladder is spent";
+    EXPECT_TRUE(h.rol.pending_shadow_inputs(esp_timer_get_time()).push_awaiting_ack)
+        << "the schedule is still owed, so the node is still not allowed to sleep";
+    EXPECT_EQ(h.rol.schedulePushMsgid(), ids.back()) << "the latest msgid is kept after giving up";
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version()) << "the node never confirmed";
     // A failed schedule push never tears the session down.
     EXPECT_FALSE(h.rol.commandFailed());
@@ -7902,42 +7927,63 @@ TEST(SchedPush, TheLadderIsOnePushPlusKSchedMaxRetriesResendsThenItGivesUpAndKee
     EXPECT_EQ(msgidsOf(h, OpCmd::Login).size(), 0u) << "no forced re-login";
 }
 
-// KNOWN BUG (step 3): sched_push_retries_ is reset ONLY by an ack. After the
-// ladder is spent, a NEW push (a fresh HA edit, the next beacon) therefore gets
-// exactly one attempt: its timer fires, sees retries >= max, logs the error and
-// never resends. The design wants every new push to get a full ladder.
-TEST(SchedPush, KnownBug_ANewPushAfterTheLadderIsSpentGetsASingleAttempt) {
+// A failed push must also leave a CONFIRMED session alone: this is the half the
+// plaintext ladder above cannot see (FailRelogin clears session_confirmed_).
+TEST(SchedPush, AFailedPushLeavesAConfirmedSessionConfirmed) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    ASSERT_TRUE(r.rol.session_confirmed_) << "precondition";
+    const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
+    r.rol.node_sched_version_ = r.rol.schedule_version() ^ 1u;
+    r.rol.send_schedule_config();
+    ASSERT_TRUE(AK(r.rol).cfg().awaiting_ack);
+    r.secs(60);                                    // far past the whole ladder
+    EXPECT_FALSE(AK(r.rol).cfg().awaiting_ack) << "the ladder ran out";
+    EXPECT_TRUE(r.rol.session_confirmed_) << "and the session was left alone";
+    EXPECT_FALSE(DP(r).relogin_pending_);
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0) << "no re-login";
+}
+
+// The retry budget is per REQUEST. After the ladder is spent, a NEW push (a fresh
+// HA edit, the next beacon) gets a whole ladder of its own.
+TEST(SchedPush, ANewPushAfterTheLadderIsSpentGetsAFullFreshLadder) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     schedReady(h);
     h.rol.send_schedule_config();
     for (int i = 0; i < 12; ++i) h.clock.tick(kSchedStepMs);
-    ASSERT_EQ(h.rol.sched_push_retries_, LORAClient::kSchedMaxRetries);
+    ASSERT_FALSE(AK(h.rol).cfg().awaiting_ack);
     const size_t before = msgidsOf(h, OpCmd::Schedule).size();
     ASSERT_EQ(before, 1u + LORAClient::kSchedMaxRetries);
 
     h.rol.send_schedule_config();            // a NEW push
     EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), before + 1);
+    EXPECT_TRUE(AK(h.rol).cfg().awaiting_ack);
+    EXPECT_EQ(AK(h.rol).cfg().retry_count, 0) << "the new request starts with an unspent budget";
     for (int i = 0; i < 12; ++i) h.clock.tick(kSchedStepMs);
 
-    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), before + 1)
-        << "KNOWN BUG: no resend at all for the second push";
-    EXPECT_EQ(h.rol.sched_push_retries_, LORAClient::kSchedMaxRetries)
-        << "KNOWN BUG: the budget is still spent from the previous push";
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), before + 1u + LORAClient::kSchedMaxRetries)
+        << "the second push gets its own first send and every resend";
+    EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack);
 }
 
-// The ack of the LATEST attempt resets everything (the positive half of the above).
+// The ack of the LATEST attempt resets everything.
 TEST(SchedPush, AnAckOfTheLatestAttemptClearsTheLadderAndAllowsAFullOneNextTime) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     schedReady(h);
     h.rol.send_schedule_config();
     h.clock.tick(kSchedStepMs);                       // one resend
-    ASSERT_EQ(h.rol.sched_push_retries_, 1);
-    deliverAck(h.rol, h.rol.sched_push_msgid_);
-    EXPECT_EQ(h.rol.sched_push_msgid_, 0u);
-    EXPECT_EQ(h.rol.sched_push_retries_, 0);
+    ASSERT_EQ(AK(h.rol).cfg().retry_count, 1);
+    deliverAck(h.rol, h.rol.schedulePushMsgid());
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
+    EXPECT_EQ(AK(h.rol).cfg().retry_count, 0);
+    EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack);
     EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
+    const size_t sent = msgidsOf(h, OpCmd::Schedule).size();
+    h.clock.tick(3 * kSchedStepMs);
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), sent) << "the ack cancelled the retry timer";
 
     const size_t before = msgidsOf(h, OpCmd::Schedule).size();
     h.rol.node_sched_version_ ^= 1u;
@@ -7947,11 +7993,11 @@ TEST(SchedPush, AnAckOfTheLatestAttemptClearsTheLadderAndAllowsAFullOneNextTime)
         << "after an ack the next push gets the whole ladder";
 }
 
-// (b) KNOWN BUG (step 3): only the LAST attempt's msgid is kept. The node acks
-// every copy it hears (and re-acks byte-identical retries), so a late ack for an
-// earlier attempt is simply not recognised: the push keeps being resent and the
-// hub keeps believing the node does not hold the schedule.
-TEST(SchedPush, KnownBug_ALateAckForAnEarlierAttemptIsNotRecognised) {
+// (b) The node acks every copy it hears (and re-acks byte-identical retries), so
+// the ack of an EARLIER attempt can arrive after a later one went out. Every msgid
+// of the request is on record: it is recognised, the schedule is delivered, and
+// the retries stop.
+TEST(SchedPush, ALateAckForAnEarlierAttemptIsRecognisedAndEndsTheRetries) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     schedReady(h);
@@ -7963,16 +8009,361 @@ TEST(SchedPush, KnownBug_ALateAckForAnEarlierAttemptIsNotRecognised) {
     const auto ids = msgidsOf(h, OpCmd::Schedule);
     ASSERT_EQ(ids.size(), 2u);
     ASSERT_NE(ids[0], ids[1]);
-    ASSERT_EQ(h.rol.sched_push_msgid_, ids[1]);
+    ASSERT_EQ(h.rol.schedulePushMsgid(), ids[1]);
 
     deliverAck(h.rol, ids[0]);                        // the node's ack of the FIRST copy, late
 
-    EXPECT_EQ(h.rol.sched_push_msgid_, ids[1]) << "KNOWN BUG: still waiting";
-    EXPECT_EQ(h.rol.sched_push_retries_, 1);
-    EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
-    EXPECT_TRUE(bs.state) << "KNOWN BUG: Schedule Pending stays on";
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u) << "delivered: nothing is awaited any more";
+    EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack);
+    EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
+    EXPECT_FALSE(bs.state) << "Schedule Pending clears";
+    h.clock.tick(3 * kSchedStepMs);
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 2u) << "and it is not resent again";
+    deliverAck(h.rol, ids[1]);                        // the duplicate ack is harmless
+    EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
+}
+
+// A late ack is still recognised AFTER the ladder was given up, and delivers it.
+TEST(SchedPush, AnAckOfAnyAttemptOfASpentLadderStillDeliversTheSchedule) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    h.rol.send_schedule_config();
+    for (int i = 0; i < 12; ++i) h.clock.tick(kSchedStepMs);
+    const auto ids = msgidsOf(h, OpCmd::Schedule);
+    ASSERT_EQ(ids.size(), 1u + LORAClient::kSchedMaxRetries);
+    ASSERT_FALSE(AK(h.rol).cfg().awaiting_ack);
+    ASSERT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
+
+    deliverAck(h.rol, ids[1]);
+
+    EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
+}
+
+// An ack names an attempt, and applies what THAT attempt carried. The schedule
+// is edited while a push is in flight: the newer push replaces the old request,
+// but the old attempt's ack is still recognised, applies the OLD version (the
+// node holds that one) and leaves the newer attempt awaited.
+TEST(SchedPush, ANewerScheduleSupersedesTheRequestButTheOldAckIdsStillCount) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    esphome::binary_sensor::BinarySensor bs;
+    h.rol.set_schedule_pending_binary_sensor(&bs);
+    bs.publish_state(true);
+    const uint32_t v1 = h.rol.schedule_version();
+    h.rol.send_schedule_config();                     // attempt carrying v1
+    h.clock.tick(2000);
+    h.rol.set_checkin_interval(h.rol.checkin_interval_ + 60);   // the user edits the schedule
+    const uint32_t v2 = h.rol.schedule_version();
+    ASSERT_NE(v1, v2);
+    h.rol.send_schedule_config();                     // supersedes: carries v2
+    const auto ids = msgidsOf(h, OpCmd::Schedule);
+    ASSERT_EQ(ids.size(), 2u);
+    ASSERT_EQ(AK(h.rol).cfg().retry_count, 0) << "the newer request has a fresh budget";
+
+    deliverAck(h.rol, ids[0]);                        // the node got the OLD one
+
+    EXPECT_EQ(h.rol.node_sched_version_, v1) << "it holds what that attempt carried";
+    EXPECT_TRUE(h.rol.schedule_pending()) << "but not the current schedule";
+    EXPECT_TRUE(bs.state) << "so Schedule Pending stays on";
+    EXPECT_TRUE(AK(h.rol).cfg().awaiting_ack) << "and the newer attempt is still awaited";
+    EXPECT_EQ(h.rol.schedulePushMsgid(), ids[1]);
+
+    deliverAck(h.rol, ids[1]);
+    EXPECT_EQ(h.rol.node_sched_version_, v2);
+    EXPECT_FALSE(h.rol.schedule_pending());
+    EXPECT_FALSE(bs.state);
+    EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack);
+    deliverAck(h.rol, ids[0]);                        // a duplicate of the OLD ack, after completion
+    EXPECT_EQ(h.rol.node_sched_version_, v2) << "must not move the node back to the old version";
+}
+
+// A resend carries the LATEST schedule, not the one the ladder started with.
+TEST(SchedPush, AResendIsRebuiltFromTheLatestSchedule) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    h.rol.send_schedule_config();
+    const uint32_t v1 = h.rol.schedule_version();
+    h.rol.set_checkin_interval(h.rol.checkin_interval_ + 60);
+    const uint32_t v2 = h.rol.schedule_version();
+    ASSERT_NE(v1, v2);
+    h.clock.tick(kSchedStepMs);                       // the resend, no new send_schedule_config call
+    const auto ids = msgidsOf(h, OpCmd::Schedule);
+    ASSERT_EQ(ids.size(), 2u);
+    deliverAck(h.rol, ids[1]);
+    EXPECT_EQ(h.rol.node_sched_version_, v2) << "the resend carried the edit";
+}
+
+// Replacing a request cancels the old one's timer: two ladders never run at once.
+TEST(SchedPush, ASupersededRequestsTimerDoesNotFireAlongsideTheNewOne) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    h.rol.send_schedule_config();                     // t = 0, would resend at 5000
+    h.clock.tick(2000);
+    h.rol.send_schedule_config();                     // t = 2000, resends at 7000
+    ASSERT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 2u);
+    h.clock.tick(3100);                               // t = 5100: the OLD timer's moment
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 2u) << "the superseded request's timer is gone";
+    h.clock.tick(2000);                               // t = 7100
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 3u) << "the new request's own resend";
+}
+
+// The ladder waits out a relogin without spending its budget.
+TEST(SchedPush, AReloginInTheMiddleDefersTheResendAndChargesNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    h.rol.send_schedule_config();
+    DP(h).relogin_pending_ = true;
+    for (int i = 0; i < 6; ++i) h.clock.tick(kSchedStepMs);
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 1u) << "nothing is sent into a rebuilt session";
+    EXPECT_EQ(AK(h.rol).cfg().retry_count, 0) << "and nothing is charged";
+    EXPECT_TRUE(AK(h.rol).cfg().awaiting_ack);
+    DP(h).relogin_pending_ = false;
     h.clock.tick(kSchedStepMs);
-    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 3u) << "KNOWN BUG: and it is resent again";
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 2u) << "the ladder resumes where it was";
+    EXPECT_EQ(AK(h.rol).cfg().retry_count, 1);
+}
+
+// A new login restarts the msgid numbering, so ids on record would alias new ones:
+// an ack for a number that now means something else must not apply a schedule.
+TEST(SchedPush, ANewLoginForgetsTheIdsOnRecord) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    h.rol.send_schedule_config();
+    const uint32_t id = h.rol.schedulePushMsgid();
+    ASSERT_NE(id, 0u);
+    h.rol.send_login();
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u) << "the old numbering is gone";
+    deliverAck(h.rol, id);
+    EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version()) << "an alias is not an ack";
+    EXPECT_TRUE(AK(h.rol).cfg().awaiting_ack) << "but the request itself goes on";
+}
+
+// Two nodes pushing at once: separate listeners, separate slots, separate ladders.
+TEST(SchedPush, TwoNodesPushingAtOnceDoNotShareState) {
+    TwoNodeHub h(/*answer_1=*/false, /*answer_2=*/false);
+    h.rol_1.node_sched_version_ = h.rol_1.schedule_version() ^ 1u;
+    h.rol_2.node_sched_version_ = h.rol_2.schedule_version() ^ 1u;
+    auto countTo = [&](uint32_t addr) {
+        size_t n = 0;
+        for (const auto &f : h.radio.hub_to_node_frames()) {
+            auto m = proto_sim::as_op(f);
+            if (m && m->cmd == OpCmd::Schedule && m->header.destAddress == addr) ++n;
+        }
+        return n;
+    };
+    h.rol_1.send_schedule_config();
+    h.rol_2.send_schedule_config();
+    ASSERT_EQ(countTo(17), 1u);
+    ASSERT_EQ(countTo(18), 1u);
+    const uint32_t id1 = h.rol_1.schedulePushMsgid();
+    const uint32_t id2 = h.rol_2.schedulePushMsgid();
+    ASSERT_NE(id1, 0u);
+    ASSERT_NE(id2, 0u);
+
+    deliverAck(h.rol_1, id1);                         // only node 17 answers
+    EXPECT_FALSE(AK(h.rol_1).cfg().awaiting_ack);
+    EXPECT_TRUE(AK(h.rol_2).cfg().awaiting_ack) << "node 18's push is untouched";
+    EXPECT_NE(h.rol_2.node_sched_version_, h.rol_2.schedule_version());
+    for (int i = 0; i < 12; ++i) h.clock.tick(kSchedStepMs);
+    EXPECT_EQ(countTo(17), 1u) << "node 17 is done: no resends";
+    EXPECT_EQ(countTo(18), 1u + LORAClient::kSchedMaxRetries) << "node 18 runs its whole ladder";
+    EXPECT_EQ(h.rol_1.node_sched_version_, h.rol_1.schedule_version());
+    EXPECT_NE(h.rol_2.node_sched_version_, h.rol_2.schedule_version());
+}
+
+// ---- the warm-up and a schedule push ---------------------------------------
+
+// A schedule push in flight counts as busy: no warm-up starts into it, and one
+// starts as soon as it is done.
+TEST(SchedPush, NoModeBWarmUpStartsWhileAPushIsInFlightAndOneStartsAfter) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    AK(r.rol).pushInFlight(9, 0, r.rol.schedule_version());   // no timer: stays in flight
+    r.secs(modebsup::kGridSettleS + modebsup::kJitterMaxS + 30);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "the push owns the node";
+    EXPECT_FALSE(r.rol.mode_test_active());
+    r.rol.node_sched_version_ = r.rol.schedule_version() ^ 1u;
+    deliverAck(r.rol, 9);                                     // delivered
+    ASSERT_GE(r.untilWarmup(modebsup::kJitterMaxS + modebsup::kYieldRetryS + 20), 0);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
+}
+
+// A GridSync in flight is busy too (the grid is not settled until it is acked).
+TEST(SchedPush, AGridSyncInFlightCountsAsBusyForTheWarmUp) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    AK(r.rol).noPush();
+    ASSERT_FALSE(AK(r.rol).delivery_busy_());
+    r.rol.gridsync_msgids_[0]   = 0x4321;
+    r.rol.gridsync_msgid_count_ = 1;
+    EXPECT_TRUE(AK(r.rol).delivery_busy_());
+    r.rol.gridsync_msgid_count_ = 0;
+    EXPECT_FALSE(AK(r.rol).delivery_busy_());
+}
+
+// A warm-up already on the air when the push is issued is stopped for it: its marks
+// would otherwise fight the 152 B frame for the same slots. Not a failed warm-up.
+TEST(SchedPush, APushIssuedDuringAWarmUpStopsItAndIsStillSent) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.secs(5);
+    ASSERT_TRUE(r.rol.mode_test_active());
+    const size_t frames_before = r.radio.hub_to_node_frames().size();
+
+    r.rol.send_schedule_config();
+
+    EXPECT_GT(r.radio.hub_to_node_frames().size(), frames_before) << "the push went out";
+    EXPECT_TRUE(AK(r.rol).cfg().awaiting_ack);
+    EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stopped the moment the push was issued";
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+}
+
+// ...and only THIS node's: a schedule push is routine (every beacon of an auto-mode
+// node) and must not postpone the other nodes' warm-ups the way a cover op does.
+TEST(SchedPush, AScheduleUnlikeACoverOpDoesNotHoldOtherNodesWarmUpsOff) {
+    ensure_psa_ready();
+    {
+        ModeBRig r;
+        r.session();
+        r.rol.send_schedule_config();
+        auto &arb = LORAClient::mbs_arbiter_();
+        ASSERT_TRUE(arb.request(777));
+        EXPECT_TRUE(arb.granted(777, r.rol.mbs_now_s_())) << "no hold-off after a schedule push";
+    }
+    {
+        ModeBRig r;
+        r.session();
+        r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+        auto &arb = LORAClient::mbs_arbiter_();
+        ASSERT_TRUE(arb.request(777));
+        EXPECT_FALSE(arb.granted(777, r.rol.mbs_now_s_())) << "(the cover op does hold off: the control)";
+    }
+}
+
+// Mode A / auto mode: the push works the same and no warm-up is ever started.
+TEST(SchedPush, AnAutoModeNodeIsPushedToAsAlwaysAndNeverWarmedUp) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.set_auto_mode_default(true);
+    r.rol.enable_timed_mode(true);
+    r.rol.node_sched_version_ = r.rol.schedule_version() ^ 1u;
+    r.rol.send_schedule_config();
+    ASSERT_TRUE(AK(r.rol).cfg().awaiting_ack);
+    const uint32_t first_id = r.rol.schedulePushMsgid();
+    r.secs(8);
+    EXPECT_NE(r.rol.schedulePushMsgid(), first_id) << "the ladder is the same: a resend under a new id";
+    deliverAck(r.rol, r.rol.schedulePushMsgid());
+    EXPECT_EQ(r.rol.node_sched_version_, r.rol.schedule_version());
+    r.secs(modebsup::kGridSettleS + modebsup::kJitterMaxS + 60);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
+    EXPECT_FALSE(r.rol.mode_test_active());
+}
+
+// ---- the glue itself: a request that gives up with FailRelogin ----------------
+
+namespace {
+struct GlueProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::deliver_;
+    using esphome::lora_tracker::LORAListener::cfg;
+};
+}  // namespace
+
+TEST(DeliveryGlue, AFailReloginRequestClearsTheSessionAndLogsInAgainWhereAFailKeepOneDoesNot) {
+    using namespace real_helpers;
+    for (const bool relogin : {false, true}) {
+        RealHubHarness h{18, kMacRol2};
+        h.rol.registered_ = true;
+        h.rol.session_confirmed_ = true;
+        int failed = 0, built = 0;
+        esphome::lora_tracker::DeliveryRequest req;
+        req.what   = "test";
+        req.policy = deliverypolicy::kSchedulePolicy;
+        req.policy.max_retries = 1;
+        req.policy.give_up = relogin ? deliverypolicy::GiveUpAction::FailRelogin
+                                     : deliverypolicy::GiveUpAction::FailKeep;
+        req.build   = [&](bool, uint32_t *tag) { *tag = 5; return (uint32_t) (100 + built++); };
+        req.on_fail = [&]() { ++failed; };
+        static_cast<GlueProbe &>(h.rol).deliver_(esphome::lora_tracker::CH_CONFIG, std::move(req));
+        for (int i = 0; i < 8; ++i) h.clock.tick(kSchedStepMs);
+        EXPECT_EQ(built, 2) << "one send and max_retries=1 resend";
+        EXPECT_EQ(failed, 1) << "on_fail runs once";
+        EXPECT_FALSE(static_cast<GlueProbe &>(h.rol).cfg().awaiting_ack);
+        EXPECT_EQ(h.rol.session_confirmed_, !relogin);
+        EXPECT_EQ(msgidsOf(h, OpCmd::Login).size() > 0, relogin);
+    }
+}
+
+TEST(DeliveryGlue, AFireRequestSendsOnceAndNeverWaitsForAnAck) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    int built = 0;
+    esphome::lora_tracker::DeliveryRequest req;
+    req.what   = "test";
+    req.policy = deliverypolicy::kSchedulePolicy;
+    req.policy.mode = deliverypolicy::Mode::Fire;
+    req.build  = [&](bool, uint32_t *tag) { *tag = 0; return (uint32_t) (200 + built++); };
+    static_cast<GlueProbe &>(h.rol).deliver_(esphome::lora_tracker::CH_CONFIG, std::move(req));
+    EXPECT_EQ(built, 1);
+    EXPECT_FALSE(static_cast<GlueProbe &>(h.rol).cfg().awaiting_ack);
+    for (int i = 0; i < 8; ++i) h.clock.tick(kSchedStepMs);
+    EXPECT_EQ(built, 1) << "never retried";
+}
+
+// A resend that fails to pack still spends its slot of the ladder: the request
+// runs to its end (and fails) instead of hanging, awaited, forever.
+TEST(DeliveryGlue, ARetryThatCannotBeBuiltStillRunsTheLadderToItsEnd) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    int built = 0, failed = 0;
+    esphome::lora_tracker::DeliveryRequest req;
+    req.what   = "test";
+    req.policy = deliverypolicy::kSchedulePolicy;
+    req.policy.max_retries = 2;
+    req.build   = [&](bool retry, uint32_t *tag) {
+        ++built;
+        *tag = 1;
+        return retry ? (uint32_t) 0 : (uint32_t) 300;
+    };
+    req.on_fail = [&]() { ++failed; };
+    static_cast<GlueProbe &>(h.rol).deliver_(esphome::lora_tracker::CH_CONFIG, std::move(req));
+    ASSERT_TRUE(static_cast<GlueProbe &>(h.rol).cfg().awaiting_ack);
+    for (int i = 0; i < 10; ++i) h.clock.tick(kSchedStepMs);
+    EXPECT_EQ(built, 3) << "the send and both counted retries were attempted";
+    EXPECT_EQ(failed, 1);
+    EXPECT_FALSE(static_cast<GlueProbe &>(h.rol).cfg().awaiting_ack);
+}
+
+TEST(DeliveryGlue, ARequestThatCannotBeBuiltStartsNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    int built = 0;
+    esphome::lora_tracker::DeliveryRequest req;
+    req.what   = "test";
+    req.policy = deliverypolicy::kSchedulePolicy;
+    req.build  = [&](bool, uint32_t *) { ++built; return (uint32_t) 0; };
+    static_cast<GlueProbe &>(h.rol).deliver_(esphome::lora_tracker::CH_CONFIG, std::move(req));
+    EXPECT_FALSE(static_cast<GlueProbe &>(h.rol).cfg().awaiting_ack);
+    for (int i = 0; i < 8; ++i) h.clock.tick(kSchedStepMs);
+    EXPECT_EQ(built, 1) << "no timer, no ladder";
 }
 
 // (c) GridSync: the ladder is the first publish + kGridSyncMaxRepublishes
@@ -8052,7 +8443,7 @@ TEST(ConfigShape, AClientConfigIsOneBareUnackedSendWithNoRetry) {
     EXPECT_EQ(h.tracker.last_supersede_key, 0u) << "no supersession";
     EXPECT_EQ(msgidsOf(h, OpCmd::ClientConfig).size(), 1u);
     EXPECT_FALSE(h.rol.awaitingAck());
-    EXPECT_EQ(h.rol.sched_push_msgid_, 0u);
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
     EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
     h.clock.tick(120'000);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "never retransmitted";

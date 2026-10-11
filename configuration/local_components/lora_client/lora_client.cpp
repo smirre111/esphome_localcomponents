@@ -869,7 +869,7 @@ namespace esphome
     // push_awaiting_ack input of pending_shadow_inputs).
     bool LORAListener::push_awaiting_ack_()
     {
-      return (this->sched_push_msgid_ != 0 && this->sched_push_retries_ < kSchedMaxRetries) ||
+      return this->sched_push_outstanding_() ||
              this->sched_dirty_ || this->schedule_pending() ||
              this->gridsync_msgid_count_ != 0 || !this->config_synced_ ||
              this->config_push_pending_;
@@ -3719,24 +3719,169 @@ namespace esphome
       return true;
     }
 
-    // A schedule push is acked by the node; that is the only positive
-    // confirmation the hub gets that the schedule actually landed.
-    // True when `ack_msg_id` was the schedule push in flight.
-    bool LORAListener::ack_schedule_push_(uint32_t ack_msg_id)
+    // ---- the generic delivery glue (step 3 of the unified MAC delivery refactor) ----
+    //
+    // One request per channel. The DECISIONS (when to retry, when to give up, which
+    // ack counts) are deliverypolicy::; this only performs them. The Config channel
+    // carries the ScheduleConfig push; the Control channel keeps its own, older and
+    // hardware-verified path (begin_tracked_op_ ...) until it is moved onto this.
+
+    const char *LORAListener::dlv_timer_(DeliveryChannel ch)
     {
-      if (this->sched_push_msgid_ == 0 || ack_msg_id != this->sched_push_msgid_)
-        return false;
+      static const char *const kNames[kDeliveryChannels] = {"dlv_ctl", "dlv_cfg", "dlv_mac"};
+      return kNames[ch];
+    }
+
+    void LORAListener::deliver_(DeliveryChannel ch, DeliveryRequest req)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      // A request already in flight is REPLACED by this one, with a fresh ladder
+      // of its own (the budget is per request). Its msgids stay on record in
+      // s.acks, so a late ack for the old request is still recognised.
+      this->cancel_timeout(dlv_timer_(ch));
+      s.req          = std::move(req);
+      s.retry_count  = 0;
+      s.awaiting_ack = false;
+      if (s.req.policy.yields_warmup)
+        this->mbs_yield_self_();
+      this->dlv_tx_(ch, false);
+    }
+
+    bool LORAListener::dlv_tx_(DeliveryChannel ch, bool retry)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      uint32_t tag = 0;
+      const uint32_t msgid = s.req.build ? s.req.build(retry, &tag) : 0;
+      if (msgid != 0)
+      {
+        s.acks.add(msgid, tag);
+        s.last_msgid = msgid;
+        if (!retry)
+          s.first_msgid = msgid;
+      }
+      // A retry that could not be built still keeps the ladder running to its
+      // end; a first attempt that could not be built starts nothing.
+      if (s.req.policy.mode == deliverypolicy::Mode::Acked && (msgid != 0 || retry))
+      {
+        s.awaiting_ack = true;
+        this->arm_dlv_timer_(ch);
+      }
+      return msgid != 0;
+    }
+
+    void LORAListener::arm_dlv_timer_(DeliveryChannel ch)
+    {
+      this->set_timeout(dlv_timer_(ch), this->ack_wait_ms_(this->slots_[ch].req.policy.base_wait_ms),
+                        [this, ch]() { this->on_dlv_timeout_(ch); });
+    }
+
+    void LORAListener::on_dlv_timeout_(DeliveryChannel ch)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      const deliverypolicy::TimeoutDecision d = deliverypolicy::onAckTimeout(
+          {s.awaiting_ack, this->relogin_pending_, false, s.retry_count, s.req.policy.max_retries});
+      s.retry_count = d.retries_spent;
+      switch (d.action)
+      {
+      case deliverypolicy::TimeoutAction::Stale:
+      case deliverypolicy::TimeoutAction::ShortWaitMissed:
+        return;
+      case deliverypolicy::TimeoutAction::DeferRelogin:
+        // No session to answer on: wait for confirm_session_(), charge nothing.
+        this->arm_dlv_timer_(ch);
+        return;
+      case deliverypolicy::TimeoutAction::GiveUp:
+        this->dlv_give_up_(ch);
+        return;
+      case deliverypolicy::TimeoutAction::Retransmit:
+        break;
+      }
+      ESP_LOGW(TAG, "[%s] %s not acknowledged — resending (%u/%u)", this->get_name().c_str(),
+               s.req.what, (unsigned) s.retry_count, (unsigned) s.req.policy.max_retries);
+      this->dlv_tx_(ch, true);
+    }
+
+    void LORAListener::dlv_give_up_(DeliveryChannel ch)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      s.awaiting_ack = false;
+      if (s.req.on_fail)
+        s.req.on_fail();
+      if (s.req.policy.give_up != deliverypolicy::GiveUpAction::FailRelogin)
+        return;
+      ESP_LOGW(TAG, "[%s] %s failed — clearing session, forcing re-login",
+               this->get_name().c_str(), s.req.what);
+      this->session_confirmed_ = false;
+      this->do_login_and_arm_retry_();
+    }
+
+    // The node acknowledged `ack_msg_id`. A request that owns it is told which
+    // attempt was answered (its tag) and says whether that completes it.
+    bool LORAListener::dlv_ack_(uint32_t ack_msg_id)
+    {
+      for (uint8_t c = CH_CONFIG; c < kDeliveryChannels; ++c)
+      {
+        DeliverySlot &s = this->slots_[c];
+        const int i = s.acks.find(ack_msg_id);
+        if (i < 0)
+          continue;
+        if (!s.req.on_ack || s.req.on_ack(s.acks.tag[i]))
+        {
+          this->cancel_timeout(dlv_timer_((DeliveryChannel) c));
+          s.awaiting_ack = false;
+          s.retry_count  = 0;
+          s.acks.clear();
+        }
+        return true;
+      }
+      return false;
+    }
+
+    // A new login restarts the msgid space, so ids on record would alias new ones.
+    // The requests themselves go on (the next attempt is sent under a new id).
+    void LORAListener::dlv_forget_ids_()
+    {
+      for (uint8_t c = CH_CONFIG; c < kDeliveryChannels; ++c)
+        this->slots_[c].acks.clear();
+    }
+
+    bool LORAListener::delivery_busy_() const
+    {
+      return this->ctl().awaiting_ack || this->ctl().deferred_until_login ||
+             this->cfg().awaiting_ack || this->gridsync_msgid_count_ != 0;
+    }
+
+    // ---- ScheduleConfig as a request ----
+
+    bool LORAListener::sched_push_outstanding_() const
+    {
+      return deliverypolicy::ladderHasRetryLeft(this->cfg().awaiting_ack, this->cfg().retry_count,
+                                                kSchedMaxRetries);
+    }
+
+    // The node acknowledged an attempt that carried `version`: that is the only
+    // positive confirmation the hub gets that the schedule actually landed.
+    bool LORAListener::on_schedule_acked_(uint32_t version)
+    {
       ESP_LOGI(TAG, "[%s] ScheduleConfig acknowledged (version=0x%08x)",
-               this->get_name().c_str(), (unsigned) this->schedule_version());
-      this->cancel_timeout("schedule_retry");
-      this->sched_push_msgid_  = 0;
-      this->sched_push_retries_ = 0;
-      // The node now holds our version; reflect that without waiting for its
-      // next beacon, so "Schedule Pending" clears promptly in Home Assistant.
-      this->node_sched_version_ = this->schedule_version();
+               this->get_name().c_str(), (unsigned) version);
+      // The node now holds THAT version; reflect it without waiting for its next
+      // beacon, so "Schedule Pending" clears promptly in Home Assistant. If the
+      // schedule has moved on since, the newer attempt is still awaited.
+      this->node_sched_version_ = version;
       if (this->schedule_pending_bsensor_ != nullptr)
-        this->schedule_pending_bsensor_->publish_state(false);
-      return true;
+        this->schedule_pending_bsensor_->publish_state(this->schedule_pending());
+      return version == this->schedule_version();
+    }
+
+    // The ladder is spent. The session is fine (the node is reachable by other
+    // frames or it would not have been pushed to); the schedule is just not there
+    // yet, and the next beacon or login pushes it again with a fresh ladder.
+    void LORAListener::on_schedule_failed_()
+    {
+      ESP_LOGW(TAG, "[%s] ScheduleConfig not acknowledged after %u attempts — keeping the session; "
+                    "the node stays on its old schedule until the next push",
+               this->get_name().c_str(), (unsigned) (1 + kSchedMaxRetries));
     }
 
     // Mark -> ack, for every command whose FIRST frame was a single placed
@@ -3764,7 +3909,7 @@ namespace esphome
     {
       if (this->ack_gridsync_(ack_msg_id))
         return;
-      if (this->ack_schedule_push_(ack_msg_id))
+      if (this->dlv_ack_(ack_msg_id))
         return;
 
       // Accept an ack for any msgid in the current command's transmit range
@@ -4094,6 +4239,7 @@ namespace esphome
         this->frame_counter_.rx_message_id = 0;
       }
       this->msgid_relogin_pending_ = false;   // the msgid space restarts here
+      this->dlv_forget_ids_();
       // New login challenge: the encrypted session is not confirmed until the
       // node proves it by sending a frame we can decrypt.  Until then the hub
       // sends commands in plaintext (see s_pack_operation_message callers).
@@ -4960,6 +5106,19 @@ namespace esphome
         return;
       }
 
+      DeliveryRequest req;
+      req.what     = "ScheduleConfig";
+      req.policy   = deliverypolicy::kSchedulePolicy;
+      req.build    = [this](bool retry, uint32_t *version) { return this->tx_schedule_config_(retry, version); };
+      req.on_ack   = [this](uint32_t version) { return this->on_schedule_acked_(version); };
+      req.on_fail  = [this]() { this->on_schedule_failed_(); };
+      this->deliver_(CH_CONFIG, std::move(req));
+    }
+
+    // ONE attempt at the push, built from the schedule as it is NOW (a resend
+    // carries the latest version). Returns its msgid, 0 when it did not pack.
+    uint32_t LORAListener::tx_schedule_config_(bool retry, uint32_t *version)
+    {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       LoraHeader header = LORA_HEADER__INIT;
       header.destaddress   = this->short_address_;
@@ -5025,33 +5184,18 @@ namespace esphome
         // and asks for the burst explicitly.
         this->send_aligned_(buf, len);
         free(buf);
-        // Arm the retransmit.  The node acks a schedule push (unlike TimeSync);
-        // that ack is what cancels this.
-        this->sched_push_msgid_ = header.msgid;
-        this->set_timeout("schedule_retry", this->ack_wait_ms_(kSchedRetryMs), [this]() {
-          if (this->sched_push_retries_ >= kSchedMaxRetries)
-          {
-            ESP_LOGE(TAG, "[%s] ScheduleConfig not acknowledged after %u attempts — "
-                          "node will stay interactive until its next beacon",
-                     this->get_name().c_str(), (unsigned) kSchedMaxRetries);
-            return;
-          }
-          this->sched_push_retries_++;
-          ESP_LOGW(TAG, "[%s] ScheduleConfig not acknowledged — resending (%u/%u)",
-                   this->get_name().c_str(), (unsigned) this->sched_push_retries_,
-                   (unsigned) kSchedMaxRetries);
-          this->send_schedule_config();
-        });
-        ESP_LOGI(TAG, "[%s] ScheduleConfig sent (version=0x%08x mode=%s entries=%u %u B msgid=%u)",
-                 this->get_name().c_str(), (unsigned) sc.version,
+        // The retransmit is the delivery glue's: the node acks a schedule push
+        // (unlike TimeSync), and that ack is what ends the ladder.
+        ESP_LOGI(TAG, "[%s] ScheduleConfig %s (version=0x%08x mode=%s entries=%u %u B msgid=%u)",
+                 this->get_name().c_str(), retry ? "resent" : "sent", (unsigned) sc.version,
                  this->auto_mode_ ? "AUTO" : "INTERACTIVE",
                  (unsigned) this->sched_entry_count_, (unsigned) len,
                  (unsigned) header.msgid);
+        *version = sc.version;
+        return header.msgid;
       }
-      else
-      {
-        ESP_LOGE(TAG, "[%s] Failed to pack ScheduleConfig", this->get_name().c_str());
-      }
+      ESP_LOGE(TAG, "[%s] Failed to pack ScheduleConfig", this->get_name().c_str());
+      return 0;
     }
 
     // P2: a node announced a wake.  Everything here is observation — the beacon
@@ -5839,8 +5983,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // A schedule push is part of bringing the node up while it can still be
       // retried. Once the ladder is spent nothing more will be sent, so the
       // stale msgid (kept to recognise a late ack) must not hold the gate.
-      s.schedule_outstanding = this->sched_push_msgid_ != 0 &&
-                               this->sched_push_retries_ < kSchedMaxRetries;
+      s.schedule_outstanding = this->sched_push_outstanding_();
 
       switch (onboarding::assess(s))
       {
@@ -5993,7 +6136,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // The node's own word (PhaseReport.timedRxActive), and only since the last
       // session: a login clears have_phase_report_.
       in.promoted       = this->have_phase_report_ && this->belief_.node_timed_rx;
-      in.busy           = this->ctl().awaiting_ack || this->ctl().deferred_until_login;
+      in.busy           = this->delivery_busy_();
       in.other_test     = this->mbs_other_test_();
       in.warmup_running = this->mode_test_active_ && this->mbs_owns_test_;
       in.report_ok      = this->mbs_report_fresh_();
@@ -6081,11 +6224,18 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // A cover op / sysop was just issued for this node: never fight it.
     void LORAListener::mbs_yield_to_op_()
     {
-      const uint32_t now_s = this->mbs_now_s_();
-      mbs_arbiter_().holdOff(now_s, modebsup::kOpHoldOffS);
-      if (!this->mbs_.yieldToOp(mbs_arbiter_(), this->mbs_id_(), now_s))
+      mbs_arbiter_().holdOff(this->mbs_now_s_(), modebsup::kOpHoldOffS);
+      this->mbs_yield_self_();
+    }
+
+    // Stop THIS node's warm-up for a command about to go out to it, without
+    // holding the other nodes' warm-ups off (a schedule push on an auto-mode node
+    // is routine and must not postpone a Mode B node's).
+    void LORAListener::mbs_yield_self_()
+    {
+      if (!this->mbs_.yieldToOp(mbs_arbiter_(), this->mbs_id_(), this->mbs_now_s_()))
         return;
-      ESP_LOGW(TAG, "[%s] Mode B warm-up aborted: cover op/sysop issued — retry in %u s",
+      ESP_LOGW(TAG, "[%s] Mode B warm-up aborted: command issued — retry in %u s",
                this->get_name().c_str(), (unsigned) modebsup::kYieldRetryS);
       this->mbs_abort_warmup_(true);
     }

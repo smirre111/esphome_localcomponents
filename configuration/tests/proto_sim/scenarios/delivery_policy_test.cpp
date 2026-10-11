@@ -138,5 +138,83 @@ TEST(DeliveryPolicy, ARangeAckCountsOnlyWhileTheCommandIsAwaited) {
     EXPECT_FALSE(acceptsRangeAck(true, 9, 10, 12));
 }
 
+TEST(DeliveryPolicy, TheIndexOfAnIdIsItsPositionAmongTheCountedEntriesOrMinusOne) {
+    const uint32_t ids[] = {4, 5, 99, 0};
+    EXPECT_EQ(msgIdIndex(ids, 3, 4), 0);
+    EXPECT_EQ(msgIdIndex(ids, 3, 99), 2);
+    EXPECT_EQ(msgIdIndex(ids, 2, 99), -1) << "beyond count is stale storage";
+    EXPECT_EQ(msgIdIndex(ids, 0, 4), -1);
+}
+
+TEST(AckIds, EveryIdAddedIsFoundWithTheTagOfItsOwnAttempt) {
+    AckIds s;
+    s.add(10, 0xAAAA);
+    s.add(11, 0xBBBB);
+    s.add(12, 0xAAAA);
+    ASSERT_EQ(s.n, 3);
+    ASSERT_GE(s.find(10), 0);
+    EXPECT_EQ(s.tag[s.find(10)], 0xAAAAu);
+    EXPECT_EQ(s.tag[s.find(11)], 0xBBBBu) << "a late ack applies what ITS attempt carried";
+    EXPECT_EQ(s.tag[s.find(12)], 0xAAAAu);
+    EXPECT_EQ(s.find(13), -1);
+    EXPECT_EQ(s.last(), 12u);
+}
+
+TEST(AckIds, ZeroIsNoIdAndIsNeverStoredOrFound) {
+    AckIds s;
+    s.add(0, 7);
+    EXPECT_EQ(s.n, 0);
+    EXPECT_EQ(s.find(0), -1);
+    EXPECT_EQ(s.last(), 0u) << "an empty set has no latest id";
+}
+
+TEST(AckIds, ClearForgetsEverything) {
+    AckIds s;
+    s.add(1, 1);
+    s.add(2, 2);
+    s.clear();
+    EXPECT_EQ(s.n, 0);
+    EXPECT_EQ(s.find(1), -1);
+    EXPECT_EQ(s.last(), 0u);
+    s.add(3, 3);
+    EXPECT_EQ(s.find(3), 0) << "storage is reused from the start";
+}
+
+TEST(AckIds, AFullSetForgetsItsOldestAndKeepsTheTagsAligned) {
+    AckIds s;
+    for (uint32_t i = 1; i <= AckIds::kCap; ++i)
+        s.add(i, 100 + i);
+    ASSERT_EQ(s.n, AckIds::kCap);
+    ASSERT_GE(s.find(1), 0) << "all eight fit";
+    s.add(50, 150);
+    EXPECT_EQ(s.n, AckIds::kCap) << "bounded";
+    EXPECT_EQ(s.find(1), -1) << "the oldest went";
+    ASSERT_GE(s.find(2), 0);
+    EXPECT_EQ(s.tag[s.find(2)], 102u) << "tags moved with their ids";
+    ASSERT_GE(s.find(8), 0);
+    EXPECT_EQ(s.tag[s.find(8)], 108u);
+    EXPECT_EQ(s.last(), 50u);
+    EXPECT_EQ(s.tag[s.find(50)], 150u);
+}
+
+TEST(DeliveryPolicy, ALadderOwesItsPushOnlyWhileItIsLiveAndHasARetryLeft) {
+    EXPECT_TRUE(ladderHasRetryLeft(true, 0, 3));
+    EXPECT_TRUE(ladderHasRetryLeft(true, 2, 3)) << "one retry left";
+    EXPECT_FALSE(ladderHasRetryLeft(true, 3, 3)) << "every retry spent: waiting out the last one";
+    EXPECT_FALSE(ladderHasRetryLeft(true, 4, 3));
+    EXPECT_FALSE(ladderHasRetryLeft(false, 0, 3)) << "acked or never started";
+}
+
+TEST(DeliveryPolicy, TheSchedulePolicyIsTodaysLadderAndKeepsTheSessionWhenItFails) {
+    EXPECT_EQ(kSchedulePolicy.max_retries, 3);
+    EXPECT_EQ(kSchedulePolicy.base_wait_ms, 5000u);
+    EXPECT_TRUE(kSchedulePolicy.mode == Mode::Acked);
+    EXPECT_TRUE(kSchedulePolicy.resend == Resend::Rebuild) << "a resend carries the latest schedule";
+    EXPECT_TRUE(kSchedulePolicy.give_up == GiveUpAction::FailKeep) << "a failed push never tears the session down";
+    EXPECT_TRUE(kSchedulePolicy.supersedes_same_kind);
+    EXPECT_TRUE(kSchedulePolicy.yields_warmup);
+    EXPECT_FALSE(kSchedulePolicy.at_most_once);
+}
+
 // The policy is pure and constexpr: usable with no listener at all.
 static_assert(onAckTimeout(TimeoutState{false, false, false, 0, 4}).action == TimeoutAction::Stale, "");

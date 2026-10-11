@@ -143,4 +143,82 @@ constexpr bool acceptsRangeAck(bool awaiting, uint32_t id, uint32_t first, uint3
     return awaiting && msgIdInRange(id, first, last);
 }
 
+// Position of `id` in the set, -1 when it is not a member.
+constexpr int msgIdIndex(const uint32_t *ids, unsigned count, uint32_t id)
+{
+    for (unsigned i = 0; i < count; ++i)
+        if (ids[i] == id)
+            return (int) i;
+    return -1;
+}
+
+// ---- the ack-id set of one request (step 3) -------------------------------
+
+// Every msgid a request has been sent under, each with a TAG: whatever the
+// attempt that carried it stood for (a ScheduleConfig's version). A request is
+// re-built on every resend, so a late ack for an EARLIER attempt must apply what
+// THAT attempt carried, not what the latest one does. The set is bounded: a full
+// set forgets its oldest entry. Id 0 is "no id" and is never stored.
+struct AckIds
+{
+    static constexpr unsigned kCap = 8;
+    uint32_t id[kCap]{};
+    uint32_t tag[kCap]{};
+    uint8_t  n{0};
+
+    void add(uint32_t new_id, uint32_t new_tag)
+    {
+        if (new_id == 0)
+            return;
+        if (this->n == kCap)
+        {
+            for (unsigned i = 1; i < kCap; ++i)
+            {
+                this->id[i - 1]  = this->id[i];
+                this->tag[i - 1] = this->tag[i];
+            }
+            --this->n;
+        }
+        this->id[this->n]  = new_id;
+        this->tag[this->n] = new_tag;
+        ++this->n;
+    }
+    int find(uint32_t wanted) const { return msgIdIndex(this->id, this->n, wanted); }
+    void clear() { this->n = 0; }
+    uint32_t last() const { return this->n != 0 ? this->id[this->n - 1] : 0; }
+};
+
+// ---- what a request IS ------------------------------------------------------
+
+enum class Mode : uint8_t { Acked, Fire };            // wait for an ack, or send and forget
+enum class Shape : uint8_t { Auto, Burst, ClassA };   // how the frame is put on the air
+enum class Resend : uint8_t { SameBytes, Rebuild };   // a retry re-sends the stored frame / builds a new one
+
+struct Policy
+{
+    Mode         mode;
+    Shape        shape;
+    Resend       resend;
+    uint8_t      max_retries;           // the counted budget AFTER the first send
+    uint32_t     base_wait_ms;          // the ack wait, before the transmit backlog is added
+    GiveUpAction give_up;
+    bool         at_most_once;          // never re-sent after it may have been heard (OTA)
+    bool         supersedes_same_kind;  // a newer request of this kind replaces the one in flight
+    bool         yields_warmup;         // a Mode B warm-up on the air is stopped for it
+};
+
+// ScheduleConfig: a ladder of one send plus three rebuilds, 5 s each (plus the
+// backlog). A failed push is only logged: the node keeps its old schedule, the
+// session is fine, and the next beacon starts a fresh ladder.
+constexpr Policy kSchedulePolicy = {Mode::Acked, Shape::Auto, Resend::Rebuild, 3, 5000,
+                                    GiveUpAction::FailKeep, false, true, true};
+
+// A ladder is live and still has a counted retry to spend: the push is "owed"
+// to the pending-shadow and holds the onboarding gate. (The final wait, after
+// the last retry, no longer does.)
+constexpr bool ladderHasRetryLeft(bool awaiting, uint8_t retries_spent, uint8_t max_retries)
+{
+    return awaiting && retries_spent < max_retries;
+}
+
 }  // namespace deliverypolicy

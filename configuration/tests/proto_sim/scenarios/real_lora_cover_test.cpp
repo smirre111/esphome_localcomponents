@@ -157,7 +157,7 @@ TEST(RealLoraCover, CoverConfigIsOneBareUnackedSendWithNoRetry) {
     EXPECT_EQ(h.tracker.last_earliest_us, 0) << "not placed on a grid mark";
     EXPECT_EQ(h.tracker.last_supersede_key, 0u) << "no supersession";
     EXPECT_FALSE(h.rol.awaitingAck()) << "not a tracked op";
-    EXPECT_EQ(h.rol.sched_push_msgid_, 0u);
+    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
     EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
     h.clock.tick(120'000);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "never retransmitted";

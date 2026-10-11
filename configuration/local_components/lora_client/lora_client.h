@@ -36,6 +36,7 @@
 #include <psa/crypto.h>
 
 #include <array>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -114,6 +115,27 @@ namespace esphome
 
  
 
+    // A request for the generic delivery glue (LORAListener::deliver_): what to
+    // send, what to do when it is acknowledged, what to do when it is given up.
+    // The retry rules are the Policy (DeliveryPolicy.h); the callbacks are the
+    // only part that knows what the frame is.
+    struct DeliveryRequest
+    {
+      const char *what{"request"};          // for the log
+      deliverypolicy::Policy policy{};
+      // Send ONE attempt (the first, or a retry when `retry` is true) and return
+      // the msgid it went out under, 0 when it could not be packed. `*tag` is
+      // what the attempt stands for (a ScheduleConfig's version); it is handed
+      // back to on_ack for whichever attempt the node answers.
+      std::function<uint32_t(bool retry, uint32_t *tag)> build;
+      // The node answered an attempt carrying `tag`. True when that completes the
+      // request (false: it answered a superseded attempt and the newer one is
+      // still awaited).
+      std::function<bool(uint32_t tag)> on_ack;
+      // The ladder is spent.
+      std::function<void()> on_fail;
+    };
+
     // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
     // delivery refactor). Everything the tracked-command machinery used to keep
     // as loose op_* members on the listener. One request per channel at a time;
@@ -174,6 +196,12 @@ namespace esphome
       // True from "retries exhausted, no ack" until the node is next heard
       // (CMD_SLEEP only; see on_sleep_unconfirmed_).
       bool     sleep_unconfirmed{false};
+      // ---- the generic glue (step 3): Config and Mac channels ----
+      // awaiting_ack / retry_count above are shared with it. The ids are every
+      // msgid the current AND earlier requests went out under, with the tag of
+      // the attempt: an ack for any of them is recognised.
+      DeliveryRequest        req;
+      deliverypolicy::AckIds acks;
     };
 
     // The delivery channels. A request occupies one channel until it is acked,
@@ -714,7 +742,10 @@ namespace esphome
       // invariant I3 (a) needs this cleared on every fresh send_login()
       // challenge, see clearSessionKeys_().
       bool     trackedOpFrameEmptyForTest() const { return this->ctl().frame.empty(); }
-      uint32_t schedulePushMsgid() const { return this->sched_push_msgid_; }
+      // The msgid of the latest ScheduleConfig attempt, 0 when none is on record
+      // (acked, or never sent). Kept after the ladder is spent, so a late ack is
+      // still recognised.
+      uint32_t schedulePushMsgid() const { return this->cfg().acks.last(); }
       // A published GridSync the node has not confirmed yet, and how many times
       // it has been re-published for that.
       bool     gridSyncAwaitingAck() const { return this->gridsync_msgid_count_ != 0; }
@@ -1088,8 +1119,7 @@ namespace esphome
       // means the node never enters auto mode, never sleeps, never wakes, never
       // beacons — and the beacon is what would have triggered a re-push.
       // Retransmit until the node's CommandAck confirms delivery.
-      uint32_t      sched_push_msgid_{0};
-      uint8_t       sched_push_retries_{0};
+      // The push is the Config channel's request (slots_[CH_CONFIG], deliver_).
       // A GridSync is re-published until the node's CommandAck names one of its
       // msgids. Measured 2026-09-15 on node 2: the single GridSync sent after a
       // login was lost (the node spent the burst in CAD retries) and nothing
@@ -1131,6 +1161,7 @@ namespace esphome
       void mbs_abort_warmup_(bool send_stop);
       void mbs_send_stop_frame_();
       void mbs_yield_to_op_();
+      void mbs_yield_self_();
       void mbs_restart_();
       bool mbs_grid_acked_() const;
       bool mbs_report_fresh_() const;
@@ -1145,8 +1176,8 @@ namespace esphome
       // on-air length is not a trustworthy T0 input.
       bool          rx_timing_trusted_{true};
       uint32_t      noncanonical_frames_{0};
-      static constexpr uint8_t  kSchedMaxRetries   = 3;
-      static constexpr uint32_t kSchedRetryMs      = 5000;
+      static constexpr uint8_t  kSchedMaxRetries   = deliverypolicy::kSchedulePolicy.max_retries;
+      static constexpr uint32_t kSchedRetryMs      = deliverypolicy::kSchedulePolicy.base_wait_ms;
       // The most an ack timer is stretched by the transmit backlog. A ceiling
       // rather than trust: the drain estimate is written from two cores without
       // a lock, and a torn read must not park a retry for hours.
@@ -1545,6 +1576,31 @@ namespace esphome
       DeliverySlot slots_[kDeliveryChannels];
       DeliverySlot       &ctl()       { return this->slots_[CH_CONTROL]; }
       const DeliverySlot &ctl() const { return this->slots_[CH_CONTROL]; }
+      DeliverySlot       &cfg()       { return this->slots_[CH_CONFIG]; }
+      const DeliverySlot &cfg() const { return this->slots_[CH_CONFIG]; }
+
+      // ---- the generic delivery glue (Config channel; Control and Mac to follow) ----
+      // Start `req` on channel `ch`, superseding one already in flight there (its
+      // ack ids stay recognised). The decisions are deliverypolicy::.
+      void     deliver_(DeliveryChannel ch, DeliveryRequest req);
+      // One attempt, and the ack wait that follows it. False: could not be built.
+      bool     dlv_tx_(DeliveryChannel ch, bool retry);
+      void     on_dlv_timeout_(DeliveryChannel ch);
+      void     arm_dlv_timer_(DeliveryChannel ch);
+      void     dlv_give_up_(DeliveryChannel ch);
+      // The node acknowledged `ack_msg_id`: true when a Config / Mac request owns it.
+      bool     dlv_ack_(uint32_t ack_msg_id);
+      // A new session restarts the msgid space: ids on record would alias new ones.
+      void     dlv_forget_ids_();
+      static const char *dlv_timer_(DeliveryChannel ch);
+      // ScheduleConfig, as a request.
+      uint32_t tx_schedule_config_(bool retry, uint32_t *version);
+      bool     on_schedule_acked_(uint32_t version);
+      void     on_schedule_failed_();
+      bool     sched_push_outstanding_() const;
+      // Something is being delivered to this node that a Mode B warm-up must not
+      // run into: a cover op / sysop, a ScheduleConfig, a GridSync.
+      bool     delivery_busy_() const;
       bool     command_failed_{false};
       binary_sensor::BinarySensor *command_failed_bsensor_{nullptr};
       switch_::Switch             *auto_mode_switch_{nullptr};
@@ -1578,7 +1634,6 @@ namespace esphome
       void     handle_command_ack_(uint32_t ack_msg_id);
       // Stages of handle_command_ack_: each returns true when it consumed the ack.
       bool     ack_gridsync_(uint32_t ack_msg_id);
-      bool     ack_schedule_push_(uint32_t ack_msg_id);
       void     record_ack_latency_();
       void     set_command_failed_(bool failed);
       // Arm a ONE-SHOT retransmit timer.  Uses set_timeout (deterministic
