@@ -129,7 +129,7 @@ lora_client:
     time_id: homeassistant_time
     short_address: 17
     subnet_address: 02
-    sleep_duration: 600   # TEST 2026-10-11 (10 min): restore to 21600 (6 h) after the sleep tests
+    sleep_duration: 21600
     battery_update_interval: 15min
     mac_address: e0:8c:fe:5f:b7:a4
     # P4: automatic (scheduled) mode.
@@ -169,7 +169,7 @@ lora_client:
     time_id: homeassistant_time
     short_address: 18
     subnet_address: 02
-    sleep_duration: 600   # TEST 2026-10-11 (10 min): restore to 21600 (6 h) after the sleep tests
+    sleep_duration: 21600
     battery_update_interval: 15min
     mac_address: e0:8c:fe:5f:9e:c4
     # ---- node 2, bench unit ----
