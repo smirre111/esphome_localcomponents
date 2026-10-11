@@ -1147,6 +1147,8 @@ namespace esphome
       // When the node last ACKNOWLEDGED a GridSync (esp_timer us, 0 = since the last
       // session never). ModeBSupervisor settles on it; see mbs_grid_acked_().
       int64_t       last_gridsync_ack_us_{0};
+      // A re-publish after a node reboot / NoGrid refusal is scheduled and not yet sent.
+      bool          regrid_pending_{false};
 
       // --- ModeBSupervisor glue (ModeBSupervisor.h) ------------------------
       // Keeps a node whose Timed Mode switch is ON in Mode B across node sleep,
@@ -1442,6 +1444,21 @@ namespace esphome
 
       // P2: record a wake beacon and publish the derived clock offset.
       void handle_beacon_(const ::NodeWakeBeacon *b);
+      // Phases of handle_beacon_ (it was CCN 32).
+      void note_wake_clock_(const ::NodeWakeBeacon *b);
+      void note_class_a_ledger_(const ::NodeWakeBeacon *b);
+      bool note_node_reset_(const ::NodeWakeBeacon *b);   // true: the reset reason is new
+      void note_beacon_clock_(const ::NodeWakeBeacon *b);
+      void sync_auto_mode_switch_(const ::NodeWakeBeacon *b);
+      // A node that lost its RAM grid (reboot on a resumed session, or a warm-up it
+      // refused for want of one): forget what we believed and publish it again.
+      // See modebsup::beaconMeansGridLost.
+      void regrid_after_reboot_(const ::NodeWakeBeacon *b, bool reset_changed);
+      void note_warmup_refusal_();
+      bool regrid_node_(const char *why);
+      bool regrid_due_() const;
+      void forget_node_grid_();
+      void regrid_fire_();
       // A node asks for its grid again. See GridSyncRequest in blinds.proto.
       void handle_grid_sync_request_(const ::GridSyncRequest *r);
 

@@ -9711,9 +9711,11 @@ namespace {
 // What the node sends after esp_restart(): a beacon with a non-deep-sleep reset
 // reason and a PhaseReport that says it is NOT in timed RX.
 void deliverRebootBeacon(LORAClient &rol, WakeReason reason, uint32_t reset_reason,
-                         bool timed_rx = false, NodeMode mode = NODE_MODE__MODE_INTERACTIVE) {
+                         bool timed_rx = false, NodeMode mode = NODE_MODE__MODE_INTERACTIVE,
+                         uint32_t phase_samples = 0) {
     ::PhaseReport pr = PHASE_REPORT__INIT;
     pr.timedrxactive = timed_rx;
+    pr.samples       = phase_samples;
     NodeWakeBeacon b = NODE_WAKE_BEACON__INIT;
     b.reason       = reason;
     b.resetreason  = reset_reason;
@@ -9736,20 +9738,329 @@ void promotedNode(ModeBRig &r) {
 }
 }  // namespace
 
-TEST(RebootRegrid, KnownBug_ASoftRebootOnAResumedSessionNeverRepublishesTheGrid) {
+namespace {
+struct RegridProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::dispatch_mac_payload_;
+    using esphome::lora_tracker::LORAListener::relogin_pending_;
+    using esphome::lora_tracker::LORAListener::belief_;
+    using esphome::lora_tracker::LORAListener::have_in_slot_confirm_;
+};
+RegridProbe &RP(LORAClient &c) { return static_cast<RegridProbe &>(c); }
+
+// A node that answers a ModeTest with an arm refusal (the report it sends instantly).
+void deliverArmRefusal(LORAClient &rol, uint32_t refusal) {
+    ModeTestReport rep = MODE_TEST_REPORT__INIT;
+    rep.mode       = 0;
+    rep.armrefusal = refusal;
+    LoraClientResponseMessage msg = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    msg.proto_case     = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT;
+    msg.modetestreport = &rep;
+    static_cast<RegridProbe &>(rol).dispatch_mac_payload_(&msg);
+}
+
+// Encrypted GridSync PUBLISH frames (enable = true) on the air so far.
+size_t encryptedGridPublishes(ModeBRig &r) {
+    size_t n = 0;
+    for (const auto &f : r.radio.hub_to_node_frames()) {
+        LoraClientOperationMessage *m = decrypt_downlink_real(f.bytes, r.base);
+        if (m == nullptr) continue;
+        if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC && m->gridsync != nullptr &&
+            m->gridsync->enable)
+            ++n;
+        lora_client_operation_message__free_unpacked(m, nullptr);
+    }
+    return n;
+}
+
+// Run `s` seconds with the log captured; the number of GridSync publishes in it.
+int publishesDuring(ModeBRig &r, uint32_t s) {
+    testing::internal::CaptureStderr();
+    r.secs(s);
+    return occurrences(testing::internal::GetCapturedStderr(), "GridSync PUBLISHED (slot");
+}
+}  // namespace
+
+// The observed pair: MODE_CHANGED then BOOT, both reset=SW, on a resumed session.
+TEST(RebootRegrid, ASoftRebootOnAResumedSessionRepublishesTheGridOnce) {
     ensure_psa_ready();
     ModeBRig r;
     promotedNode(r);
     ASSERT_TRUE(r.rol.mbs_grid_acked_());
+    ASSERT_EQ(r.rol.mbs_warmups_started_, 0u);
+    const size_t enc0 = encryptedGridPublishes(r);
 
     testing::internal::CaptureStderr();
     deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);
     deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
-    r.secs(6);
-    const std::string log = testing::internal::GetCapturedStderr();
+    const std::string head = testing::internal::GetCapturedStderr();
 
-    EXPECT_EQ(occurrences(log, "GridSync PUBLISHED (slot"), 0) << "KnownBug: no re-publish";
-    EXPECT_TRUE(r.rol.mbs_grid_acked_()) << "KnownBug: the pre-reboot ack is still trusted";
-    // ... so the supervisor warms up into a node that holds no grid.
-    EXPECT_GE(r.untilWarmup(modebsup::kJitterMaxS + 3 * modebsup::kTickS), 0);
+    EXPECT_FALSE(r.rol.mbs_grid_acked_()) << "the pre-reboot acknowledgement no longer counts";
+    EXPECT_EQ(r.rol.last_gridsync_ack_us_, 0);
+    EXPECT_EQ(occurrences(head, "GridSync PUBLISHED (slot"), 0) << "not before the 1.25 s the D1 path waits";
+    EXPECT_EQ(occurrences(head, "Node rebooted without a login"), 1) << "the pair is ONE event";
+
+    EXPECT_EQ(publishesDuring(r, 3), 1) << "re-published ~1.25 s later, once";
+    EXPECT_TRUE(r.rol.gridSyncAwaitingAck());
+    EXPECT_EQ(encryptedGridPublishes(r), enc0 + 1) << "under the live session, not in the clear";
+    EXPECT_EQ(publishedGrids(r).size(), 0u);
+}
+
+TEST(RebootRegrid, ALoneBootBeaconRepublishesToo) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(publishesDuring(r, 3), 1);
+}
+
+TEST(RebootRegrid, ABeaconThatArrivesWhileThePublishIsAwaitingItsAckDoesNotPublishAgain) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);
+    EXPECT_EQ(publishesDuring(r, 3), 1);
+    ASSERT_TRUE(r.rol.gridSyncAwaitingAck());
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);   // the late half of the pair
+    EXPECT_EQ(publishesDuring(r, 3), 0) << "the ladder in flight is already doing the job";
+}
+
+TEST(RebootRegrid, TheSupervisorWarmsUpOnlyAfterTheNewAckHasSettled) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    // Without the fix the stale ack let a warm-up start within ~20 s.
+    r.secs(3);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "never against the pre-reboot acknowledgement";
+    ASSERT_TRUE(r.rol.gridSyncAwaitingAck());
+    r.ackGrid();                                     // the node adopts the NEW grid
+    r.secs(modebsup::kGridSettleS - 2);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "and not before that one has settled";
+    ASSERT_GE(r.untilWarmup(modebsup::kJitterMaxS + 3 * modebsup::kTickS), 0);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u) << "Mode B is re-established automatically";
+}
+
+TEST(RebootRegrid, TheRebootAlsoDropsThePromotedBeliefAndTheBackoff) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    ASSERT_TRUE(r.rol.hubBeliefNow_().phase_reported);
+    // The beacon itself still carries phase samples (a stale report is what the
+    // forgetting has to outweigh).
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw, false, NODE_MODE__MODE_INTERACTIVE, 12);
+    const timedmode::HubBelief b = r.rol.hubBeliefNow_();
+    EXPECT_FALSE(b.phase_reported);
+    EXPECT_FALSE(b.node_timed_rx);
+    EXPECT_EQ(b.phase_samples, 0u);
+    EXPECT_EQ(b.confirmation_age_s, 0xFFFFFFFFu) << "no report from this boot yet";
+    EXPECT_TRUE(b.rebooted_since_confirm) << "single shot must be earned again";
+    EXPECT_EQ(r.rol.txPolicyNow(), timedmode::TxPolicy::Burst);
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u);
+}
+
+TEST(RebootRegrid, AMidWarmUpRebootBeaconAbortsTheWarmUpAndResetsTheBackoff) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_FALSE(r.rol.mode_test_active()) << "the marks go to a node with no grid";
+    EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
+}
+
+TEST(RebootRegrid, OrdinaryBeaconsAndAStaleResetReasonDoNotRepublish) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_CHECKIN, kResetSw, true);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_EVENT, kResetSw, true);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BUTTON, kResetSw, true);
+    EXPECT_EQ(publishesDuring(r, 5), 0) << "periodic beacons never trigger it";
+    EXPECT_TRUE(r.rol.mbs_grid_acked_());
+
+    // A node that says it is in timed RX holds a grid whatever else it says.
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw, /*timed_rx=*/true);
+    EXPECT_EQ(publishesDuring(r, 5), 0);
+    EXPECT_TRUE(r.rol.mbs_grid_acked_());
+}
+
+TEST(RebootRegrid, AModeChangedBeaconWithAnUnchangedResetReasonIsNotAReboot) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);   // the reboot
+    EXPECT_EQ(publishesDuring(r, 3), 1);
+    r.ackGrid();
+    r.secs(modebsup::kRegridMinGapS + 5);
+    r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, true);
+    // Later, an ordinary mode change still reports the old SW reset reason.
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw, true);
+    EXPECT_EQ(publishesDuring(r, 5), 0);
+}
+
+TEST(RebootRegrid, ADeepSleepWakeIsLeftToItsExistingPath) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetDeepSleep);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetDeepSleep);
+    EXPECT_EQ(publishesDuring(r, 5), 0);
+    EXPECT_TRUE(r.rol.mbs_grid_acked_()) << "nothing is invalidated";
+}
+
+TEST(RebootRegrid, ANodeWithTimedModeOffIsUntouched) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    ASSERT_FALSE(r.rol.timed_mode_enabled());
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(publishesDuring(r, 5), 0) << "no GridSync for a node that is not meant to have a grid";
+    EXPECT_FALSE(r.rol.regrid_pending_);
+    EXPECT_FALSE(r.rol.gridSyncAwaitingAck());
+}
+
+TEST(RebootRegrid, AnAutoModeNodeIsUntouched) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw, false, NODE_MODE__MODE_AUTO);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw, false, NODE_MODE__MODE_AUTO);
+    EXPECT_EQ(publishesDuring(r, 5), 0) << "an auto-mode node deep-sleeps; Mode B cannot hold there";
+    EXPECT_TRUE(r.rol.mbs_grid_acked_());
+}
+
+TEST(RebootRegrid, TwoNodesAreIndependent) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    SecondNode b(r);
+    ASSERT_TRUE(b.rol2.timed_mode_enabled());
+    r.secs(1);
+    const bool b_acked = b.rol2.mbs_grid_acked_();
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_FALSE(r.rol.mbs_grid_acked_());
+    EXPECT_EQ(b.rol2.mbs_grid_acked_(), b_acked) << "the other node's acknowledgement is its own";
+    EXPECT_FALSE(b.rol2.regrid_pending_);
+    EXPECT_TRUE(r.rol.regrid_pending_);
+}
+
+TEST(RebootRegrid, ABeaconBeforeALoginDefersToTheLoginPublish) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    // A full relogin is under way: the D1 publish at its confirmation will do it.
+    static_cast<RegridProbe &>(r.rol).relogin_pending_ = true;
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(publishesDuring(r, 4), 0) << "send_grid_sync defers while the session is rebuilt";
+}
+
+// --- the same class of failure, whatever the trigger: the node says NoGrid --------------
+
+TEST(RebootRegrid, ANoGridRefusalOfTheWarmUpRepublishesTheGridInsteadOfBlindlyRetrying) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    ASSERT_TRUE(r.rol.mbs_grid_acked_());
+
+    testing::internal::CaptureStderr();
+    deliverArmRefusal(r.rol, modebsup::kArmRefusalNoGrid);
+    const std::string head = testing::internal::GetCapturedStderr();
+    EXPECT_FALSE(r.rol.mode_test_active()) << "the refused warm-up is stopped, not left running";
+    EXPECT_FALSE(r.rol.mbs_grid_acked_());
+    EXPECT_EQ(occurrences(head, "Node refused the Mode B warm-up: no grid"), 1);
+    EXPECT_EQ(publishesDuring(r, 3), 1);
+    EXPECT_TRUE(r.rol.gridSyncAwaitingAck());
+
+    // The supervisor carries on: this attempt fails, the backoff applies, and the
+    // next warm-up waits for the new ack.
+    r.ackGrid();                                     // the node adopts the re-published grid
+    ASSERT_TRUE(r.untilFailures(1, modebsup::kVerifyGraceS + modebsup::kWarmupS + 30));
+    const uint32_t started = r.rol.mbs_warmups_started_;
+    const int again = r.untilWarmup(modebsup::kBackoffS[0] + modebsup::kJitterMaxS + 30);
+    EXPECT_GE(again, (int) (modebsup::kBackoffS[0] - 2 * modebsup::kTickS))
+        << "the failure backoff still applies: no tight retry loop";
+    EXPECT_EQ(r.rol.mbs_warmups_started_, started + 1) << "and it does retry, on an acknowledged grid";
+}
+
+TEST(RebootRegrid, ANoGridRefusalOutweighsEverythingTheHubBelievedAboutTheNodesGrid) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    // Whatever earlier reports said, a refusal for want of a grid is the newest word.
+    r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, /*node_timed_rx=*/true);
+    RP(r.rol).belief_.in_slot_acks = 5;
+    RP(r.rol).have_in_slot_confirm_ = true;
+    ASSERT_TRUE(r.rol.hubBeliefNow_().node_timed_rx);
+    deliverArmRefusal(r.rol, modebsup::kArmRefusalNoGrid);
+    const timedmode::HubBelief b = r.rol.hubBeliefNow_();
+    EXPECT_FALSE(b.node_timed_rx);
+    EXPECT_FALSE(b.phase_reported);
+    EXPECT_EQ(b.phase_samples, 0u);
+    EXPECT_EQ(b.in_slot_acks, 0u);
+    EXPECT_FALSE(RP(r.rol).have_in_slot_confirm_);
+    EXPECT_EQ(b.confirmation_age_s, 0xFFFFFFFFu);
+}
+
+TEST(RebootRegrid, ALateNoGridReportAfterTheWarmUpEndedOrOnAnOperatorsTestDoesNotRepublish) {
+    ensure_psa_ready();
+    {   // our warm-up has run out; the supervisor's ownership flag is still set
+        ModeBRig r;
+        r.session();
+        r.rol.enable_timed_mode(true);
+        r.ackGrid();
+        ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+        r.secs(modebsup::kWarmupS + 6);
+        ASSERT_FALSE(r.rol.mode_test_active());
+        deliverArmRefusal(r.rol, modebsup::kArmRefusalNoGrid);
+        EXPECT_EQ(publishesDuring(r, 3), 0);
+        EXPECT_TRUE(r.rol.mbs_grid_acked_());
+    }
+    {   // the operator's ModeTest is on the air
+        ModeBRig r;
+        r.session();
+        r.rol.enable_timed_mode(true);
+        r.ackGrid();
+        r.rol.start_mode_test(900, 1500, 2, 1, true, true, false, true);
+        ASSERT_TRUE(r.rol.mode_test_active());
+        ASSERT_FALSE(r.rol.mbs_owns_test_);
+        r.secs(modebsup::kRegridMinGapS + 5);   // so only the ownership test stands in the way
+        deliverArmRefusal(r.rol, modebsup::kArmRefusalNoGrid);
+        EXPECT_TRUE(r.rol.mode_test_active()) << "somebody else's measurement is left alone";
+        EXPECT_EQ(publishesDuring(r, 3), 0);
+        EXPECT_TRUE(r.rol.mbs_grid_acked_());
+    }
+}
+
+TEST(RebootRegrid, OtherRefusalsAndAnOperatorsTestDoNotRepublish) {
+    ensure_psa_ready();
+    {   // a different refusal on OUR warm-up
+        ModeBRig r;
+        r.session();
+        r.rol.enable_timed_mode(true);
+        r.ackGrid();
+        ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+        deliverArmRefusal(r.rol, 5 /* BatteryTooLow */);
+        EXPECT_EQ(publishesDuring(r, 3), 0);
+        EXPECT_TRUE(r.rol.mbs_grid_acked_());
+    }
+    {   // NoGrid, but nobody's warm-up is on the air
+        ModeBRig r;
+        r.session();
+        r.rol.enable_timed_mode(true);
+        r.ackGrid();
+        r.secs(modebsup::kRegridMinGapS + 5);
+        deliverArmRefusal(r.rol, modebsup::kArmRefusalNoGrid);
+        EXPECT_EQ(publishesDuring(r, 3), 0);
+        EXPECT_TRUE(r.rol.mbs_grid_acked_());
+    }
 }

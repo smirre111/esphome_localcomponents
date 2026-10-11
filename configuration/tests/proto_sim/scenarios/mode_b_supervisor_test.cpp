@@ -6,6 +6,7 @@
 // state machine with hand-built Inputs and a virtual uptime-seconds clock.
 
 #include "ModeBSupervisor.h"
+#include "ModeTestPolicy.h"
 
 #include <gtest/gtest.h>
 
@@ -667,4 +668,46 @@ TEST(ModeBFleet, AHubRebootThatDemotesEveryNodeBringsEveryNodeBack) {
     for (size_t i = 0; i < f.n.size(); ++i)
         EXPECT_TRUE(f.n[i].in.promoted) << "node " << i << " was not re-established";
     EXPECT_LE(f.max_concurrent, 1u);
+}
+
+// ---------------------------------------------------------------------------
+// A node that came back from a reboot without its RAM grid (2026-10-11).
+// ---------------------------------------------------------------------------
+TEST(RegridPolicy, TheWireValuesAreThePinnedOnes) {
+    EXPECT_EQ(kArmRefusalNoGrid, (uint32_t) modetest::ArmRefusal::NoGrid)
+        << "the node's ModeTestPolicy.h enum is the wire value";
+    EXPECT_EQ(kWakeBoot, 0u);
+    EXPECT_EQ(kWakeModeChanged, 5u);
+    EXPECT_EQ(kResetDeepSleep, 8u);
+}
+
+TEST(RegridPolicy, ARebootBeaconMeansTheGridIsGone) {
+    const uint32_t kSw = 3;
+    EXPECT_TRUE(beaconMeansGridLost(kWakeBoot, kSw, false, false)) << "BOOT is always a boot";
+    EXPECT_TRUE(beaconMeansGridLost(kWakeBoot, kSw, true, false));
+    EXPECT_TRUE(beaconMeansGridLost(kWakeModeChanged, kSw, true, false)) << "a NEW reset reason";
+    EXPECT_FALSE(beaconMeansGridLost(kWakeModeChanged, kSw, false, false))
+        << "an old, stale reset reason on an ordinary mode change is not a reboot";
+    for (uint32_t w = 1; w <= 4; ++w)
+        EXPECT_FALSE(beaconMeansGridLost(w, kSw, true, false)) << "wake reason " << w << " is periodic";
+}
+
+TEST(RegridPolicy, ADeepSleepWakeAndANodeInTimedRxAreNeverTreatedAsLostGrid) {
+    EXPECT_FALSE(beaconMeansGridLost(kWakeBoot, kResetDeepSleep, true, false));
+    EXPECT_FALSE(beaconMeansGridLost(kWakeModeChanged, kResetDeepSleep, true, false));
+    EXPECT_FALSE(beaconMeansGridLost(kWakeBoot, 3, true, true)) << "it reports timed RX: it has a grid";
+    EXPECT_FALSE(beaconMeansGridLost(kWakeModeChanged, 3, true, true));
+}
+
+TEST(RegridPolicy, ARepublishIsDueOnlyWhenNoneIsPendingInFlightOrJustSent) {
+    EXPECT_TRUE(regridDue(false, false, 0xFFFFFFFFu));
+    EXPECT_TRUE(regridDue(false, false, kRegridMinGapS));
+    EXPECT_FALSE(regridDue(false, false, kRegridMinGapS - 1)) << "just published";
+    EXPECT_FALSE(regridDue(true, false, 0xFFFFFFFFu)) << "already scheduled";
+    EXPECT_FALSE(regridDue(false, true, 0xFFFFFFFFu)) << "its ladder is in flight";
+}
+
+TEST(RegridPolicy, TheRepublishFollowsTheTimeSyncAndPrecedesTheSchedulePush) {
+    EXPECT_GT(kRegridDelayMs, 750u) << "TimeSync (beacon path) first";
+    EXPECT_LT(kRegridDelayMs, 2000u) << "ScheduleConfig push second";
 }

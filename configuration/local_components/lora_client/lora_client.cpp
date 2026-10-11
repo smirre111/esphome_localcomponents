@@ -2569,7 +2569,10 @@ namespace esphome
       // ModeTest results. Also MAC-layer: never forwarded to a cover.
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT &&
                msg->modetestreport)
+      {
         this->handle_mode_test_report_(msg->modetestreport);
+        this->note_warmup_refusal_();
+      }
       // The node asks for its grid again. Also MAC-layer: never forwarded.
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST &&
                msg->gridsyncrequest)
@@ -5369,21 +5372,20 @@ static const char *s_reset_reason_name(uint32_t r)
   }
 }
 
+// POSITIONAL: the index IS the wire value, so a new WakeReason must be
+// appended here in the same commit or it reads as "?" — the bound below
+// is the other half and they must move together.
+static const char *s_wake_reason_name(int r)
+{
+  static const char *const kReason[] = {"BOOT", "TIMER_EVENT", "TIMER_CHECKIN",
+                                        "BUTTON", "UNKNOWN", "MODE_CHANGED"};
+  return (r >= 0 && r < (int) (sizeof(kReason) / sizeof(kReason[0]))) ? kReason[r] : "?";
+}
+
 void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
     {
       if (b == nullptr)
         return;
-
-      // POSITIONAL: the index IS the wire value, so a new WakeReason must be
-      // appended here in the same commit or it reads as "?" — the bound below
-      // is the other half and they must move together.
-      static const char *const kReason[] = {"BOOT", "TIMER_EVENT", "TIMER_CHECKIN",
-                                            "BUTTON", "UNKNOWN", "MODE_CHANGED"};
-      const char *reason =
-          (b->reason >= 0 &&
-           b->reason < (int) (sizeof(kReason) / sizeof(kReason[0])))
-              ? kReason[b->reason]
-              : "?";
 
       this->last_beacon_reason_  = b->reason;
       this->node_mode_           = b->mode;
@@ -5391,6 +5393,59 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       this->node_fw_version_     = b->fwversion;
       this->node_session_resume_ = b->sessionresume;
 
+      this->note_wake_clock_(b);
+      this->note_class_a_ledger_(b);
+      const bool reset_changed = this->note_node_reset_(b);
+
+      // §4.6's promotion evidence. handle_beacon_ runs only for a DECRYPTED
+      // beacon, which is what makes this an authenticated observation.
+      this->notePhaseReport_(b->phase);
+
+      // The node is back from a reboot that cost it its RAM grid, on a session it
+      // RESUMED from NVS (so no LOGIN, hence no D1 publish). After notePhaseReport_,
+      // which would otherwise overwrite the verdict with this very beacon's report.
+      this->regrid_after_reboot_(b, reset_changed);
+
+      this->note_beacon_clock_(b);
+
+      // P2b: ALWAYS answer a beacon with a TimeSync.
+      //
+      // Two jobs in one frame.  It refreshes the node's clock on every wake
+      // (correcting whatever drift accumulated while it slept), and — because
+      // it is encrypted — it is the node's proof that the resumed session
+      // actually works.  A node that took the resume path is sitting on a
+      // fallback timer right now: if this reply never decrypts, it re-registers.
+      //
+      // Same timeout name as the login path, so the two can never double-send:
+      // set_timeout replaces an existing timeout of the same name.
+      this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
+
+      this->sync_auto_mode_switch_(b);
+
+      if (this->schedule_pending_bsensor_ != nullptr)
+        this->schedule_pending_bsensor_->publish_state(this->schedule_pending());
+
+      // P4: push the schedule if the node is not already on our version.
+      //
+      // Version comparison rather than a dirty flag, so this is self-healing:
+      // a node that missed a push, was reflashed, or lost its config.txt
+      // reports a stale version and gets corrected on its very next wake,
+      // without the hub needing to have remembered that it owed one.
+      //
+      // Deferred past the TimeSync so the two do not land on top of each other,
+      // and ordered second because the node needs a clock before a schedule is
+      // of any use to it.
+      if (this->schedule_pending())
+      {
+        ESP_LOGI(TAG, "[%s] Schedule pending (node=0x%08x hub=0x%08x) — pushing",
+                 this->get_name().c_str(), (unsigned) this->node_sched_version_,
+                 (unsigned) this->schedule_version());
+        this->set_timeout("schedule_push", 2000, [this]() { this->send_schedule_config(); });
+      }
+    }
+
+    void LORAListener::note_wake_clock_(const ::NodeWakeBeacon *b)
+    {
       // Mode C, MAC-0: the wake clock. This beacon carries the RTC tick count of
       // the PREVIOUS one; pair it first, then file this beacon's own stamp for
       // the next. The stamp is used only when it belongs to this frame: a
@@ -5425,7 +5480,10 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
                                                        this->wake_fit_.ppm()),
                    (int) this->wake_fit_.ppm());
       }
+    }
 
+    void LORAListener::note_class_a_ledger_(const ::NodeWakeBeacon *b)
+    {
       // Mode C's ledger, stages 1-3: what the node's PREVIOUS wake actually
       // saw. Every beacon carries it, so this is the other half of the
       // offered count above and the pair is what makes a Class A success rate
@@ -5445,14 +5503,18 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
         this->class_a_stats_.detected  += b->prevwakedetected;
         this->class_a_stats_.crc_valid += b->prevwakecrcvalid;
       }
+    }
 
+    bool LORAListener::note_node_reset_(const ::NodeWakeBeacon *b)
+    {
       // N-3 (hub side): a non-deep-sleep reset means the node's SessionManager
       // restored rx_id_ with a +16 margin and a fully-seen bitmap over it (see
       // BlindsESP's SessionManager::load()) — the node will refuse to accept
       // any downlink msgid inside that margin. Advance this listener's own
       // downlink counter to match, once per actual reboot (not once per
       // beacon — DEEPSLEEP wakes report the same reason on every beacon).
-      if (b->resetreason != this->last_handled_reset_reason_)
+      const bool changed = (b->resetreason != this->last_handled_reset_reason_);
+      if (changed)
       {
         this->last_handled_reset_reason_ = b->resetreason;
         if (b->resetreason != 8 /* DEEPSLEEP */)
@@ -5464,10 +5526,12 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
         }
       }
 
-      // §4.6's promotion evidence. handle_beacon_ runs only for a DECRYPTED
-      // beacon, which is what makes this an authenticated observation.
-      this->notePhaseReport_(b->phase);
+      return changed;
+    }
 
+    void LORAListener::note_beacon_clock_(const ::NodeWakeBeacon *b)
+    {
+      const char *reason = s_wake_reason_name(b->reason);
       // Reference point for predicting the next check-in — see
       // last_beacon_epoch_. The node beacons on every wake, so this is the
       // most recent moment it was provably awake.
@@ -5503,19 +5567,10 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                  s_reset_reason_name(b->resetreason),
                  (unsigned) b->fwversion, (int) b->sessionresume);
       }
+    }
 
-      // P2b: ALWAYS answer a beacon with a TimeSync.
-      //
-      // Two jobs in one frame.  It refreshes the node's clock on every wake
-      // (correcting whatever drift accumulated while it slept), and — because
-      // it is encrypted — it is the node's proof that the resumed session
-      // actually works.  A node that took the resume path is sitting on a
-      // fallback timer right now: if this reply never decrypts, it re-registers.
-      //
-      // Same timeout name as the login path, so the two can never double-send:
-      // set_timeout replaces an existing timeout of the same name.
-      this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
-
+    void LORAListener::sync_auto_mode_switch_(const ::NodeWakeBeacon *b)
+    {
       // P4b: reflect the node's ACTUAL mode in Home Assistant.
       //
       // Requested mode and real mode legitimately diverge: the node refuses auto
@@ -5557,27 +5612,6 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
                       "— leaving the switch as requested",
                  this->get_name().c_str(),
                  (b->mode == NODE_MODE__MODE_AUTO) ? "AUTO" : "INTERACTIVE");
-      }
-
-      if (this->schedule_pending_bsensor_ != nullptr)
-        this->schedule_pending_bsensor_->publish_state(this->schedule_pending());
-
-      // P4: push the schedule if the node is not already on our version.
-      //
-      // Version comparison rather than a dirty flag, so this is self-healing:
-      // a node that missed a push, was reflashed, or lost its config.txt
-      // reports a stale version and gets corrected on its very next wake,
-      // without the hub needing to have remembered that it owed one.
-      //
-      // Deferred past the TimeSync so the two do not land on top of each other,
-      // and ordered second because the node needs a clock before a schedule is
-      // of any use to it.
-      if (this->schedule_pending())
-      {
-        ESP_LOGI(TAG, "[%s] Schedule pending (node=0x%08x hub=0x%08x) — pushing",
-                 this->get_name().c_str(), (unsigned) this->node_sched_version_,
-                 (unsigned) this->schedule_version());
-        this->set_timeout("schedule_push", 2000, [this]() { this->send_schedule_config(); });
       }
     }
 
@@ -6388,6 +6422,75 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     {
       this->mbs_.restart(mbs_arbiter_(), this->mbs_id_());
       this->mbs_abort_warmup_(false);
+    }
+
+    // Everything the hub believed about the node's grid describes a grid it no
+    // longer holds. The promoted belief and the GridSync acknowledgement are the
+    // two the supervisor reads (mbs_inputs_).
+    void LORAListener::forget_node_grid_()
+    {
+      this->last_gridsync_ack_us_          = 0;
+      this->belief_.rebooted_since_confirm = true;
+      this->belief_.in_slot_acks           = 0;
+      this->have_in_slot_confirm_          = false;
+      this->belief_.phase_reported         = false;
+      this->belief_.phase_samples          = 0;
+      this->belief_.node_timed_rx          = false;
+      this->have_phase_report_             = false;
+    }
+
+    bool LORAListener::regrid_due_() const
+    {
+      const uint32_t since =
+          (this->last_gridsync_publish_us_ == 0)
+              ? 0xFFFFFFFFu
+              : (uint32_t) ((esp_timer_get_time() - this->last_gridsync_publish_us_) / 1000000);
+      return modebsup::regridDue(this->regrid_pending_, this->gridSyncAwaitingAck(), since);
+    }
+
+    // Publish the grid again, through the same delivery glue as every other publish
+    // (Mac channel, ladder, encrypted under the live session). Only for a node the
+    // supervisor would manage: Timed Mode ON, not auto-mode. Idempotent through
+    // regrid_due_(). False when nothing was scheduled.
+    bool LORAListener::regrid_node_(const char *why)
+    {
+      if (!this->mbs_supervised_() || !this->regrid_due_())
+        return false;
+      ESP_LOGW(TAG, "[%s] %s — forgetting its grid acknowledgement, GridSync in %u ms",
+               this->get_name().c_str(), why, (unsigned) modebsup::kRegridDelayMs);
+      this->forget_node_grid_();
+      this->regrid_pending_ = true;
+      this->set_timeout("gridsync_regrid", modebsup::kRegridDelayMs, [this]() { this->regrid_fire_(); });
+      return true;
+    }
+
+    void LORAListener::regrid_fire_()
+    {
+      this->regrid_pending_ = false;
+      if (this->timed_mode_enabled_)
+        this->send_grid_sync(true);
+    }
+
+    void LORAListener::regrid_after_reboot_(const ::NodeWakeBeacon *b, bool reset_changed)
+    {
+      const bool timed_rx = (b->phase != nullptr) && b->phase->timedrxactive;
+      if (!modebsup::beaconMeansGridLost((uint32_t) b->reason, b->resetreason, reset_changed, timed_rx))
+        return;
+      if (this->regrid_node_("Node rebooted without a login (grid is RAM)"))
+        this->mbs_restart_();
+    }
+
+    // The node answered OUR warm-up with ArmRefusal::NoGrid: it holds no grid, so
+    // the marks are pointless and a blind retry would be refused the same way.
+    // Stop the warm-up (quietly) and publish the grid; the failure backoff stays.
+    void LORAListener::note_warmup_refusal_()
+    {
+      const ModeTestSummary &s = this->mode_test_summary_;
+      if (!this->mbs_owns_test_ || !this->mode_test_active_ || !s.valid ||
+          s.arm_refusal != modebsup::kArmRefusalNoGrid)
+        return;
+      this->mbs_abort_warmup_(false);
+      this->regrid_node_("Node refused the Mode B warm-up: no grid");
     }
 
     // A GridSync of ours has been acknowledged and nothing newer is outstanding.

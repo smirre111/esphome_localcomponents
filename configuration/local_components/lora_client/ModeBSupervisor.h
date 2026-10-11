@@ -100,6 +100,54 @@ constexpr uint32_t worstCaseAllNodesS(uint32_t n)
     return kGridSettleS + kJitterMaxS + n * (kWarmupS + 5 + 2 * kTickS);
 }
 
+// --- A node that came back without its grid ---------------------------------
+//
+// MEASURED 2026-10-11 (node 2, OTA sysop that aborted): the node restarted
+// (esp_restart, reset reason SW) and RESUMED its session from NVS, so there was
+// no REGISTER and no LOGIN - and the D1 publish ("a GridSync at every confirmed
+// session") lives in confirm_session_ only. The grid is plain RAM on the node, so
+// it came back with none, never asked for one (it cannot: a node with no grid has
+// nothing to call stale, see syncRequestReason), and the supervisor kept warming
+// up against the acknowledgement from BEFORE the reboot. Every warm-up was
+// refused ArmRefusal::NoGrid, retried on the 2 / 5 / 15 min ladder, forever.
+//
+// So the hub reads the grid loss off the beacon the rebooted node sends.
+static constexpr uint32_t kWakeBoot        = 0;   // WakeReason (blinds.proto)
+static constexpr uint32_t kWakeModeChanged = 5;
+static constexpr uint32_t kResetDeepSleep  = 8;   // esp_reset_reason_t
+// ModeTestReport.armRefusal: node ModeTestPolicy.h ArmRefusal::NoGrid.
+static constexpr uint32_t kArmRefusalNoGrid = 8;
+
+// Delay before the re-publish: the same ~1.25 s the D1 publish waits after a
+// confirmed session, so it follows the TimeSync (750 ms) and precedes the
+// schedule push (2 s) in the three-frame sequence.
+static constexpr uint32_t kRegridDelayMs = 1250;
+// A second trigger this soon after a publish is the same event again (the
+// observed MODE_CHANGED + BOOT pair), not a new one.
+static constexpr uint32_t kRegridMinGapS = 20;
+
+// This beacon says the node lost its RAM grid. A non-deep-sleep reset is a
+// reboot (a deep-sleep wake is the auto-mode path and is left as it was); BOOT
+// is always a boot, MODE_CHANGED only counts when the reset reason is new (it
+// also carries a stale reset reason on a later, ordinary mode change); a node
+// whose PhaseReport says timed RX is active holds a grid by definition.
+constexpr bool beaconMeansGridLost(uint32_t wake_reason, uint32_t reset_reason,
+                                   bool reset_reason_changed, bool node_timed_rx)
+{
+    if (node_timed_rx || reset_reason == kResetDeepSleep)
+        return false;
+    return wake_reason == kWakeBoot ||
+           (wake_reason == kWakeModeChanged && reset_reason_changed);
+}
+
+// Re-publish now? Not while one is already scheduled, not while a GridSync is
+// still awaiting its ack (that ladder is already doing the job), and not right
+// after a publish.
+constexpr bool regridDue(bool pending, bool awaiting_ack, uint32_t s_since_publish)
+{
+    return !pending && !awaiting_ack && s_since_publish >= kRegridMinGapS;
+}
+
 // An uptime-seconds comparison that survives uint32 wrap.
 constexpr bool reached(uint32_t now_s, uint32_t t_s)
 {
