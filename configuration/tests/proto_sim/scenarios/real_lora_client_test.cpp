@@ -1014,6 +1014,29 @@ TEST(RealLoraClient, EnterSleepEmitsSleepCmdAndArmsFallback) {
         << "Real enterSleep() must transmit CMD_SLEEP exactly once.";
 }
 
+
+// CHARACTERISATION of the pre-2026-10-11 nightly sleep (replaced by the tracked
+// path below). One raw, unacked, unretried frame, and the hub's session state
+// torn down BEFORE the frame had been heard.
+TEST(RealLoraClient, CharacterisationOldEnterSleepIsOneRawFrameWithEagerStateMutation) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.time.set_now(1787000000, /*valid=*/true);
+    h.rol.login_acked_         = true;
+    h.rol.pending_login_nonce_ = 0x1234;
+
+    h.rol.enterSleep();
+
+    EXPECT_FALSE(h.rol.awaitingAck()) << "old: not a tracked op";
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 1787000000u) << "old: stamped before any ack";
+    EXPECT_FALSE(h.rol.login_acked_) << "old: session torn down before any ack";
+    EXPECT_EQ(h.rol.pending_login_nonce_, 0u);
+
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(30'000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "old: never retransmitted";
+}
 // Real-code: triggerOTA emits CMD_OTA.
 TEST(RealLoraClient, TriggerOtaEmitsOtaSysop) {
     using namespace real_helpers;
