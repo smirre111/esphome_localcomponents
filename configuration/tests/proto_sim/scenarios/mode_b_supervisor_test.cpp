@@ -711,3 +711,31 @@ TEST(RegridPolicy, TheRepublishFollowsTheTimeSyncAndPrecedesTheSchedulePush) {
     EXPECT_GT(kRegridDelayMs, 750u) << "TimeSync (beacon path) first";
     EXPECT_LT(kRegridDelayMs, 2000u) << "ScheduleConfig push second";
 }
+
+TEST(BootAdvancePolicy, EveryBootAdvancesOnceAndNothingElseDoes) {
+    const uint32_t kSw = 3, kNever = 0xFFFFFFFFu;
+    EXPECT_TRUE(bootAdvancesTx(kWakeBoot, kSw, false, true, false, kNever)) << "BOOT, reset reason unchanged";
+    EXPECT_TRUE(bootAdvancesTx(kWakeModeChanged, kSw, false, true, false, kNever));
+    EXPECT_TRUE(bootAdvancesTx(2, kSw, true, true, false, kNever)) << "a new reset reason on any beacon";
+    EXPECT_FALSE(bootAdvancesTx(2, kSw, false, true, false, kNever)) << "periodic beacon, stale reason";
+    EXPECT_FALSE(bootAdvancesTx(kWakeBoot, kSw, true, true, false, kRegridMinGapS - 1)) << "the pair / a duplicate";
+    EXPECT_TRUE(bootAdvancesTx(kWakeBoot, kSw, true, true, false, kRegridMinGapS));
+}
+
+TEST(BootAdvancePolicy, ADeepSleepWakeAdvancesOnlyWhenResumedAndNew) {
+    const uint32_t kNever = 0xFFFFFFFFu;
+    EXPECT_TRUE(bootAdvancesTx(2, kResetDeepSleep, true, true, true, kNever));
+    EXPECT_FALSE(bootAdvancesTx(2, kResetDeepSleep, true, true, false, kNever)) << "same wake";
+    EXPECT_FALSE(bootAdvancesTx(2, kResetDeepSleep, true, false, true, kNever)) << "it logs in instead";
+    EXPECT_FALSE(bootAdvancesTx(kWakeBoot, kResetDeepSleep, true, false, false, kNever));
+}
+
+TEST(BootAdvancePolicy, ASpentLadderForcesALoginOnlyWhenDeafAndRecentAndNotRepeatedly) {
+    EXPECT_TRUE(reloginAfterSpentLadder(30, false, 0xFFFFFFFFu));
+    EXPECT_FALSE(reloginAfterSpentLadder(30, true, 0xFFFFFFFFu)) << "an ack proves the node hears us";
+    EXPECT_FALSE(reloginAfterSpentLadder(kWedgeWindowS + 1, false, 0xFFFFFFFFu)) << "not related to a reboot";
+    EXPECT_FALSE(reloginAfterSpentLadder(0xFFFFFFFFu, false, 0xFFFFFFFFu)) << "no reboot seen";
+    EXPECT_FALSE(reloginAfterSpentLadder(30, false, kForcedReloginGapS - 1)) << "no storm";
+    EXPECT_TRUE(reloginAfterSpentLadder(30, false, kForcedReloginGapS));
+    EXPECT_EQ(kTxBootMargin, 16u) << "the node's SessionManager::kRxPersistMargin";
+}

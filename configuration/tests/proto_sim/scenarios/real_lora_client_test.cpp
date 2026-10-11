@@ -9712,7 +9712,7 @@ namespace {
 // reason and a PhaseReport that says it is NOT in timed RX.
 void deliverRebootBeacon(LORAClient &rol, WakeReason reason, uint32_t reset_reason,
                          bool timed_rx = false, NodeMode mode = NODE_MODE__MODE_INTERACTIVE,
-                         uint32_t phase_samples = 0) {
+                         uint32_t phase_samples = 0, uint32_t prev_msgid = 0, bool resume = true) {
     ::PhaseReport pr = PHASE_REPORT__INIT;
     pr.timedrxactive = timed_rx;
     pr.samples       = phase_samples;
@@ -9721,7 +9721,8 @@ void deliverRebootBeacon(LORAClient &rol, WakeReason reason, uint32_t reset_reas
     b.resetreason  = reset_reason;
     b.mode         = mode;
     b.fwversion    = 0x00010203;
-    b.sessionresume = true;
+    b.sessionresume = resume;
+    b.prevbeaconmsgid = prev_msgid;
     b.phase        = &pr;
     static_cast<BeaconProbe &>(rol).handle_beacon_(&b);
 }
@@ -9744,6 +9745,12 @@ struct RegridProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::belief_;
     using esphome::lora_tracker::LORAListener::have_in_slot_confirm_;
+    using esphome::lora_tracker::LORAListener::frame_counter_;
+    using esphome::lora_tracker::LORAListener::on_sleep_acknowledged_;
+    using esphome::lora_tracker::LORAListener::confirm_session_;
+    using esphome::lora_tracker::LORAListener::acked_since_confirm_;
+    using esphome::lora_tracker::LORAListener::login_acked_;
+    using esphome::lora_tracker::LORAListener::handle_command_ack_;
 };
 RegridProbe &RP(LORAClient &c) { return static_cast<RegridProbe &>(c); }
 
@@ -10130,4 +10137,170 @@ TEST(RegridOnce, ASecondGenuineRebootMinutesLaterPublishesAgain) {
     r.secs(60);
     deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
     EXPECT_EQ(publishesDuring(r, 3), 1) << "a new reboot is a new event";
+}
+
+// --- 2026-10-11: the downlink counter advances once per node BOOT -----------------------
+namespace {
+uint32_t txId(LORAClient &rol) { return RP(rol).frame_counter_.tx_message_id; }
+}  // namespace
+
+TEST(BootAdvance, TwoConsecutiveSoftRebootsAdvanceTwice) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    const uint32_t t0 = txId(r.rol);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(txId(r.rol), t0 + modebsup::kTxBootMargin) << "the MODE_CHANGED + BOOT pair is ONE boot";
+    r.secs(60);
+    const uint32_t t1 = txId(r.rol);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetSw);   // same reset reason again
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(txId(r.rol), t1 + modebsup::kTxBootMargin) << "the 2nd OTA restart advances too";
+}
+
+TEST(BootAdvance, ALoneBootBeaconAfterAnEarlierSwRebootStillAdvances) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(60);
+    const uint32_t t1 = txId(r.rol);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(txId(r.rol), t1 + modebsup::kTxBootMargin);
+}
+
+TEST(BootAdvance, ADuplicateBootBeaconAdvancesOnce) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    testing::internal::CaptureStderr();
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(5);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    EXPECT_EQ(occurrences(testing::internal::GetCapturedStderr(), "advancing tx_message_id by 16"), 1);
+}
+
+TEST(BootAdvance, PeriodicBeaconsWithAStaleResetReasonDoNotAdvance) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(60);
+    const uint32_t t1 = txId(r.rol);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_CHECKIN, kResetSw, true);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BUTTON, kResetSw, true);
+    EXPECT_EQ(txId(r.rol), t1);
+}
+
+TEST(BootAdvance, ADeepSleepWakeOnAResumedSessionAdvancesOncePerWake) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    testing::internal::CaptureStderr();
+    // beacons of ONE wake carry the same previous-beacon msgid
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_MODE_CHANGED, kResetDeepSleep, true, NODE_MODE__MODE_INTERACTIVE, 0, 77);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_CHECKIN, kResetDeepSleep, true, NODE_MODE__MODE_INTERACTIVE, 0, 77);
+    r.secs(30);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_CHECKIN, kResetDeepSleep, true, NODE_MODE__MODE_INTERACTIVE, 0, 77);
+    EXPECT_EQ(occurrences(testing::internal::GetCapturedStderr(), "advancing tx_message_id by 16"), 1);
+    testing::internal::CaptureStderr();
+    r.secs(600);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_CHECKIN, kResetDeepSleep, true, NODE_MODE__MODE_INTERACTIVE, 0, 90);
+    EXPECT_EQ(occurrences(testing::internal::GetCapturedStderr(), "advancing tx_message_id by 16"), 1) << "the next wake";
+}
+
+TEST(BootAdvance, ADeepSleepWakeThatDidNotResumeTheSessionDoesNotAdvance) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    const uint32_t t0 = txId(r.rol);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_CHECKIN, kResetDeepSleep, true, NODE_MODE__MODE_INTERACTIVE, 0, 77, /*resume=*/false);
+    EXPECT_EQ(txId(r.rol), t0) << "it logs in: the login resets the counters";
+}
+
+TEST(BootAdvance, ASpentGridSyncLadderWithNoAckAfterARebootForcesOneLoginAtMost) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(70);                                  // publish + 5 re-publishes, nobody answers
+    EXPECT_GT(msgidsOf(r, OpCmd::Login).size(), logins0) << "a deaf node gets a fresh LOGIN";
+    const size_t logins1 = msgidsOf(r, OpCmd::Login).size();
+    r.secs(modebsup::kRegridMinGapS + 5);
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(70);
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins1) << "rate limited: no relogin storm";
+}
+
+TEST(BootAdvance, AnAckedGridSyncAfterARebootNeverForcesALogin) {
+    ensure_psa_ready();
+    ModeBRig r;
+    promotedNode(r);
+    const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
+    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
+    r.secs(3);
+    r.ackGrid();
+    r.secs(120);
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0);
+}
+
+// --- B: one wake, one login --------------------------------------------------------------
+namespace {
+// Sleep acknowledged, then the node wakes on a RESUMED session (no REGISTER).
+void sleepThenResumedWake(ModeBRig &r, bool node_acks) {
+    r.rol.set_sleep_duration(600);
+    RP(r.rol).on_sleep_acknowledged_();
+    r.secs(595);
+    RP(r.rol).confirm_session_();                 // the first decrypted uplink after the wake
+    ASSERT_TRUE(RP(r.rol).login_acked_);
+    RP(r.rol).acked_since_confirm_ = node_acks;   // it has (not) acked a downlink since
+}
+}  // namespace
+
+TEST(WakeFallback, AResumedNodeThatAcksGetsNoSecondLogin) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
+    sleepThenResumedWake(r, true);
+    r.secs(60);                                   // past the fallback (sleep + 5 s + stagger)
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0) << "the fallback is a no-op";
+}
+
+TEST(WakeFallback, AResumedNodeThatNeverAcksStillGetsTheFallbackLoginAfterOneRecheck) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
+    sleepThenResumedWake(r, false);
+    r.secs(10);                                   // the fallback has fired once and deferred
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0) << "re-checked first";
+    r.secs(modebsup::kFallbackRecheckMs / 1000 + 5);
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0 + 1) << "a node deaf to us is repaired by a LOGIN";
+}
+
+TEST(WakeFallback, ANodeThatNeverWokeGetsTheFallbackLoginAtOnce) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
+    r.rol.set_sleep_duration(600);
+    RP(r.rol).on_sleep_acknowledged_();
+    r.secs(612);
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0 + 1);
+}
+
+TEST(WakeFallback, AnAckArrivingAfterTheWakeDisarmsTheFallbackLogin) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
+    sleepThenResumedWake(r, false);
+    ASSERT_FALSE(RP(r.rol).acked_since_confirm_);
+    RP(r.rol).handle_command_ack_(4242);          // the node acknowledges something we sent
+    EXPECT_TRUE(RP(r.rol).acked_since_confirm_);
+    r.secs(60);
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0);
 }
