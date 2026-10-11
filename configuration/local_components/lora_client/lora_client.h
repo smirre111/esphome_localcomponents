@@ -17,6 +17,7 @@
 // Hub-only: the first ack wait of an optimistic single shot, and the shadow
 // pending-data mask (computed and logged, never transmitted).
 #include "esphome/components/lora_client/SingleShotAckWait.h"
+#include "esphome/components/lora_client/DeliveryPolicy.h"
 #include "esphome/components/lora_client/ModeBSupervisor.h"
 #include "esphome/components/lora_client/PendingShadow.h"
 

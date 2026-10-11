@@ -226,6 +226,7 @@ add_header_test(mode_test_policy_test)
 add_header_test(pending_data_test)
 add_header_test(pending_shadow_test)
 add_header_test(single_shot_ack_wait_test)
+add_header_test(delivery_policy_test)
 add_header_test(mode_b_supervisor_test)
 
 # ----------------------------------------------------------------------------

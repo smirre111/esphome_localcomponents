@@ -3479,7 +3479,7 @@ namespace esphome
       // the frame needs to land and be answered, not after 3 s. See
       // SingleShotAckWait.h for the derivation. Measured from the placed mark,
       // which is where the frame actually goes out, not from now.
-      const bool short_wait = singleshotwait::useShortFirstWait(
+      const bool short_wait = deliverypolicy::isShortFirstWait(
           this->op_sent_optimistic_, this->op_retry_count_, this->op_short_wait_spent_);
       uint32_t wait_ms = this->ack_wait_ms_(kOpRetryIntervalMs);
       this->op_first_tail_ms_ = 0;
@@ -3523,36 +3523,42 @@ namespace esphome
     // The one-shot "op_retry" timer body.
     void LORAListener::on_op_retry_timeout_(bool short_wait)
     {
-      if (!this->op_awaiting_ack_)
-        return; // acked already; one-shot, nothing to re-arm
-      // Security review finding 1: a relogin can start WHILE a retry is
-      // already in flight (clearSessionKeys_() empties op_frame_ right
-      // out from under it). Sending now would just be a plaintext frame
-      // the node — still holding its old session — rejects outright, and
-      // counting it would burn a retry for nothing. Wait for
-      // confirm_session_() instead of spending the retry budget on a
-      // session that doesn't exist yet.
-      if (this->relogin_pending_)
+      // The decision is deliverypolicy::onAckTimeout (DeliveryPolicy.h); this
+      // function only performs it.
+      const deliverypolicy::TimeoutDecision d = deliverypolicy::onAckTimeout(
+          {this->op_awaiting_ack_, this->relogin_pending_, short_wait,
+           this->op_retry_count_, kOpMaxRetries});
+      this->op_retry_count_ = d.retries_spent;
+      switch (d.action)
       {
+      case deliverypolicy::TimeoutAction::Stale:
+        return; // acked already; one-shot, nothing to re-arm
+      case deliverypolicy::TimeoutAction::DeferRelogin:
+        // Security review finding 1: a relogin can start WHILE a retry is
+        // already in flight (clearSessionKeys_() empties op_frame_ right
+        // out from under it). Sending now would just be a plaintext frame
+        // the node — still holding its old session — rejects outright, and
+        // counting it would burn a retry for nothing. Wait for
+        // confirm_session_() instead of spending the retry budget on a
+        // session that doesn't exist yet.
         ESP_LOGD(TAG, "[%s] Tracked op retry deferred — session being rebuilt",
                  this->get_name().c_str());
         this->schedule_op_retry_();
         return;
-      }
-      if (short_wait)
-      {
+      case deliverypolicy::TimeoutAction::ShortWaitMissed:
         this->op_short_wait_missed_();
         return;
-      }
-      if (++this->op_retry_count_ > kOpMaxRetries)
-      {
+      case deliverypolicy::TimeoutAction::GiveUp:
         this->op_retries_exhausted_();
         return;
+      case deliverypolicy::TimeoutAction::Retransmit:
+        break;
       }
       // Rule 4: a single shot that went unacked puts this node back on bursts
       // immediately, and stays that way until a fresh in-slot uplink. One
       // frame is the whole exposure — the retry below is already a burst.
-      if (this->op_sent_single_shot_ && !this->belief_.single_shot_unacked)
+      if (deliverypolicy::marksSingleShotUnacked(this->op_sent_single_shot_,
+                                                 this->belief_.single_shot_unacked))
       {
         this->belief_.single_shot_unacked = true;
         ESP_LOGW(TAG, "[%s] single shot unacked — back to bursts until "
@@ -3599,7 +3605,7 @@ namespace esphome
       // A sleep command is the one tracked op whose silence is ambiguous (the node
       // may have slept and lost its ack): never the teardown below. See
       // on_sleep_unconfirmed_().
-      if (this->op_is_sleep_())
+      if (deliverypolicy::giveUpAction(this->op_is_sleep_()) == deliverypolicy::GiveUpAction::FailKeep)
       {
         this->on_sleep_unconfirmed_();
         return;
@@ -3671,19 +3677,16 @@ namespace esphome
     // True when `ack_msg_id` was one of the published GridSync ids.
     bool LORAListener::ack_gridsync_(uint32_t ack_msg_id)
     {
-      for (uint8_t i = 0; i < this->gridsync_msgid_count_; ++i)
-      {
-        if (this->gridsync_msgids_[i] != ack_msg_id)
-          continue;
-        ESP_LOGI(TAG, "[%s] GridSync acknowledged (msgid=%u, %u re-publishes)",
-                 this->get_name().c_str(), (unsigned) ack_msg_id,
-                 (unsigned) this->gridsync_retries_);
-        this->cancel_timeout("gridsync_retry");
-        this->gridsync_msgid_count_ = 0;
-        this->last_gridsync_ack_us_ = esp_timer_get_time();
-        return true;
-      }
-      return false;
+      if (!deliverypolicy::msgIdInSet(this->gridsync_msgids_, this->gridsync_msgid_count_,
+                                      ack_msg_id))
+        return false;
+      ESP_LOGI(TAG, "[%s] GridSync acknowledged (msgid=%u, %u re-publishes)",
+               this->get_name().c_str(), (unsigned) ack_msg_id,
+               (unsigned) this->gridsync_retries_);
+      this->cancel_timeout("gridsync_retry");
+      this->gridsync_msgid_count_ = 0;
+      this->last_gridsync_ack_us_ = esp_timer_get_time();
+      return true;
     }
 
     // A schedule push is acked by the node; that is the only positive
@@ -3734,11 +3737,10 @@ namespace esphome
       if (this->ack_schedule_push_(ack_msg_id))
         return;
 
-      if (!this->op_awaiting_ack_)
-        return;
       // Accept an ack for any msgid in the current command's transmit range
       // (first .. last) since each retransmit uses a fresh, higher msgid.
-      if (ack_msg_id < this->op_first_msgid_ || ack_msg_id > this->op_last_msgid_)
+      if (!deliverypolicy::acceptsRangeAck(this->op_awaiting_ack_, ack_msg_id,
+                                           this->op_first_msgid_, this->op_last_msgid_))
         return;
       this->op_awaiting_ack_ = false;
       this->cancel_timeout("op_retry");
