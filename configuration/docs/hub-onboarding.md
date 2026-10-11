@@ -19,7 +19,7 @@ There is no protocol or wire change and no new frame type. Every fix orders when
 
 | # | fix | where |
 |---|---|---|
-| 1 | `LORAListener::send_downlink()` is the one way a child node hands a downlink to the radio; it encrypts whenever the session is confirmed. The cover uses it. | `lora_client.cpp`, `lora_cover.cpp` |
+| 1 | `LORAListener::send_cover_config()` (a Fire request on the delivery mechanism, `dlv_fire_`) is the one way a child node hands its CoverConfig to the radio; it encrypts whenever the session is confirmed. The cover uses it. | `lora_client.cpp`, `lora_cover.cpp` |
 | 2 | `LORATracker::txDrainUs()` prices every accepted frame as its own burst behind the others; `ack_wait_ms_(base)` adds it to the four ack timers (capped at 60 s). | `lora_tracker.{h,cpp}`, `lora_client.cpp` |
 | 3 | **`OnboardingGate.h`**, a dependency-free policy: a node may start a login challenge only while it holds the gate, and holds it until it is *settled* (session confirmed, ≥3 s for the follow-up pushes to be queued, the hub's queue drained, the schedule acked or its retries spent). Waiters are FIFO. Escape hatches so an absent node cannot block the fleet: released if the node never answers within 15 s (and the hub's own backlog is empty), and capped at 60 s regardless. | `OnboardingGate.h`, `lora_client.cpp` |
 | 4 | `relogin_pending_`: raised by a REGISTER or `send_login()`, cleared by `confirm_session_`; TimeSync, ScheduleConfig and GridSync **publish** wait while it is up. `confirm_session_` already re-sends all three. A grid *withdrawal* is not deferred: it is the safe direction and carries no key. | `lora_client.cpp` |
