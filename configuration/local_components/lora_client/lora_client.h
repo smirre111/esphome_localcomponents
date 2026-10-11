@@ -1556,6 +1556,27 @@ namespace esphome
       void     op_short_wait_missed_();
       void     op_retries_exhausted_();
 
+      // ---- Nightly sleep (enterSleep): a tracked sysop whose hub-side effects
+      // are applied only when the node ACKNOWLEDGES it. See lora_client.cpp. ----
+      // The tracked op in flight (awaiting its ack, or deferred behind a relogin)
+      // is a CMD_SLEEP.
+      bool     op_is_sleep_() const;
+      bool     sleep_op_in_flight_() const;
+      // Ack received: the node is going to sleep. Stamp + persist the sleep,
+      // end the session on the hub side, arm the wake-time login fallback.
+      void     on_sleep_acknowledged_();
+      void     stamp_sleep_epoch_();
+      void     arm_post_sleep_login_fallback_();
+      // Retries exhausted without an ack: outcome unknown, keep everything.
+      void     on_sleep_unconfirmed_();
+      // A CMD_SLEEP stuck behind a relogin (deferred, or its retries deferred)
+      // must not outlive the night: a sleep sent hours late is worse than none.
+      void     arm_pending_sleep_expiry_();
+      void     expire_pending_sleep_();
+      static constexpr uint32_t kPendingSleepExpiryMs = 180000;
+      // True from "retries exhausted, no ack" until the node is next heard.
+      bool     sleep_unconfirmed_{false};
+
       ESPPreferenceObject rtc_;
     };
 

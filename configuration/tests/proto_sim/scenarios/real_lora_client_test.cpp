@@ -1015,28 +1015,6 @@ TEST(RealLoraClient, EnterSleepEmitsSleepCmdAndArmsFallback) {
 }
 
 
-// CHARACTERISATION of the pre-2026-10-11 nightly sleep (replaced by the tracked
-// path below). One raw, unacked, unretried frame, and the hub's session state
-// torn down BEFORE the frame had been heard.
-TEST(RealLoraClient, CharacterisationOldEnterSleepIsOneRawFrameWithEagerStateMutation) {
-    using namespace real_helpers;
-    RealHubHarness h{18, kMacRol2};
-    h.rol.registered_ = true;
-    h.time.set_now(1787000000, /*valid=*/true);
-    h.rol.login_acked_         = true;
-    h.rol.pending_login_nonce_ = 0x1234;
-
-    h.rol.enterSleep();
-
-    EXPECT_FALSE(h.rol.awaitingAck()) << "old: not a tracked op";
-    EXPECT_EQ(h.rol.last_sleep_epoch_, 1787000000u) << "old: stamped before any ack";
-    EXPECT_FALSE(h.rol.login_acked_) << "old: session torn down before any ack";
-    EXPECT_EQ(h.rol.pending_login_nonce_, 0u);
-
-    const size_t sends = h.tracker.sent_copies.size();
-    h.clock.tick(30'000);
-    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "old: never retransmitted";
-}
 // Real-code: triggerOTA emits CMD_OTA.
 TEST(RealLoraClient, TriggerOtaEmitsOtaSysop) {
     using namespace real_helpers;
@@ -1079,6 +1057,7 @@ TEST(RealLoraClient, SleepFallbackFiresWhenRegisterLost) {
     rol.registered_ = true;
 
     rol.enterSleep();
+    deliverAck(rol, static_cast<TrackedOpProbe &>(rol).op_last_msgid_);   // the effects (and the fallback) are the ACK's
     const int before = static_cast<int>(radio.transcript().size());
 
     constexpr uint32_t kExpected = 60u * 1000u + 5000u + 18u * 3000u;
@@ -1129,6 +1108,7 @@ TEST(RealLoraClient, EarlyRegisterCancelsSleepFallback) {
     attach_encrypted_login_ack(radio, rol, /*node_addr=*/18, /*subnet=*/2);
 
     rol.enterSleep();
+    deliverAck(rol, static_cast<TrackedOpProbe &>(rol).op_last_msgid_);   // the fallback timer is armed by the ACK
     const int before = static_cast<int>(radio.transcript().size());
 
     // Node wakes early at 50 s and sends REGISTER.
@@ -7342,4 +7322,482 @@ TEST(ModeBListener, WithNoAckLatencyHistoryTheWaitIsTheSafeDefault) {
     EXPECT_EQ(r.rol.ack_latency_for_test().tailMs(0), singleshotwait::kDefaultTailMs)
         << "no history -> the normal 3 s wait: nothing gained, nothing risked";
     EXPECT_EQ(singleshotwait::kDefaultTailMs, 3000u);
+}
+
+// ---------------------------------------------------------------------------
+// The nightly sleep is a TRACKED sysop whose hub-side effects happen on the ACK
+// (2026-10-11). Before: one raw unacked frame, state torn down before it was
+// heard — on 2026-10-07 the nodes were back in 1.8 s / 3 min, and with Timed Mode
+// ON the unaligned one-shot was missed by a node that listens only in its slot.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct SleepProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::op_sysop_;
+    using esphome::lora_tracker::LORAListener::op_last_msgid_;
+    using esphome::lora_tracker::LORAListener::op_generation_;
+    using esphome::lora_tracker::LORAListener::op_awaiting_ack_;
+    using esphome::lora_tracker::LORAListener::op_deferred_until_login_;
+    using esphome::lora_tracker::LORAListener::relogin_pending_;
+    using esphome::lora_tracker::LORAListener::sleep_unconfirmed_;
+    using esphome::lora_tracker::LORAListener::note_node_heard_;
+    using esphome::lora_tracker::LORAListener::rtc_;
+    using esphome::lora_tracker::LORAListener::login_slot_;
+    using esphome::lora_tracker::LORAListener::confirm_session_;
+};
+SleepProbe &SP(LORAClient &c) { return static_cast<SleepProbe &>(c); }
+
+int countSleepFrames(real_helpers::RealHubHarness &h) {
+    int n = 0;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Sysop &&
+            m->sysop == proto_sim::ClientOperation::CMD_SLEEP) ++n;
+    }
+    return n;
+}
+
+int countLoginFrames(real_helpers::RealHubHarness &h) {
+    int n = 0;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login) ++n;
+    }
+    return n;
+}
+
+// A registered, logged-in, plaintext-session node at a known wall-clock time.
+void sleepReady(real_helpers::RealHubHarness &h) {
+    h.rol.registered_ = true;
+    h.time.set_now(kModeBNow, /*valid=*/true);
+    h.rol.login_acked_         = true;
+    h.rol.pending_login_nonce_ = 0x1234;
+}
+
+// The node's CommandAck for the sleep in flight.
+void ackSleep(real_helpers::RealHubHarness &h) {
+    SP(h.rol).note_node_heard_();   // the ack is an uplink: uplink_accept_ notes it first
+    deliverAck(h.rol, SP(h.rol).op_last_msgid_);
+}
+
+// Run the whole retry budget out: the first wait, then kOpMaxRetries more.
+void exhaustRetries(real_helpers::RealHubHarness &h) {
+    for (int i = 0; i < 6; ++i) h.clock.tick(3050);
+}
+
+}  // namespace
+
+TEST(NightlySleep, GoesOutAsATrackedOpAndMutatesNothingUntilTheAck) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    std::vector<uint8_t> nvs;
+    SP(h.rol).rtc_ = esphome::ESPPreferenceObject(&nvs);
+    const size_t sends0 = h.tracker.sent_copies.size();
+
+    h.rol.enterSleep();
+
+    EXPECT_TRUE(h.rol.awaitingAck()) << "a tracked op, not a raw frame";
+    EXPECT_EQ(SP(h.rol).op_sysop_, (int32_t) CLIENT_OPERATION__CMD_SLEEP);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1);
+    EXPECT_EQ(countSleepFrames(h), 1);
+    // ...and the hub's picture of the node is exactly what it was.
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "no sleep is recorded before the node says so";
+    EXPECT_TRUE(h.rol.login_acked_) << "the session is still live";
+    EXPECT_EQ(h.rol.pending_login_nonce_, 0x1234u);
+    esphome::lora_tracker::LORAClientRestoreState before{};
+    ASSERT_TRUE(SP(h.rol).rtc_.load(&before));
+    EXPECT_EQ(before.last_sleep_epoch, 0u) << "and nothing was persisted either";
+
+    ackSleep(h);
+
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.commandFailed());
+    EXPECT_EQ(h.rol.last_sleep_epoch_, (uint32_t) kModeBNow + 1)
+        << "stamped at the ack, one second past the uplink that carried it";
+    EXPECT_FALSE(h.rol.login_acked_);
+    EXPECT_EQ(h.rol.pending_login_nonce_, 0u);
+    esphome::lora_tracker::LORAClientRestoreState after{};
+    ASSERT_TRUE(SP(h.rol).rtc_.load(&after));
+    EXPECT_EQ(after.last_sleep_epoch, (uint32_t) kModeBNow + 1) << "persisted on the ack";
+}
+
+TEST(NightlySleep, AnUnackedSleepIsRetransmittedWithTheSameMsgidAndStillRecordsNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.enterSleep();
+    const uint32_t id    = SP(h.rol).op_last_msgid_;
+    const size_t   sends = h.tracker.sent_copies.size();
+
+    h.clock.tick(2000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "not before the ack deadline";
+    h.clock.tick(1050);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the 3 s retry";
+    EXPECT_EQ(h.rol.opRetryCount(), 1u);
+    EXPECT_EQ(SP(h.rol).op_last_msgid_, id) << "the retry IS the original command";
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
+    EXPECT_TRUE(h.rol.login_acked_);
+
+    ackSleep(h);   // a late ack for the original still counts
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_EQ(h.rol.last_sleep_epoch_, (uint32_t) kModeBNow + 1);
+}
+
+// The same adaptive deadline and Rule 4 burst fallback as every other sysop.
+TEST(NightlySleep, UsesTheAdaptiveFirstAckDeadlineAndTheBurstFallback) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.time.set_now(kModeBNow, /*valid=*/true);
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    seedLatency(h, 1700);
+
+    h.rol.enterSleep();
+    ASSERT_EQ(h.tracker.last_copies, 1) << "one placed copy, like any other optimistic sysop";
+    ASSERT_TRUE(h.rol.op_sent_optimistic_for_test());
+    const uint32_t wait_ms = expectedWaitMs(h);
+    ASSERT_GE(wait_ms, singleshotwait::kFloorTailMs);
+    ASSERT_NE(wait_ms, 3000u) << "an ADAPTIVE deadline, not the flat 3 s";
+
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(wait_ms - 30);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends);
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
+    h.clock.tick(60);
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the burst fallback went out";
+    EXPECT_NE(h.tracker.last_copies, 1);
+    EXPECT_TRUE(h.rol.hubBelief().single_shot_unacked);
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "a missed guess is not a sleep";
+
+    ackSleep(h);
+    EXPECT_NE(h.rol.last_sleep_epoch_, 0u);
+}
+
+// A promoted node, entitled to single shot, is addressed in its slot.
+TEST(NightlySleep, ATimedModeNodeGetsTheSleepOnItsGridMarkNotAsAnUnalignedBurst) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.time.set_now(kModeBNow, /*valid=*/true);
+    confirmedGrid(h);
+    h.rol.node_fw_version_ = 10104;
+    h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, /*node_timed_rx=*/true);
+    ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::None);
+
+    h.rol.enterSleep();
+
+    EXPECT_EQ(h.tracker.last_copies, 1) << "single placed copy";
+    EXPECT_GE(usToPlacedMark(h), 0) << "placed on the node's own mark";
+    EXPECT_TRUE(h.rol.awaitingAck());
+    EXPECT_EQ(countSleepFrames(h), 1);
+}
+
+TEST(NightlySleep, TheAckArmsTheLoginFallbackFromTheAckNotFromTheRequest) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.set_sleep_duration(60);
+    SP(h.rol).login_slot_ = 3;               // a node that is not first in YAML order
+    h.rol.enterSleep();
+    h.clock.tick(5000);                       // the ack takes a while
+    ASSERT_EQ(countLoginFrames(h), 0);
+    ackSleep(h);
+    const int logins0 = countLoginFrames(h);
+
+    const uint32_t delay_ms = 60u * 1000u + 5000u + (uint32_t) SP(h.rol).login_slot_ * 3000u;
+    h.clock.tick(delay_ms - 1);
+    EXPECT_EQ(countLoginFrames(h), logins0) << "one ms shy of sleep + boot margin + stagger";
+    h.clock.tick(2);
+    EXPECT_EQ(countLoginFrames(h), logins0 + 1) << "the fallback login, exactly then";
+}
+
+TEST(NightlySleep, WithoutAnAckNoLoginFallbackIsEverArmed) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.set_sleep_duration(60);
+    h.rol.session_confirmed_ = true;
+    h.rol.enterSleep();
+    exhaustRetries(h);
+    const int logins = countLoginFrames(h);
+    h.clock.tick(200'000);
+    EXPECT_EQ(countLoginFrames(h), logins) << "no sleep happened as far as the hub knows";
+}
+
+// RETRIES EXHAUSTED: the unconfirmed-sleep decision.
+TEST(NightlySleep, ExhaustedRetriesKeepTheSessionAndRecordNoSleep) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.session_confirmed_ = true;
+    h.rol.enterSleep();
+    const int logins0 = countLoginFrames(h);
+    exhaustRetries(h);
+
+    EXPECT_FALSE(h.rol.awaitingAck()) << "the budget is spent";
+    EXPECT_TRUE(h.rol.commandFailed()) << "visible in Home Assistant";
+    EXPECT_TRUE(SP(h.rol).sleep_unconfirmed_);
+    // The teardown "Command failed after retries - clearing session" is NOT applied.
+    EXPECT_TRUE(h.rol.session_confirmed_) << "the session is kept";
+    EXPECT_TRUE(h.rol.login_acked_);
+    EXPECT_EQ(h.rol.pending_login_nonce_, 0x1234u);
+    EXPECT_EQ(countLoginFrames(h), logins0) << "and no forced re-login is sent into the night";
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "a sleep nobody confirmed is not recorded";
+}
+
+TEST(NightlySleep, TheNextUplinkFromTheNodeSettlesAnUnconfirmedSleep) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.enterSleep();
+    exhaustRetries(h);
+    ASSERT_TRUE(SP(h.rol).sleep_unconfirmed_);
+    ASSERT_TRUE(h.rol.commandFailed());
+
+    SP(h.rol).note_node_heard_();
+
+    EXPECT_FALSE(SP(h.rol).sleep_unconfirmed_);
+    EXPECT_FALSE(h.rol.commandFailed()) << "the alarm clears: the node is demonstrably there";
+}
+
+TEST(NightlySleep, HearingTheNodeDoesNotClearALaterCommandsFailure) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.session_confirmed_ = true;
+    h.rol.enterSleep();
+    exhaustRetries(h);
+    ASSERT_TRUE(SP(h.rol).sleep_unconfirmed_);
+
+    sendOpen(h);                    // a cover op replaces the sleep as the tracked op
+    exhaustRetries(h);
+    ASSERT_TRUE(h.rol.commandFailed()) << "the cover op failed on its own account";
+
+    SP(h.rol).note_node_heard_();
+    EXPECT_FALSE(SP(h.rol).sleep_unconfirmed_);
+    EXPECT_TRUE(h.rol.commandFailed()) << "that failure is the cover op's, not the sleep's";
+}
+
+TEST(NightlySleep, AnAutoModeNodeIsSkippedExactlyAsBefore) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.set_auto_mode_default(true);
+    const size_t sends = h.tracker.sent_copies.size();
+
+    h.rol.enterSleep();
+    h.clock.tick(30'000);
+
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "nothing is sent";
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
+    EXPECT_TRUE(h.rol.login_acked_) << "the session is not discarded";
+    EXPECT_EQ(h.rol.pending_login_nonce_, 0x1234u);
+}
+
+TEST(NightlySleep, ASecondRequestWhileOneIsPendingChangesNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.enterSleep();
+    const size_t   sends = h.tracker.sent_copies.size();
+    const uint32_t gen   = SP(h.rol).op_generation_;
+    const uint32_t id    = SP(h.rol).op_last_msgid_;
+
+    h.rol.enterSleep();
+
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "no second command";
+    EXPECT_EQ(SP(h.rol).op_generation_, gen) << "the first is not superseded";
+    EXPECT_EQ(SP(h.rol).op_last_msgid_, id);
+
+    ackSleep(h);
+    ASSERT_FALSE(h.rol.awaitingAck());
+    h.rol.enterSleep();                 // a request AFTER the ack is a fresh one
+    EXPECT_TRUE(h.rol.awaitingAck());
+    EXPECT_GT(h.tracker.sent_copies.size(), sends);
+}
+
+// A sleep waiting for a session that does not come back is dropped, not sent late.
+TEST(NightlySleep, ASleepDeferredBehindARelogin_IsDroppedAfterTheExpiryNotSentHoursLate) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    SP(r.rol).relogin_pending_ = true;            // the session is being rebuilt
+    const size_t frames = r.radio.hub_to_node_frames().size();
+
+    r.rol.enterSleep();
+    EXPECT_TRUE(SP(r.rol).op_deferred_until_login_);
+    EXPECT_EQ(r.radio.hub_to_node_frames().size(), frames) << "nothing in the clear";
+
+    r.secs(170);
+    EXPECT_TRUE(SP(r.rol).op_deferred_until_login_) << "still within the expiry";
+    r.secs(20);
+    EXPECT_FALSE(SP(r.rol).op_deferred_until_login_) << "expired";
+    EXPECT_TRUE(SP(r.rol).sleep_unconfirmed_);
+    EXPECT_TRUE(r.rol.commandFailed());
+
+    SP(r.rol).confirm_session_();                 // the node finally comes back
+    EXPECT_EQ(r.radio.hub_to_node_frames().size(), frames) << "the stale sleep is not sent";
+    EXPECT_FALSE(r.rol.awaitingAck());
+}
+
+TEST(NightlySleep, ASleepDeferredBehindARelogin_IsSentWhenTheSessionReturnsInTime) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    SP(r.rol).relogin_pending_ = true;
+    r.rol.enterSleep();
+    r.secs(175);                                  // 5 s before the expiry
+
+    SP(r.rol).confirm_session_();
+    EXPECT_TRUE(r.rol.awaitingAck()) << "sent from confirm_session_()";
+    EXPECT_FALSE(SP(r.rol).op_deferred_until_login_);
+
+    r.secs(6);                                    // the expiry timer fires meanwhile
+    EXPECT_TRUE(r.rol.awaitingAck()) << "the expiry does not kill a sleep that is being retried";
+    EXPECT_FALSE(SP(r.rol).sleep_unconfirmed_);
+    deliverAck(r.rol, SP(r.rol).op_last_msgid_);
+    EXPECT_NE(r.rol.last_sleep_epoch_, 0u);
+}
+
+// TIMED MODE: the supervisor and the sleeping node.
+TEST(NightlySleep, ASleepIssuedDuringAWarmupStopsItAndTheAckKeepsItOff) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.secs(5);
+    ASSERT_TRUE(r.rol.mode_test_active());
+    ASSERT_EQ(r.rol.mbs_warmups_started_, 1u);
+
+    r.rol.enterSleep();
+    EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stop the moment the sleep is issued";
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
+
+    r.secs(3);
+    deliverAck(r.rol, SP(r.rol).op_last_msgid_);
+    ASSERT_FALSE(P(r.rol).is_node_awake_()) << "acked: the hub now models the node as asleep";
+    r.secs(900);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u) << "no warm-up into a sleeping node";
+    EXPECT_FALSE(r.rol.mode_test_active());
+}
+
+TEST(NightlySleep, AfterTheSleepTheNodesRebootBringsModeBBack) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, /*node_timed_rx=*/true);   // promoted
+    r.rol.enterSleep();
+    r.secs(3);
+    deliverAck(r.rol, SP(r.rol).op_last_msgid_);
+    r.secs(60);
+    ASSERT_EQ(r.rol.mbs_warmups_started_, 0u);
+
+    // The node wakes (a fresh REGISTER), logs in, takes the grid again.
+    r.time.set_now(kModeBNow + 601, /*valid=*/true);   // ten minutes on: the test sleep
+    auto reg = real_helpers::serialize_register(kMacRol2);
+    r.rol.set_response(reg.data(), reg.size());
+    proto_sim_timer_advance_us(
+        (int64_t) (esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200) * 1000);
+    r.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    r.secs(3);
+    ASSERT_TRUE(r.rol.gridSyncAwaitingAck());
+    r.ackGrid();
+    EXPECT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0)
+        << "the supervisor re-establishes Mode B once the node is back";
+}
+
+TEST(NightlySleep, ASecondRequestWhileTheFirstIsDeferredBehindARelogin_ChangesNothing) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    SP(r.rol).relogin_pending_ = true;
+    r.rol.enterSleep();
+    ASSERT_TRUE(SP(r.rol).op_deferred_until_login_);
+    const uint32_t gen = SP(r.rol).op_generation_;
+
+    r.rol.enterSleep();
+
+    EXPECT_EQ(SP(r.rol).op_generation_, gen) << "the deferred sleep is not re-issued";
+}
+
+TEST(NightlySleep, ASleepWhoseRetriesAreStuckBehindARelogin_IsGivenUpAtTheExpiry) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enterSleep();
+    ASSERT_TRUE(r.rol.awaitingAck());
+    SP(r.rol).relogin_pending_ = true;            // the session dies under it: retries defer
+
+    r.secs(200);
+
+    EXPECT_FALSE(r.rol.awaitingAck()) << "not retried into the afternoon";
+    EXPECT_TRUE(SP(r.rol).sleep_unconfirmed_);
+    EXPECT_EQ(r.rol.last_sleep_epoch_, 0u);
+}
+
+TEST(NightlySleep, AnAckForAnyOtherTrackedOpRecordsNoSleep) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.session_confirmed_ = true;
+    h.rol.enterSleep();
+    ackSleep(h);
+    ASSERT_NE(h.rol.last_sleep_epoch_, 0u);
+    h.rol.last_sleep_epoch_ = 0;                  // the node woke; the hub knows
+    h.rol.login_acked_      = true;
+
+    h.rol.triggerOTA();                           // a different SYSOP
+    ackSleep(h);
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "an OTA ack is not a sleep";
+    EXPECT_TRUE(h.rol.login_acked_);
+
+    sendOpen(h);                                  // and a COVER op, with op_sysop_ still CMD_OTA
+    ackSleep(h);
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
+    EXPECT_TRUE(h.rol.login_acked_);
+}
+
+TEST(NightlySleep, AnAckedCoverOpAfterASleepIsNotASleepEither) {
+    // op_sysop_ keeps its last value; only op_kind_ says whether it is live.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.session_confirmed_ = true;
+    h.rol.enterSleep();
+    ackSleep(h);
+    h.rol.last_sleep_epoch_ = 0;
+    h.rol.login_acked_      = true;
+
+    sendOpen(h);                                  // op_sysop_ is still CMD_SLEEP
+    ackSleep(h);
+
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "a cover op's ack must not replay the sleep";
+    EXPECT_TRUE(h.rol.login_acked_);
+}
+
+TEST(NightlySleep, WithoutAValidClockTheSleepIsStillAckedAndTheFallbackStillArmed) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.time.set_now(kModeBNow, /*valid=*/false);
+    h.rol.set_sleep_duration(60);
+    h.rol.enterSleep();
+    ackSleep(h);
+
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "no clock, no timestamp (as before)";
+    EXPECT_FALSE(h.rol.login_acked_) << "but the session still ends";
+    const int logins0 = countLoginFrames(h);
+    h.clock.tick(60u * 1000u + 5000u + 100u);
+    EXPECT_EQ(countLoginFrames(h), logins0 + 1);
 }

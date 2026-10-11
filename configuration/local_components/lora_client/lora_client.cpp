@@ -816,6 +816,15 @@ namespace esphome
 
     void LORAListener::note_node_heard_()
     {
+      if (this->sleep_unconfirmed_)
+      {
+        // See on_sleep_unconfirmed_(): the node is awake (again), whichever it was.
+        this->sleep_unconfirmed_ = false;
+        if (this->op_is_sleep_())   // a later op's failure is that op's own
+          this->set_command_failed_(false);
+        ESP_LOGW(TAG, "[%s] Node heard again after an UNCONFIRMED sleep command — treating it as awake",
+                 this->get_name().c_str());
+      }
       this->onboarding_heard_ = true;
       this->last_heard_us_ = esp_timer_get_time();
       if (this->time != nullptr && this->time->now().is_valid())
@@ -3587,6 +3596,14 @@ namespace esphome
     // Every retry was spent without an ack: fail the command and force a login.
     void LORAListener::op_retries_exhausted_()
     {
+      // A sleep command is the one tracked op whose silence is ambiguous (the node
+      // may have slept and lost its ack): never the teardown below. See
+      // on_sleep_unconfirmed_().
+      if (this->op_is_sleep_())
+      {
+        this->on_sleep_unconfirmed_();
+        return;
+      }
       ESP_LOGE(TAG, "[%s] Tracked op not acknowledged after %u retries — marking failed",
                this->get_name().c_str(), (unsigned)kOpMaxRetries);
       this->op_awaiting_ack_ = false;
@@ -3730,6 +3747,9 @@ namespace esphome
                (unsigned)ack_msg_id);
       if (this->op_mark_us_ != 0)
         this->record_ack_latency_();
+      // The nightly sleep takes effect on the hub only now: the node has heard it.
+      if (this->op_is_sleep_())
+        this->on_sleep_acknowledged_();
     }
 
     void LORAListener::set_command_failed_(bool failed)
@@ -3739,27 +3759,26 @@ namespace esphome
         this->command_failed_bsensor_->publish_state(failed);
     }
 
+    // THE NIGHTLY SLEEP IS A TRACKED SYSOP, AND ITS EFFECTS HAPPEN ON THE ACK.
+    //
+    // It used to be one raw `parent_->send()`: unacked, unretried, not aligned to
+    // the Mode B grid, with every hub-side consequence applied BEFORE the frame
+    // was even on the air. Measured 2026-10-07 23:00: "Sleep sent" for both
+    // nodes, node 1 logged in again 1.8 s later and node 2 after 3 min (no 6 h
+    // sleep); and on 2026-10-10/11, with Timed Mode ON, battery updates arrived
+    // all night. A promoted node listens only in its own slot, so an unaligned
+    // one-shot is simply missed — and the hub had meanwhile discarded a live
+    // session for a sleep that never happened.
+    //
+    // Now: send_tracked_sysop_(CMD_SLEEP) — the same aligned placement, adaptive
+    // first-ack deadline, Rule 4 burst fallback and retransmit budget as every
+    // other sysop. The hub's bookkeeping moves to on_sleep_acknowledged_().
     void LORAListener::enterSleep()
     {
       // The nightly sleep is an INTERACTIVE-mode mechanism, and applying it to
       // an auto-mode node is not merely wasted airtime — it actively breaks the
-      // session. Everything below runs unconditionally and BEFORE the frame is
-      // transmitted:
-      //
-      //   * last_sleep_epoch_ is stamped, recording a sleep that never happened
-      //     (an auto-mode node is usually already asleep and never receives the
-      //     command at all);
-      //   * login_acked_ and pending_login_nonce_ are cleared, discarding a
-      //     session the node still holds;
-      //   * a login fallback is armed at sleep_duration + margin + stagger,
-      //     which for an auto-mode node predicts a wake that will not happen.
-      //
-      // Observed 2026-08-27: the 23:00 sleep armed a login for 05:00:56/05:00:59
-      // (23:00 + 21600 + 5 + addr x 3). It fired at 05:01 against two sleeping
-      // nodes, send_login() minted a fresh nonce, and when node 2 actually woke
-      // at 05:59:30 its resume beacon ARRIVED and could not be decrypted —
-      // psa_aead_decrypt failed: -149 — costing a full REGISTER handshake.
-      //
+      // session (the stale login fallback of 2026-08-27 that cost a full REGISTER
+      // handshake: the node's resume beacon could not be decrypted).
       // An auto-mode node derives its own wake from the schedule, so there is
       // nothing here the hub can usefully say. The node ignores the command too
       // (belt and braces), but not sending it is what protects the session.
@@ -3772,53 +3791,70 @@ namespace esphome
         return;
       }
 
-      ESP_LOGI("LORAListener", "Device %s entering sleep mode", this->address_str());
+      // A second request while one is in flight would only bump the generation
+      // and supersede the frame that is about to be acked.
+      if (this->sleep_op_in_flight_())
+      {
+        ESP_LOGI(TAG, "[%s] Sleep already pending — ignoring the repeated request",
+                 this->get_name().c_str());
+        return;
+      }
 
-      // Persist the sleep timestamp before incrTxMessageId() triggers save_state_(),
-      // so last_sleep_epoch_ is included in the same flash write.
-      if (this->time != nullptr && this->time->now().is_valid())
-        this->last_sleep_epoch_ = static_cast<uint32_t>(this->time->now().timestamp);
+      ESP_LOGI("LORAListener", "Device %s entering sleep mode (tracked, effects on ack)",
+               this->address_str());
+      this->send_tracked_sysop_(CLIENT_OPERATION__CMD_SLEEP);
+      this->arm_pending_sleep_expiry_();
+    }
+
+    bool LORAListener::op_is_sleep_() const
+    {
+      return this->op_kind_ == TrackedOpKind::SYSOP && this->op_sysop_ == CLIENT_OPERATION__CMD_SLEEP;
+    }
+
+    bool LORAListener::sleep_op_in_flight_() const
+    {
+      return this->op_is_sleep_() && (this->op_awaiting_ack_ || this->op_deferred_until_login_);
+    }
+
+    // The node acknowledged CMD_SLEEP: it has heard it and is about to deep-sleep
+    // (the node always acks, drains its queue, then sleeps). Everything the old
+    // code did eagerly happens here instead.
+    void LORAListener::on_sleep_acknowledged_()
+    {
+      this->sleep_unconfirmed_ = false;
+      this->stamp_sleep_epoch_();
       this->login_acked_         = false;
       this->login_retry_count_   = 0;
       this->pending_login_nonce_ = 0;   // sleep ends the session; mint fresh on wake
       this->cancel_timeout("login_startup");
       this->cancel_timeout("login_retry");
+      // incrTxMessageId() no longer persists last_sleep_epoch_ as a side effect.
+      this->save_state_(true);
+      this->arm_post_sleep_login_fallback_();
+    }
 
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
-      // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-      // op_message.senderaddress = 0x12345678;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress = this->short_address_;
-      header.destsubnet = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid = this->incrTxMessageId(); // Incrementing message ID
-      op_message.header = &header;
+    // The sleep happened at ack time, but never EARLIER than the last uplink: the
+    // ack itself is an uplink and note_node_heard_() ran just before us in the
+    // same second, and is_node_awake_() reads "heard at or after the sleep" as
+    // "awake again".
+    void LORAListener::stamp_sleep_epoch_()
+    {
+      if (this->time == nullptr || !this->time->now().is_valid())
+        return;
+      const uint32_t now = static_cast<uint32_t>(this->time->now().timestamp);
+      this->last_sleep_epoch_ = std::max(now, this->last_heard_epoch_ + 1);
+    }
 
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
-      op_message.sysop = CLIENT_OPERATION__CMD_SLEEP;
-
-      // Encrypt the sysop in-session so SLEEP cannot be forged/injected.
-      uint8_t *txBuf = nullptr;
-      size_t   len   = 0;
-      if (this->pack_operation_(&op_message, this->session_confirmed_, &txBuf, &len))
-      {
-        this->parent_->send(txBuf, len);
-        free(txBuf);
-      }
-      else
-      {
-        ESP_LOGE(TAG, "[%s] Failed to pack sleep operation", this->get_name().c_str());
-      }
-
-      // Schedule a login challenge slightly after the node is expected to wake up.
-      // NODE_BOOT_MARGIN_MS gives the node time to complete its boot sequence and
-      // send REGISTER, which cancels this timer (REGISTER-path is the primary path).
-      // This timer is only the fallback for lost REGISTER packets.
-      // LOGIN_STAGGER_MS per SLOT prevents simultaneous login transmissions when
-      // multiple nodes wake from sleep at roughly the same time. Slot, not
-      // address — this is the site that produced the "51 s stagger" and
-      // "54 s stagger" seen in the hub log for addresses 17 and 18.
+    // Schedule a login challenge slightly after the node is expected to wake up.
+    // NODE_BOOT_MARGIN_MS gives the node time to complete its boot sequence and
+    // send REGISTER, which cancels this timer (REGISTER-path is the primary path).
+    // This timer is only the fallback for lost REGISTER packets.
+    // LOGIN_STAGGER_MS per SLOT prevents simultaneous login transmissions when
+    // multiple nodes wake from sleep at roughly the same time. Slot, not
+    // address — this is the site that produced the "51 s stagger" and
+    // "54 s stagger" seen in the hub log for addresses 17 and 18.
+    void LORAListener::arm_post_sleep_login_fallback_()
+    {
       static constexpr uint32_t NODE_BOOT_MARGIN_MS = 5000;
       static constexpr uint32_t LOGIN_STAGGER_MS    = 3000;
       uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * LOGIN_STAGGER_MS;
@@ -3826,11 +3862,58 @@ namespace esphome
           std::min<uint64_t>(this->sleep_duration_ * 1000ULL,
                              static_cast<uint64_t>(0xFFFFFFFFu)));
       uint32_t total_ms = wake_ms + NODE_BOOT_MARGIN_MS + stagger_ms;
-      ESP_LOGI(TAG, "[%s] Sleep sent — login fallback timer in %u s (%u s sleep + %u s boot margin + %u s stagger)",
+      ESP_LOGI(TAG, "[%s] Sleep acknowledged — login fallback timer in %u s (%u s sleep + %u s boot margin + %u s stagger)",
                this->get_name().c_str(), total_ms / 1000,
                wake_ms / 1000, NODE_BOOT_MARGIN_MS / 1000, stagger_ms / 1000);
       this->set_timeout("login_startup", total_ms,
                         [this]() { this->do_login_and_arm_retry_(); });
+    }
+
+    // Every retry was spent and the node never acked CMD_SLEEP. Unlike any other
+    // tracked op this does NOT mean the session is dead, and tearing it down
+    // ("Command failed after retries — clearing session, forcing re-login") would
+    // be wrong either way:
+    //   * the node may have heard it, acked (ack lost on the air) and gone to
+    //     sleep — then a forced re-login transmits into a sleeping node;
+    //   * or it never heard it and is awake and well — then the session it holds
+    //     is perfectly good and discarding it only costs a LOGIN/REGISTER cycle.
+    // The hub cannot tell which. So: record NOTHING as if the sleep had happened
+    // (last_sleep_epoch_, login_acked_, the login fallback are untouched — the
+    // model keeps saying "awake", the safe error), keep the session, shout, and
+    // let the next thing heard from the node settle it (note_node_heard_): a node
+    // that did sleep announces itself with a REGISTER at its wake, which the
+    // normal path handles; one that did not is simply heard.
+    void LORAListener::on_sleep_unconfirmed_()
+    {
+      this->op_awaiting_ack_   = false;
+      this->sleep_unconfirmed_ = true;
+      this->set_command_failed_(true);
+      ESP_LOGE(TAG, "[%s] SLEEP command UNCONFIRMED after %u retries — the node may have "
+                    "slept (ack lost) or never heard it. Session KEPT, sleep NOT recorded; "
+                    "the next uplink from the node settles it",
+               this->get_name().c_str(), (unsigned) kOpMaxRetries);
+    }
+
+    // A sleep stuck behind a relogin (the session never came back: the node is
+    // absent) would otherwise fire whenever the session finally confirms —
+    // possibly days later, in the middle of the afternoon.
+    void LORAListener::arm_pending_sleep_expiry_()
+    {
+      this->set_timeout("sleep_pending_expiry", kPendingSleepExpiryMs,
+                        [this]() { this->expire_pending_sleep_(); });
+    }
+
+    void LORAListener::expire_pending_sleep_()
+    {
+      // Actively retrying with a live session: its own retry budget ends it.
+      if (!this->sleep_op_in_flight_() ||
+          !(this->op_deferred_until_login_ || this->relogin_pending_))
+        return;
+      this->op_deferred_until_login_ = false;
+      this->cancel_timeout("op_retry");
+      ESP_LOGW(TAG, "[%s] Sleep still waiting for a session after %u s — dropped, not sent late",
+               this->get_name().c_str(), (unsigned) (kPendingSleepExpiryMs / 1000));
+      this->on_sleep_unconfirmed_();
     }
 
     void LORAListener::triggerOTA()
