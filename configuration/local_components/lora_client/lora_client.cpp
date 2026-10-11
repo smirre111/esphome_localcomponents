@@ -1488,11 +1488,9 @@ namespace esphome
     {
       if (this->ctl().deferred_until_login)
       {
-        this->ctl().deferred_until_login = false;
         ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred tracked op",
                  this->get_name().c_str());
-        this->begin_tracked_op_(this->tx_tracked_op_(),
-                                this->ctl().kind == TrackedOpKind::SYSOP ? "Sysop" : "Cover op");
+        this->ctl_send_();
       }
     }
 
@@ -3480,20 +3478,94 @@ namespace esphome
       return header.msgid;
     }
 
-    void LORAListener::begin_tracked_op_(uint32_t msgid, const char *what)
+    // The Control channel's request: the command the slot describes, delivered by
+    // the generic glue. The decisions are the policy's (DeliveryPolicy.h); what is
+    // specific to a tracked command is here: the stored frame is re-sent byte for
+    // byte, an optimistic single shot gets the short first wait, and a sleep that
+    // goes unanswered is not a dead session.
+    DeliveryRequest LORAListener::ctl_request_()
     {
-      this->ctl().first_msgid  = msgid;
-      this->ctl().last_msgid   = msgid;
-      this->ctl().retry_count  = 0;
-      this->ctl().awaiting_ack = true;
-      this->ctl().short_wait_spent = false;
+      static_assert(deliverypolicy::kControlMaxRetries == kOpMaxRetries &&
+                        deliverypolicy::kControlWaitMs == kOpRetryIntervalMs,
+                    "the Control policies are the verified ladder");
+      DeliveryRequest req;
+      req.what        = "Tracked op";
+      req.resend_verb = nullptr;   // tx_ctl_ logs the retransmit itself, with the msgid
+      req.policy      = deliverypolicy::controlPolicy(
+          this->ctl().kind == TrackedOpKind::COVER, this->ctl().sysop,
+          CLIENT_OPERATION__CMD_SLEEP, CLIENT_OPERATION__CMD_OTA);
+      req.build   = [this](bool retry, uint32_t *tag) { return this->tx_ctl_(retry, tag); };
+      req.on_ack  = [this](uint32_t id) { return this->on_ctl_acked_(id); };
+      req.on_fail = [this]() { this->on_ctl_failed_(); };
+      return req;
+    }
+
+    // Start the slot's command: one attempt now, then the ladder.
+    void LORAListener::ctl_send_()
+    {
+      this->ctl().deferred_until_login = false;
+      this->ctl().short_wait_spent     = false;
+      // A superseded command's ack must not complete this one.
+      this->ctl().acks.clear();
       this->set_command_failed_(false);
+      this->deliver_(CH_CONTROL, this->ctl_request_());
+    }
 
-      ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
-               what, (unsigned)msgid);
+    // ONE attempt. The first packs and stores the frame; a retry re-sends the
+    // stored bytes under the SAME msgid (the node re-acks a duplicate instead of
+    // running it twice).
+    uint32_t LORAListener::tx_ctl_(bool retry, uint32_t *tag)
+    {
+      uint32_t msgid = 0;
+      if (!retry)
+      {
+        msgid = this->tx_tracked_op_();
+        ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
+                 this->ctl().kind == TrackedOpKind::SYSOP ? "Sysop" : "Cover op", (unsigned) msgid);
+      }
+      else
+      {
+        msgid = this->retransmit_tracked_op_();
+        if (this->ctl().short_wait_spent && this->ctl().retry_count == 0)
+          ESP_LOGW(TAG, "[%s] Tracked op burst fallback (msgid=%u)", this->get_name().c_str(),
+                   (unsigned) msgid);
+        else
+          ESP_LOGW(TAG, "[%s] Tracked op retransmit %u/%u (msgid=%u)", this->get_name().c_str(),
+                   (unsigned) this->ctl().retry_count, (unsigned) kOpMaxRetries, (unsigned) msgid);
+      }
+      *tag = msgid;
+      return msgid;
+    }
 
-      this->cancel_timeout("op_retry");
-      this->schedule_op_retry_();
+    bool LORAListener::on_ctl_acked_(uint32_t ack_msg_id)
+    {
+      this->ctl().awaiting_ack = false;
+      this->set_command_failed_(false);
+      ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
+               (unsigned) ack_msg_id);
+      if (this->ctl().mark_us != 0)
+        this->record_ack_latency_();
+      // The nightly sleep takes effect on the hub only now: the node has heard it.
+      if (this->op_is_sleep_())
+        this->on_sleep_acknowledged_();
+      return true;
+    }
+
+    // Every retry was spent without an ack. (The policy decides whether the
+    // session is torn down: not for a sleep, whose silence is ambiguous, see
+    // on_sleep_unconfirmed_().)
+    void LORAListener::on_ctl_failed_()
+    {
+      // A late ack of a command given up on must not revive it.
+      this->ctl().acks.clear();
+      if (this->op_is_sleep_())
+      {
+        this->on_sleep_unconfirmed_();
+        return;
+      }
+      ESP_LOGE(TAG, "[%s] Tracked op not acknowledged after %u retries — marking failed",
+               this->get_name().c_str(), (unsigned) kOpMaxRetries);
+      this->set_command_failed_(true);
     }
 
     void LORAListener::send_cover_operation(uint32_t covop_case, int32_t operation, float position)
@@ -3520,8 +3592,7 @@ namespace esphome
         ESP_LOGD(TAG, "[%s] Cover op deferred — session being rebuilt", this->get_name().c_str());
         return;
       }
-      this->ctl().deferred_until_login = false;
-      this->begin_tracked_op_(this->tx_tracked_op_(), "Cover op");
+      this->ctl_send_();
     }
 
     void LORAListener::send_tracked_sysop_(int32_t sysop)
@@ -3543,170 +3614,7 @@ namespace esphome
         ESP_LOGD(TAG, "[%s] Sysop deferred — session being rebuilt", this->get_name().c_str());
         return;
       }
-      this->ctl().deferred_until_login = false;
-      this->begin_tracked_op_(this->tx_tracked_op_(), "Sysop");
-    }
-
-    void LORAListener::schedule_op_retry_()
-    {
-      // One-shot timeout: fires exactly kOpRetryIntervalMs from now (no random
-      // interval phase offset), then re-arms itself.  This guarantees the first
-      // retransmit waits the full interval, leaving the node's deferred ACK a
-      // quiet window to arrive first.
-      //
-      // The FIRST wait of a command whose first shot was an OPTIMISTIC single
-      // shot is the short one: a wrong guess is then found out in about the time
-      // the frame needs to land and be answered, not after 3 s. See
-      // SingleShotAckWait.h for the derivation. Measured from the placed mark,
-      // which is where the frame actually goes out, not from now.
-      const bool short_wait = deliverypolicy::isShortFirstWait(
-          this->ctl().sent_optimistic, this->ctl().retry_count, this->ctl().short_wait_spent);
-      uint32_t wait_ms = this->ack_wait_ms_(kOpRetryIntervalMs);
-      this->ctl().first_tail_ms = 0;
-      if (short_wait)
-        wait_ms = this->short_first_wait_ms_();
-      this->set_timeout("op_retry", wait_ms, [this, short_wait]() {
-        this->on_op_retry_timeout_(short_wait);
-      });
-    }
-
-    // The short first ack wait of an optimistic single shot, in ms from NOW.
-    // Records the node's mark->ack tail in first_tail_ms.
-    uint32_t LORAListener::short_first_wait_ms_()
-    {
-      // From NOW: whichever is later of the placed mark and the queue's drain
-      // (they estimate the same instant; ack_wait_ms_ must NOT be added on top,
-      // it would count the time to the mark twice), plus THIS node's measured
-      // mark->ack tail.
-      const int64_t  us_to_t0 = ((this->ctl().mark_us != 0) ? this->ctl().mark_us
-                                                          : this->last_placed_t0_us_) -
-                                esp_timer_get_time();
-      int64_t drain_ms = (this->parent_ != nullptr) ? this->parent_->txDrainUs() / 1000 : 0;
-      if (drain_ms < 0)
-        drain_ms = 0;
-      if (drain_ms > (int64_t) kMaxAckBacklogMs)
-        drain_ms = kMaxAckBacklogMs;
-      const uint32_t now_ms = (uint32_t) (esp_timer_get_time() / 1000);
-      const uint32_t tail   = this->ack_latency_.tailMs(now_ms);
-      this->ctl().first_tail_ms = tail;
-      const uint32_t wait_ms = singleshotwait::firstAckWaitMs(us_to_t0, (uint32_t) drain_ms, tail);
-      ESP_LOGI(TAG, "[%s] optimistic single shot: ack deadline %u ms from now "
-                    "(mark in %d ms, queue drain %d ms, tail %u ms; node history %u "
-                    "samples, max %u ms)",
-               this->get_name().c_str(), (unsigned) wait_ms,
-               (int) (us_to_t0 / 1000), (int) drain_ms, (unsigned) tail,
-               (unsigned) this->ack_latency_.count(now_ms),
-               (unsigned) this->ack_latency_.maxDelayMs(now_ms));
-      return wait_ms;
-    }
-
-    // The one-shot "op_retry" timer body.
-    void LORAListener::on_op_retry_timeout_(bool short_wait)
-    {
-      // The decision is deliverypolicy::onAckTimeout (DeliveryPolicy.h); this
-      // function only performs it.
-      const deliverypolicy::TimeoutDecision d = deliverypolicy::onAckTimeout(
-          {this->ctl().awaiting_ack, this->relogin_pending_, short_wait,
-           this->ctl().retry_count, kOpMaxRetries});
-      this->ctl().retry_count = d.retries_spent;
-      switch (d.action)
-      {
-      case deliverypolicy::TimeoutAction::Stale:
-        return; // acked already; one-shot, nothing to re-arm
-      case deliverypolicy::TimeoutAction::DeferRelogin:
-        // Security review finding 1: a relogin can start WHILE a retry is
-        // already in flight (clearSessionKeys_() empties frame right
-        // out from under it). Sending now would just be a plaintext frame
-        // the node — still holding its old session — rejects outright, and
-        // counting it would burn a retry for nothing. Wait for
-        // confirm_session_() instead of spending the retry budget on a
-        // session that doesn't exist yet.
-        ESP_LOGD(TAG, "[%s] Tracked op retry deferred — session being rebuilt",
-                 this->get_name().c_str());
-        this->schedule_op_retry_();
-        return;
-      case deliverypolicy::TimeoutAction::ShortWaitMissed:
-        this->op_short_wait_missed_();
-        return;
-      case deliverypolicy::TimeoutAction::GiveUp:
-        this->op_retries_exhausted_();
-        return;
-      case deliverypolicy::TimeoutAction::Retransmit:
-        break;
-      }
-      // Rule 4: a single shot that went unacked puts this node back on bursts
-      // immediately, and stays that way until a fresh in-slot uplink. One
-      // frame is the whole exposure — the retry below is already a burst.
-      if (deliverypolicy::marksSingleShotUnacked(this->ctl().sent_single_shot,
-                                                 this->belief_.single_shot_unacked))
-      {
-        this->belief_.single_shot_unacked = true;
-        ESP_LOGW(TAG, "[%s] single shot unacked — back to bursts until "
-                      "the node is confirmed again", this->get_name().c_str());
-      }
-
-      // NOT tx_tracked_op_(): that re-packs from live state with a fresh
-      // msgid. last_msgid deliberately does NOT move — the retry IS the
-      // original command, and the ack window must keep accepting its id.
-      uint32_t msgid = this->retransmit_tracked_op_();
-      ESP_LOGW(TAG, "[%s] Tracked op retransmit %u/%u (msgid=%u)", this->get_name().c_str(),
-               (unsigned)this->ctl().retry_count, (unsigned)kOpMaxRetries, (unsigned)msgid);
-      this->schedule_op_retry_(); // re-arm the next one-shot
-    }
-
-    // The optimistic guess missed. Burst NOW (Rule 4 below marks the node
-    // unacked, so retransmit_tracked_op_() places a full burst), but do
-    // NOT count it: retry_count is the budget that ends in "command
-    // failed, tear the session down", and a guess the operator
-    // opted into is not evidence the session is dead. The
-    // normal 3 s waits and the full kOpMaxRetries follow unchanged.
-    void LORAListener::op_short_wait_missed_()
-    {
-      this->ctl().short_wait_spent = true;
-      this->belief_.single_shot_unacked = true;
-      // The tail just proved too short is a lower bound on this node's
-      // delay: remember it, so the next deadline is longer instead of the
-      // same mistake (and a node that never answers climbs to the normal
-      // wait, no further).
-      this->ack_latency_.note((uint32_t) (esp_timer_get_time() / 1000),
-                              this->ctl().first_tail_ms);
-      ESP_LOGW(TAG, "[%s] optimistic single shot unacked — bursting now "
-                    "(not counted against the retry budget)",
-               this->get_name().c_str());
-      const uint32_t msgid = this->retransmit_tracked_op_();
-      ESP_LOGW(TAG, "[%s] Tracked op burst fallback (msgid=%u)",
-               this->get_name().c_str(), (unsigned)msgid);
-      this->schedule_op_retry_();
-    }
-
-    // Every retry was spent without an ack: fail the command and force a login.
-    void LORAListener::op_retries_exhausted_()
-    {
-      // A sleep command is the one tracked op whose silence is ambiguous (the node
-      // may have slept and lost its ack): never the teardown below. See
-      // on_sleep_unconfirmed_().
-      if (deliverypolicy::giveUpAction(this->op_is_sleep_()) == deliverypolicy::GiveUpAction::FailKeep)
-      {
-        this->on_sleep_unconfirmed_();
-        return;
-      }
-      ESP_LOGE(TAG, "[%s] Tracked op not acknowledged after %u retries — marking failed",
-               this->get_name().c_str(), (unsigned)kOpMaxRetries);
-      this->ctl().awaiting_ack = false;
-      this->set_command_failed_(true);
-      // Session recovery.  A command that goes fully unacked means the session
-      // is effectively dead — either the hub never confirmed it (node re-keyed
-      // while the hub still thinks it has none, Part B rejects plaintext), OR
-      // the hub had confirmed it earlier but the node has since re-keyed/hung
-      // leaving a STALE-confirmed flag (observed 2026-07-11: node 1 failed 4x
-      // without recovering because session_confirmed_ was still true).  In both
-      // cases clear the confirmation and force an immediate fresh login so the
-      // next command rebuilds the session in seconds instead of silently
-      // retrying a dead session or waiting out the backoff.
-      this->session_confirmed_ = false;
-      ESP_LOGW(TAG, "[%s] Command failed after retries — clearing session, forcing re-login",
-               this->get_name().c_str());
-      this->do_login_and_arm_retry_();
+      this->ctl_send_();
     }
 
     // B4: retransmit the STORED frame, byte for byte.
@@ -3806,24 +3714,70 @@ namespace esphome
 
     void LORAListener::arm_dlv_timer_(DeliveryChannel ch)
     {
-      this->set_timeout(dlv_timer_(ch), this->ack_wait_ms_(this->slots_[ch].req.policy.base_wait_ms),
-                        [this, ch]() { this->on_dlv_timeout_(ch); });
+      DeliverySlot &s = this->slots_[ch];
+      // The FIRST wait of an optimistic single shot is the short, adaptive one
+      // (SingleShotAckWait.h), measured from the placed mark; every other wait is
+      // the policy's, plus the transmit backlog.
+      const bool short_wait = deliverypolicy::isShortFirstWait(
+          s.sent_optimistic, s.retry_count, s.short_wait_spent);
+      s.first_tail_ms = 0;
+      const uint32_t wait_ms = short_wait ? this->dlv_short_wait_ms_(ch)
+                                          : this->ack_wait_ms_(s.req.policy.base_wait_ms);
+      this->set_timeout(dlv_timer_(ch), wait_ms,
+                        [this, ch, short_wait]() { this->on_dlv_timeout_(ch, short_wait); });
     }
 
-    void LORAListener::on_dlv_timeout_(DeliveryChannel ch)
+    // The short first ack wait of an optimistic single shot, in ms from NOW.
+    // Records the node's mark->ack tail in first_tail_ms.
+    uint32_t LORAListener::dlv_short_wait_ms_(DeliveryChannel ch)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      // From NOW: whichever is later of the placed mark and the queue's drain
+      // (they estimate the same instant; ack_wait_ms_ must NOT be added on top,
+      // it would count the time to the mark twice), plus THIS node's measured
+      // mark->ack tail.
+      const int64_t  us_to_t0 = ((s.mark_us != 0) ? s.mark_us : this->last_placed_t0_us_) -
+                                esp_timer_get_time();
+      int64_t drain_ms = (this->parent_ != nullptr) ? this->parent_->txDrainUs() / 1000 : 0;
+      if (drain_ms < 0)
+        drain_ms = 0;
+      if (drain_ms > (int64_t) kMaxAckBacklogMs)
+        drain_ms = kMaxAckBacklogMs;
+      const uint32_t now_ms = (uint32_t) (esp_timer_get_time() / 1000);
+      const uint32_t tail   = this->ack_latency_.tailMs(now_ms);
+      s.first_tail_ms = tail;
+      const uint32_t wait_ms = singleshotwait::firstAckWaitMs(us_to_t0, (uint32_t) drain_ms, tail);
+      ESP_LOGI(TAG, "[%s] optimistic single shot: ack deadline %u ms from now "
+                    "(mark in %d ms, queue drain %d ms, tail %u ms; node history %u "
+                    "samples, max %u ms)",
+               this->get_name().c_str(), (unsigned) wait_ms,
+               (int) (us_to_t0 / 1000), (int) drain_ms, (unsigned) tail,
+               (unsigned) this->ack_latency_.count(now_ms),
+               (unsigned) this->ack_latency_.maxDelayMs(now_ms));
+      return wait_ms;
+    }
+
+    void LORAListener::on_dlv_timeout_(DeliveryChannel ch, bool short_wait)
     {
       DeliverySlot &s = this->slots_[ch];
       const deliverypolicy::TimeoutDecision d = deliverypolicy::onAckTimeout(
-          {s.awaiting_ack, this->relogin_pending_, false, s.retry_count, s.req.policy.max_retries});
+          {s.awaiting_ack, this->relogin_pending_, short_wait, s.retry_count, s.req.policy.max_retries});
       s.retry_count = d.retries_spent;
       switch (d.action)
       {
       case deliverypolicy::TimeoutAction::Stale:
-      case deliverypolicy::TimeoutAction::ShortWaitMissed:
-        return;
+        return;   // acked already; one-shot, nothing to re-arm
       case deliverypolicy::TimeoutAction::DeferRelogin:
-        // No session to answer on: wait for confirm_session_(), charge nothing.
+        // No session to answer on (a relogin can start WHILE a retry is in
+        // flight, and clears the stored frame): a frame sent now would be a
+        // plaintext one the node, still holding its old session, rejects. Wait for
+        // confirm_session_(), charge nothing.
+        ESP_LOGD(TAG, "[%s] %s retry deferred — session being rebuilt", this->get_name().c_str(),
+                 s.req.what);
         this->arm_dlv_timer_(ch);
+        return;
+      case deliverypolicy::TimeoutAction::ShortWaitMissed:
+        this->dlv_short_wait_missed_(ch);
         return;
       case deliverypolicy::TimeoutAction::GiveUp:
         this->dlv_give_up_(ch);
@@ -3831,9 +3785,45 @@ namespace esphome
       case deliverypolicy::TimeoutAction::Retransmit:
         break;
       }
-      ESP_LOGW(TAG, "[%s] %s not acknowledged — %s (%u/%u)", this->get_name().c_str(),
-               s.req.what, s.req.resend_verb, (unsigned) s.retry_count,
-               (unsigned) s.req.policy.max_retries);
+      this->dlv_resend_(ch);
+    }
+
+    void LORAListener::dlv_resend_(DeliveryChannel ch)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      // Rule 4: a single shot that went unacked puts this node back on bursts
+      // immediately, and stays that way until a fresh in-slot uplink. One frame is
+      // the whole exposure -- the retry below is already a burst.
+      if (deliverypolicy::marksSingleShotUnacked(s.sent_single_shot, this->belief_.single_shot_unacked))
+      {
+        this->belief_.single_shot_unacked = true;
+        ESP_LOGW(TAG, "[%s] single shot unacked — back to bursts until "
+                      "the node is confirmed again", this->get_name().c_str());
+      }
+      if (s.req.resend_verb != nullptr)
+        ESP_LOGW(TAG, "[%s] %s not acknowledged — %s (%u/%u)", this->get_name().c_str(),
+                 s.req.what, s.req.resend_verb, (unsigned) s.retry_count,
+                 (unsigned) s.req.policy.max_retries);
+      this->dlv_tx_(ch, true);
+    }
+
+    // The optimistic guess missed. Burst NOW (Rule 4 marks the node unacked, so
+    // the resend places a full burst), but do NOT count it: retry_count is the
+    // budget that ends in "command failed, tear the session down", and a guess the
+    // operator opted into is not evidence the session is dead. The normal waits and
+    // the full budget follow unchanged.
+    void LORAListener::dlv_short_wait_missed_(DeliveryChannel ch)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      s.short_wait_spent = true;
+      this->belief_.single_shot_unacked = true;
+      // The tail just proven too short is a lower bound on this node's delay:
+      // remember it, so the next deadline is longer instead of the same mistake
+      // (and a node that never answers climbs to the normal wait, no further).
+      this->ack_latency_.note((uint32_t) (esp_timer_get_time() / 1000), s.first_tail_ms);
+      ESP_LOGW(TAG, "[%s] optimistic single shot unacked — bursting now "
+                    "(not counted against the retry budget)",
+               this->get_name().c_str());
       this->dlv_tx_(ch, true);
     }
 
@@ -3843,12 +3833,21 @@ namespace esphome
       s.awaiting_ack = false;
       if (s.req.on_fail)
         s.req.on_fail();
-      if (s.req.policy.give_up != deliverypolicy::GiveUpAction::FailRelogin)
-        return;
-      ESP_LOGW(TAG, "[%s] %s failed — clearing session, forcing re-login",
-               this->get_name().c_str(), s.req.what);
-      this->session_confirmed_ = false;
-      this->do_login_and_arm_retry_();
+      if (s.req.policy.give_up == deliverypolicy::GiveUpAction::FailRelogin)
+      {
+        // Session recovery. A command that goes fully unacked means the session is
+        // effectively dead -- the hub never confirmed it, OR it had, but the node
+        // has since re-keyed/hung leaving a STALE-confirmed flag (observed
+        // 2026-07-11: node 1 failed 4x without recovering because session_confirmed_
+        // was still true). Clear the confirmation and force an immediate fresh login
+        // so the next command rebuilds the session in seconds.
+        this->session_confirmed_ = false;
+        ESP_LOGW(TAG, "[%s] Command failed after retries — clearing session, forcing re-login",
+                 this->get_name().c_str());
+        this->do_login_and_arm_retry_();
+      }
+      if (s.req.on_done)
+        s.req.on_done();
     }
 
     // The node acknowledged `ack_msg_id`. A request that owns it is told which
@@ -3856,14 +3855,18 @@ namespace esphome
     bool LORAListener::dlv_ack_(uint32_t ack_msg_id)
     {
       // Highest channel first: a GridSync takes an id before a schedule push would.
-      for (uint8_t c = kDeliveryChannels; c-- > CH_CONFIG;)
+      for (uint8_t c = kDeliveryChannels; c-- > 0;)
       {
         DeliverySlot &s = this->slots_[c];
         const int i = s.acks.find(ack_msg_id);
         if (i < 0)
           continue;
         if (!s.req.on_ack || s.req.on_ack(s.acks.tag[i]))
+        {
           this->dlv_cancel_((DeliveryChannel) c);
+          if (s.req.on_done)
+            s.req.on_done();
+        }
         return true;
       }
       return false;
@@ -3948,24 +3951,7 @@ namespace esphome
 
     void LORAListener::handle_command_ack_(uint32_t ack_msg_id)
     {
-      if (this->dlv_ack_(ack_msg_id))
-        return;
-
-      // Accept an ack for any msgid in the current command's transmit range
-      // (first .. last) since each retransmit uses a fresh, higher msgid.
-      if (!deliverypolicy::acceptsRangeAck(this->ctl().awaiting_ack, ack_msg_id,
-                                           this->ctl().first_msgid, this->ctl().last_msgid))
-        return;
-      this->ctl().awaiting_ack = false;
-      this->cancel_timeout("op_retry");
-      this->set_command_failed_(false);
-      ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
-               (unsigned)ack_msg_id);
-      if (this->ctl().mark_us != 0)
-        this->record_ack_latency_();
-      // The nightly sleep takes effect on the hub only now: the node has heard it.
-      if (this->op_is_sleep_())
-        this->on_sleep_acknowledged_();
+      this->dlv_ack_(ack_msg_id);
     }
 
     void LORAListener::set_command_failed_(bool failed)
@@ -4126,7 +4112,7 @@ namespace esphome
       if (!this->sleep_op_in_flight_() || !this->relogin_pending_)
         return;
       this->ctl().deferred_until_login = false;
-      this->cancel_timeout("op_retry");
+      this->cancel_timeout(dlv_timer_(CH_CONTROL));
       ESP_LOGW(TAG, "[%s] Sleep still waiting for a session after %u s — dropped, not sent late",
                this->get_name().c_str(), (unsigned) (kPendingSleepExpiryMs / 1000));
       this->on_sleep_unconfirmed_();

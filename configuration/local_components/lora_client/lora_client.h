@@ -123,7 +123,7 @@ namespace esphome
     struct DeliveryRequest
     {
       const char *what{"request"};          // for the log
-      const char *resend_verb{"resending"}; // how a counted retry is logged
+      const char *resend_verb{"resending"}; // how a counted retry is logged; nullptr: build() logs it
       deliverypolicy::Policy policy{};
       // Send ONE attempt (the first, or a retry when `retry` is true) and return
       // the msgid it went out under, 0 when it could not be packed. `*tag` is
@@ -136,6 +136,11 @@ namespace esphome
       std::function<bool(uint32_t tag)> on_ack;
       // The ladder is spent.
       std::function<void()> on_fail;
+      // The request has left its channel (acked, or given up). Runs last.
+      std::function<void()> on_done;
+      // Whether a retry may go out at all (an at-most-once request that can no
+      // longer be re-sent byte for byte must be failed instead). Empty: always.
+      std::function<bool()> resendable;
     };
 
     // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
@@ -1590,8 +1595,13 @@ namespace esphome
       void     deliver_(DeliveryChannel ch, DeliveryRequest req);
       // One attempt, and the ack wait that follows it. False: could not be built.
       bool     dlv_tx_(DeliveryChannel ch, bool retry);
-      void     on_dlv_timeout_(DeliveryChannel ch);
+      void     on_dlv_timeout_(DeliveryChannel ch, bool short_wait);
       void     arm_dlv_timer_(DeliveryChannel ch);
+      // A counted retry: Rule 4, then one more attempt.
+      void     dlv_resend_(DeliveryChannel ch);
+      // The optimistic single shot's short first wait elapsed unanswered.
+      void     dlv_short_wait_missed_(DeliveryChannel ch);
+      uint32_t dlv_short_wait_ms_(DeliveryChannel ch);
       void     dlv_give_up_(DeliveryChannel ch);
       // The node acknowledged `ack_msg_id`: true when a Config / Mac request owns it.
       bool     dlv_ack_(uint32_t ack_msg_id);
@@ -1643,24 +1653,19 @@ namespace esphome
       // is included BY lora_tracker.h, not the other way round), so an inline
       // body would need a complete type this header must not have.
       TxPolicy tracked_op_policy_() const;
-      // Shared tail for send_cover_operation / send_tracked_sysop_: record the
-      // msgid, arm ack tracking, and schedule the first retransmit.
-      void     begin_tracked_op_(uint32_t msgid, const char *what);
       void     handle_command_ack_(uint32_t ack_msg_id);
       // Stages of handle_command_ack_: each returns true when it consumed the ack.
       void     record_ack_latency_();
       void     set_command_failed_(bool failed);
-      // Arm a ONE-SHOT retransmit timer.  Uses set_timeout (deterministic
-      // now+delay) rather than set_interval, whose first firing is randomly
-      // offset within [0, interval/2) to de-correlate periodic components — that
-      // jitter fired the first cover-op retransmit almost immediately.  The
-      // timeout re-arms itself after each retransmit; cancelled on ack.
-      void     schedule_op_retry_();
-      // Stages of schedule_op_retry_() and of its one-shot timer.
-      uint32_t short_first_wait_ms_();
-      void     on_op_retry_timeout_(bool short_wait);
-      void     op_short_wait_missed_();
-      void     op_retries_exhausted_();
+      // ---- the Control channel's request (cover operations and sysops) ----
+      // The command is the slot's own fields (kind, covop_case, ..., sysop); this
+      // is the request that delivers it.
+      DeliveryRequest ctl_request_();
+      // Send the slot's command now (a fresh one, or the one a relogin deferred).
+      void     ctl_send_();
+      uint32_t tx_ctl_(bool retry, uint32_t *tag);
+      bool     on_ctl_acked_(uint32_t ack_msg_id);
+      void     on_ctl_failed_();
 
       // ---- Nightly sleep (enterSleep): a tracked sysop whose hub-side effects
       // are applied only when the node ACKNOWLEDGES it. See lora_client.cpp. ----

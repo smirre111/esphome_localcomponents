@@ -321,6 +321,21 @@ struct AckProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::delivery_busy_;
     using esphome::lora_tracker::LORAListener::on_grid_sync_acked_;
     using esphome::lora_tracker::LORAListener::on_grid_sync_failed_;
+    using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_request_;
+    // A Control-channel command "in flight" the way the glue would have left it:
+    // sent under every id in `ids`, with the slot's command as it stands. No timer
+    // is armed (the tests that need one send for real).
+    void ctlInFlight(std::initializer_list<uint32_t> ids) {
+        this->cancel_timeout("dlv_ctl");
+        auto &s = this->ctl();
+        s.req = this->ctl_request_();
+        s.acks.clear();
+        for (uint32_t id : ids) s.acks.add(id, id);
+        s.first_msgid  = ids.size() ? *ids.begin() : 0;
+        s.last_msgid   = ids.size() ? *(ids.end() - 1) : 0;
+        s.awaiting_ack = true;
+    }
     // Put a ScheduleConfig push "in flight" the way the glue would have left it:
     // sent under `id`, which stands for schedule version `tag`, with `retries`
     // spent. No timer is armed (the tests that need one send for real).
@@ -6267,13 +6282,11 @@ TEST(AckPath, AGridSyncAckIsConsumedBeforeAScheduleAckWithTheSameId) {
     EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
 }
 
-TEST(AckPath, ATrackedOpIsAckedByAnyMsgidInItsRangeAndOnlyWhileAwaiting) {
+TEST(AckPath, ATrackedOpIsAckedByAnyMsgidItWasSentUnderAndOnlyWhileAwaiting) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     auto arm = [&]() {
-        AP(h).ctl().awaiting_ack = true;
-        AP(h).ctl().first_msgid  = 10;
-        AP(h).ctl().last_msgid   = 12;
+        AK(h.rol).ctlInFlight({10, 11, 12});
         AP(h).command_failed_  = true;
     };
     arm();
@@ -6288,9 +6301,10 @@ TEST(AckPath, ATrackedOpIsAckedByAnyMsgidInItsRangeAndOnlyWhileAwaiting) {
         EXPECT_FALSE(AP(h).ctl().awaiting_ack) << "id " << id;
         EXPECT_FALSE(AP(h).command_failed_) << "an ack clears 'command failed'";
     }
-    // Nothing awaiting: an in-range ack is not an event.
+    // Nothing awaiting (acked or given up): a late ack is not an event.
     arm();
     AP(h).ctl().awaiting_ack = false;
+    AP(h).ctl().acks.clear();
     deliverAck(h.rol, 11);
     EXPECT_TRUE(AP(h).command_failed_) << "must not be touched when nothing is awaiting";
 }
@@ -6302,8 +6316,7 @@ TEST(AckPath, OnlyACleanSingleShotAckFeedsTheLatencyHistory) {
     auto count = [&]() { return h.rol.ack_latency_for_test().count((uint32_t) (esp_timer_get_time() / 1000)); };
     auto maxd  = [&]() { return h.rol.ack_latency_for_test().maxDelayMs((uint32_t) (esp_timer_get_time() / 1000)); };
     auto arm = [&](int64_t mark_us, uint8_t retries, bool short_spent) {
-        AP(h).ctl().awaiting_ack = true;
-        AP(h).ctl().first_msgid  = AP(h).ctl().last_msgid = 10;
+        AK(h.rol).ctlInFlight({10});
         AP(h).ctl().mark_us      = mark_us;
         AP(h).ctl().retry_count  = retries;
         AP(h).ctl().short_wait_spent = short_spent;
@@ -6341,7 +6354,7 @@ TEST(AckPath, OnlyACleanSingleShotAckFeedsTheLatencyHistory) {
 // ---------------------------------------------------------------------------
 namespace {
 struct ReArmProbe : LORAClient {
-    using esphome::lora_tracker::LORAListener::schedule_op_retry_;
+    using esphome::lora_tracker::LORAListener::arm_dlv_timer_;
 };
 }  // namespace
 
@@ -6491,7 +6504,7 @@ TEST(OpRetry, TheShortWaitIsMeasuredFromTheOpMarkWhenThereIsOneElseFromTheLastPl
         const int64_t now = esp_timer_get_time();
         P(h).last_placed_t0_us_ = now + 900'000;
         AP(h).ctl().mark_us       = have_op_mark ? now + 400'000 : 0;
-        static_cast<ReArmProbe &>(h.rol).schedule_op_retry_();   // re-arm the first wait
+        static_cast<ReArmProbe &>(h.rol).arm_dlv_timer_(esphome::lora_tracker::CH_CONTROL);   // re-arm the first wait
         const int64_t to_mark_us = have_op_mark ? 400'000 : 900'000;
         const uint32_t want = singleshotwait::firstAckWaitMs(to_mark_us, 0, h.rol.op_first_tail_ms_for_test());
         const int got = msUntilBurst(h);
@@ -8978,7 +8991,9 @@ TEST(OtaRepack, KnownBug_AnOtaRetriedAfterARegisterIsRepackedWithAFreshMsgid) {
     EXPECT_EQ(DP(h).ctl().first_msgid, after[1]) << "the ack range moved with it";
     EXPECT_EQ(DP(h).ctl().last_msgid, after[1]);
     deliverAck(h.rol, ota[0]);                         // the node's ack of the ORIGINAL OTA
-    EXPECT_TRUE(h.rol.awaitingAck()) << "KNOWN BUG: not recognised";
+    // (Since the Control channel keeps every msgid a command went out under, the
+    // original's ack is now recognised; the repack itself is the bug, fixed in 5e.)
+    EXPECT_FALSE(h.rol.awaitingAck());
 }
 
 // The ordinary cover-op retry, by contrast, keeps the stored bytes and msgid
