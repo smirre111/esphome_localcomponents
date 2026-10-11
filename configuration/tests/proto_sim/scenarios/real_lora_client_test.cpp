@@ -7836,3 +7836,400 @@ TEST(NightlySleep, AnAckedSleepCancelsALoginRetryThatWasAlreadyRunning) {
 
     EXPECT_EQ(countLoginFrames(h), logins0) << "no login retry into a node that was just told to sleep";
 }
+
+// =============================================================================
+// "Unified MAC delivery path" refactor, STEP 0: characterisation of what the
+// delivery machinery does TODAY, for the cases the design review found
+// unpinned. Every test here passes on the unmodified code. Tests whose name
+// contains KnownBug pin behaviour that is WRONG and is scheduled to be fixed
+// (step 3: schedule/GridSync retry ladders; step 5: one tracked command at a
+// time, OTA at-most-once). When that step lands the KnownBug test is expected
+// to FAIL on purpose and must be rewritten to assert the fixed behaviour.
+// =============================================================================
+namespace {
+
+struct DlvProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::op_first_msgid_;
+    using esphome::lora_tracker::LORAListener::op_last_msgid_;
+    using esphome::lora_tracker::LORAListener::op_awaiting_ack_;
+    using esphome::lora_tracker::LORAListener::op_kind_;
+    using esphome::lora_tracker::LORAListener::op_sysop_;
+    using esphome::lora_tracker::LORAListener::op_frame_;
+    using esphome::lora_tracker::LORAListener::op_deferred_until_login_;
+    using esphome::lora_tracker::LORAListener::relogin_pending_;
+    using esphome::lora_tracker::LORAListener::clearSessionKeys_;
+    using esphome::lora_tracker::LORAListener::confirm_session_;
+    using esphome::lora_tracker::LORAListener::sleep_op_in_flight_;
+    using TrackedOpKind = esphome::lora_tracker::LORAListener::TrackedOpKind;
+};
+DlvProbe &DP(real_helpers::RealHubHarness &h) { return static_cast<DlvProbe &>(h.rol); }
+
+using OpCmd = proto_sim::LoraClientOperationMessage::Cmd;
+
+// msgids of every plaintext hub->node frame of one kind, in air order.
+std::vector<uint32_t> msgidsOf(real_helpers::RealHubHarness &h, OpCmd cmd) {
+    std::vector<uint32_t> ids;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == cmd) ids.push_back(m->header.msgId);
+    }
+    return ids;
+}
+
+std::vector<uint32_t> sysopMsgids(real_helpers::RealHubHarness &h, proto_sim::ClientOperation op) {
+    std::vector<uint32_t> ids;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == OpCmd::Sysop && m->sysop == op) ids.push_back(m->header.msgId);
+    }
+    return ids;
+}
+
+constexpr uint32_t kSchedStepMs = esphome::lora_tracker::LORAListener::kSchedRetryMs + 50;
+
+// A registered node with a plaintext session and a schedule the node does not hold.
+void schedReady(real_helpers::RealHubHarness &h) {
+    h.rol.registered_ = true;
+    h.rol.node_sched_version_ = h.rol.schedule_version() ^ 1u;
+}
+
+}  // namespace
+
+// (a) The ScheduleConfig ladder: the first push plus kSchedMaxRetries resends,
+// each a FRESH frame (new msgid), then an error log and silence. Giving up keeps
+// the session and the stale msgid.
+TEST(SchedPush, TheLadderIsOnePushPlusKSchedMaxRetriesResendsThenItGivesUpAndKeepsTheSession) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    h.rol.session_confirmed_ = false;
+    h.rol.send_schedule_config();
+    ASSERT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 1u);
+
+    for (int i = 0; i < 12; ++i) h.clock.tick(kSchedStepMs);
+
+    const auto ids = msgidsOf(h, OpCmd::Schedule);
+    ASSERT_EQ(ids.size(), 1u + LORAClient::kSchedMaxRetries) << "first push + the counted resends";
+    for (size_t i = 1; i < ids.size(); ++i)
+        EXPECT_GT(ids[i], ids[i - 1]) << "every resend is a new frame with a new msgid";
+    EXPECT_EQ(h.rol.sched_push_retries_, LORAClient::kSchedMaxRetries);
+    EXPECT_EQ(h.rol.sched_push_msgid_, ids.back()) << "the stale msgid is kept after giving up";
+    EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version()) << "the node never confirmed";
+    // A failed schedule push never tears the session down.
+    EXPECT_FALSE(h.rol.commandFailed());
+    EXPECT_FALSE(DP(h).relogin_pending_);
+    EXPECT_EQ(msgidsOf(h, OpCmd::Login).size(), 0u) << "no forced re-login";
+}
+
+// KNOWN BUG (step 3): sched_push_retries_ is reset ONLY by an ack. After the
+// ladder is spent, a NEW push (a fresh HA edit, the next beacon) therefore gets
+// exactly one attempt: its timer fires, sees retries >= max, logs the error and
+// never resends. The design wants every new push to get a full ladder.
+TEST(SchedPush, KnownBug_ANewPushAfterTheLadderIsSpentGetsASingleAttempt) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    h.rol.send_schedule_config();
+    for (int i = 0; i < 12; ++i) h.clock.tick(kSchedStepMs);
+    ASSERT_EQ(h.rol.sched_push_retries_, LORAClient::kSchedMaxRetries);
+    const size_t before = msgidsOf(h, OpCmd::Schedule).size();
+    ASSERT_EQ(before, 1u + LORAClient::kSchedMaxRetries);
+
+    h.rol.send_schedule_config();            // a NEW push
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), before + 1);
+    for (int i = 0; i < 12; ++i) h.clock.tick(kSchedStepMs);
+
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), before + 1)
+        << "KNOWN BUG: no resend at all for the second push";
+    EXPECT_EQ(h.rol.sched_push_retries_, LORAClient::kSchedMaxRetries)
+        << "KNOWN BUG: the budget is still spent from the previous push";
+}
+
+// The ack of the LATEST attempt resets everything (the positive half of the above).
+TEST(SchedPush, AnAckOfTheLatestAttemptClearsTheLadderAndAllowsAFullOneNextTime) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    h.rol.send_schedule_config();
+    h.clock.tick(kSchedStepMs);                       // one resend
+    ASSERT_EQ(h.rol.sched_push_retries_, 1);
+    deliverAck(h.rol, h.rol.sched_push_msgid_);
+    EXPECT_EQ(h.rol.sched_push_msgid_, 0u);
+    EXPECT_EQ(h.rol.sched_push_retries_, 0);
+    EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
+
+    const size_t before = msgidsOf(h, OpCmd::Schedule).size();
+    h.rol.node_sched_version_ ^= 1u;
+    h.rol.send_schedule_config();
+    for (int i = 0; i < 12; ++i) h.clock.tick(kSchedStepMs);
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), before + 1u + LORAClient::kSchedMaxRetries)
+        << "after an ack the next push gets the whole ladder";
+}
+
+// (b) KNOWN BUG (step 3): only the LAST attempt's msgid is kept. The node acks
+// every copy it hears (and re-acks byte-identical retries), so a late ack for an
+// earlier attempt is simply not recognised: the push keeps being resent and the
+// hub keeps believing the node does not hold the schedule.
+TEST(SchedPush, KnownBug_ALateAckForAnEarlierAttemptIsNotRecognised) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    schedReady(h);
+    esphome::binary_sensor::BinarySensor bs;
+    h.rol.set_schedule_pending_binary_sensor(&bs);
+    bs.publish_state(true);
+    h.rol.send_schedule_config();
+    h.clock.tick(kSchedStepMs);                       // the second attempt
+    const auto ids = msgidsOf(h, OpCmd::Schedule);
+    ASSERT_EQ(ids.size(), 2u);
+    ASSERT_NE(ids[0], ids[1]);
+    ASSERT_EQ(h.rol.sched_push_msgid_, ids[1]);
+
+    deliverAck(h.rol, ids[0]);                        // the node's ack of the FIRST copy, late
+
+    EXPECT_EQ(h.rol.sched_push_msgid_, ids[1]) << "KNOWN BUG: still waiting";
+    EXPECT_EQ(h.rol.sched_push_retries_, 1);
+    EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
+    EXPECT_TRUE(bs.state) << "KNOWN BUG: Schedule Pending stays on";
+    h.clock.tick(kSchedStepMs);
+    EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 3u) << "KNOWN BUG: and it is resent again";
+}
+
+// (c) GridSync: the ladder is the first publish + kGridSyncMaxRepublishes
+// re-publishes. Running out clears the wait; a late ack for ANY earlier publish
+// is then unrecognised; a fresh publish starts a fresh ladder (this half works).
+TEST(GridSyncLadder, RunningOutOfRepublishesClearsTheWaitAndALateAckIsIgnored) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    const size_t sends0 = h.tracker.sent_copies.size();
+    const uint32_t first = h.rol.gridsync_msgids_[0];
+    for (int i = 0; i < 12; ++i)
+        h.clock.tick(LORAClient::kGridSyncRetryMs + 50);
+
+    EXPECT_EQ(h.tracker.sent_copies.size() - sends0, (size_t) LORAClient::kGridSyncMaxRepublishes)
+        << "exactly kGridSyncMaxRepublishes more GridSync frames, then silence";
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), LORAClient::kGridSyncMaxRepublishes);
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck()) << "the wait is cleared: 'stays in Mode A until its next login'";
+
+    const int64_t ack_us = h.rol.last_gridsync_ack_us_;
+    deliverAck(h.rol, first);                          // late ack of the first publish
+    EXPECT_EQ(h.rol.last_gridsync_ack_us_, ack_us) << "no longer recognised as a GridSync ack";
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+}
+
+TEST(GridSyncLadder, AFreshPublishAfterExhaustionStartsAFreshLadder) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    for (int i = 0; i < 12; ++i)
+        h.clock.tick(LORAClient::kGridSyncRetryMs + 50);
+    ASSERT_FALSE(h.rol.gridSyncAwaitingAck());
+    ASSERT_EQ(h.rol.gridSyncRepublishes(), LORAClient::kGridSyncMaxRepublishes);
+
+    const size_t sends0 = h.tracker.sent_copies.size();
+    h.rol.send_grid_sync(true);
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck());
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 0) << "the counter restarts with a new wait";
+    for (int i = 0; i < 12; ++i)
+        h.clock.tick(LORAClient::kGridSyncRetryMs + 50);
+    EXPECT_EQ(h.tracker.sent_copies.size() - sends0, 1u + LORAClient::kGridSyncMaxRepublishes);
+}
+
+TEST(GridSyncLadder, EveryPublishOfTheLadderIsAckableUntilTheWaitIsCleared) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    for (int i = 0; i < 3; ++i)
+        h.clock.tick(LORAClient::kGridSyncRetryMs + 50);
+    ASSERT_EQ(h.rol.gridSyncRepublishes(), 3);
+    ASSERT_EQ(h.rol.gridsync_msgid_count_, 4) << "four publishes are on record";
+    const uint32_t third = h.rol.gridsync_msgids_[2];
+    deliverAck(h.rol, third);                          // an ack of a middle publish confirms the grid
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+    const size_t sends = h.tracker.sent_copies.size();
+    h.clock.tick(5 * LORAClient::kGridSyncRetryMs);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "and the re-publishing stops";
+}
+
+// (d) ClientConfig: one bare, unacked, unplaced send. No tracked-op state, no
+// retry timer, no supersede key.
+TEST(ConfigShape, AClientConfigIsOneBareUnackedSendWithNoRetry) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    const size_t sends0 = h.tracker.sent_copies.size();
+
+    h.rol.send_remote_config();
+
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends0 + 1);
+    EXPECT_EQ(h.tracker.last_copies, 0) << "no shape requested: the default burst";
+    EXPECT_EQ(h.tracker.last_earliest_us, 0) << "not placed on a grid mark";
+    EXPECT_EQ(h.tracker.last_supersede_key, 0u) << "no supersession";
+    EXPECT_EQ(msgidsOf(h, OpCmd::ClientConfig).size(), 1u);
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_EQ(h.rol.sched_push_msgid_, 0u);
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+    h.clock.tick(120'000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "never retransmitted";
+    EXPECT_EQ(msgidsOf(h, OpCmd::ClientConfig).size(), 1u);
+}
+
+TEST(ConfigShape, AClientConfigDoesNotDisturbATrackedOpInFlight) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    const uint32_t first = DP(h).op_first_msgid_;
+    const uint32_t last  = DP(h).op_last_msgid_;
+
+    h.rol.send_remote_config();
+
+    EXPECT_TRUE(h.rol.awaitingAck());
+    EXPECT_EQ(DP(h).op_first_msgid_, first);
+    EXPECT_EQ(DP(h).op_last_msgid_, last) << "the config frame took a msgid but is not part of the op's range";
+    EXPECT_EQ(h.tracker.last_supersede_gen, 0u) << "the config send carries no generation";
+    deliverAck(h.rol, last);
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+// (e) KNOWN BUG (step 5): there is ONE tracked-op slot. A cover op sent while a
+// SLEEP is in flight overwrites it: the sleep is never retransmitted again, its
+// own ack no longer matches, and the sleep is never recorded even if the node
+// heard it and went to sleep.
+TEST(OneSlot, KnownBug_ACoverOpSentWhileASleepIsInFlightOverwritesIt) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.enterSleep();
+    ASSERT_TRUE(DP(h).sleep_op_in_flight_());
+    ASSERT_EQ(countSleepFrames(h), 1);
+    const uint32_t sleep_id = DP(h).op_last_msgid_;
+
+    sendOpen(h);
+
+    EXPECT_FALSE(DP(h).sleep_op_in_flight_()) << "KNOWN BUG: the sleep is gone";
+    EXPECT_EQ(DP(h).op_kind_, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_NE(DP(h).op_last_msgid_, sleep_id);
+    for (int i = 0; i < 3; ++i) h.clock.tick(3050);
+    EXPECT_EQ(countSleepFrames(h), 1) << "KNOWN BUG: the sleep is never retransmitted";
+
+    deliverAck(h.rol, sleep_id);                       // the node DID hear it and acks it
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "KNOWN BUG: its own ack is not recognised";
+    EXPECT_TRUE(h.rol.login_acked_) << "so the hub keeps a session with a node that sleeps";
+}
+
+TEST(OneSlot, KnownBug_ACoverOpSentWhileASleepIsDeferredReplacesItThere_Too) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    DP(r).relogin_pending_ = true;
+    r.rol.enterSleep();
+    ASSERT_TRUE(DP(r).op_deferred_until_login_);
+    ASSERT_TRUE(DP(r).sleep_op_in_flight_());
+
+    sendOpen(r);
+
+    EXPECT_TRUE(DP(r).op_deferred_until_login_) << "still one deferred command";
+    EXPECT_FALSE(DP(r).sleep_op_in_flight_()) << "KNOWN BUG: but it is the cover op now, not the sleep";
+    DP(r).confirm_session_();
+    EXPECT_TRUE(r.rol.awaitingAck()) << "sent from confirm_session_()";
+    EXPECT_EQ(DP(r).op_kind_, DlvProbe::TrackedOpKind::COVER);
+    deliverAck(r.rol, DP(r).op_last_msgid_);
+    EXPECT_EQ(r.rol.last_sleep_epoch_, 0u) << "KNOWN BUG: the sleep was lost";
+}
+
+// (f) A sysop (the auto-mode switch) issued while a cover op is in flight takes
+// the same single slot: the cover op is not retransmitted any more and its ack is
+// no longer matched. Characterised as-is (step 5 queues instead).
+TEST(OneSlot, ASetAutoModeSysopDuringACoverOpReplacesTheCoverOp) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig h;
+    h.session();
+    ASSERT_TRUE(h.rol.session_confirmed_);
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    const uint32_t cover_id = DP(h).op_last_msgid_;
+    ASSERT_EQ(DP(h).op_kind_, DlvProbe::TrackedOpKind::COVER);
+
+    h.rol.set_auto_mode(true);
+
+    EXPECT_EQ(DP(h).op_kind_, DlvProbe::TrackedOpKind::SYSOP);
+    EXPECT_EQ(DP(h).op_sysop_, (int32_t) CLIENT_OPERATION__CMD_MODE_AUTO);
+    EXPECT_TRUE(h.rol.awaitingAck());
+    EXPECT_GT(DP(h).op_first_msgid_, cover_id) << "the ack range now belongs to the sysop";
+    EXPECT_EQ(h.rol.opRetryCount(), 0u) << "a fresh retry budget";
+
+    deliverAck(h.rol, cover_id);                       // the cover op's own ack
+    EXPECT_TRUE(h.rol.awaitingAck()) << "is not matched; the sysop is still awaited";
+    deliverAck(h.rol, DP(h).op_last_msgid_);
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+TEST(OneSlot, ASetAutoModeWithoutAConfirmedSessionSendsNothingAndLeavesTheCoverOpAlone) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    ASSERT_FALSE(h.rol.session_confirmed_);
+    const uint32_t last = DP(h).op_last_msgid_;
+
+    h.rol.set_auto_mode(true);                         // saved, pushed with the schedule later
+
+    EXPECT_EQ(DP(h).op_kind_, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_EQ(DP(h).op_last_msgid_, last);
+}
+
+// (g) KNOWN BUG (step 5): OTA must be at-most-once, but when a REGISTER clears
+// the stored frame inside the retry window the retry is RE-PACKED with a fresh
+// msgid. The node may have run the first OTA already (its ack lost), so this can
+// trigger a second one; and the ack of the original msgid no longer matches.
+TEST(OtaRepack, KnownBug_AnOtaRetriedAfterARegisterIsRepackedWithAFreshMsgid) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.triggerOTA();
+    ASSERT_TRUE(h.rol.awaitingAck());
+    ASSERT_FALSE(DP(h).op_frame_.empty()) << "pack-once: the frame is stored";
+    const auto ota = sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA);
+    ASSERT_EQ(ota.size(), 1u);
+
+    // What handle_register_ does when the node reboots mid-delivery.
+    DP(h).clearSessionKeys_();
+    ASSERT_TRUE(DP(h).op_frame_.empty());
+    DP(h).relogin_pending_ = true;
+    h.clock.tick(10'000);                              // retries defer, nothing is sent or charged
+    EXPECT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 1u);
+    EXPECT_EQ(h.rol.opRetryCount(), 0u);
+    DP(h).relogin_pending_ = false;                    // the new session is up
+
+    h.clock.tick(3050);                                // the next retry
+
+    const auto after = sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA);
+    ASSERT_EQ(after.size(), 2u) << "KNOWN BUG: a second OTA command goes out";
+    EXPECT_NE(after[1], after[0]) << "KNOWN BUG: with a fresh msgid, i.e. a NEW command to the node";
+    EXPECT_EQ(DP(h).op_first_msgid_, after[1]) << "the ack range moved with it";
+    EXPECT_EQ(DP(h).op_last_msgid_, after[1]);
+    deliverAck(h.rol, ota[0]);                         // the node's ack of the ORIGINAL OTA
+    EXPECT_TRUE(h.rol.awaitingAck()) << "KNOWN BUG: not recognised";
+}
+
+// The ordinary cover-op retry, by contrast, keeps the stored bytes and msgid
+// (pack once): the stored-frame path is what the OTA bug bypasses.
+TEST(OtaRepack, ACoverOpRetryWithAStoredFrameKeepsItsMsgid) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    const uint32_t id = DP(h).op_last_msgid_;
+    h.clock.tick(3050);
+    EXPECT_EQ(h.rol.opRetryCount(), 1u);
+    EXPECT_EQ(DP(h).op_last_msgid_, id);
+    EXPECT_EQ(DP(h).op_first_msgid_, id);
+}

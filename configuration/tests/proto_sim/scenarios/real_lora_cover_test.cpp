@@ -142,4 +142,25 @@ TEST(RealLoraCover, SendRemoteConfigEmitsCoverConfigWithGeometry) {
            "with destAddress=18 and full geometry.";
 }
 
+// Step 0 of the "unified MAC delivery path" refactor: a CoverConfig is ONE bare,
+// unacked, unplaced send through the listener (send_downlink -> parent_->send
+// with a default policy). No tracked-op state, no retry timer, no supersession.
+// Pinned as-is; the node does not ack it yet (a later, optional change).
+TEST(RealLoraCover, CoverConfigIsOneBareUnackedSendWithNoRetry) {
+    CoverHarness h;
+    const size_t sends0 = h.tracker.sent_copies.size();
+
+    h.cover.send_remote_config();
+
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends0 + 1);
+    EXPECT_EQ(h.tracker.last_copies, 0) << "no shape requested: the default burst";
+    EXPECT_EQ(h.tracker.last_earliest_us, 0) << "not placed on a grid mark";
+    EXPECT_EQ(h.tracker.last_supersede_key, 0u) << "no supersession";
+    EXPECT_FALSE(h.rol.awaitingAck()) << "not a tracked op";
+    EXPECT_EQ(h.rol.sched_push_msgid_, 0u);
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+    h.clock.tick(120'000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "never retransmitted";
+}
+
 } // namespace
