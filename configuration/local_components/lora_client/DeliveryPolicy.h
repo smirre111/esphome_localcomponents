@@ -223,6 +223,41 @@ constexpr Policy kSchedulePolicy = {Mode::Acked, Shape::Auto, Resend::Rebuild, 3
 constexpr Policy kGridSyncPolicy = {Mode::Acked, Shape::Burst, Resend::Rebuild, 5, 6000,
                                     GiveUpAction::FailKeep, false, true, false};
 
+// ---- the Control channel (step 5): cover operations and sysops --------------
+//
+// One command per node at a time, the ladder the hardware verified: the stored
+// frame is re-sent byte for byte (same msgid, so the node re-acks it from its
+// AckCache instead of running it twice), 3 s apart plus the transmit backlog,
+// 4 counted retries. Out of retries the session is presumed dead (FailRelogin)
+// -- except SLEEP, whose silence is ambiguous (the node may have slept and lost
+// its ack): that one keeps the session (FailKeep).
+constexpr uint8_t  kControlMaxRetries = 4;
+constexpr uint32_t kControlWaitMs     = 3000;
+
+// A cover operation: the latest one wins, so a newer one replaces an older one.
+constexpr Policy kCoverPolicy = {Mode::Acked, Shape::Auto, Resend::SameBytes, kControlMaxRetries,
+                                 kControlWaitMs, GiveUpAction::FailRelogin, false, true, true};
+// A sysop (mode switch, debug toggles, ...): never replaced by a newer request.
+constexpr Policy kSysopPolicy = {Mode::Acked, Shape::Auto, Resend::SameBytes, kControlMaxRetries,
+                                 kControlWaitMs, GiveUpAction::FailRelogin, false, false, true};
+// CMD_SLEEP: as a sysop, but giving up keeps the session.
+constexpr Policy kSleepPolicy = {Mode::Acked, Shape::Auto, Resend::SameBytes, kControlMaxRetries,
+                                 kControlWaitMs, GiveUpAction::FailKeep, false, false, true};
+// CMD_OTA: as a sysop, but AT MOST ONCE -- it is never re-packed under a fresh
+// msgid, because the node may already have run the first one.
+constexpr Policy kOtaPolicy = {Mode::Acked, Shape::Auto, Resend::SameBytes, kControlMaxRetries,
+                               kControlWaitMs, GiveUpAction::FailRelogin, true, false, true};
+
+// Which of the four a Control command is. The sysop values are the caller's
+// (ClientOperation), so this header stays free of the generated protobuf header.
+constexpr const Policy &controlPolicy(bool is_cover, int32_t sysop, int32_t sleep_op, int32_t ota_op)
+{
+    return is_cover        ? kCoverPolicy
+           : sysop == sleep_op ? kSleepPolicy
+           : sysop == ota_op   ? kOtaPolicy
+                               : kSysopPolicy;
+}
+
 // A ladder is live and still has a counted retry to spend: the push is "owed"
 // to the pending-shadow and holds the onboarding gate. (The final wait, after
 // the last retry, no longer does.)

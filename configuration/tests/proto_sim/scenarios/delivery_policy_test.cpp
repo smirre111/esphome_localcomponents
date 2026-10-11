@@ -216,5 +216,43 @@ TEST(DeliveryPolicy, TheSchedulePolicyIsTodaysLadderAndKeepsTheSessionWhenItFail
     EXPECT_FALSE(kSchedulePolicy.at_most_once);
 }
 
+// ---- the Control channel's four policies (step 5) ---------------------------
+
+TEST(DeliveryPolicy, AllFourControlPoliciesShareTheVerifiedLadder) {
+    for (const Policy *p : {&kCoverPolicy, &kSysopPolicy, &kSleepPolicy, &kOtaPolicy}) {
+        EXPECT_EQ(p->max_retries, 4);
+        EXPECT_EQ(p->base_wait_ms, 3000u);
+        EXPECT_TRUE(p->mode == Mode::Acked);
+        EXPECT_TRUE(p->resend == Resend::SameBytes) << "a retry re-sends the stored bytes, same msgid";
+        EXPECT_TRUE(p->yields_warmup) << "a command stops a Mode B warm-up";
+    }
+}
+
+TEST(DeliveryPolicy, OnlyACoverOperationIsSupersededByANewerOne) {
+    EXPECT_TRUE(kCoverPolicy.supersedes_same_kind);
+    EXPECT_FALSE(kSysopPolicy.supersedes_same_kind);
+    EXPECT_FALSE(kSleepPolicy.supersedes_same_kind) << "a sleep is never replaced";
+    EXPECT_FALSE(kOtaPolicy.supersedes_same_kind) << "an OTA is never replaced";
+}
+
+TEST(DeliveryPolicy, OnlyTheSleepKeepsTheSessionWhenItIsGivenUpAndOnlyTheOtaIsAtMostOnce) {
+    EXPECT_TRUE(kCoverPolicy.give_up == GiveUpAction::FailRelogin);
+    EXPECT_TRUE(kSysopPolicy.give_up == GiveUpAction::FailRelogin);
+    EXPECT_TRUE(kOtaPolicy.give_up == GiveUpAction::FailRelogin);
+    EXPECT_TRUE(kSleepPolicy.give_up == GiveUpAction::FailKeep);
+    EXPECT_TRUE(kOtaPolicy.at_most_once);
+    EXPECT_FALSE(kCoverPolicy.at_most_once);
+    EXPECT_FALSE(kSysopPolicy.at_most_once);
+    EXPECT_FALSE(kSleepPolicy.at_most_once);
+}
+
+TEST(DeliveryPolicy, ControlPolicyPicksByKindThenBySysop) {
+    constexpr int32_t kSleep = 7, kOta = 9, kOther = 11;
+    EXPECT_EQ(&controlPolicy(true, kSleep, kSleep, kOta), &kCoverPolicy) << "a cover op is a cover op whatever the stale sysop field says";
+    EXPECT_EQ(&controlPolicy(false, kSleep, kSleep, kOta), &kSleepPolicy);
+    EXPECT_EQ(&controlPolicy(false, kOta, kSleep, kOta), &kOtaPolicy);
+    EXPECT_EQ(&controlPolicy(false, kOther, kSleep, kOta), &kSysopPolicy);
+}
+
 // The policy is pure and constexpr: usable with no listener at all.
 static_assert(onAckTimeout(TimeoutState{false, false, false, 0, 4}).action == TimeoutAction::Stale, "");
