@@ -148,9 +148,9 @@ namespace esphome
 
     // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
     // delivery refactor). Everything the tracked-command machinery used to keep
-    // as loose op_* members on the listener. One request per channel at a time;
-    // only the Control channel (cover operations and sysops) is used so far, the
-    // Config and Mac channels are for the later steps.
+    // as loose op_* members on the listener. One request per channel at a time
+    // (Control: cover operations and sysops, with a small line of what waits
+    // behind it; Config: ScheduleConfig; Mac: GridSync).
     struct DeliverySlot
     {
       // What tx_tracked_op_ rebuilds on each (re)transmission.
@@ -219,7 +219,7 @@ namespace esphome
     enum DeliveryChannel : uint8_t
     {
       CH_CONTROL = 0,   // cover operations and sysops
-      CH_CONFIG  = 1,   // ScheduleConfig, ClientConfig / CoverConfig (later steps)
+      CH_CONFIG  = 1,   // ScheduleConfig (ClientConfig / CoverConfig are still bare sends)
       CH_MAC     = 2,   // GridSync (enable)
       kDeliveryChannels = 3
     };
@@ -1582,8 +1582,8 @@ namespace esphome
       // + force re-login after kOpMaxRetries.  kind selects what tx_tracked_op_
       // rebuilds on each retransmission.
       using TrackedOpKind = DeliverySlot::Kind;
-      // The per-channel request state (DeliverySlot above). Only the Control
-      // channel is in use: ctl() is the tracked cover-op / sysop slot.
+      // The per-channel request state (DeliverySlot above): ctl() is the tracked
+      // cover-op / sysop slot, cfg() the schedule push, mac() the GridSync.
       DeliverySlot slots_[kDeliveryChannels];
       DeliverySlot       &ctl()       { return this->slots_[CH_CONTROL]; }
       const DeliverySlot &ctl() const { return this->slots_[CH_CONTROL]; }
@@ -1592,7 +1592,7 @@ namespace esphome
       DeliverySlot       &mac()       { return this->slots_[CH_MAC]; }
       const DeliverySlot &mac() const { return this->slots_[CH_MAC]; }
 
-      // ---- the generic delivery glue (Config channel; Control and Mac to follow) ----
+      // ---- the generic delivery glue (Control, Config and Mac channels) ----
       // Start `req` on channel `ch`, superseding one already in flight there (its
       // ack ids stay recognised). The decisions are deliverypolicy::.
       void     deliver_(DeliveryChannel ch, DeliveryRequest req);
@@ -1673,6 +1673,27 @@ namespace esphome
       bool     on_ctl_acked_(uint32_t ack_msg_id);
       void     on_ctl_failed_();
       void     on_ctl_abandoned_();
+      // A Control request from outside: starts now, replaces a cover op, or waits
+      // its turn (DeliveryPolicy.h, ControlQueue).
+      void     ctl_submit_(const deliverypolicy::ControlCmd &c);
+      // Make `c` the slot's command and send it, or leave it deferred for
+      // confirm_session_() (`hold`: the node is asleep, not merely re-logging in).
+      void     ctl_begin_(const deliverypolicy::ControlCmd &c, bool hold);
+      void     ctl_enqueue_(const deliverypolicy::ControlCmd &c);
+      // The command in flight is done (acked, failed or abandoned): start the next.
+      void     ctl_next_();
+      bool     ctl_busy_() const;
+      // The commands waiting behind the one in flight.
+      deliverypolicy::ControlQueue ctl_queue_;
+      // The node acknowledged CMD_SLEEP and is asleep: what waited behind the sleep
+      // is held for its wake (confirm_session_) instead of being sent into the void.
+      bool     ctl_hold_for_wake_{false};
+      // A sleep is in flight, deferred or waiting its turn.
+      bool     sleep_pending_() const;
+      // Drop a sleep that has waited too long for a session (in flight, or queued).
+      bool     drop_stale_sleep_();
+      // Run the channel's on_done (a copy: it may start the channel's next request).
+      void     dlv_done_(DeliveryChannel ch);
 
       // ---- Nightly sleep (enterSleep): a tracked sysop whose hub-side effects
       // are applied only when the node ACKNOWLEDGES it. See lora_client.cpp. ----

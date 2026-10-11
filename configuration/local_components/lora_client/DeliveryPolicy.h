@@ -258,6 +258,110 @@ constexpr const Policy &controlPolicy(bool is_cover, int32_t sysop, int32_t slee
                                : kSysopPolicy;
 }
 
+// ---- one Control command at a time, the rest in line (step 5d) ---------------
+//
+// A node has ONE Control command in flight (a cover op or a sysop). A newer
+// request never silently overwrites it:
+//   * a newer COVER op replaces an older cover op, in flight or still waiting
+//     ("the latest cover op wins": a blind only needs to end up where the user
+//     last said);
+//   * everything else WAITS, in order: a sysop (SLEEP, OTA, a mode switch, a
+//     debug toggle) is never superseded, and a cover op never cancels one.
+struct ControlCmd
+{
+    bool     is_cover;
+    uint32_t covop_case;   // cover: which oneof arm
+    int32_t  operation;    // cover: CovOperation
+    float    position;     // cover: 0..1
+    int32_t  sysop;        // sysop: ClientOperation
+};
+
+enum class ControlAdmit : uint8_t
+{
+    StartNow,   // nothing in flight
+    Replace,    // a cover op over the cover op in flight
+    Queue,      // behind the command in flight
+};
+
+constexpr ControlAdmit admitControl(bool busy, bool inflight_is_cover, bool new_is_cover)
+{
+    if (!busy)
+        return ControlAdmit::StartNow;
+    return (new_is_cover && inflight_is_cover) ? ControlAdmit::Replace : ControlAdmit::Queue;
+}
+
+// What waits behind the command in flight: a small FIFO, oldest first.
+//
+// At most ONE cover op is ever in it (a newer one replaces it, and moves to the
+// back: the order is the order the user's latest intents were given in). When it
+// is full a request is REFUSED -- the newest is dropped, never an older one: a
+// queued SLEEP/OTA/mode switch was asked for and must not vanish silently.
+struct ControlQueue
+{
+    static constexpr unsigned kDepth = 4;
+    enum class Push : uint8_t { Queued, ReplacedCover, Full };
+
+    ControlCmd q[kDepth]{};
+    uint8_t    n{0};
+
+    Push push(const ControlCmd &c)
+    {
+        bool replaced = false;
+        if (c.is_cover)
+            replaced = this->removeCover();
+        if (this->n == kDepth)
+            return Push::Full;
+        this->q[this->n++] = c;
+        return replaced ? Push::ReplacedCover : Push::Queued;
+    }
+    // The oldest, removed. False when nothing waits.
+    bool pop(ControlCmd *out)
+    {
+        if (this->n == 0)
+            return false;
+        *out = this->q[0];
+        this->erase(0);
+        return true;
+    }
+    bool empty() const { return this->n == 0; }
+    unsigned size() const { return this->n; }
+    void clear() { this->n = 0; }
+    bool hasSysop(int32_t sysop) const { return this->find(false, sysop) >= 0; }
+    // Drop a waiting sysop. True when there was one.
+    bool removeSysop(int32_t sysop)
+    {
+        const int i = this->find(false, sysop);
+        if (i < 0)
+            return false;
+        this->erase((unsigned) i);
+        return true;
+    }
+    bool hasCover() const { return this->find(true, 0) >= 0; }
+
+private:
+    int find(bool cover, int32_t sysop) const
+    {
+        for (unsigned i = 0; i < this->n; ++i)
+            if (this->q[i].is_cover == cover && (cover || this->q[i].sysop == sysop))
+                return (int) i;
+        return -1;
+    }
+    bool removeCover()
+    {
+        const int i = this->find(true, 0);
+        if (i < 0)
+            return false;
+        this->erase((unsigned) i);
+        return true;
+    }
+    void erase(unsigned i)
+    {
+        for (; i + 1 < this->n; ++i)
+            this->q[i] = this->q[i + 1];
+        --this->n;
+    }
+};
+
 // A ladder is live and still has a counted retry to spend: the push is "owed"
 // to the pending-shadow and holds the onboarding gate. (The final wait, after
 // the last retry, no longer does.)

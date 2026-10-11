@@ -7910,6 +7910,8 @@ TEST(NightlySleep, AnAckedSleepCancelsALoginRetryThatWasAlreadyRunning) {
 // (step 3: schedule/GridSync retry ladders; step 5: one tracked command at a
 // time, OTA at-most-once). When that step lands the KnownBug test is expected
 // to FAIL on purpose and must be rewritten to assert the fixed behaviour.
+// (Step 5 has landed: the OneSlot and OtaRepack KnownBug tests were rewritten
+// as ControlQueue.* and OtaRepack.* tests asserting the fixed behaviour.)
 // =============================================================================
 namespace {
 
@@ -8871,11 +8873,79 @@ TEST(ConfigShape, AClientConfigDoesNotDisturbATrackedOpInFlight) {
     EXPECT_FALSE(h.rol.awaitingAck());
 }
 
-// (e) KNOWN BUG (step 5): there is ONE tracked-op slot. A cover op sent while a
-// SLEEP is in flight overwrites it: the sleep is never retransmitted again, its
-// own ack no longer matches, and the sleep is never recorded even if the node
-// heard it and went to sleep.
-TEST(OneSlot, KnownBug_ACoverOpSentWhileASleepIsInFlightOverwritesIt) {
+// =============================================================================
+// The Control channel is ONE command in flight per node, and the rest in line
+// (step 5d). A newer cover op replaces an older cover op (in flight or waiting);
+// everything else -- a SLEEP, an OTA, a mode switch, a debug toggle, and a cover op
+// arriving while one of those is in flight -- WAITS its turn. Before: there was one
+// slot and a newer request silently overwrote whatever was in it, so a cover op
+// sent while a SLEEP was in flight made the hub forget the sleep (never
+// retransmitted, its own ack no longer recognised, the sleep never recorded).
+// =============================================================================
+namespace {
+
+struct QProbe : DlvProbe {
+    using esphome::lora_tracker::LORAListener::ctl_queue_;
+    using esphome::lora_tracker::LORAListener::dispatch_payload_;
+    using esphome::lora_tracker::LORAListener::note_node_heard_;
+};
+QProbe &QP(LORAClient &c) { return static_cast<QProbe &>(c); }
+QProbe &QP(real_helpers::RealHubHarness &h) { return static_cast<QProbe &>(h.rol); }
+
+constexpr int32_t kOpSleep   = CLIENT_OPERATION__CMD_SLEEP;
+constexpr int32_t kOpOta     = CLIENT_OPERATION__CMD_OTA;
+constexpr int32_t kOpStatus  = CLIENT_OPERATION__CMD_STATUS;
+constexpr int32_t kOpWifiOn  = CLIENT_OPERATION__CMD_ENABLE_WIFI;
+constexpr int32_t kOpWifiOff = CLIENT_OPERATION__CMD_DISABLE_WIFI;
+
+void sendClose(LORAClient &rol) {
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_CLOSE, 0.0f);
+}
+void sendOpenTo(LORAClient &rol) {
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+}
+
+// The commands that have gone out to `dest`, in the order each FIRST went out
+// (a retransmission repeats a msgid and is not listed again). "S<n>" is a sysop
+// (ClientOperation n), "C<n>" a cover operation (CovOperation n).
+std::vector<std::string> airOrder(proto_sim::SimRadio &radio, uint32_t dest = 0) {
+    std::vector<std::string> out;
+    std::vector<uint32_t> seen;
+    const auto frames = radio.hub_to_node_frames();   // by value: never iterate the temporary
+    for (const auto &f : frames) {
+        auto m = proto_sim::as_op(f);
+        if (!m) continue;
+        if (dest != 0 && m->header.destAddress != dest) continue;
+        if (m->cmd != OpCmd::Operation && m->cmd != OpCmd::Sysop) continue;
+        if (std::find(seen.begin(), seen.end(), m->header.msgId) != seen.end()) continue;
+        seen.push_back(m->header.msgId);
+        out.push_back(m->cmd == OpCmd::Sysop ? "S" + std::to_string((int) m->sysop)
+                                             : "C" + std::to_string((int) m->operation.operation));
+    }
+    return out;
+}
+std::vector<std::string> airOrder(real_helpers::RealHubHarness &h) { return airOrder(h.radio); }
+using Order = std::vector<std::string>;
+
+// How many frames of one msgid went out (a retransmission repeats it).
+int copiesOf(proto_sim::SimRadio &radio, uint32_t msgid) {
+    int n = 0;
+    const auto frames = radio.hub_to_node_frames();
+    for (const auto &f : frames) {
+        auto m = proto_sim::as_op(f);
+        if (m && (m->cmd == OpCmd::Operation || m->cmd == OpCmd::Sysop) && m->header.msgId == msgid) ++n;
+    }
+    return n;
+}
+
+// The node's CommandAck for the command in flight.
+void ackInFlight(real_helpers::RealHubHarness &h) { deliverAck(h.rol, DP(h).ctl().last_msgid); }
+
+}  // namespace
+
+// A cover op sent while a SLEEP is in flight WAITS behind it: the sleep keeps its
+// slot, is retransmitted as itself, and its own ack is recognised and recorded.
+TEST(ControlQueue, ACoverOpSentWhileASleepIsInFlightQueuesBehindItAndTheSleepIsRecorded) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
@@ -8886,18 +8956,66 @@ TEST(OneSlot, KnownBug_ACoverOpSentWhileASleepIsInFlightOverwritesIt) {
 
     sendOpen(h);
 
-    EXPECT_FALSE(DP(h).sleep_op_in_flight_()) << "KNOWN BUG: the sleep is gone";
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
-    EXPECT_NE(DP(h).ctl().last_msgid, sleep_id);
-    for (int i = 0; i < 3; ++i) h.clock.tick(3050);
-    EXPECT_EQ(countSleepFrames(h), 1) << "KNOWN BUG: the sleep is never retransmitted";
+    EXPECT_TRUE(DP(h).sleep_op_in_flight_()) << "the sleep keeps its slot";
+    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::SYSOP);
+    EXPECT_EQ(DP(h).ctl().last_msgid, sleep_id);
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "the cover op is waiting";
+    EXPECT_EQ(airOrder(h), (Order{"S4"})) << "nothing else on the air yet";
 
-    deliverAck(h.rol, sleep_id);                       // the node DID hear it and acks it
-    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "KNOWN BUG: its own ack is not recognised";
-    EXPECT_TRUE(h.rol.login_acked_) << "so the hub keeps a session with a node that sleeps";
+    h.clock.tick(3050);
+    EXPECT_EQ(countSleepFrames(h), 2) << "the sleep is retransmitted, as itself";
+    EXPECT_EQ(DP(h).ctl().last_msgid, sleep_id);
+    EXPECT_EQ(airOrder(h), (Order{"S4"}));
+
+    ackSleep(h);                                       // the node DID hear it
+    EXPECT_NE(h.rol.last_sleep_epoch_, 0u) << "its own ack is recognised: the sleep is recorded";
+    EXPECT_FALSE(h.rol.login_acked_) << "and the hub's session with the sleeping node ends";
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
+    EXPECT_EQ(airOrder(h), (Order{"S4"})) << "the cover op is NOT sent into the sleeping node";
+    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_TRUE(DP(h).ctl().deferred_until_login) << "it is held for the node's wake";
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.commandFailed());
 }
 
-TEST(OneSlot, KnownBug_ACoverOpSentWhileASleepIsDeferredReplacesItThere_Too) {
+// ...and when the node is back the held cover op goes out, exactly once.
+TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enterSleep();
+    ASSERT_TRUE(DP(r).sleep_op_in_flight_());
+    sendOpen(r);
+    ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
+    ackSleep(r);
+    ASSERT_TRUE(DP(r).ctl().deferred_until_login);
+    const size_t before = r.radio.hub_to_node_frames().size();
+
+    DP(r).relogin_pending_ = true;                     // the wake: a fresh login
+    DP(r).confirm_session_();
+
+    EXPECT_FALSE(DP(r).ctl().deferred_until_login);
+    EXPECT_TRUE(r.rol.awaitingAck()) << "sent from confirm_session_()";
+    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_GT(r.radio.hub_to_node_frames().size(), before);
+    ackInFlight(r);
+    EXPECT_FALSE(r.rol.awaitingAck());
+    EXPECT_FALSE(r.rol.commandFailed());
+
+    // The wake ended the hold: what waits behind a command NOW goes out as soon as
+    // that command is acknowledged, not at some later login.
+    r.rol.triggerOTA();
+    sendClose(r.rol);
+    ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
+    ackInFlight(r);
+    EXPECT_FALSE(DP(r).ctl().deferred_until_login);
+    EXPECT_TRUE(r.rol.awaitingAck()) << "the cover op that waited behind the OTA is sent";
+    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+}
+
+// The same when the sleep itself is still waiting for a session (deferred).
+TEST(ControlQueue, ACoverOpSentWhileASleepIsDeferredQueuesBehindItThere_Too) {
     using namespace real_helpers;
     ensure_psa_ready();
     ModeBRig r;
@@ -8909,19 +9027,20 @@ TEST(OneSlot, KnownBug_ACoverOpSentWhileASleepIsDeferredReplacesItThere_Too) {
 
     sendOpen(r);
 
-    EXPECT_TRUE(DP(r).ctl().deferred_until_login) << "still one deferred command";
-    EXPECT_FALSE(DP(r).sleep_op_in_flight_()) << "KNOWN BUG: but it is the cover op now, not the sleep";
+    EXPECT_TRUE(DP(r).ctl().deferred_until_login) << "still the sleep that is deferred";
+    EXPECT_TRUE(DP(r).sleep_op_in_flight_()) << "and it is still the sleep";
+    EXPECT_EQ(QP(r).ctl_queue_.size(), 1u);
     DP(r).confirm_session_();
-    EXPECT_TRUE(r.rol.awaitingAck()) << "sent from confirm_session_()";
-    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
-    deliverAck(r.rol, DP(r).ctl().last_msgid);
-    EXPECT_EQ(r.rol.last_sleep_epoch_, 0u) << "KNOWN BUG: the sleep was lost";
+    EXPECT_TRUE(r.rol.awaitingAck()) << "the sleep is sent from confirm_session_()";
+    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::SYSOP);
+    EXPECT_EQ(DP(r).ctl().sysop, kOpSleep);
+    ackSleep(r);
+    EXPECT_NE(r.rol.last_sleep_epoch_, 0u) << "the sleep was not lost";
 }
 
-// (f) A sysop (the auto-mode switch) issued while a cover op is in flight takes
-// the same single slot: the cover op is not retransmitted any more and its ack is
-// no longer matched. Characterised as-is (step 5 queues instead).
-TEST(OneSlot, ASetAutoModeSysopDuringACoverOpReplacesTheCoverOp) {
+// A set_auto_mode sysop issued while a cover op is in flight waits for it: the cover
+// op keeps its ladder and its ack, and the sysop goes out when it is done.
+TEST(ControlQueue, ASetAutoModeSysopDuringACoverOpQueuesBehindIt) {
     using namespace real_helpers;
     ensure_psa_ready();
     ModeBRig h;
@@ -8934,16 +9053,412 @@ TEST(OneSlot, ASetAutoModeSysopDuringACoverOpReplacesTheCoverOp) {
 
     h.rol.set_auto_mode(true);
 
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::SYSOP);
+    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER) << "the cover op is not displaced";
+    EXPECT_EQ(DP(h).ctl().last_msgid, cover_id);
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 1u);
+    h.clock.tick(3050);
+    EXPECT_EQ(h.rol.opRetryCount(), 1u) << "the cover op's own ladder runs on";
+
+    deliverAck(h.rol, cover_id);                       // the cover op's ack
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
+    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::SYSOP) << "now the sysop";
     EXPECT_EQ(DP(h).ctl().sysop, (int32_t) CLIENT_OPERATION__CMD_MODE_AUTO);
     EXPECT_TRUE(h.rol.awaitingAck());
-    EXPECT_GT(DP(h).ctl().first_msgid, cover_id) << "the ack range now belongs to the sysop";
-    EXPECT_EQ(h.rol.opRetryCount(), 0u) << "a fresh retry budget";
-
-    deliverAck(h.rol, cover_id);                       // the cover op's own ack
-    EXPECT_TRUE(h.rol.awaitingAck()) << "is not matched; the sysop is still awaited";
-    deliverAck(h.rol, DP(h).ctl().last_msgid);
+    EXPECT_EQ(h.rol.opRetryCount(), 0u) << "with a fresh retry budget";
+    deliverAck(h.rol, cover_id);                       // a duplicate ack of the cover op
+    EXPECT_TRUE(h.rol.awaitingAck()) << "does not complete the sysop";
+    ackInFlight(h);
     EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+// FIFO: what waits goes out in the order it was asked for, one at a time, each only
+// after the one before it was acknowledged.
+TEST(ControlQueue, WhatWaitsGoesOutInOrderOneAtATime) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.triggerOTA();
+    h.rol.sendDebugSysop(kOpStatus);
+    h.rol.sendDebugSysop(kOpWifiOn);
+    h.rol.sendDebugSysop(kOpWifiOff);
+    h.clock.tick(10);
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 3u);
+    EXPECT_EQ(airOrder(h), (Order{"S2"})) << "only the OTA is on the air";
+
+    ackInFlight(h); h.clock.tick(10);
+    EXPECT_EQ(airOrder(h), (Order{"S2", "S3"}));
+    ackInFlight(h); h.clock.tick(10);
+    EXPECT_EQ(airOrder(h), (Order{"S2", "S3", "S0"}));
+    ackInFlight(h); h.clock.tick(10);
+    EXPECT_EQ(airOrder(h), (Order{"S2", "S3", "S0", "S1"}));
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
+    ackInFlight(h);
+    EXPECT_FALSE(h.rol.awaitingAck());
+    h.clock.tick(60'000);
+    EXPECT_EQ(airOrder(h).size(), 4u) << "nothing more";
+}
+
+// A command that gives up (out of retries) hands the channel to the next one; the
+// session teardown it causes makes that one wait for the new session.
+TEST(ControlQueue, AFailedCommandHandsTheChannelOnToTheNextOneWhichWaitsForTheNewSession) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    h.rol.sendDebugSysop(kOpStatus);
+    ASSERT_EQ(QP(h).ctl_queue_.size(), 1u);
+
+    for (int i = 0; i < 5; ++i) h.clock.tick(3050);    // 4 retries, then the give-up
+
+    EXPECT_TRUE(h.rol.commandFailed() || DP(h).ctl().deferred_until_login);
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 0u) << "the sysop took the channel";
+    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::SYSOP);
+    EXPECT_TRUE(DP(h).ctl().deferred_until_login) << "but the session is being rebuilt: it waits for it";
+    EXPECT_EQ(airOrder(h), (Order{"C0"})) << "not sent into the dead session";
+}
+
+// Overflow: when the line is full the NEWEST request is refused (logged, Command
+// Failed raised) -- never an older one, which was asked for and stays.
+TEST(ControlQueue, AFullLineRefusesTheNewestRequestAndKeepsEverythingAlreadyWaiting) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.triggerOTA();
+    for (unsigned i = 0; i < deliverypolicy::ControlQueue::kDepth; ++i)
+        h.rol.sendDebugSysop(kOpStatus);
+    ASSERT_EQ(QP(h).ctl_queue_.size(), deliverypolicy::ControlQueue::kDepth);
+    ASSERT_FALSE(h.rol.commandFailed()) << "a full line is not yet an overflow";
+
+    h.rol.sendDebugSysop(kOpWifiOff);                  // one too many
+
+    EXPECT_TRUE(h.rol.commandFailed()) << "Command Failed is raised";
+    EXPECT_EQ(QP(h).ctl_queue_.size(), deliverypolicy::ControlQueue::kDepth) << "nothing displaced";
+
+    sendClose(h.rol);                                  // a cover op meets the same full line
+    EXPECT_EQ(QP(h).ctl_queue_.size(), deliverypolicy::ControlQueue::kDepth);
+    EXPECT_FALSE(QP(h).ctl_queue_.hasCover()) << "refused too";
+
+    for (unsigned i = 0; i < deliverypolicy::ControlQueue::kDepth + 1; ++i) {
+        ackInFlight(h);
+        h.clock.tick(10);
+    }
+    EXPECT_EQ(airOrder(h), (Order{"S2", "S3", "S3", "S3", "S3"})) << "the refused ones never go out";
+}
+
+// ...but a cover op that REPLACES the one already waiting needs no room.
+TEST(ControlQueue, ANewerCoverOpReplacesTheWaitingOneEvenWhenTheLineIsFull) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.triggerOTA();
+    h.rol.sendDebugSysop(kOpStatus);
+    h.rol.sendDebugSysop(kOpStatus);
+    h.rol.sendDebugSysop(kOpStatus);
+    sendOpenTo(h.rol);
+    ASSERT_EQ(QP(h).ctl_queue_.size(), deliverypolicy::ControlQueue::kDepth);
+
+    sendClose(h.rol);
+
+    EXPECT_FALSE(h.rol.commandFailed()) << "a replacement is not an overflow";
+    EXPECT_EQ(QP(h).ctl_queue_.size(), deliverypolicy::ControlQueue::kDepth);
+    for (int i = 0; i < 5; ++i) { ackInFlight(h); h.clock.tick(10); }
+    EXPECT_EQ(airOrder(h), (Order{"S2", "S3", "S3", "S3", "C1"})) << "the CLOSE, never the OPEN";
+}
+
+// A newer cover op replaces a QUEUED one (latest wins) and takes its place at the
+// back of the line, behind a sysop asked for in between.
+TEST(ControlQueue, ANewerCoverOpReplacesAQueuedCoverOpAndGoesToTheBack) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.triggerOTA();
+    sendOpenTo(h.rol);
+    h.rol.sendDebugSysop(kOpStatus);
+    sendClose(h.rol);
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 2u) << "one cover op (the latest) and the sysop";
+
+    ackInFlight(h); h.clock.tick(10);
+    ackInFlight(h); h.clock.tick(10);
+    ackInFlight(h); h.clock.tick(10);
+
+    EXPECT_EQ(airOrder(h), (Order{"S2", "S3", "C1"})) << "OPEN was replaced before it was ever sent";
+}
+
+// A newer cover op replaces the cover op IN FLIGHT, as before: the old one is
+// retired (its ack no longer matches) and the line behind it is untouched.
+TEST(ControlQueue, ANewerCoverOpReplacesTheCoverOpInFlightAndLeavesTheLineAlone) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    const uint32_t first = DP(h).ctl().last_msgid;
+    h.rol.sendDebugSysop(kOpStatus);
+    ASSERT_EQ(QP(h).ctl_queue_.size(), 1u);
+
+    sendClose(h.rol);
+    h.clock.tick(10);
+
+    const uint32_t second = DP(h).ctl().last_msgid;
+    EXPECT_NE(second, first);
+    EXPECT_EQ(airOrder(h), (Order{"C0", "C1"})) << "the replacement goes out at once";
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "the sysop is still waiting, not displaced";
+    h.clock.tick(3050);
+    EXPECT_EQ(copiesOf(h.radio, second), 2) << "it is the CLOSE that is retransmitted";
+    EXPECT_EQ(copiesOf(h.radio, first), 1);
+
+    deliverAck(h.rol, first);                          // the retired command's ack
+    EXPECT_TRUE(h.rol.awaitingAck()) << "is not matched";
+    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER) << "the CLOSE is still the one awaited";
+    EXPECT_EQ(DP(h).ctl().last_msgid, second);
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "and the sysop has not been let through";
+    ackInFlight(h);
+    h.clock.tick(10);
+    EXPECT_EQ(airOrder(h), (Order{"C0", "C1", "S3"})) << "now the sysop";
+}
+
+// A command given up on is over: the ack of one of its copies that turns up late
+// neither revives it nor clears the Command Failed it raised.
+TEST(ControlQueue, ALateAckOfACommandThatWasGivenUpOnChangesNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    const uint32_t id = DP(h).ctl().last_msgid;
+    for (int i = 0; i < 5; ++i) h.clock.tick(3050);    // 4 retries, then the give-up
+    ASSERT_FALSE(h.rol.awaitingAck());
+    ASSERT_TRUE(h.rol.commandFailed());
+
+    deliverAck(h.rol, id);
+
+    EXPECT_TRUE(h.rol.commandFailed()) << "Command Failed stays";
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+// Two nodes: each has its own channel and its own line.
+TEST(ControlQueue, TwoNodesControlChannelsAreIndependent) {
+    using namespace real_helpers;
+    TwoNodeHub h(false, false);
+    h.rol_1.registered_ = true;
+    h.rol_2.registered_ = true;
+    h.rol_1.triggerOTA();
+    sendOpenTo(h.rol_1);                               // waits behind node 1's OTA
+    ASSERT_EQ(QP(h.rol_1).ctl_queue_.size(), 1u);
+
+    sendClose(h.rol_2);                                // node 2: nothing in its way
+    h.clock.tick(10);
+
+    EXPECT_EQ(QP(h.rol_2).ctl_queue_.size(), 0u);
+    EXPECT_TRUE(h.rol_2.awaitingAck());
+    EXPECT_EQ(airOrder(h.radio, 18), (Order{"C1"})) << "node 2's command went out at once";
+    EXPECT_EQ(airOrder(h.radio, 17), (Order{"S2"})) << "node 1 still has only its OTA on the air";
+    deliverAck(h.rol_2, QP(h.rol_2).ctl().last_msgid);
+    EXPECT_FALSE(h.rol_2.awaitingAck());
+    EXPECT_TRUE(h.rol_1.awaitingAck()) << "node 2's ack did nothing to node 1";
+    EXPECT_EQ(QP(h.rol_1).ctl_queue_.size(), 1u);
+    deliverAck(h.rol_1, QP(h.rol_1).ctl().last_msgid);
+    h.clock.tick(10);
+    EXPECT_EQ(airOrder(h.radio, 17), (Order{"S2", "C0"}));
+}
+
+// OTA is at-most-once, and a command waiting behind it still gets its turn.
+TEST(ControlQueue, AnAbandonedOtaHandsTheChannelToTheCommandWaitingBehindIt) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.triggerOTA();
+    sendOpenTo(h.rol);
+    ASSERT_EQ(QP(h).ctl_queue_.size(), 1u);
+
+    DP(h).clearSessionKeys_();                         // the session changed mid-delivery
+    h.clock.tick(3050);
+
+    EXPECT_EQ(airOrder(h), (Order{"S2", "C0"})) << "the OTA is not re-sent; the cover op follows";
+    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_TRUE(h.rol.awaitingAck());
+}
+
+// A retried sleep is acked once per copy the node heard (it re-acks a duplicate from
+// its AckCache): the second ack must not run the sleep's effects again.
+TEST(ControlQueue, ARetriedSleepsSecondAckChangesNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.enterSleep();
+    const uint32_t id = DP(h).ctl().last_msgid;
+    h.clock.tick(3050);                                // a retry
+    ASSERT_EQ(countSleepFrames(h), 2);
+
+    ackSleep(h);
+    ASSERT_NE(h.rol.last_sleep_epoch_, 0u);
+    ASSERT_FALSE(h.rol.login_acked_);
+    const uint32_t epoch = h.rol.last_sleep_epoch_;
+    h.rol.login_acked_ = true;                         // anything on_sleep_acknowledged_ would undo
+
+    deliverAck(h.rol, id);                             // the re-ack of the duplicate
+
+    EXPECT_TRUE(h.rol.login_acked_) << "the sleep's effects ran once";
+    EXPECT_EQ(h.rol.last_sleep_epoch_, epoch);
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+// A node's position report confirms delivery of a COVER op. It is not the answer to
+// a sysop: with a sleep in flight it must not be taken for the sleep's ack.
+TEST(ControlQueue, APositionReportOnlyConfirmsACoverOp) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.enterSleep();
+    ASSERT_TRUE(DP(h).sleep_op_in_flight_());
+    ::LoraClientResponseMessage pos = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    pos.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION;
+
+    QP(h).dispatch_payload_(&pos);
+
+    EXPECT_TRUE(h.rol.awaitingAck()) << "the sleep is still waiting for its own ack";
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "and was not recorded";
+    ackSleep(h);
+    EXPECT_NE(h.rol.last_sleep_epoch_, 0u);
+
+    // A cover op IS confirmed by the position it produces.
+    RealHubHarness g{18, kMacRol2};
+    g.rol.registered_ = true;
+    sendOpen(g);
+    ASSERT_TRUE(g.rol.awaitingAck());
+    QP(g).dispatch_payload_(&pos);
+    EXPECT_FALSE(g.rol.awaitingAck()) << "position confirms delivery of a cover op";
+}
+
+// A second sleep request while one is waiting in line is the same sleep.
+TEST(ControlQueue, ASleepAlreadyWaitingInLineIsNotQueuedTwice) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    sendOpen(h);                                       // in flight
+    h.rol.enterSleep();                                // waits
+    ASSERT_EQ(QP(h).ctl_queue_.size(), 1u);
+
+    h.rol.enterSleep();                                // the same night's request again
+
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "Sleep already pending";
+    ackInFlight(h); h.clock.tick(10);
+    EXPECT_EQ(airOrder(h), (Order{"C0", "S4"}));
+    EXPECT_EQ(countSleepFrames(h), 1);
+}
+
+// A sleep that waits for a session longer than the night allows is dropped, not sent
+// late: in line behind a command that is itself waiting for the session...
+TEST(ControlQueue, ASleepWaitingInLineForTooLongIsDroppedAndTheCommandAheadOfItStays) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    DP(r).relogin_pending_ = true;
+    sendOpen(r);                                       // deferred
+    r.rol.enterSleep();                                // behind it
+    ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
+    ASSERT_TRUE(DP(r).ctl().deferred_until_login);
+
+    r.secs(179);
+    EXPECT_EQ(QP(r).ctl_queue_.size(), 1u) << "still within the expiry";
+    r.secs(2);
+
+    EXPECT_EQ(QP(r).ctl_queue_.size(), 0u) << "expired";
+    EXPECT_TRUE(DP(r).ctl().deferred_until_login) << "the cover op ahead of it is untouched";
+    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_FALSE(r.rol.commandFailed()) << "a sleep that was never sent is not an unconfirmed one";
+    DP(r).confirm_session_();
+    EXPECT_TRUE(r.rol.awaitingAck());
+    ackInFlight(r);
+    r.secs(5);
+    EXPECT_EQ(countSleepFrames(r), 0) << "the stale sleep is never sent";
+}
+
+// ...and a sleep in flight that expires hands the channel to what waits behind it.
+TEST(ControlQueue, AnExpiredSleepInFlightHandsTheChannelOnToWhatWaitsBehindIt) {
+    using namespace real_helpers;
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    DP(r).relogin_pending_ = true;
+    r.rol.enterSleep();                                // deferred
+    sendOpen(r);                                       // behind it
+    ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
+
+    r.secs(181);
+
+    EXPECT_FALSE(DP(r).sleep_op_in_flight_()) << "the sleep was dropped";
+    EXPECT_EQ(QP(r).ctl_queue_.size(), 0u);
+    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER) << "the cover op took the channel";
+    EXPECT_TRUE(DP(r).ctl().deferred_until_login);
+    DP(r).confirm_session_();
+    EXPECT_TRUE(r.rol.awaitingAck());
+    EXPECT_EQ(countSleepFrames(r), 0);
+}
+
+// An auto-mode node: no nightly sleep is queued or sent, and its cover ops are not
+// delayed by it.
+TEST(ControlQueue, AnAutoModeNodeQueuesNoSleepAndItsCoverOpsGoOutAtOnce) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    sleepReady(h);
+    h.rol.set_auto_mode_default(true);
+
+    h.rol.enterSleep();
+    EXPECT_EQ(countSleepFrames(h), 0);
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
+    EXPECT_FALSE(h.rol.awaitingAck());
+
+    sendOpen(h);
+    h.clock.tick(10);
+    EXPECT_EQ(airOrder(h), (Order{"C0"}));
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
+    ackInFlight(h);
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+// A node in plain Mode A: a lone cover op is exactly what it was -- one send, the
+// ladder, no queue involved.
+TEST(ControlQueue, ALoneCoverOpNeverTouchesTheLine) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    h.clock.tick(10);
+    EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
+    EXPECT_EQ(airOrder(h), (Order{"C0"}));
+    for (int i = 0; i < 2; ++i) h.clock.tick(3050);
+    EXPECT_EQ(h.rol.opRetryCount(), 2u);
+    EXPECT_EQ(copiesOf(h.radio, DP(h).ctl().last_msgid), 3) << "the same bytes, three times";
+    ackInFlight(h);
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.commandFailed());
+}
+
+// Warm-up: a sysop (like a cover op) issued during a Mode B warm-up stops it -- the
+// policy's yields_warmup -- and the node is busy while the command is in flight.
+// (A command cannot WAIT during a warm-up: a warm-up never starts under a busy
+// node, so the in-flight command always stopped it first.)
+TEST(ControlQueue, ASysopStopsAWarmUpAndKeepsTheNodeBusyWhileItIsInFlight) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.secs(5);
+    ASSERT_TRUE(r.rol.mode_test_active());
+
+    ASSERT_FALSE(AK(r.rol).delivery_busy_());
+
+    r.rol.triggerOTA();                                // in flight: stops the warm-up
+
+    EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stopped the moment the sysop was issued";
+    EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
+    EXPECT_TRUE(AK(r.rol).delivery_busy_());
+    r.rol.sendDebugSysop(kOpStatus);                   // and one that waits keeps it busy
+    ackInFlight(r);                                    // the OTA is acked: the waiting one takes over
+    EXPECT_TRUE(AK(r.rol).delivery_busy_());
+    EXPECT_TRUE(r.rol.awaitingAck());
 }
 
 TEST(OneSlot, ASetAutoModeWithoutAConfirmedSessionSendsNothingAndLeavesTheCoverOpAlone) {
@@ -9036,6 +9551,34 @@ TEST(OtaRepack, ATriggerAfterAFailedOtaIsANewRequestAndIsSent) {
     EXPECT_TRUE(h.rol.awaitingAck());
     EXPECT_FALSE(h.rol.commandFailed()) << "a new command clears the indication";
     EXPECT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 2u);
+}
+
+// ...whereas a cover op (not at-most-once) whose stored frame a relogin cleared IS
+// re-packed: it is a new command in the new session, and the ack of its NEW msgid
+// completes it.
+TEST(OtaRepack, ACoverOpWhoseStoredFrameWasClearedByAReloginIsRePackedAndItsNewMsgidCompletesIt) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    const uint32_t old_id = DP(h).ctl().last_msgid;
+    DP(h).clearSessionKeys_();
+    ASSERT_TRUE(DP(h).ctl().frame.empty());
+    DP(h).relogin_pending_ = true;
+    h.clock.tick(10'000);
+    EXPECT_EQ(msgidsOf(h, OpCmd::Operation).size(), 1u) << "nothing is sent into a session being rebuilt";
+    DP(h).relogin_pending_ = false;
+
+    h.clock.tick(3050);
+
+    const auto ids = msgidsOf(h, OpCmd::Operation);
+    ASSERT_EQ(ids.size(), 2u) << "re-packed and sent";
+    EXPECT_NE(ids[1], old_id);
+    EXPECT_EQ(DP(h).ctl().last_msgid, ids[1]);
+    EXPECT_TRUE(h.rol.awaitingAck());
+    deliverAck(h.rol, ids[1]);
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.commandFailed());
 }
 
 // The ordinary cover-op retry, by contrast, keeps the stored bytes and msgid

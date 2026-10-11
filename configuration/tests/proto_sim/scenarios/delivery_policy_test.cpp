@@ -254,5 +254,123 @@ TEST(DeliveryPolicy, ControlPolicyPicksByKindThenBySysop) {
     EXPECT_EQ(&controlPolicy(false, kOther, kSleep, kOta), &kSysopPolicy);
 }
 
+// ---- the Control channel's line (step 5d) ------------------------------------
+
+namespace {
+ControlCmd cover(float pos) { return ControlCmd{true, 1, 0, pos, 0}; }
+ControlCmd sysop(int32_t s) { return ControlCmd{false, 0, 0, 0.0f, s}; }
+}  // namespace
+
+TEST(ControlAdmission, NothingInFlightStartsAtOnceWhateverItIs) {
+    EXPECT_TRUE(admitControl(false, false, true) == ControlAdmit::StartNow);
+    EXPECT_TRUE(admitControl(false, true, false) == ControlAdmit::StartNow);
+    EXPECT_TRUE(admitControl(false, true, true) == ControlAdmit::StartNow);
+    EXPECT_TRUE(admitControl(false, false, false) == ControlAdmit::StartNow);
+}
+
+TEST(ControlAdmission, OnlyACoverOpReplacesAndOnlyACoverOp) {
+    EXPECT_TRUE(admitControl(true, true, true) == ControlAdmit::Replace) << "latest cover op wins";
+    EXPECT_TRUE(admitControl(true, false, true) == ControlAdmit::Queue) << "a cover op never cancels a sysop";
+    EXPECT_TRUE(admitControl(true, true, false) == ControlAdmit::Queue) << "a sysop never cancels a cover op";
+    EXPECT_TRUE(admitControl(true, false, false) == ControlAdmit::Queue) << "a sysop is never superseded";
+}
+
+TEST(ControlQueue, IsFirstInFirstOut) {
+    ControlQueue q;
+    EXPECT_TRUE(q.empty());
+    ControlCmd out{};
+    EXPECT_FALSE(q.pop(&out)) << "nothing waits";
+    ASSERT_TRUE(q.push(sysop(10)) == ControlQueue::Push::Queued);
+    ASSERT_TRUE(q.push(sysop(11)) == ControlQueue::Push::Queued);
+    ASSERT_TRUE(q.push(sysop(12)) == ControlQueue::Push::Queued);
+    EXPECT_EQ(q.size(), 3u);
+    for (int32_t want : {10, 11, 12}) {
+        ASSERT_TRUE(q.pop(&out));
+        EXPECT_EQ(out.sysop, want);
+    }
+    EXPECT_TRUE(q.empty());
+    EXPECT_FALSE(q.pop(&out));
+}
+
+TEST(ControlQueue, ARefusedPushDropsTheNewestAndKeepsEveryOlderOne) {
+    ControlQueue q;
+    for (unsigned i = 0; i < ControlQueue::kDepth; ++i)
+        ASSERT_TRUE(q.push(sysop(20 + (int32_t) i)) == ControlQueue::Push::Queued);
+    EXPECT_EQ(ControlQueue::kDepth, 4u);
+    EXPECT_TRUE(q.push(sysop(99)) == ControlQueue::Push::Full);
+    EXPECT_TRUE(q.push(cover(0.5f)) == ControlQueue::Push::Full) << "a cover op with no cover op to replace needs room too";
+    EXPECT_EQ(q.size(), ControlQueue::kDepth);
+    EXPECT_FALSE(q.hasSysop(99));
+    EXPECT_FALSE(q.hasCover());
+    ControlCmd out{};
+    for (int32_t want : {20, 21, 22, 23}) {
+        ASSERT_TRUE(q.pop(&out));
+        EXPECT_EQ(out.sysop, want);
+    }
+}
+
+TEST(ControlQueue, ANewerCoverOpReplacesTheWaitingOneAndMovesToTheBack) {
+    ControlQueue q;
+    ASSERT_TRUE(q.push(cover(0.1f)) == ControlQueue::Push::Queued);
+    ASSERT_TRUE(q.push(sysop(7)) == ControlQueue::Push::Queued);
+    EXPECT_TRUE(q.push(cover(0.9f)) == ControlQueue::Push::ReplacedCover);
+    EXPECT_EQ(q.size(), 2u) << "never two cover ops waiting";
+    ControlCmd out{};
+    ASSERT_TRUE(q.pop(&out));
+    EXPECT_FALSE(out.is_cover) << "the sysop asked for in between is now first";
+    EXPECT_EQ(out.sysop, 7);
+    ASSERT_TRUE(q.pop(&out));
+    EXPECT_TRUE(out.is_cover);
+    EXPECT_EQ(out.position, 0.9f) << "the latest one";
+}
+
+TEST(ControlQueue, AReplacementNeedsNoRoomWhenTheLineIsFull) {
+    ControlQueue q;
+    ASSERT_TRUE(q.push(cover(0.1f)) == ControlQueue::Push::Queued);
+    for (int i = 0; i < 3; ++i) ASSERT_TRUE(q.push(sysop(30 + i)) == ControlQueue::Push::Queued);
+    ASSERT_EQ(q.size(), ControlQueue::kDepth);
+    EXPECT_TRUE(q.push(cover(0.7f)) == ControlQueue::Push::ReplacedCover);
+    EXPECT_EQ(q.size(), ControlQueue::kDepth);
+    EXPECT_TRUE(q.hasCover());
+}
+
+TEST(ControlQueue, SysopsAreNeverReplacedByEachOther) {
+    ControlQueue q;
+    ASSERT_TRUE(q.push(sysop(5)) == ControlQueue::Push::Queued);
+    ASSERT_TRUE(q.push(sysop(5)) == ControlQueue::Push::Queued) << "the same sysop twice is two requests";
+    EXPECT_EQ(q.size(), 2u);
+}
+
+TEST(ControlQueue, FindsAndRemovesAWaitingSysopWithoutDisturbingTheRest) {
+    ControlQueue q;
+    q.push(sysop(1));
+    q.push(cover(0.3f));
+    q.push(sysop(4));
+    EXPECT_TRUE(q.hasSysop(4));
+    EXPECT_FALSE(q.hasSysop(3));
+    EXPECT_FALSE(q.removeSysop(3));
+    EXPECT_EQ(q.size(), 3u);
+    EXPECT_TRUE(q.removeSysop(4));
+    EXPECT_FALSE(q.hasSysop(4));
+    EXPECT_EQ(q.size(), 2u);
+    EXPECT_TRUE(q.hasCover());
+    ControlCmd out{};
+    ASSERT_TRUE(q.pop(&out));
+    EXPECT_EQ(out.sysop, 1);
+    ASSERT_TRUE(q.pop(&out));
+    EXPECT_TRUE(out.is_cover);
+    q.push(sysop(9));
+    q.clear();
+    EXPECT_TRUE(q.empty());
+}
+
+TEST(ControlQueue, ACoverOpIsNotMistakenForASysopWithTheSameNumber) {
+    ControlQueue q;
+    q.push(ControlCmd{true, 1, 0, 0.0f, 4});     // a cover op whose stale sysop field reads 4
+    EXPECT_FALSE(q.hasSysop(4));
+    EXPECT_FALSE(q.removeSysop(4));
+    EXPECT_TRUE(q.hasCover());
+}
+
 // The policy is pure and constexpr: usable with no listener at all.
 static_assert(onAckTimeout(TimeoutState{false, false, false, 0, 4}).action == TimeoutAction::Stale, "");

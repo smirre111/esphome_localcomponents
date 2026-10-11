@@ -1486,6 +1486,7 @@ namespace esphome
     // confirm_session_ unchanged.)
     void LORAListener::send_deferred_tracked_op_()
     {
+      this->ctl_hold_for_wake_ = false;   // the node is back
       if (this->ctl().deferred_until_login)
       {
         ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred tracked op",
@@ -2549,7 +2550,7 @@ namespace esphome
         this->handle_command_ack_(msg->ack->ack_msg_id);
       }
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
-               this->ctl().awaiting_ack)
+               this->ctl().awaiting_ack && this->ctl().kind == TrackedOpKind::COVER)
         this->handle_command_ack_(this->ctl().last_msgid); // position confirms delivery
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && msg->beacon)
         this->handle_beacon_(msg->beacon);
@@ -3505,6 +3506,7 @@ namespace esphome
         return !(this->ctl().req.policy.at_most_once && this->ctl().frame.empty());
       };
       req.on_abandon  = [this]() { this->on_ctl_abandoned_(); };
+      req.on_done     = [this]() { this->ctl_next_(); };
       return req;
     }
 
@@ -3587,51 +3589,104 @@ namespace esphome
 
     void LORAListener::send_cover_operation(uint32_t covop_case, int32_t operation, float position)
     {
-      this->ctl().kind       = TrackedOpKind::COVER;
-      this->ctl().covop_case = covop_case;
-      this->ctl().operation  = operation;
-      this->ctl().position   = position;
+      this->ctl_submit_({true, covop_case, operation, position, 0});
+    }
 
+    void LORAListener::send_tracked_sysop_(int32_t sysop)
+    {
+      // P1: one-shot sysops used to be sent once, unacked -- a single dropped or
+      // replay-rejected frame was lost with no recovery. They go through the same
+      // tracked machinery as cover ops: a miss is retransmitted until the node
+      // acks, then fails + re-logins.
+      this->ctl_submit_({false, 0, 0, 0.0f, sysop});
+    }
+
+    bool LORAListener::ctl_busy_() const
+    {
+      return this->ctl().awaiting_ack || this->ctl().deferred_until_login;
+    }
+
+    // One command in flight per node. A newer cover op replaces an older one; any
+    // other request waits its turn rather than overwriting what is in flight (a
+    // SLEEP, an OTA or a mode switch is never superseded -- and the overwritten
+    // SLEEP used to lose its own ack).
+    void LORAListener::ctl_submit_(const deliverypolicy::ControlCmd &c)
+    {
+      this->mbs_yield_to_op_();
+      if (deliverypolicy::admitControl(this->ctl_busy_(), this->ctl().kind == TrackedOpKind::COVER,
+                                       c.is_cover) == deliverypolicy::ControlAdmit::Queue)
+      {
+        this->ctl_enqueue_(c);
+        return;
+      }
+      this->ctl_begin_(c, false);
+    }
+
+    void LORAListener::ctl_begin_(const deliverypolicy::ControlCmd &c, bool hold)
+    {
+      if (c.is_cover)
+      {
+        this->ctl().kind       = TrackedOpKind::COVER;
+        this->ctl().covop_case = c.covop_case;
+        this->ctl().operation  = c.operation;
+        this->ctl().position   = c.position;
+      }
+      else
+      {
+        this->ctl().kind  = TrackedOpKind::SYSOP;
+        this->ctl().sysop = c.sysop;
+      }
       // A NEW logical command, so a previous one still sitting in the transmit
       // queue is now stale. Bumped before the pack, so the frame carries the
       // generation that supersedes it. See txqueue::SupersedeTable.
       this->ctl().generation++;
-      this->mbs_yield_to_op_();
 
-      // Security review finding 1: see deferred_until_login's comment.
-      // The op's parameters above are already stored on `this`, so
-      // confirm_session_() can replay this exact call once encryption is
-      // possible, rather than this sending a plaintext frame now that the
-      // node (already holding a session) will reject outright.
-      if (this->relogin_pending_)
+      // Security review finding 1: see deferred_until_login's comment. The
+      // command's parameters are already stored in the slot, so
+      // confirm_session_() can send exactly this once encryption is possible,
+      // rather than this sending a plaintext frame now that the node (already
+      // holding a session) will reject outright.
+      if (this->relogin_pending_ || hold)
       {
         this->ctl().deferred_until_login = true;
-        ESP_LOGD(TAG, "[%s] Cover op deferred — session being rebuilt", this->get_name().c_str());
+        ESP_LOGD(TAG, "[%s] %s deferred — %s", this->get_name().c_str(),
+                 c.is_cover ? "Cover op" : "Sysop",
+                 hold ? "the node is asleep" : "session being rebuilt");
         return;
       }
       this->ctl_send_();
     }
 
-    void LORAListener::send_tracked_sysop_(int32_t sysop)
+    void LORAListener::ctl_enqueue_(const deliverypolicy::ControlCmd &c)
     {
-      // P1: one-shot sysops used to be sent once, unacked — a single dropped or
-      // replay-rejected frame was lost with no recovery.  Route them through the
-      // exact same tracked machinery as cover ops so a miss is retransmitted (with
-      // a fresh incrementing msgid) until the node acks, then fails + re-logins.
-      this->ctl().kind  = TrackedOpKind::SYSOP;
-      this->ctl().sysop = sysop;
-
-      this->ctl().generation++;   // same reasoning as send_cover_operation
-      this->mbs_yield_to_op_();
-
-      // See send_cover_operation()'s identical guard just above.
-      if (this->relogin_pending_)
+      const char *what = c.is_cover ? "Cover op" : "Sysop";
+      switch (this->ctl_queue_.push(c))
       {
-        this->ctl().deferred_until_login = true;
-        ESP_LOGD(TAG, "[%s] Sysop deferred — session being rebuilt", this->get_name().c_str());
+      case deliverypolicy::ControlQueue::Push::Full:
+        // The newest is refused, never an older one: what is queued was asked for.
+        ESP_LOGE(TAG, "[%s] %s refused — %u commands are already waiting behind the one in flight",
+                 this->get_name().c_str(), what, (unsigned) deliverypolicy::ControlQueue::kDepth);
+        this->set_command_failed_(true);
+        return;
+      case deliverypolicy::ControlQueue::Push::ReplacedCover:
+        ESP_LOGI(TAG, "[%s] %s queued behind the command in flight — replaces the cover op already waiting",
+                 this->get_name().c_str(), what);
+        return;
+      case deliverypolicy::ControlQueue::Push::Queued:
+        ESP_LOGI(TAG, "[%s] %s queued behind the command in flight (%u waiting)",
+                 this->get_name().c_str(), what, (unsigned) this->ctl_queue_.size());
         return;
       }
-      this->ctl_send_();
+    }
+
+    void LORAListener::ctl_next_()
+    {
+      deliverypolicy::ControlCmd c;
+      if (!this->ctl_queue_.pop(&c))
+        return;
+      ESP_LOGI(TAG, "[%s] Starting the %s that waited", this->get_name().c_str(),
+               c.is_cover ? "cover op" : "sysop");
+      this->ctl_begin_(c, this->ctl_hold_for_wake_);
     }
 
     // B4: retransmit the STORED frame, byte for byte.
@@ -3681,9 +3736,9 @@ namespace esphome
     // ---- the generic delivery glue (step 3 of the unified MAC delivery refactor) ----
     //
     // One request per channel. The DECISIONS (when to retry, when to give up, which
-    // ack counts) are deliverypolicy::; this only performs them. The Config channel
-    // carries the ScheduleConfig push; the Control channel keeps its own, older and
-    // hardware-verified path (begin_tracked_op_ ...) until it is moved onto this.
+    // ack counts) are deliverypolicy::; this only performs them. The Control channel
+    // carries cover operations and sysops, the Config channel the ScheduleConfig
+    // push, the Mac channel the GridSync publish.
 
     const char *LORAListener::dlv_timer_(DeliveryChannel ch)
     {
@@ -3829,6 +3884,13 @@ namespace esphome
       this->dlv_tx_(ch, true);
     }
 
+    void LORAListener::dlv_done_(DeliveryChannel ch)
+    {
+      const std::function<void()> done = this->slots_[ch].req.on_done;
+      if (done)
+        done();
+    }
+
     void LORAListener::dlv_abandon_(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
@@ -3840,8 +3902,7 @@ namespace esphome
         s.req.on_abandon();
       else if (s.req.on_fail)
         s.req.on_fail();
-      if (s.req.on_done)
-        s.req.on_done();
+      this->dlv_done_(ch);
     }
 
     // The optimistic guess missed. Burst NOW (Rule 4 marks the node unacked, so
@@ -3883,8 +3944,7 @@ namespace esphome
                  this->get_name().c_str());
         this->do_login_and_arm_retry_();
       }
-      if (s.req.on_done)
-        s.req.on_done();
+      this->dlv_done_(ch);
     }
 
     // The node acknowledged `ack_msg_id`. A request that owns it is told which
@@ -3901,8 +3961,7 @@ namespace esphome
         if (!s.req.on_ack || s.req.on_ack(s.acks.tag[i]))
         {
           this->dlv_cancel_((DeliveryChannel) c);
-          if (s.req.on_done)
-            s.req.on_done();
+          this->dlv_done_((DeliveryChannel) c);
         }
         return true;
       }
@@ -4032,7 +4091,7 @@ namespace esphome
 
       // A second request while one is in flight would only bump the generation
       // and supersede the frame that is about to be acked.
-      if (this->sleep_op_in_flight_())
+      if (this->sleep_pending_())
       {
         ESP_LOGI(TAG, "[%s] Sleep already pending — ignoring the repeated request",
                  this->get_name().c_str());
@@ -4061,6 +4120,9 @@ namespace esphome
     void LORAListener::on_sleep_acknowledged_()
     {
       this->ctl().sleep_unconfirmed = false;
+      // Whatever waited behind the sleep must not be sent into a sleeping node: it
+      // goes out when the node is back (confirm_session_).
+      this->ctl_hold_for_wake_ = true;
       this->stamp_sleep_epoch_();
       this->login_acked_         = false;
       this->login_retry_count_   = 0;
@@ -4146,13 +4208,31 @@ namespace esphome
       // Actively retrying with a live session: its own retry budget ends it.
       // (relogin_pending_ is cleared only by confirm_session_(), which also sends
       // a deferred op, so it alone says "still waiting for a session".)
-      if (!this->sleep_op_in_flight_() || !this->relogin_pending_)
+      if (!this->relogin_pending_ || !this->drop_stale_sleep_())
         return;
-      this->ctl().deferred_until_login = false;
-      this->cancel_timeout(dlv_timer_(CH_CONTROL));
       ESP_LOGW(TAG, "[%s] Sleep still waiting for a session after %u s — dropped, not sent late",
                this->get_name().c_str(), (unsigned) (kPendingSleepExpiryMs / 1000));
-      this->on_sleep_unconfirmed_();
+    }
+
+    // The sleep in flight (or deferred) is given up as unconfirmed and the command
+    // behind it, if any, goes next; a sleep still waiting in line is just removed
+    // (it was never sent: nothing is unconfirmed). False: there was no sleep.
+    bool LORAListener::drop_stale_sleep_()
+    {
+      if (this->sleep_op_in_flight_())
+      {
+        this->ctl().deferred_until_login = false;
+        this->cancel_timeout(dlv_timer_(CH_CONTROL));
+        this->on_sleep_unconfirmed_();
+        this->ctl_next_();
+        return true;
+      }
+      return this->ctl_queue_.removeSysop(CLIENT_OPERATION__CMD_SLEEP);
+    }
+
+    bool LORAListener::sleep_pending_() const
+    {
+      return this->sleep_op_in_flight_() || this->ctl_queue_.hasSysop(CLIENT_OPERATION__CMD_SLEEP);
     }
 
     void LORAListener::triggerOTA()
