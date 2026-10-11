@@ -317,6 +317,7 @@ struct AckProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::handle_command_ack_;
     using esphome::lora_tracker::LORAListener::cfg;
     using esphome::lora_tracker::LORAListener::mac;
+    using esphome::lora_tracker::LORAListener::published_resync_max_s_;
     using esphome::lora_tracker::LORAListener::delivery_busy_;
     using esphome::lora_tracker::LORAListener::on_grid_sync_acked_;
     using esphome::lora_tracker::LORAListener::on_grid_sync_failed_;
@@ -8481,6 +8482,338 @@ TEST(GridSyncLadder, EveryPublishOfTheLadderIsAckableUntilTheWaitIsCleared) {
     const size_t sends = h.tracker.sent_copies.size();
     h.clock.tick(5 * LORAClient::kGridSyncRetryMs);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "and the re-publishing stops";
+}
+
+// ---------------------------------------------------------------------------
+// GridSync (enable) as the Mac channel's request on the generic delivery glue
+// (step 4). The ladder, the frame and the log lines are today's; these pin what
+// the migration must keep and what the glue now decides.
+// ---------------------------------------------------------------------------
+namespace {
+struct PublishedGrid { uint32_t msgid; uint32_t txround; uint32_t txslot; };
+
+// Every plaintext GridSync PUBLISH (enable = true) on the air, in air order, as
+// the frame declared itself.
+std::vector<PublishedGrid> publishedGrids(real_helpers::RealHubHarness &h) {
+    std::vector<PublishedGrid> out;
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        LoraClientOperationMessage *m =
+            lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
+        if (m == nullptr) continue;
+        if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC &&
+            m->gridsync != nullptr && m->gridsync->enable)
+            out.push_back({m->header->msgid, m->gridsync->txround, m->gridsync->txslot});
+        lora_client_operation_message__free_unpacked(m, nullptr);
+    }
+    return out;
+}
+
+int occurrences(const std::string &hay, const std::string &needle) {
+    int n = 0;
+    for (size_t p = hay.find(needle); p != std::string::npos; p = hay.find(needle, p + 1)) ++n;
+    return n;
+}
+
+constexpr uint32_t kGridStepMs = LORAClient::kGridSyncRetryMs + 50;
+}  // namespace
+
+TEST(GridSyncGlue, EveryRepublishRedeclaresTheCurrentPositionWhileTheAckIdSetAccumulates) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    for (int i = 0; i < 3; ++i) h.clock.tick(kGridStepMs);
+
+    const auto g = publishedGrids(h);
+    ASSERT_EQ(g.size(), 4u) << "the publish and three re-publishes, each a frame of its own";
+    ASSERT_GE(h.tracker.sent_earliest_us.size(), 4u);
+    const auto &e = h.tracker.sent_earliest_us;
+    for (size_t i = 1; i < g.size(); ++i) {
+        EXPECT_GT(g[i].msgid, g[i - 1].msgid) << "rebuilt under a fresh msgid, not the stored bytes";
+        EXPECT_GT(g[i].txround, g[i - 1].txround)
+            << "a re-publish declares the round it will occupy NOW; a stale one anchors the node wrong";
+        EXPECT_EQ(g[i].txslot, g[0].txslot);
+        EXPECT_GT(e[e.size() - 4 + i], e[e.size() - 4 + i - 1]) << "and is placed on a later mark";
+    }
+    for (size_t i = 0; i < g.size(); ++i)
+        EXPECT_NE(e[e.size() - 4 + i], 0) << "every one is placed on a pre-planned mark";
+    for (int c : h.tracker.sent_copies)
+        EXPECT_EQ(c, h.tracker.defaultBurstCopies()) << "always the explicit full burst";
+    const auto &acks = AK(h.rol).mac().acks;
+    ASSERT_EQ(acks.n, 4) << "the ack-id set accumulates every publish";
+    for (size_t i = 0; i < g.size(); ++i) EXPECT_EQ(acks.id[i], g[i].msgid);
+}
+
+TEST(GridSyncGlue, ALateAckForAnEarlierRepublishEndsTheLadderAndStampsTheAck) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    proto_sim_timer_reset();
+    proto_sim_timer_advance_us(1000);   // esp_timer 0 reads as "never"
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    for (int i = 0; i < 2; ++i) h.clock.tick(kGridStepMs);
+    ASSERT_EQ(h.rol.gridSyncRepublishes(), 2u);
+    const uint32_t middle = AK(h.rol).mac().acks.id[1];
+    ASSERT_EQ(h.rol.last_gridsync_ack_us_, 0);
+
+    proto_sim_timer_advance_us(2000);   // the node answers after the frame was sent
+    testing::internal::CaptureStderr();
+    deliverAck(h.rol, middle);
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+    EXPECT_NE(h.rol.last_gridsync_ack_us_, 0) << "the supervisor's 'acknowledged GridSync' stamp";
+    EXPECT_TRUE(h.rol.mbs_grid_acked_()) << "and it is later than the last publish";
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 2u);
+    EXPECT_EQ(occurrences(log, "GridSync acknowledged (msgid=" + std::to_string(middle) +
+                               ", 2 re-publishes)"), 1)
+        << log;
+    EXPECT_EQ(AK(h.rol).mac().acks.n, 0) << "the set is released with the ladder";
+
+    const size_t sent = publishedGrids(h).size();
+    h.clock.tick(5 * kGridStepMs);
+    EXPECT_EQ(publishedGrids(h).size(), sent) << "the re-publishing stopped";
+    const int64_t stamp = h.rol.last_gridsync_ack_us_;
+    h.clock.tick(10);
+    proto_sim_timer_advance_us(2000);
+    deliverAck(h.rol, middle);
+    EXPECT_EQ(h.rol.last_gridsync_ack_us_, stamp) << "a second ack of it is not a GridSync ack";
+}
+
+TEST(GridSyncGlue, AFreshPublishAfterExhaustionGetsAFullLadderAndOnlyItsOwnIdsAreRecognised) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    proto_sim_timer_reset();
+    proto_sim_timer_advance_us(1000);   // esp_timer 0 reads as "never"
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    for (uint8_t i = 0; i < LORAClient::kGridSyncMaxRepublishes; ++i) h.clock.tick(kGridStepMs);
+    ASSERT_EQ(AK(h.rol).mac().acks.n, 1 + LORAClient::kGridSyncMaxRepublishes);
+    const uint32_t old_first = AK(h.rol).mac().acks.id[0];
+    const uint32_t old_last  = AK(h.rol).mac().acks.id[LORAClient::kGridSyncMaxRepublishes];
+    for (int i = 0; i < 4; ++i) h.clock.tick(kGridStepMs);
+    ASSERT_FALSE(h.rol.gridSyncAwaitingAck()) << "the ladder is spent";
+    EXPECT_EQ(AK(h.rol).mac().acks.n, 0) << "and its ids are dropped";
+
+    const size_t sent = publishedGrids(h).size();
+    h.rol.send_grid_sync(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 0u);
+    EXPECT_EQ(AK(h.rol).mac().retry_count, 0) << "an unspent budget";
+    deliverAck(h.rol, old_first);
+    deliverAck(h.rol, old_last);
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck()) << "an id of the spent ladder is not this publish's";
+    EXPECT_EQ(h.rol.last_gridsync_ack_us_, 0);
+
+    for (uint8_t i = 0; i < LORAClient::kGridSyncMaxRepublishes; ++i) h.clock.tick(kGridStepMs);
+    EXPECT_EQ(publishedGrids(h).size(), sent + 1u + LORAClient::kGridSyncMaxRepublishes)
+        << "the full ladder again";
+    const uint32_t mine = AK(h.rol).mac().acks.id[2];
+    proto_sim_timer_advance_us(2000);
+    deliverAck(h.rol, mine);
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+    EXPECT_NE(h.rol.last_gridsync_ack_us_, 0);
+}
+
+TEST(GridSyncGlue, GivingUpLogsTheSameLinesAndKeepsTheSession) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    ASSERT_TRUE(r.rol.session_confirmed_);
+    const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
+
+    testing::internal::CaptureStderr();
+    r.rol.enable_timed_mode(true);
+    r.secs(60);
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(occurrences(log, "GridSync PUBLISHED (slot"), 6) << "the publish and five re-publishes";
+    for (unsigned k = 1; k <= LORAClient::kGridSyncMaxRepublishes; ++k)
+        EXPECT_EQ(occurrences(log, "GridSync not acknowledged — re-publishing (" + std::to_string(k) +
+                                   "/5)"), 1) << "re-publish " << k;
+    EXPECT_EQ(occurrences(log, "GridSync not acknowledged after 5 re-publishes — "
+                               "the node stays in Mode A until its next login"), 1) << log;
+    EXPECT_EQ(occurrences(log, "clearing session"), 0) << "giving up does not tear the session down";
+    EXPECT_FALSE(r.rol.gridSyncAwaitingAck());
+    EXPECT_TRUE(r.rol.session_confirmed_);
+    EXPECT_FALSE(DP(r).relogin_pending_);
+    EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0) << "and no login follows";
+    EXPECT_EQ(r.rol.last_gridsync_ack_us_, 0);
+}
+
+TEST(GridSyncGlue, TheWarmUpWaitsForAGridSyncInFlightAndStartsAfterItsAck) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    // The grid is settled and acked; a GridSync is published again and not yet
+    // answered (held in flight without a timer so it cannot expire under the test).
+    AK(r.rol).gridInFlight({0x4321});
+    ASSERT_TRUE(AK(r.rol).delivery_busy_());
+    r.secs(modebsup::kGridSettleS + modebsup::kJitterMaxS + 6 * modebsup::kTickS);
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "never into a grid that is still being published";
+    EXPECT_FALSE(r.rol.mode_test_active());
+
+    proto_sim_timer_advance_us(2000);
+    deliverAck(r.rol, 0x4321);
+    ASSERT_FALSE(AK(r.rol).delivery_busy_());
+    EXPECT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + modebsup::kYieldRetryS + 30), 0)
+        << "and it starts once the node has acknowledged the grid";
+    EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
+}
+
+TEST(GridSyncGlue, TwoNodesGridSyncLaddersAreIndependent) {
+    ensure_psa_ready();
+    ModeBRig r;
+    LORAClient rol2;
+    rol2.set_name("rol2");
+    rol2.set_short_address(19);
+    rol2.set_subnet_address(2);
+    rol2.set_sleep_duration(21600);
+    rol2.set_address(0xE08CFE5F9EC5ULL);
+    rol2.set_time(&r.time);
+    r.tracker.register_client(&rol2);
+    rol2.registered_ = true;
+    r.rol.registered_ = true;
+    r.rol.enable_timed_mode(true);
+    rol2.enable_timed_mode(true);
+    ASSERT_TRUE(r.rol.gridSyncAwaitingAck());
+    ASSERT_TRUE(rol2.gridSyncAwaitingAck());
+    const uint32_t id1 = AK(r.rol).mac().acks.id[0];
+    const uint32_t id2 = AK(rol2).mac().acks.id[0];
+    ASSERT_NE(id1, 0u);
+    ASSERT_NE(id2, 0u);
+
+    proto_sim_timer_advance_us(2000);
+    r.clock.tick(10);
+    deliverAck(rol2, id2);
+    EXPECT_FALSE(rol2.gridSyncAwaitingAck());
+    EXPECT_TRUE(r.rol.gridSyncAwaitingAck()) << "the other node's ladder runs on";
+    EXPECT_EQ(r.rol.last_gridsync_ack_us_, 0);
+
+    r.clock.tick(kGridStepMs);
+    EXPECT_EQ(r.rol.gridSyncRepublishes(), 1u) << "node 1 re-publishes";
+    EXPECT_EQ(rol2.gridSyncRepublishes(), 0u) << "node 2 does not";
+    deliverAck(rol2, AK(r.rol).mac().acks.id[1]);
+    EXPECT_TRUE(r.rol.gridSyncAwaitingAck()) << "a node's ack never ends another node's ladder";
+}
+
+TEST(GridSyncGlue, ANodeResetMidLadderForgetsTheIdsAndTheRepublishWaitsForTheSession) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    proto_sim_timer_reset();
+    proto_sim_timer_advance_us(1000);   // esp_timer 0 reads as "never"
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    const uint32_t before = AK(h.rol).mac().acks.id[0];
+    h.clock.tick(10);
+
+    h.rol.send_login();                       // the node rebooted: a new session, a new msgid space
+    EXPECT_EQ(AK(h.rol).mac().acks.n, 0) << "ids of the old space would alias new ones";
+    proto_sim_timer_advance_us(2000);
+    deliverAck(h.rol, before);
+    EXPECT_EQ(h.rol.last_gridsync_ack_us_, 0) << "an ack from before the reset confirms nothing";
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck()) << "the ladder itself goes on";
+
+    const size_t sent = publishedGrids(h).size();
+    h.clock.tick(2 * kGridStepMs);
+    EXPECT_EQ(publishedGrids(h).size(), sent) << "nothing is published into a session being rebuilt";
+    EXPECT_EQ(AK(h.rol).mac().retry_count, 0) << "and the wait costs the budget nothing";
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 0u);
+
+    DP(h).relogin_pending_ = false;           // the session is confirmed again
+    h.clock.tick(kGridStepMs);
+    EXPECT_EQ(publishedGrids(h).size(), sent + 1) << "the ladder resumes where it was";
+    EXPECT_EQ(AK(h.rol).mac().retry_count, 1);
+}
+
+TEST(GridSyncGlue, AWithdrawalIsAPlainBurstThatEndsTheWaitOutsideTheMechanism) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    h.clock.tick(kGridStepMs);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    ASSERT_NE(AK(h.rol).published_resync_max_s_, 0u) << "a publish records its resync bound";
+    const size_t sent = h.tracker.sent_copies.size();
+
+    testing::internal::CaptureStderr();
+    h.rol.enable_timed_mode(false);
+    EXPECT_EQ(AK(h.rol).published_resync_max_s_, 0u) << "a withdrawal takes the bound with it";
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+    EXPECT_EQ(AK(h.rol).mac().acks.n, 0);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sent + 1) << "one frame";
+    EXPECT_EQ(h.tracker.sent_copies.back(), 0) << "a plain send: no shape, not placed";
+    EXPECT_EQ(h.tracker.last_earliest_us, 0);
+    EXPECT_EQ(occurrences(log, "GridSync WITHDRAWN (slot"), 1) << log;
+    EXPECT_EQ(publishedGrids(h).size(), 2u) << "the withdrawal is not a publish";
+    h.clock.tick(5 * kGridStepMs);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sent + 1) << "nothing is re-published";
+}
+
+TEST(GridSyncGlue, ThePublishIsDeferredWhileTheSessionIsBeingRebuilt) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    h.clock.tick(10);
+    h.rol.send_login();
+    ASSERT_TRUE(DP(h).relogin_pending_);
+    AK(h.rol).noGrid();
+    const size_t sent = h.tracker.sent_copies.size();
+
+    h.rol.send_grid_sync(true);
+
+    EXPECT_EQ(h.tracker.sent_copies.size(), sent) << "nothing goes into a session that cannot encrypt it";
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck()) << "and no wait is started";
+}
+
+TEST(GridSyncGlue, TheFirstRepublishComesSixSecondsAfterThePublishNotBefore) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    h.clock.tick(5900);
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 0u);
+    h.clock.tick(200);
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 1u);
+}
+
+TEST(GridSyncGlue, ARequestMinutesIntoALadderThatIsStillAwaitingItsAckIsNotAnswered) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    // Well past the once-a-minute bound, so only the in-flight wait can refuse it.
+    proto_sim_timer_advance_us((int64_t) (timedmode::kHubSyncRequestMinIntervalS + 30) * 1'000'000);
+    const uint32_t ignored = h.rol.gridSyncRequestsIgnored();
+
+    deliverSyncRequest(h.rol);
+
+    EXPECT_EQ(h.rol.gridSyncRequestsIgnored(), ignored + 1);
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 0u);
+    EXPECT_EQ(AK(h.rol).mac().acks.n, 1) << "no second publish";
+}
+
+TEST(GridSyncGlue, APublishDuringAWarmUpDoesNotStopIt) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
+    r.secs(5);
+    ASSERT_TRUE(r.rol.mode_test_active());
+
+    r.rol.send_grid_sync(true);
+
+    EXPECT_TRUE(r.rol.gridSyncAwaitingAck());
+    EXPECT_TRUE(r.rol.mode_test_active()) << "unlike a command, a grid publish leaves the warm-up running";
 }
 
 // (d) ClientConfig: one bare, unacked, unplaced send. No tracked-op state, no
