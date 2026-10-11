@@ -141,6 +141,9 @@ namespace esphome
       // Whether a retry may go out at all (an at-most-once request that can no
       // longer be re-sent byte for byte must be failed instead). Empty: always.
       std::function<bool()> resendable;
+      // resendable() said no: the request is failed WITHOUT another send. Empty:
+      // on_fail runs instead.
+      std::function<void()> on_abandon;
     };
 
     // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
@@ -1599,6 +1602,9 @@ namespace esphome
       void     arm_dlv_timer_(DeliveryChannel ch);
       // A counted retry: Rule 4, then one more attempt.
       void     dlv_resend_(DeliveryChannel ch);
+      // A retry is due but the request may not be re-sent (at-most-once, and the
+      // bytes it went out as are gone): fail it, send nothing.
+      void     dlv_abandon_(DeliveryChannel ch);
       // The optimistic single shot's short first wait elapsed unanswered.
       void     dlv_short_wait_missed_(DeliveryChannel ch);
       uint32_t dlv_short_wait_ms_(DeliveryChannel ch);
@@ -1666,6 +1672,7 @@ namespace esphome
       uint32_t tx_ctl_(bool retry, uint32_t *tag);
       bool     on_ctl_acked_(uint32_t ack_msg_id);
       void     on_ctl_failed_();
+      void     on_ctl_abandoned_();
 
       // ---- Nightly sleep (enterSleep): a tracked sysop whose hub-side effects
       // are applied only when the node ACKNOWLEDGES it. See lora_client.cpp. ----

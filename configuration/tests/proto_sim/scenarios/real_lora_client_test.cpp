@@ -8960,11 +8960,11 @@ TEST(OneSlot, ASetAutoModeWithoutAConfirmedSessionSendsNothingAndLeavesTheCoverO
     EXPECT_EQ(DP(h).ctl().last_msgid, last);
 }
 
-// (g) KNOWN BUG (step 5): OTA must be at-most-once, but when a REGISTER clears
-// the stored frame inside the retry window the retry is RE-PACKED with a fresh
-// msgid. The node may have run the first OTA already (its ack lost), so this can
-// trigger a second one; and the ack of the original msgid no longer matches.
-TEST(OtaRepack, KnownBug_AnOtaRetriedAfterARegisterIsRepackedWithAFreshMsgid) {
+// (g) OTA is AT-MOST-ONCE (step 5e). When a REGISTER / relogin clears the stored
+// frame inside the retry window, the retry used to be RE-PACKED with a fresh
+// msgid -- a NEW command, while the node may have run the first one already (its
+// ack lost): a second OTA. Now the command is failed and nothing is sent.
+TEST(OtaRepack, AnOtaWhoseSessionChangedMidDeliveryIsFailedNotRepackedWithAFreshMsgid) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
@@ -8981,19 +8981,61 @@ TEST(OtaRepack, KnownBug_AnOtaRetriedAfterARegisterIsRepackedWithAFreshMsgid) {
     h.clock.tick(10'000);                              // retries defer, nothing is sent or charged
     EXPECT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 1u);
     EXPECT_EQ(h.rol.opRetryCount(), 0u);
+    EXPECT_TRUE(h.rol.awaitingAck()) << "still waiting for the session, not failed yet";
+    const int logins = countLoginFrames(h);
     DP(h).relogin_pending_ = false;                    // the new session is up
 
-    h.clock.tick(3050);                                // the next retry
+    h.clock.tick(3050);                                // the next retry is due
 
-    const auto after = sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA);
-    ASSERT_EQ(after.size(), 2u) << "KNOWN BUG: a second OTA command goes out";
-    EXPECT_NE(after[1], after[0]) << "KNOWN BUG: with a fresh msgid, i.e. a NEW command to the node";
-    EXPECT_EQ(DP(h).ctl().first_msgid, after[1]) << "the ack range moved with it";
-    EXPECT_EQ(DP(h).ctl().last_msgid, after[1]);
-    deliverAck(h.rol, ota[0]);                         // the node's ack of the ORIGINAL OTA
-    // (Since the Control channel keeps every msgid a command went out under, the
-    // original's ack is now recognised; the repack itself is the bug, fixed in 5e.)
+    EXPECT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 1u)
+        << "no second OTA command: it is failed, not re-packed";
     EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_TRUE(h.rol.commandFailed()) << "Command Failed is raised";
+    EXPECT_EQ(countLoginFrames(h), logins) << "the relogin that cleared the frame is the session change; no second one";
+    h.clock.tick(60'000);
+    EXPECT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 1u) << "and it stays failed";
+    deliverAck(h.rol, ota[0]);                         // a late ack of the original
+    EXPECT_TRUE(h.rol.commandFailed()) << "does not revive it";
+}
+
+// At-most-once forbids a NEW command, not the same bytes again: while the stored
+// frame is intact the OTA is retried like any sysop (same msgid, the node re-acks
+// a duplicate), and out of retries it tears the session down like any sysop.
+TEST(OtaRepack, AnOtaWithItsStoredFrameIsRetriedWithTheSameMsgidAndThenGivenUpLikeAnySysop) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.triggerOTA();
+    const auto ota = sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA);
+    ASSERT_EQ(ota.size(), 1u);
+    for (int i = 0; i < 4; ++i) h.clock.tick(3050);
+    EXPECT_EQ(h.rol.opRetryCount(), 4u);
+    const auto after = sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA);
+    ASSERT_EQ(after.size(), 5u) << "the first send and four retries";
+    for (uint32_t id : after) EXPECT_EQ(id, ota[0]) << "every retry is the SAME command";
+    h.clock.tick(3050);                                // the fifth expiry is the give-up
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_TRUE(h.rol.commandFailed());
+    EXPECT_FALSE(h.rol.session_confirmed_) << "the session is presumed dead (FailRelogin)";
+}
+
+// Triggering OTA again after a failed one is a deliberate new request: it is sent.
+TEST(OtaRepack, ATriggerAfterAFailedOtaIsANewRequestAndIsSent) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.triggerOTA();
+    DP(h).clearSessionKeys_();
+    h.clock.tick(3050);
+    ASSERT_FALSE(h.rol.awaitingAck());
+    ASSERT_TRUE(h.rol.commandFailed());
+    ASSERT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 1u);
+
+    h.rol.triggerOTA();
+
+    EXPECT_TRUE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.commandFailed()) << "a new command clears the indication";
+    EXPECT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 2u);
 }
 
 // The ordinary cover-op retry, by contrast, keeps the stored bytes and msgid

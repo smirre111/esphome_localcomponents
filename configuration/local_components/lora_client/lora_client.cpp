@@ -3497,6 +3497,14 @@ namespace esphome
       req.build   = [this](bool retry, uint32_t *tag) { return this->tx_ctl_(retry, tag); };
       req.on_ack  = [this](uint32_t id) { return this->on_ctl_acked_(id); };
       req.on_fail = [this]() { this->on_ctl_failed_(); };
+      // An at-most-once command (OTA) whose stored frame is gone -- a relogin
+      // clears it, and the session it was sealed under is dead -- must not be
+      // re-packed: that would be a NEW command, and the node may have run the
+      // first one already.
+      req.resendable  = [this]() {
+        return !(this->ctl().req.policy.at_most_once && this->ctl().frame.empty());
+      };
+      req.on_abandon  = [this]() { this->on_ctl_abandoned_(); };
       return req;
     }
 
@@ -3549,6 +3557,15 @@ namespace esphome
       if (this->op_is_sleep_())
         this->on_sleep_acknowledged_();
       return true;
+    }
+
+    // A retry was due but the command cannot be re-sent safely: failed, nothing sent.
+    // The session is NOT torn down (the relogin that cleared the frame is the
+    // session change; a second one would only repeat it).
+    void LORAListener::on_ctl_abandoned_()
+    {
+      this->ctl().acks.clear();
+      this->set_command_failed_(true);
     }
 
     // Every retry was spent without an ack. (The policy decides whether the
@@ -3791,6 +3808,11 @@ namespace esphome
     void LORAListener::dlv_resend_(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
+      if (s.req.resendable && !s.req.resendable())
+      {
+        this->dlv_abandon_(ch);
+        return;
+      }
       // Rule 4: a single shot that went unacked puts this node back on bursts
       // immediately, and stays that way until a fresh in-slot uplink. One frame is
       // the whole exposure -- the retry below is already a burst.
@@ -3805,6 +3827,21 @@ namespace esphome
                  s.req.what, s.req.resend_verb, (unsigned) s.retry_count,
                  (unsigned) s.req.policy.max_retries);
       this->dlv_tx_(ch, true);
+    }
+
+    void LORAListener::dlv_abandon_(DeliveryChannel ch)
+    {
+      DeliverySlot &s = this->slots_[ch];
+      s.awaiting_ack = false;
+      ESP_LOGE(TAG, "[%s] %s may already have been heard and can no longer be re-sent as the "
+                    "same command (its session changed) — failed, NOT re-sent",
+               this->get_name().c_str(), s.req.what);
+      if (s.req.on_abandon)
+        s.req.on_abandon();
+      else if (s.req.on_fail)
+        s.req.on_fail();
+      if (s.req.on_done)
+        s.req.on_done();
     }
 
     // The optimistic guess missed. Burst NOW (Rule 4 marks the node unacked, so
