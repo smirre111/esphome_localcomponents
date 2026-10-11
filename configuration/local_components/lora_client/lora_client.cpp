@@ -22,6 +22,7 @@
 #include "esp_random.h"
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <cstring>
 #include "psa/crypto.h"
 #include <vector>
@@ -3762,6 +3763,16 @@ namespace esphome
 
     void LORAListener::deliver_(DeliveryChannel ch, DeliveryRequest req)
     {
+      // A Fire request is sent once and occupies no channel: it never reaches the
+      // slot below, so it cannot cancel, replace or delay a request in flight on any
+      // channel (a TimeSync goes out between a ScheduleConfig's attempts).
+      if (req.policy.mode == deliverypolicy::Mode::Fire)
+      {
+        this->dlv_fire_(req);
+        return;
+      }
+      if (ch >= kDeliveryChannels)
+        return;   // an acked request needs a channel to wait on
       DeliverySlot &s = this->slots_[ch];
       // A request already in flight is REPLACED by this one, with a fresh ladder
       // of its own (the budget is per request). Its msgids stay on record in
@@ -3774,6 +3785,124 @@ namespace esphome
       if (s.req.policy.yields_warmup)
         this->mbs_yield_self_();
       this->dlv_tx_(ch, false);
+    }
+
+    // THE one transmission of a Fire request (step 6): TimeSync, ClientConfig,
+    // CoverConfig. Everything that used to be repeated at each of those three call
+    // sites lives here once -- the relogin deferral, the msgid, the header, the
+    // encryption decision (pack_operation_: sealed whenever a session is confirmed,
+    // plaintext only before one exists), the shape and the failure log. What the
+    // frame SAYS, and when it is wanted at all, is the request's.
+    bool LORAListener::dlv_fire_(DeliveryRequest &req)
+    {
+      if (this->parent_ == nullptr || !req.fill)
+        return false;   // no radio, or nothing to say
+      // See relogin_pending_. Checked before the msgid is taken, so a deferred
+      // frame does not burn one; confirm_session_ sends it again.
+      if (deliverypolicy::fireDeferred(req.policy, this->relogin_pending_))
+      {
+        ESP_LOGD(TAG, "[%s] %s deferred — session being rebuilt", this->get_name().c_str(),
+                 req.what);
+        return false;
+      }
+      if (req.admit && !req.admit())
+        return false;
+
+      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = this->incrTxMessageId();
+      op_message.header    = &header;
+      req.fill(&op_message);
+
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      if (!this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
+      {
+        ESP_LOGE(TAG, "[%s] Failed to pack %s", this->get_name().c_str(), req.what);
+        return false;
+      }
+      const bool sent = this->fire_place_(req.policy.shape, buf, len, req.what);
+      free(buf);
+      if (sent && req.on_sent)
+        req.on_sent(header.msgid);
+      return sent;
+    }
+
+    bool LORAListener::fire_place_(deliverypolicy::Shape shape, const uint8_t *buf, size_t len,
+                                   const char *what)
+    {
+      switch (shape)
+      {
+      case deliverypolicy::Shape::Bare:
+        return this->parent_->send(const_cast<uint8_t *>(buf), len);
+      case deliverypolicy::Shape::Auto:
+        return this->send_aligned_(buf, len);
+      case deliverypolicy::Shape::Burst:
+      {
+        TxPolicy p;
+        p.copies = this->parent_->defaultBurstCopies();
+        return this->send_aligned_(buf, len, p);
+      }
+      case deliverypolicy::Shape::ClassA:
+        return this->fire_class_a_(buf, len, what);
+      }
+      return false;
+    }
+
+    // C2 when the hub has a usable uplink stamp for this node, today's burst
+    // otherwise. Not a switch: the fallback IS the old behaviour, so a node the hub
+    // cannot place still gets its frame the way it always did.
+    bool LORAListener::fire_class_a_(const uint8_t *buf, size_t len, const char *what)
+    {
+      const ClassAPlacement placement = this->send_into_class_a_window_(buf, len);
+      if (placement == ClassAPlacement::Placed)
+        return true;
+
+      if (placement == ClassAPlacement::WindowsPast)
+      {
+        // The node is ASLEEP, and this end is the one that knows it.
+        //
+        // The burst below rests on "a TimeSync carries no ack, so a lost
+        // single copy is silent" — an argument that assumes something is
+        // LISTENING. Both Class A windows have closed: no number of copies
+        // is heard, so 17 of them is 1408 ms of air, colliding with every
+        // other node's window, to achieve exactly nothing.
+        //
+        // Dropping costs nothing the burst would have won. The node beacons
+        // on its next wake and P2b answers every beacon with a TimeSync
+        // 750 ms later — while RX1 is still 250 ms out, so THAT one places.
+        ESP_LOGI(TAG, "[%s] %s dropped — both Class A windows past, "
+                      "the node is asleep; its next beacon gets one",
+                 this->get_name().c_str(), what);
+        return false;
+      }
+      if (placement == ClassAPlacement::NotClassA ||
+          placement == ClassAPlacement::NoUplinkStamp)
+      {
+        // PLACED, and as a BURST. Placement is the fix: through the bare
+        // send() this left whenever the queue drained, so in Mode B it
+        // arrived outside the node's window and the clock silently did not
+        // advance.
+        //
+        // The burst is asked for EXPLICITLY because a TimeSync carries no
+        // ack. Rule 4's exposure argument — "being wrong costs one frame" —
+        // rests on the loss being visible; for an unacked frame a missed
+        // single copy is silent, and the node runs on a stale clock until
+        // the next push. Airtime is the cheaper side of that trade.
+        //
+        // Both reasons are named rather than negated: these two are the
+        // cases where the hub does NOT know where the node listens, and the
+        // burst spans every window it might open. WindowsPast is the case
+        // where it knows precisely, and knows the answer is "nowhere".
+        TxPolicy p;
+        p.copies = this->parent_->defaultBurstCopies();
+        this->send_aligned_(buf, len, p);
+        return true;
+      }
+      return false;   // NotSendable: nothing to send
     }
 
     bool LORAListener::dlv_tx_(DeliveryChannel ch, bool retry)
@@ -5993,20 +6122,13 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       return ClassAPlacement::Placed;
     }
 
-    // Whether a TimeSync should go out now, and if so the throttle clock is
-    // stamped. (The guard prefix of send_timesync, moved out unchanged except
-    // that `return` became `return false`.)
+    // Whether a TimeSync is wanted now, and if so the throttle clock is stamped.
+    // The request's admit step: the delivery mechanism has already ruled out "no
+    // radio" and "session being rebuilt" (kTimeSyncPolicy defers in a relogin, and
+    // confirm_session_ sends the TimeSync again 750 ms after the node proves the
+    // key), so this is only what is specific to a TimeSync.
     bool LORAListener::timesync_due_()
     {
-      if (this->parent_ == nullptr)
-        return false;
-      // See relogin_pending_: confirm_session_ sends the TimeSync again 750 ms
-      // after the node proves the key.
-      if (this->relogin_pending_)
-      {
-        ESP_LOGD(TAG, "[%s] TimeSync deferred — session being rebuilt", this->get_name().c_str());
-        return false;
-      }
       if (this->time == nullptr || !this->time->now().is_valid())
       {
         // Home Assistant time not up yet. Skip rather than send epoch 0 — the
@@ -6046,25 +6168,33 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
 
     void LORAListener::send_timesync()
     {
-      if (!this->timesync_due_())
-        return;
+      // The payload is owned by a capture shared by the fill and the log, so the
+      // pointer the mechanism packs from outlives the call.
+      const TimeSync initial = TIME_SYNC__INIT;
+      auto ts = std::make_shared<TimeSync>(initial);
 
+      DeliveryRequest req;
+      req.what    = "TimeSync";
+      req.policy  = deliverypolicy::kTimeSyncPolicy;
+      req.admit   = [this]() { return this->timesync_due_(); };
+      req.fill    = [this, ts](LoraClientOperationMessage *op) { this->fill_timesync_(op, ts.get()); };
+      req.on_sent = [this, ts](uint32_t msgid) {
+        ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
+                 this->get_name().c_str(), (unsigned long long) ts->epoch,
+                 (int) ts->utcoffset, (unsigned) msgid);
+      };
+      this->deliver_(CH_NONE, std::move(req));
+    }
+
+    void LORAListener::fill_timesync_(LoraClientOperationMessage *op, TimeSync *ts)
+    {
       const auto     now       = this->time->now();
       const uint64_t epoch     = static_cast<uint64_t>(now.timestamp);
       const int32_t  utcoffset = esphome::ESPTime::timezone_offset();
 
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
-      op_message.header    = &header;
-
-      TimeSync ts = TIME_SYNC__INIT;
-      ts.epoch     = epoch;
-      ts.utcoffset = utcoffset;
-      ts.dstnext   = 0;   // not yet computed; the node treats 0 as "unknown"
+      ts->epoch     = epoch;
+      ts->utcoffset = utcoffset;
+      ts->dstnext   = 0;   // not yet computed; the node treats 0 as "unknown"
 
       // U-4: what the hub has OBSERVED of this node's uplink placement.
       //
@@ -6076,7 +6206,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // Same counter the hub keeps as a diagnostic (noteUplinkPlacement_), not
       // a second measurement — one definition, and the node's view of it can
       // only ever be this one's echo.
-      ts.inslotuplinks = this->belief_.in_slot_acks;
+      ts->inslotuplinks = this->belief_.in_slot_acks;
 
       // TIER 1: tell the node whether it may sleep immediately.
       //
@@ -6088,72 +6218,9 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // Conservative by construction: anything that might mean more traffic
       // leaves sleepOk false, which is precisely today's behaviour. A false
       // negative costs one wake's power; a false POSITIVE drops a command.
-      ts.sleepok = !this->more_traffic_owed_();
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
-      op_message.timesync = &ts;
-
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
-      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
-      {
-        // C2 when the hub has a usable uplink stamp for this node, today's
-        // burst otherwise. Not a switch: the fallback IS the old behaviour, so
-        // a node the hub cannot place still gets its TimeSync the way it always
-        // did.
-        const ClassAPlacement placement =
-            this->send_into_class_a_window_(buf, len);
-        bool sent = (placement == ClassAPlacement::Placed);
-
-        if (placement == ClassAPlacement::WindowsPast)
-        {
-          // The node is ASLEEP, and this end is the one that knows it.
-          //
-          // The burst below rests on "a TimeSync carries no ack, so a lost
-          // single copy is silent" — an argument that assumes something is
-          // LISTENING. Both Class A windows have closed: no number of copies
-          // is heard, so 17 of them is 1408 ms of air, colliding with every
-          // other node's window, to achieve exactly nothing.
-          //
-          // Dropping costs nothing the burst would have won. The node beacons
-          // on its next wake and P2b answers every beacon with a TimeSync
-          // 750 ms later — while RX1 is still 250 ms out, so THAT one places.
-          ESP_LOGI(TAG, "[%s] TimeSync dropped — both Class A windows past, "
-                        "the node is asleep; its next beacon gets one",
-                   this->get_name().c_str());
-        }
-        else if (placement == ClassAPlacement::NotClassA ||
-                 placement == ClassAPlacement::NoUplinkStamp)
-        {
-          // PLACED, and as a BURST. Placement is the fix: through the bare
-          // send() this left whenever the queue drained, so in Mode B it
-          // arrived outside the node's window and the clock silently did not
-          // advance.
-          //
-          // The burst is asked for EXPLICITLY because a TimeSync carries no
-          // ack. Rule 4's exposure argument — "being wrong costs one frame" —
-          // rests on the loss being visible; for an unacked frame a missed
-          // single copy is silent, and the node runs on a stale clock until
-          // the next push. Airtime is the cheaper side of that trade.
-          //
-          // Both reasons are named rather than negated: these two are the
-          // cases where the hub does NOT know where the node listens, and the
-          // burst spans every window it might open. WindowsPast is the case
-          // where it knows precisely, and knows the answer is "nowhere".
-          TxPolicy p;
-          p.copies = this->parent_->defaultBurstCopies();
-          this->send_aligned_(buf, len, p);
-          sent = true;
-        }
-        free(buf);
-        if (sent)
-          ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
-                   this->get_name().c_str(), (unsigned long long) epoch,
-                   (int) utcoffset, (unsigned) header.msgid);
-      }
-      else
-      {
-        ESP_LOGE(TAG, "[%s] Failed to pack TimeSync", this->get_name().c_str());
-      }
+      ts->sleepok = !this->more_traffic_owed_();
+      op->cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+      op->timesync = ts;
     }
 
     bool LORAListener::acquire_onboarding_()
@@ -6242,75 +6309,56 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       return base_ms + (uint32_t) drain_ms;
     }
 
-    bool LORAListener::send_downlink(const ::LoraClientOperationMessage *op)
+    // The CoverConfig, as a Fire request. The cover component builds the payload;
+    // the header, msgid, encryption and placement are the mechanism's.
+    bool LORAListener::send_cover_config(const ::CoverConfig &cc)
     {
-      uint8_t *txBuf = nullptr;
-      size_t   len   = 0;
-      // s_pack_operation_message takes a mutable message only because it copies
-      // the struct to strip the inner header; it never writes through the pointer.
-      if (!this->pack_operation_(const_cast<LoraClientOperationMessage *>(op),
-                                    this->session_confirmed_, &txBuf, &len))
-      {
-        ESP_LOGE(TAG, "[%s] Failed to pack downlink", this->get_name().c_str());
-        return false;
-      }
-      const bool ok = this->parent_->send(txBuf, len);
-      free(txBuf);
-      return ok;
+      bool sent = false;
+      DeliveryRequest req;
+      req.what    = "downlink";
+      req.policy  = deliverypolicy::kConfigPushPolicy;
+      req.fill    = [payload = cc](LoraClientOperationMessage *op) mutable {
+        op->cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+        op->coverconfig = &payload;
+      };
+      req.on_sent = [&sent](uint32_t) { sent = true; };
+      this->deliver_(CH_NONE, std::move(req));
+      return sent;
     }
 
     void LORAListener::send_remote_config()
     {
       ESP_LOGI(TAG, "Sending remote config for device %s", this->address_str());
-      // Implementation to send remote address
-
-      // op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
-      // op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-      // op_message.senderaddress = 0x12345678;
-
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress = this->short_address_;
-      header.destsubnet = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid = this->incrTxMessageId(); //++(this->frame_counter_.tx_message_id); // Incrementing message ID
-      op_message.header = &header;
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
-
-      ClientConfig clientconfig = CLIENT_CONFIG__INIT;
-      clientconfig.mac_addr = this->address_uint64_;
-      clientconfig.addr = this->short_address_;
-      clientconfig.subnt = this->subnet_address_;
-      clientconfig.name.data = (uint8_t *)this->get_name().c_str();
-      clientconfig.name.len = strlen(this->get_name().c_str());
-      clientconfig.sleepduration = this->sleep_duration_;
-      clientconfig.batteryinterval = this->battery_update_interval_;
-
-      // TimeUpdate time_update = TIME_UPDATE__INIT;
-      // time_update.closetime = this->close_duration_;
-      // time_update.opentime = this->open_duration_;
-
       ESP_LOGI(TAG, "Setting device name to: %s", this->get_name().c_str());
 
-      op_message.clientconfig = &clientconfig;
-
-      // Packed through s_pack_operation_message so it is ENCRYPTED whenever a
-      // session exists. This used to pack raw and therefore always went out in
+      // Packed through pack_operation_ (by the mechanism) so it is ENCRYPTED whenever
+      // a session exists. This used to pack raw and therefore always went out in
       // the clear — and a provisioned node refuses a plaintext ClientConfig,
       // because ClientConfig sets its address, subnet, name and sleep duration
       // and an unauthenticated frame must not be able to re-address a node.
       // The hub then set config_synced_ = true regardless and never retried, so
       // a config change flashed into the hub was lost silently.
-      uint8_t *txBuf = nullptr;
-      size_t   len   = 0;
-      if (!this->pack_operation_(&op_message, this->session_confirmed_,
-                                    &txBuf, &len))
-      {
-        ESP_LOGE(TAG, "[%s] Failed to pack ClientConfig", this->get_name().c_str());
-        return;
-      }
-      this->parent_->send(txBuf, len);
-      free(txBuf);
+      ClientConfig initial = CLIENT_CONFIG__INIT;
+      DeliveryRequest req;
+      req.what   = "ClientConfig";
+      req.policy = deliverypolicy::kConfigPushPolicy;
+      req.fill   = [this, payload = initial](LoraClientOperationMessage *op) mutable {
+        this->fill_client_config_(op, &payload);
+      };
+      this->deliver_(CH_NONE, std::move(req));
+    }
+
+    void LORAListener::fill_client_config_(LoraClientOperationMessage *op, ClientConfig *cc)
+    {
+      cc->mac_addr = this->address_uint64_;
+      cc->addr = this->short_address_;
+      cc->subnt = this->subnet_address_;
+      cc->name.data = (uint8_t *)this->get_name().c_str();
+      cc->name.len = strlen(this->get_name().c_str());
+      cc->sleepduration = this->sleep_duration_;
+      cc->batteryinterval = this->battery_update_interval_;
+      op->cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
+      op->clientconfig = cc;
     }
 
     // =====================================================================

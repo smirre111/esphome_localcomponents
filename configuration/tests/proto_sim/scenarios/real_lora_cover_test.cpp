@@ -143,8 +143,8 @@ TEST(RealLoraCover, SendRemoteConfigEmitsCoverConfigWithGeometry) {
 }
 
 // Step 0 of the "unified MAC delivery path" refactor: a CoverConfig is ONE bare,
-// unacked, unplaced send through the listener (send_downlink -> parent_->send
-// with a default policy). No tracked-op state, no retry timer, no supersession.
+// unacked, unplaced send through the listener (send_cover_config -> a Fire request,
+// kConfigPushPolicy, shape Bare). No tracked-op state, no retry timer, no supersession.
 // Pinned as-is; the node does not ack it yet (a later, optional change).
 TEST(RealLoraCover, CoverConfigIsOneBareUnackedSendWithNoRetry) {
     CoverHarness h;

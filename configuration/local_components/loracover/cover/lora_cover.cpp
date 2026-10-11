@@ -212,15 +212,6 @@ namespace esphome
       // this->parent_->frame_counter_.tx_message_id = 0;
       // this->parent_->frame_counter_.rx_message_id = 0;
 
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress = this->parent_->short_address_;
-      header.destsubnet = this->parent_->subnet_address_;
-      header.senderaddress = lora_tracker::kHubAddress;
-      header.msgid = this->parent_->incrTxMessageId(); //++(this->parent_->frame_counter_.tx_message_id); Incrementing message ID
-      op_message.header = &header;
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
-
       CoverConfig coverconfig = COVER_CONFIG__INIT;
       coverconfig.closetime = this->close_duration_;
       coverconfig.opentime = this->open_duration_;
@@ -230,13 +221,12 @@ namespace esphome
       coverconfig.openslack = this->open_slack_;
       coverconfig.closeslack = this->close_slack_;
 
-      op_message.coverconfig = &coverconfig;
-
-      // Through the listener, so it is ENCRYPTED once a session is confirmed.
-      // This packed raw and called parent_->parent_->send(), which put the
-      // CoverConfig in the clear on a confirmed session, where the node refuses
-      // it: its geometry and durations never reached an already-provisioned node.
-      this->parent_->send_downlink(&op_message);
+      // Through the listener's delivery mechanism, so it is ENCRYPTED once a session
+      // is confirmed (header and msgid are its job too). This packed raw and called
+      // parent_->parent_->send(), which put the CoverConfig in the clear on a
+      // confirmed session, where the node refuses it: its geometry and durations
+      // never reached an already-provisioned node.
+      this->parent_->send_cover_config(coverconfig);
     }
 
   } // namespace LoraCov

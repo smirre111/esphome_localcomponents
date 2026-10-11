@@ -191,7 +191,12 @@ struct AckIds
 // ---- what a request IS ------------------------------------------------------
 
 enum class Mode : uint8_t { Acked, Fire };            // wait for an ack, or send and forget
-enum class Shape : uint8_t { Auto, Burst, ClassA };   // how the frame is put on the air
+// How the frame is put on the air. Auto: placed on the node's next mark, a single shot
+// when the node has earned it. Burst: placed, as a full burst. ClassA: one copy aimed
+// at the node's next open Class A window, a burst when the hub cannot place the node
+// and nothing at all when the node is known to be asleep. Bare: a plain send, not
+// placed on any mark (the transmit queue releases it when it drains).
+enum class Shape : uint8_t { Auto, Burst, ClassA, Bare };
 enum class Resend : uint8_t { SameBytes, Rebuild };   // a retry re-sends the stored frame / builds a new one
 
 struct Policy
@@ -205,6 +210,11 @@ struct Policy
     bool         at_most_once;          // never re-sent after it may have been heard (OTA)
     bool         supersedes_same_kind;  // a newer request of this kind replaces the one in flight
     bool         yields_warmup;         // a Mode B warm-up on the air is stopped for it
+    // Fire only: with no session to encrypt under (a relogin in progress) the frame is
+    // NOT sent -- a plaintext one is refused by a node that still holds its old session
+    // -- and whoever confirms the session sends it again. A frame that must go out in
+    // the clear to reach an unprovisioned node leaves this false.
+    bool         defer_in_relogin = false;
 };
 
 // ScheduleConfig: a ladder of one send plus three rebuilds, 5 s each (plus the
@@ -222,6 +232,33 @@ constexpr Policy kSchedulePolicy = {Mode::Acked, Shape::Auto, Resend::Rebuild, 3
 // fresh ladder.
 constexpr Policy kGridSyncPolicy = {Mode::Acked, Shape::Burst, Resend::Rebuild, 5, 6000,
                                     GiveUpAction::FailKeep, false, true, false};
+
+// ---- Fire requests (step 6): one transmission, no ack ----------------------------
+//
+// A Fire request is sent ONCE and forgotten: no retry ladder, no ack matching, no
+// give-up. It occupies no channel -- it never touches a DeliverySlot, so it can
+// neither cancel nor delay a ScheduleConfig / GridSync / cover-op ladder in flight
+// on the channel its traffic class shares.
+
+// TimeSync: one copy in the node's Class A window when the hub can place it, the
+// burst it always was when it cannot (a TimeSync carries no ack, so a lost single
+// copy is silent and airtime is the cheaper side of that trade), and nothing for a
+// node whose windows have both closed. Deferred while the session is rebuilt:
+// confirm_session_() sends it again.
+constexpr Policy kTimeSyncPolicy = {Mode::Fire, Shape::ClassA, Resend::SameBytes, 0, 0,
+                                    GiveUpAction::FailKeep, false, false, false, true};
+// ClientConfig / CoverConfig: a bare send, encrypted whenever a session exists and in
+// the clear only for the unprovisioned bootstrap. NOT deferred in a relogin: the
+// REGISTER that provokes them arrives exactly when no session exists.
+constexpr Policy kConfigPushPolicy = {Mode::Fire, Shape::Bare, Resend::SameBytes, 0, 0,
+                                      GiveUpAction::FailKeep, false, false, false, false};
+
+// Whether a Fire request is held back now. An Acked request is never held here (its
+// own ladder defers its retries, see onAckTimeout).
+constexpr bool fireDeferred(const Policy &p, bool relogin_pending)
+{
+    return p.mode == Mode::Fire && p.defer_in_relogin && relogin_pending;
+}
 
 // ---- the Control channel (step 5): cover operations and sysops --------------
 //

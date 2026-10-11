@@ -53,7 +53,10 @@ struct GridSyncRequest;             // a node asking for its grid again, by poin
 struct GridSync;                    // the grid being published, filled by fill_grid_sync_
 struct PhaseReport;                 // §4.6's promotion evidence, by pointer
 struct LoraClientResponseMessage;   // set_response phases take it by pointer
-struct LoraClientOperationMessage;  // send_downlink takes it by pointer
+struct LoraClientOperationMessage;  // a Fire request fills it; send_cover_config wraps one
+struct TimeSync;                    // filled by fill_timesync_
+struct ClientConfig;                // filled by fill_client_config_
+struct CoverConfig;                 // send_cover_config takes it by reference
 struct EncryptedPayload;            // Tier 3: sealBurstCopyTag takes it by pointer
 struct LoraHeader;                  // Tier 3: sealBurstCopyTag takes it by pointer
 
@@ -144,6 +147,15 @@ namespace esphome
       // resendable() said no: the request is failed WITHOUT another send. Empty:
       // on_fail runs instead.
       std::function<void()> on_abandon;
+      // ---- Fire requests only (Policy::mode == Fire): sent once, no ack ----
+      // Whether the frame is wanted at all, asked after the relogin deferral and
+      // before a msgid is taken. False: dropped (the callback logs why).
+      std::function<bool()> admit;
+      // Fill in the command (cmd_case and its payload); the header and the msgid
+      // are the mechanism's. The payload must outlive the call (own it in a capture).
+      std::function<void(::LoraClientOperationMessage *op)> fill;
+      // The frame is on the air (or queued for it), under `msgid`.
+      std::function<void(uint32_t msgid)> on_sent;
     };
 
     // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
@@ -219,9 +231,12 @@ namespace esphome
     enum DeliveryChannel : uint8_t
     {
       CH_CONTROL = 0,   // cover operations and sysops
-      CH_CONFIG  = 1,   // ScheduleConfig (ClientConfig / CoverConfig are still bare sends)
+      CH_CONFIG  = 1,   // ScheduleConfig
       CH_MAC     = 2,   // GridSync (enable)
-      kDeliveryChannels = 3
+      kDeliveryChannels = 3,
+      // A Fire request (TimeSync, ClientConfig, CoverConfig) occupies no channel: it
+      // is sent once and forgotten, and never touches a slot.
+      CH_NONE    = 0xFF
     };
 
     class LORAListener : public EntityBase, public Component
@@ -1218,13 +1233,13 @@ namespace esphome
       uint32_t incrTxMessageId();
       void setRxMessageId(uint32_t msg_id);
 
-      // The ONE way a child node hands a downlink operation to the radio. It is
-      // encrypted whenever the session is confirmed and plaintext only before
-      // that, so a caller cannot forget — packing raw and calling parent_->send()
-      // is what sent a CoverConfig in the clear onto a confirmed session, which
-      // the node refuses. `op` keeps its own header (destaddress, msgid).
+      // The ONE way a child cover hands its CoverConfig to the radio: a Fire request
+      // through the delivery mechanism, so it is encrypted whenever the session is
+      // confirmed and plaintext only before that — packing raw and calling
+      // parent_->send() is what sent a CoverConfig in the clear onto a confirmed
+      // session, which the node refuses. Header and msgid are the mechanism's.
       // Returns false when it could not be packed or the transmit pool refused.
-      bool send_downlink(const ::LoraClientOperationMessage *op);
+      bool send_cover_config(const ::CoverConfig &cc);
 
       // F-4: Send a cover operation with delivery tracking.  The operation is
       // stored so it can be retransmitted (with a fresh, incrementing msgid)
@@ -1627,6 +1642,16 @@ namespace esphome
       // Start `req` on channel `ch`, superseding one already in flight there (its
       // ack ids stay recognised). The decisions are deliverypolicy::.
       void     deliver_(DeliveryChannel ch, DeliveryRequest req);
+      // A Fire request (step 6): the one transmission, with no slot, timer or ack
+      // involved. True when the frame went out. Reached only through deliver_.
+      bool     dlv_fire_(DeliveryRequest &req);
+      // Put the packed frame on the air the way `shape` says. True when it went out.
+      bool     fire_place_(deliverypolicy::Shape shape, const uint8_t *buf, size_t len,
+                           const char *what);
+      bool     fire_class_a_(const uint8_t *buf, size_t len, const char *what);
+      // TimeSync / ClientConfig, as Fire requests.
+      void     fill_timesync_(::LoraClientOperationMessage *op, ::TimeSync *ts);
+      void     fill_client_config_(::LoraClientOperationMessage *op, ::ClientConfig *cc);
       // One attempt, and the ack wait that follows it. False: could not be built.
       bool     dlv_tx_(DeliveryChannel ch, bool retry);
       void     on_dlv_timeout_(DeliveryChannel ch, bool short_wait);

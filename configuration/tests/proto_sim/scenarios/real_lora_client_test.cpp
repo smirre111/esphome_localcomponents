@@ -8387,17 +8387,27 @@ TEST(DeliveryGlue, AFailReloginRequestClearsTheSessionAndLogsInAgainWhereAFailKe
 TEST(DeliveryGlue, AFireRequestSendsOnceAndNeverWaitsForAnAck) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    int built = 0;
+    int filled = 0, sent = 0;
     esphome::lora_tracker::DeliveryRequest req;
     req.what   = "test";
     req.policy = deliverypolicy::kSchedulePolicy;
     req.policy.mode = deliverypolicy::Mode::Fire;
-    req.build  = [&](bool, uint32_t *tag) { *tag = 0; return (uint32_t) (200 + built++); };
+    req.policy.shape = deliverypolicy::Shape::Bare;
+    // A schedule-shaped payload: the mechanism owns header and msgid, the request the command.
+    req.fill   = [&](LoraClientOperationMessage *op) {
+        ++filled;
+        static ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
+        op->cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+        op->schedule = &sc;
+    };
+    req.on_sent = [&](uint32_t) { ++sent; };
     static_cast<GlueProbe &>(h.rol).deliver_(esphome::lora_tracker::CH_CONFIG, std::move(req));
-    EXPECT_EQ(built, 1);
+    EXPECT_EQ(filled, 1);
+    EXPECT_EQ(sent, 1);
     EXPECT_FALSE(static_cast<GlueProbe &>(h.rol).cfg().awaiting_ack);
     for (int i = 0; i < 8; ++i) h.clock.tick(kSchedStepMs);
-    EXPECT_EQ(built, 1) << "never retried";
+    EXPECT_EQ(filled, 1) << "never retried";
+    EXPECT_EQ(sent, 1);
 }
 
 // A resend that fails to pack still spends its slot of the ladder: the request
@@ -10303,4 +10313,655 @@ TEST(WakeFallback, AnAckArrivingAfterTheWakeDisarmsTheFallbackLogin) {
     EXPECT_TRUE(RP(r.rol).acked_since_confirm_);
     r.secs(60);
     EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0);
+}
+
+// =============================================================================
+// "Unified MAC delivery path" refactor, STEP 6: the three unacked application
+// frames -- TimeSync, ClientConfig, CoverConfig -- are Fire requests on the
+// generic mechanism. One transmission through deliver_(): the relogin deferral,
+// the msgid, the header, the encryption decision, the shape and the failure log
+// live there once. A Fire request occupies no channel, so it can neither cancel
+// nor delay an acked request in flight (a ScheduleConfig / GridSync / cover op
+// ladder shares the air with all three).
+// =============================================================================
+namespace {
+
+struct FireProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::deliver_;
+    using esphome::lora_tracker::LORAListener::cfg;
+    using esphome::lora_tracker::LORAListener::mac;
+    using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::relogin_pending_;
+    using esphome::lora_tracker::LORAListener::last_timesync_sent_us_;
+    using esphome::lora_tracker::LORAListener::frame_counter_;
+    using esphome::lora_tracker::LORAListener::delivery_busy_;
+    using esphome::lora_tracker::LORAListener::clearSessionKeys_;
+    uint32_t txId() const { return this->frame_counter_.tx_message_id; }
+};
+FireProbe &FP(LORAClient &c) { return static_cast<FireProbe &>(c); }
+FireProbe &FP(real_helpers::RealHubHarness &h) { return static_cast<FireProbe &>(h.rol); }
+
+struct Seen {
+    OpCmd    cmd;
+    uint32_t msgid;
+    uint32_t dest;
+    bool     sealed;
+};
+
+// Every hub->node frame, in air order, decrypted when it is sealed under `base`.
+std::vector<Seen> airSeen(proto_sim::SimRadio &radio, uint32_t base = 0) {
+    std::vector<Seen> out;
+    const auto frames = radio.hub_to_node_frames();   // by value: never iterate the temporary
+    for (const auto &f : frames) {
+        auto p = proto_sim::as_op(f);
+        if (!p) continue;
+        if (p->cmd == OpCmd::Encrypted) {
+            auto inner = decrypt_downlink(f, base);
+            if (inner) out.push_back({inner->cmd, p->header.msgId, p->header.destAddress, true});
+        } else {
+            out.push_back({p->cmd, p->header.msgId, p->header.destAddress, false});
+        }
+    }
+    return out;
+}
+size_t countCmd(const std::vector<Seen> &v, OpCmd cmd, size_t from = 0) {
+    size_t n = 0;
+    for (size_t i = from; i < v.size(); ++i) n += (v[i].cmd == cmd);
+    return n;
+}
+// The msgid of the (single) frame of one kind at or after `from`; 0 when none.
+uint32_t idOf(const std::vector<Seen> &v, OpCmd cmd, size_t from = 0) {
+    for (size_t i = from; i < v.size(); ++i)
+        if (v[i].cmd == cmd) return v[i].msgid;
+    return 0;
+}
+
+void makeCover(LORAClient &rol, esphome::loracov::LoraCoverComponent &cover) {
+    cover.set_name("rol_cover");
+    cover.set_open_duration(60);
+    cover.set_close_duration(61);
+    cover.set_invert_position(false);
+    cover.set_blind_height_mm(2000.0f);
+    cover.set_axle_diameter_mm(60.0f);
+    cover.set_blind_thickness_mm(8.0f);
+    cover.setup();
+    rol.register_lora_node(&cover);
+}
+
+// A TimeSync, a ClientConfig and a CoverConfig, in that order.
+void fireAllThree(LORAClient &rol, esphome::loracov::LoraCoverComponent &cover) {
+    rol.send_timesync();
+    rol.send_remote_config();
+    cover.send_remote_config();
+}
+
+// A Fire request of the given shape that says "TimeSync" (the payload is beside the
+// point: the mechanism does not look at it).
+esphome::lora_tracker::DeliveryRequest probeFire(deliverypolicy::Shape shape, int *sent) {
+    esphome::lora_tracker::DeliveryRequest req;
+    req.what         = "probe";
+    req.policy       = deliverypolicy::kConfigPushPolicy;
+    req.policy.shape = shape;
+    req.fill         = [](LoraClientOperationMessage *op) {
+        static TimeSync ts = TIME_SYNC__INIT;
+        op->cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+        op->timesync = &ts;
+    };
+    req.on_sent      = [sent](uint32_t) { ++*sent; };
+    return req;
+}
+
+// A node the hub trusts with a single shot, so Auto, Burst and Bare are three
+// different things on the air.
+void singleShotReady(real_helpers::RealHubHarness &h) {
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    give_phase_report(h);
+}
+
+}  // namespace
+
+// ---- shape: what goes on the air is what went on the air before ------------------
+
+TEST(FireDelivery, ATimeSyncFromANodeTheHubCannotPlaceIsOneBurstSentOnce) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    ASSERT_EQ(h.rol.node_mode_, (uint32_t) NODE_MODE__MODE_INTERACTIVE);
+    const size_t sends0 = h.tracker.sent_copies.size();
+
+    h.rol.send_timesync();
+
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends0 + 1);
+    EXPECT_EQ(h.tracker.last_copies, h.tracker.defaultBurstCopies()) << "an unacked frame is never one copy";
+    EXPECT_EQ(h.tracker.last_supersede_key, 0u);
+    h.clock.tick(120'000);
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "never retransmitted";
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 1u);
+    EXPECT_FALSE(FP(h).cfg().awaiting_ack);
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+}
+
+TEST(FireDelivery, ATimeSyncForAClassANodeIsOneCopyAimedAtItsOpenWindow) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
+    constexpr int64_t kT0 = 100'000;
+    h.rol.last_uplink_t0_us_ = kT0;
+    proto_sim_timer_set_now_us(kT0 + 50'000);
+    const size_t sends0 = h.tracker.sent_copies.size();
+
+    testing::internal::CaptureStderr();
+    h.rol.send_timesync();
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    ASSERT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "one frame";
+    EXPECT_EQ(h.tracker.last_copies, 1) << "one copy, not a burst";
+    EXPECT_GT(h.tracker.last_earliest_us, 0) << "aimed at the window";
+    EXPECT_EQ(occurrences(log, "reply aimed at RX1"), 1) << log;
+    EXPECT_EQ(occurrences(log, "TimeSync sent (epoch="), 1) << log;
+    EXPECT_EQ(h.rol.class_a_stats().offered, 1u);
+}
+
+TEST(FireDelivery, ATimeSyncForAClassANodeWhoseWindowsHaveClosedIsDroppedAndSaysSo) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
+    constexpr int64_t kT0 = 100'000;
+    h.rol.last_uplink_t0_us_ = kT0;
+    proto_sim_timer_set_now_us(kT0 + (int64_t) classa::kRx2DelayUs + 1);
+    const size_t sends0 = h.tracker.sent_copies.size();
+    const uint32_t id0 = FP(h).txId();
+
+    testing::internal::CaptureStderr();
+    h.rol.send_timesync();
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends0) << "17 copies at a sleeping node buy nothing";
+    EXPECT_EQ(occurrences(log, "TimeSync dropped — both Class A windows past, the node is asleep; "
+                               "its next beacon gets one"), 1) << log;
+    EXPECT_EQ(occurrences(log, "TimeSync sent"), 0) << "and it does not claim to have been sent";
+    EXPECT_EQ(FP(h).txId(), id0 + 1) << "the msgid is taken before the placement is known, as before";
+    EXPECT_EQ(h.rol.class_a_stats().offered, 0u);
+}
+
+TEST(FireDelivery, ATimeSyncSentLogLineNamesTheEpochTheOffsetAndTheMsgidOnTheAir) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    esphome::ESPTime::set_timezone_offset(7200);
+    h.time.set_now(1787000000, /*valid=*/true);
+
+    testing::internal::CaptureStderr();
+    h.rol.send_timesync();
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    const uint32_t id = idOf(airSeen(h.radio), OpCmd::TimeSync);
+    ASSERT_NE(id, 0u);
+    EXPECT_EQ(occurrences(log, "[rol] TimeSync sent (epoch=1787000000 utcoffset=+7200 s msgid=" +
+                               std::to_string(id) + ")"), 1) << log;
+}
+
+TEST(FireDelivery, AClientConfigAndACoverConfigLogExactlyWhatTheyAlwaysDid) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+
+    testing::internal::CaptureStderr();
+    h.rol.send_remote_config();
+    cover.send_remote_config();
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(occurrences(log, "Sending remote config for device"), 2) << "one per frame: " << log;
+    EXPECT_EQ(occurrences(log, "Setting device name to: rol"), 1) << log;
+    EXPECT_EQ(occurrences(log, "Failed to pack"), 0);
+    const auto seen = airSeen(h.radio);
+    EXPECT_EQ(countCmd(seen, OpCmd::ClientConfig), 1u);
+    EXPECT_EQ(countCmd(seen, OpCmd::CoverConfig), 1u);
+}
+
+// ---- the mechanism owns the msgid, the header, the failure log --------------------
+
+TEST(FireDelivery, ThreeFireFramesTakeThreeConsecutiveMsgidsFromTheListenersCounter) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    const uint32_t id0 = FP(h).txId();
+
+    fireAllThree(h.rol, cover);
+
+    const auto seen = airSeen(h.radio);
+    EXPECT_EQ(idOf(seen, OpCmd::TimeSync),    id0 + 1);
+    EXPECT_EQ(idOf(seen, OpCmd::ClientConfig), id0 + 2);
+    EXPECT_EQ(idOf(seen, OpCmd::CoverConfig), id0 + 3);
+    EXPECT_EQ(FP(h).txId(), id0 + 3) << "one msgid per frame, none burned, none taken twice";
+    for (const auto &s : seen) EXPECT_EQ(s.dest, 18u);
+}
+
+TEST(FireDelivery, AFrameThatCannotBePackedSendsNothingAndNamesItselfInTheLog) {
+    ensure_psa_ready();
+    ModeBRig r;
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(r.rol, cover);
+    r.session();
+    ASSERT_TRUE(r.rol.session_confirmed_);
+    // A session whose keys are gone (a new challenge cleared them): sealing is
+    // impossible, and falling back to plaintext would be refused by the node.
+    FP(r.rol).clearSessionKeys_();
+    const size_t sends0 = r.tracker.sent_copies.size();
+
+    testing::internal::CaptureStderr();
+    fireAllThree(r.rol, cover);
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(r.tracker.sent_copies.size(), sends0) << "nothing is sent in the clear instead";
+    EXPECT_EQ(occurrences(log, "[rol] Failed to pack TimeSync"), 1) << log;
+    EXPECT_EQ(occurrences(log, "[rol] Failed to pack ClientConfig"), 1) << log;
+    EXPECT_EQ(occurrences(log, "[rol] Failed to pack downlink"), 1) << log;
+    EXPECT_EQ(occurrences(log, "TimeSync sent"), 0);
+}
+
+// ---- encryption: sealed once a session exists, plaintext before ------------------
+
+TEST(FireDelivery, TheThreeFramesAreSealedOnAConfirmedSessionAndNeverInTheClear) {
+    ensure_psa_ready();
+    ModeBRig r;
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(r.rol, cover);
+    r.session();
+    ASSERT_TRUE(r.rol.session_confirmed_);
+    r.secs(5);
+    const size_t n0 = airSeen(r.radio, r.base).size();
+
+    fireAllThree(r.rol, cover);
+
+    const auto seen = airSeen(r.radio, r.base);
+    ASSERT_GE(seen.size(), n0 + 3);
+    for (OpCmd c : {OpCmd::TimeSync, OpCmd::ClientConfig, OpCmd::CoverConfig}) {
+        ASSERT_EQ(countCmd(seen, c, n0), 1u) << "exactly one of each, decryptable under the session";
+        for (size_t i = n0; i < seen.size(); ++i)
+            if (seen[i].cmd == c) EXPECT_TRUE(seen[i].sealed) << "a readable frame is refused by the node";
+    }
+}
+
+TEST(FireDelivery, TheThreeFramesGoInTheClearBeforeAnySessionExistsTheBootstrap) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    ASSERT_FALSE(h.rol.session_confirmed_);
+
+    fireAllThree(h.rol, cover);
+
+    const auto seen = airSeen(h.radio);
+    ASSERT_EQ(seen.size(), 3u);
+    for (const auto &s : seen) EXPECT_FALSE(s.sealed) << "an unprovisioned node holds no key to open it with";
+}
+
+// ---- relogin: a TimeSync waits, a config push does not ---------------------------
+
+TEST(FireDelivery, ATimeSyncIsHeldBackWhileTheSessionIsRebuiltWithoutBurningAMsgidOrTheWeeklyAllowance) {
+    using namespace real_helpers;
+    for (const bool auto_mode : {false, true}) {
+        RealHubHarness h{18, kMacRol2};
+        h.rol.registered_ = true;
+        h.rol.set_auto_mode_default(auto_mode);
+        h.rol.send_login();
+        ASSERT_TRUE(FP(h).relogin_pending_);
+        const size_t sends0 = h.tracker.sent_copies.size();
+        const uint32_t id0  = FP(h).txId();
+
+        h.rol.send_timesync();
+
+        EXPECT_EQ(h.tracker.sent_copies.size(), sends0) << "auto=" << auto_mode;
+        EXPECT_EQ(FP(h).txId(), id0) << "a deferred frame burns no msgid";
+        EXPECT_EQ(FP(h).last_timesync_sent_us_, 0)
+            << "and it does not count as this week's TimeSync: confirm_session_ must be able to send it";
+
+        FP(h).relogin_pending_ = false;
+        h.rol.send_timesync();
+        EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "and it goes the moment the session is back";
+    }
+}
+
+TEST(FireDelivery, AConfigPushIsNotHeldBackByARebuildingSessionBecauseTheRegisterThatAsksForItComesThen) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    FP(h).relogin_pending_ = true;
+
+    h.rol.send_remote_config();
+    cover.send_remote_config();
+
+    const auto seen = airSeen(h.radio);
+    EXPECT_EQ(countCmd(seen, OpCmd::ClientConfig), 1u);
+    EXPECT_EQ(countCmd(seen, OpCmd::CoverConfig), 1u);
+}
+
+// ---- a Fire frame never touches the ladder of an acked request ---------------------
+
+TEST(FireDelivery, AScheduleConfigLadderRunsOnUndisturbedByTheThreeFrames) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    schedReady(h);
+    h.rol.send_schedule_config();
+    ASSERT_TRUE(FP(h).cfg().awaiting_ack);
+    const uint32_t push_id = h.rol.schedulePushMsgid();
+    ASSERT_NE(push_id, 0u);
+
+    fireAllThree(h.rol, cover);
+
+    EXPECT_TRUE(FP(h).cfg().awaiting_ack) << "still waiting for its own ack";
+    EXPECT_EQ(FP(h).cfg().acks.n, 1);
+    EXPECT_EQ(FP(h).cfg().acks.id[0], push_id);
+    EXPECT_EQ(FP(h).cfg().retry_count, 0);
+    EXPECT_STREQ(FP(h).cfg().req.what, "ScheduleConfig") << "the request in the slot is still the schedule";
+    EXPECT_EQ(h.rol.schedulePushMsgid(), push_id);
+
+    // An ack for a Fire frame's msgid is nobody's ack.
+    const auto seen = airSeen(h.radio);
+    deliverAck(h.rol, idOf(seen, OpCmd::TimeSync));
+    deliverAck(h.rol, idOf(seen, OpCmd::ClientConfig));
+    deliverAck(h.rol, idOf(seen, OpCmd::CoverConfig));
+    EXPECT_TRUE(FP(h).cfg().awaiting_ack) << "a stray ack must not complete the schedule push";
+
+    // ...and the ladder runs its full length on schedule.
+    for (int i = 0; i < 8; ++i) h.clock.tick(kSchedStepMs);
+    const auto after = airSeen(h.radio);
+    EXPECT_EQ(countCmd(after, OpCmd::Schedule), 1u + LORAClient::kSchedMaxRetries);
+    EXPECT_EQ(countCmd(after, OpCmd::TimeSync), 1u) << "the Fire frames are not part of the ladder";
+    EXPECT_EQ(countCmd(after, OpCmd::ClientConfig), 1u);
+    EXPECT_EQ(countCmd(after, OpCmd::CoverConfig), 1u);
+}
+
+TEST(FireDelivery, AGridSyncLadderRunsOnUndisturbedByTheThreeFrames) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.rol.gridSyncAwaitingAck());
+    const uint32_t grid_id = FP(h).mac().acks.id[0];
+
+    fireAllThree(h.rol, cover);
+
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck());
+    EXPECT_EQ(FP(h).mac().acks.n, 1);
+    EXPECT_EQ(FP(h).mac().acks.id[0], grid_id);
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 0u);
+    h.clock.tick(kGridStepMs);
+    EXPECT_EQ(h.rol.gridSyncRepublishes(), 1u) << "the re-publish comes on its own schedule";
+    EXPECT_EQ(FP(h).mac().acks.n, 2);
+
+    const auto seen = airSeen(h.radio);
+    deliverAck(h.rol, idOf(seen, OpCmd::TimeSync));
+    EXPECT_TRUE(h.rol.gridSyncAwaitingAck()) << "a TimeSync's msgid does not confirm the grid";
+    deliverAck(h.rol, grid_id);
+    EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
+}
+
+TEST(FireDelivery, ACoverOpLadderRunsOnUndisturbedByTheThreeFrames) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    h.rol.registered_ = true;
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    const uint32_t first = FP(h).ctl().first_msgid;
+    const uint32_t last  = FP(h).ctl().last_msgid;
+    const uint8_t  gen   = (uint8_t) FP(h).ctl().generation;
+
+    fireAllThree(h.rol, cover);
+
+    EXPECT_TRUE(h.rol.awaitingAck());
+    EXPECT_EQ(FP(h).ctl().first_msgid, first);
+    EXPECT_EQ(FP(h).ctl().last_msgid, last) << "the Fire frames took msgids but are not part of the op's range";
+    EXPECT_EQ((uint8_t) FP(h).ctl().generation, gen);
+    EXPECT_EQ(FP(h).ctl().retry_count, 0);
+
+    const auto seen = airSeen(h.radio);
+    deliverAck(h.rol, idOf(seen, OpCmd::CoverConfig));
+    EXPECT_TRUE(h.rol.awaitingAck()) << "a CoverConfig's msgid is not the op's ack";
+
+    h.clock.tick(3000 + 100);
+    EXPECT_EQ(FP(h).ctl().retry_count, 1) << "the op's retry comes on its own schedule";
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 1u) << "and re-sends nothing of the Fire frames";
+    deliverAck(h.rol, FP(h).ctl().last_msgid);
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+TEST(FireDelivery, AFireFrameDoesNotFillTheSlotOfAnIdleChannel) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+
+    fireAllThree(h.rol, cover);
+
+    for (auto *s : {&FP(h).cfg(), &FP(h).mac(), &FP(h).ctl()}) {
+        EXPECT_FALSE(s->awaiting_ack);
+        EXPECT_EQ(s->acks.n, 0);
+        EXPECT_EQ(s->retry_count, 0);
+        EXPECT_EQ(s->first_msgid, 0u);
+        EXPECT_EQ(s->last_msgid, 0u);
+        EXPECT_EQ(s->req.build == nullptr, true) << "no request was left in the slot";
+    }
+    EXPECT_FALSE(FP(h).delivery_busy_());
+}
+
+// ---- two nodes ------------------------------------------------------------------------
+
+TEST(FireDelivery, TwoNodesFireFramesAreAddressedAndNumberedIndependently) {
+    ensure_psa_ready();
+    ModeBRig r;
+    LORAClient rol2;
+    rol2.set_name("rol2");
+    rol2.set_short_address(19);
+    rol2.set_subnet_address(2);
+    rol2.set_sleep_duration(21600);
+    rol2.set_address(0xE08CFE5F9EC5ULL);
+    rol2.set_time(&r.time);
+    r.tracker.register_client(&rol2);
+    rol2.registered_ = true;
+    r.rol.registered_ = true;
+
+    r.rol.send_timesync();
+    r.rol.send_remote_config();
+    rol2.send_remote_config();
+    rol2.send_timesync();
+
+    const auto seen = airSeen(r.radio);
+    ASSERT_EQ(seen.size(), 4u);
+    EXPECT_EQ(seen[0].dest, 18u);
+    EXPECT_EQ(seen[1].dest, 18u);
+    EXPECT_EQ(seen[2].dest, 19u);
+    EXPECT_EQ(seen[3].dest, 19u);
+    EXPECT_EQ(seen[0].msgid, 1u) << "node 1: TimeSync is its first frame";
+    EXPECT_EQ(seen[1].msgid, 2u);
+    EXPECT_EQ(seen[2].msgid, 1u) << "node 2 counts from its own counter: ClientConfig is ITS first frame";
+    EXPECT_EQ(seen[3].msgid, 2u);
+    EXPECT_EQ(FP(r.rol).txId(), 2u);
+    EXPECT_EQ(FP(rol2).txId(), 2u);
+
+    // One node rebuilding its session holds back only its OWN TimeSync.
+    FP(r.rol).relogin_pending_ = true;
+    const size_t n0 = airSeen(r.radio).size();
+    r.rol.send_timesync();
+    rol2.send_timesync();
+    const auto after = airSeen(r.radio);
+    ASSERT_EQ(after.size(), n0 + 1);
+    EXPECT_EQ(after.back().dest, 19u) << "node 2's TimeSync is not held behind node 1's relogin";
+}
+
+// ---- the mechanism itself, with a request that is not one of the three --------------------
+
+TEST(FireDelivery, ShapeDecidesHowTheFrameIsPlacedAutoBurstAndBareAreThreeDifferentThings) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    singleShotReady(h);
+    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot);
+
+    int sent = 0;
+    h.clock.tick(10);
+    FP(h).deliver_(esphome::lora_tracker::CH_NONE, probeFire(deliverypolicy::Shape::Auto, &sent));
+    EXPECT_EQ(h.tracker.last_copies, 1) << "Auto: placed, and a single shot for a node that earned it";
+    EXPECT_GT(h.tracker.last_earliest_us, 0);
+
+    FP(h).deliver_(esphome::lora_tracker::CH_NONE, probeFire(deliverypolicy::Shape::Burst, &sent));
+    EXPECT_EQ(h.tracker.last_copies, h.tracker.defaultBurstCopies()) << "Burst: placed, as a full burst";
+    EXPECT_GT(h.tracker.last_earliest_us, 0);
+
+    FP(h).deliver_(esphome::lora_tracker::CH_NONE, probeFire(deliverypolicy::Shape::Bare, &sent));
+    EXPECT_EQ(h.tracker.last_copies, 0) << "Bare: no shape asked for";
+    EXPECT_EQ(h.tracker.last_earliest_us, 0) << "and not placed";
+    EXPECT_EQ(sent, 3);
+}
+
+TEST(FireDelivery, ARequestThatIsNotWantedOrHasNothingToSayGoesNowhereAndBurnsNoMsgid) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    const size_t sends0 = h.tracker.sent_copies.size();
+    const uint32_t id0  = FP(h).txId();
+    int sent = 0;
+
+    auto unwanted  = probeFire(deliverypolicy::Shape::Bare, &sent);
+    unwanted.admit = []() { return false; };
+    FP(h).deliver_(esphome::lora_tracker::CH_NONE, std::move(unwanted));
+
+    auto silent = probeFire(deliverypolicy::Shape::Bare, &sent);
+    silent.fill = nullptr;
+    FP(h).deliver_(esphome::lora_tracker::CH_NONE, std::move(silent));
+
+    EXPECT_EQ(h.tracker.sent_copies.size(), sends0);
+    EXPECT_EQ(FP(h).txId(), id0) << "admit runs before the msgid is taken";
+    EXPECT_EQ(sent, 0);
+}
+
+TEST(FireDelivery, AnAckedRequestWithNoChannelIsRefusedRatherThanIndexedOutOfTheSlotArray) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    int built = 0;
+    esphome::lora_tracker::DeliveryRequest req;
+    req.what   = "test";
+    req.policy = deliverypolicy::kSchedulePolicy;
+    req.build  = [&](bool, uint32_t *tag) { *tag = 0; return (uint32_t) (500 + built++); };
+
+    FP(h).deliver_(esphome::lora_tracker::CH_NONE, std::move(req));
+
+    EXPECT_EQ(built, 0);
+    EXPECT_FALSE(FP(h).delivery_busy_());
+}
+
+// ---- the triggers are unchanged -------------------------------------------------------------
+
+TEST(FireDelivery, TheTimeSyncAfterALoginComesSevenHundredFiftyMillisecondsAfterTheConfirmation) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.time.set_now(1787000000, /*valid=*/true);
+    ensure_psa_ready();
+    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_NE(base, 0u);
+    ASSERT_TRUE(h.rol.login_acked_);
+    EXPECT_EQ(countCmd(airSeen(h.radio, base), OpCmd::TimeSync), 0u) << "not inline with the login ack";
+
+    h.clock.tick(1000);
+
+    EXPECT_EQ(countCmd(airSeen(h.radio, base), OpCmd::TimeSync), 1u);
+}
+
+TEST(FireDelivery, ABeaconIsAnsweredWithATimeSyncSevenHundredFiftyMillisecondsLater) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    deliverBeaconWithWakeFunnel(h.rol, 1, 0, 0, 0, 0);
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 0u) << "deferred, not inline";
+
+    h.clock.tick(700);
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 0u) << "not before the 750 ms";
+    h.clock.tick(100);
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 1u);
+}
+
+TEST(FireDelivery, AnAutoNodesTimeSyncStaysWeeklyThrottledAndOnlyASentOneCounts) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.set_auto_mode_default(true);
+    proto_sim_timer_set_now_us(1'000'000);
+
+    h.rol.send_timesync();
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 1u) << "the first one always goes";
+    proto_sim_timer_advance_us(3600LL * 1'000'000);
+    h.rol.send_timesync();
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 1u) << "an hour later is not due";
+    proto_sim_timer_advance_us(timesyncpolicy::kAutoModeIntervalUs);
+    h.rol.send_timesync();
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 2u) << "a week on, due again";
+}
+
+TEST(FireDelivery, ATimeSyncWithoutAValidHubClockIsSkippedAndNothingIsSent) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.time.set_now(0, /*valid=*/false);
+    const uint32_t id0 = FP(h).txId();
+
+    testing::internal::CaptureStderr();
+    h.rol.send_timesync();
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 0u);
+    EXPECT_EQ(FP(h).txId(), id0);
+    EXPECT_EQ(occurrences(log, "TimeSync skipped — hub clock not valid yet"), 1) << log;
+}
+
+TEST(FireDelivery, TheDeferredConfigPushAfterAConfirmedSessionStillSetsConfigSynced) {
+    // The REGISTER flow: a provisioned node's push waits for the session, then
+    // confirm_session_ sends ClientConfig and (via the stored REGISTER) CoverConfig.
+    ensure_psa_ready();
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(rol, cover);
+
+    auto reg = real_helpers::serialize_register(kMacRol2, /*needs_config=*/false);
+    rol.set_response(reg.data(), reg.size());
+    ASSERT_FALSE(rol.config_synced_);
+    testing::internal::CaptureStderr();
+    const uint32_t base = drive_session(clock, radio, rol);
+    const std::string log = testing::internal::GetCapturedStderr();
+    ASSERT_NE(base, 0u);
+
+    EXPECT_TRUE(rol.config_synced_);
+    EXPECT_EQ(occurrences(log, "Session confirmed — sending the deferred config push"), 1) << log;
+    const auto seen = airSeen(radio, base);
+    EXPECT_EQ(countCmd(seen, OpCmd::ClientConfig), 1u);
+    EXPECT_EQ(countCmd(seen, OpCmd::CoverConfig), 1u);
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
 }

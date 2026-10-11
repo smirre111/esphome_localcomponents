@@ -374,3 +374,49 @@ TEST(ControlQueue, ACoverOpIsNotMistakenForASysopWithTheSameNumber) {
 
 // The policy is pure and constexpr: usable with no listener at all.
 static_assert(onAckTimeout(TimeoutState{false, false, false, 0, 4}).action == TimeoutAction::Stale, "");
+
+// ---- Fire requests (step 6) ---------------------------------------------------------
+
+TEST(FirePolicy, TheThreeUnackedFramesAreFireAndNeverRetryOrWaitOrGiveUp) {
+    for (const Policy *p : {&kTimeSyncPolicy, &kConfigPushPolicy}) {
+        EXPECT_EQ(p->mode, Mode::Fire);
+        EXPECT_EQ(p->max_retries, 0) << "no retry ladder";
+        EXPECT_EQ(p->base_wait_ms, 0u) << "no ack wait";
+        EXPECT_FALSE(p->at_most_once);
+        EXPECT_FALSE(p->supersedes_same_kind);
+        EXPECT_FALSE(p->yields_warmup) << "a Fire frame leaves a warm-up running";
+    }
+}
+
+TEST(FirePolicy, ATimeSyncIsAimedAtTheClassAWindowAndWaitsOutARelogin) {
+    EXPECT_EQ(kTimeSyncPolicy.shape, Shape::ClassA);
+    EXPECT_TRUE(kTimeSyncPolicy.defer_in_relogin);
+}
+
+TEST(FirePolicy, AConfigPushIsABareSendAndIsNotHeldBackByARelogin) {
+    EXPECT_EQ(kConfigPushPolicy.shape, Shape::Bare);
+    EXPECT_FALSE(kConfigPushPolicy.defer_in_relogin) << "the REGISTER that asks for it comes when no session exists";
+}
+
+TEST(FirePolicy, OnlyAFireRequestThatAsksForItIsDeferredAndOnlyDuringARelogin) {
+    EXPECT_TRUE(fireDeferred(kTimeSyncPolicy, true));
+    EXPECT_FALSE(fireDeferred(kTimeSyncPolicy, false)) << "no relogin, no deferral";
+    EXPECT_FALSE(fireDeferred(kConfigPushPolicy, true)) << "it does not ask for it";
+    EXPECT_FALSE(fireDeferred(kConfigPushPolicy, false));
+}
+
+TEST(FirePolicy, AnAckedPolicyIsNeverDeferredByTheFirePath) {
+    // Their retries defer themselves (onAckTimeout); the Fire path must not also
+    // swallow a first attempt even if a flag were set by mistake.
+    for (const Policy *p : {&kSchedulePolicy, &kGridSyncPolicy, &kCoverPolicy, &kSysopPolicy,
+                            &kSleepPolicy, &kOtaPolicy}) {
+        EXPECT_EQ(p->mode, Mode::Acked);
+        EXPECT_FALSE(p->defer_in_relogin);
+        Policy flagged = *p;
+        flagged.defer_in_relogin = true;
+        EXPECT_FALSE(fireDeferred(flagged, true));
+    }
+}
+
+static_assert(fireDeferred(kTimeSyncPolicy, true), "");
+static_assert(!fireDeferred(kConfigPushPolicy, true), "");
