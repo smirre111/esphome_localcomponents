@@ -74,6 +74,9 @@ namespace esphome
       if (call.get_stop())
       {
         // F-4: tracked send — retransmits until the node returns a CommandAck.
+        // A node the hub models as asleep IGNORES the command (user decision):
+        // the entity is left exactly as it was and the unchanged state is
+        // re-published so Home Assistant drops whatever the UI showed optimistically.
         this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
                                             COV_OPERATION__CMD_STOP, 0.0f);
         this->publish_state(true);
@@ -91,25 +94,34 @@ namespace esphome
           if (this->invert_position_)
             pos = 1 - pos;
 
-          this->target_position_ = pos;
-
           // F-4: tracked send — the operation is retransmitted with a fresh
           // msgid until acknowledged, then surfaced as failed if never acked.
+          bool accepted;
           if (pos == COVER_OPEN)
           {
-            this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
-                                                COV_OPERATION__CMD_OPEN, 0.0f);
+            accepted = this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                                                           COV_OPERATION__CMD_OPEN, 0.0f);
           }
           else if (pos == COVER_CLOSED)
           {
-            this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
-                                                COV_OPERATION__CMD_CLOSE, 0.0f);
+            accepted = this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                                                           COV_OPERATION__CMD_CLOSE, 0.0f);
           }
           else
           {
-            this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, pos);
+            accepted = this->parent_->send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, pos);
           }
 
+          if (!accepted)
+          {
+            // Ignored: the node sleeps. Nothing moves, so the entity stays at its
+            // real position, is not "busy", and the unchanged state is re-published
+            // (without persisting) so the UI snaps back instead of showing the
+            // requested position.
+            this->publish_state(false);
+            return;
+          }
+          this->target_position_ = pos;
           busy_ = true;
           const uint32_t now = millis();
           this->start_dir_time_ = now;

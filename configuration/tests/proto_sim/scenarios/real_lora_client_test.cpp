@@ -9002,7 +9002,12 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     ASSERT_TRUE(DP(r).ctl().deferred_until_login);
     const size_t before = r.radio.hub_to_node_frames().size();
 
-    DP(r).relogin_pending_ = true;                     // the wake: a fresh login
+    // The wake: the node is HEARD (every confirmation is preceded by the uplink that
+    // proves it; a node heard after the sleep is awake, and a command issued to a
+    // node still modelled asleep is ignored) and logs in afresh.
+    r.time.set_now(kModeBNow + 601, /*valid=*/true);
+    QP(r).note_node_heard_();
+    DP(r).relogin_pending_ = true;
     DP(r).confirm_session_();
 
     EXPECT_FALSE(DP(r).ctl().deferred_until_login);
@@ -11020,4 +11025,498 @@ TEST(FireDelivery, TheDeferredConfigPushAfterAConfirmedSessionStillSetsConfigSyn
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+
+// ===========================================================================
+// A COMMAND ISSUED TO A SLEEPING NODE IS IGNORED (2026-10-12, user decision:
+// "a command issued while the node is asleep shall be IGNORED, as the node is
+// asleep"). Before, a cover op or sysop issued between the SLEEP ack and the
+// wake was sent anyway: five frames, then "Command failed after retries --
+// clearing session, forcing re-login" -- a login into a sleeping node.
+// The predicate and its edge are documented in SleepModel.h.
+// ===========================================================================
+
+#include "esphome/components/text_sensor/text_sensor.h"
+
+namespace {
+
+struct GateProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::sleep_state_;
+    using esphome::lora_tracker::LORAListener::node_asleep_;
+    using esphome::lora_tracker::LORAListener::is_node_awake_;
+    using esphome::lora_tracker::LORAListener::refresh_sleep_status_;
+    using esphome::lora_tracker::LORAListener::start_sleep_status_;
+    using esphome::lora_tracker::LORAListener::login_slot_;
+    using esphome::lora_tracker::LORAListener::note_node_heard_;
+    using esphome::lora_tracker::LORAListener::confirm_session_;
+    using esphome::lora_tracker::LORAListener::relogin_pending_;
+    using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_queue_;
+};
+GateProbe &GP(real_helpers::RealHubHarness &h) { return static_cast<GateProbe &>(h.rol); }
+GateProbe &GP(LORAClient &r) { return static_cast<GateProbe &>(r); }
+
+// The tests run with the hub's local time one hour ahead of UTC, so a wrong
+// (UTC) rendering of a time of day cannot pass; restored on exit.
+struct TzGuard {
+    int32_t before;
+    explicit TzGuard(int32_t tz) : before(esphome::ESPTime::timezone_offset()) {
+        esphome::ESPTime::set_timezone_offset(tz);
+    }
+    ~TzGuard() { esphome::ESPTime::set_timezone_offset(before); }
+};
+
+// The modelled wake of a sleep acknowledged at kModeBNow (stamped one second on).
+constexpr std::time_t kSleepStamp = kModeBNow + 1;
+constexpr std::time_t kWakeAt     = kSleepStamp + 21600;
+
+struct GateRig : real_helpers::RealHubHarness {
+    esphome::binary_sensor::BinarySensor asleep;
+    esphome::binary_sensor::BinarySensor failed;
+    esphome::text_sensor::TextSensor     status;
+    TzGuard                              tz{3600};
+
+    GateRig() : real_helpers::RealHubHarness(18, kMacRol2) {
+        sleepReady(*this);
+        rol.set_asleep_binary_sensor(&asleep);
+        rol.set_sleep_status_text_sensor(&status);
+        rol.set_command_failed_binary_sensor(&failed);
+        GP(*this).login_slot_ = 2;   // margin = 5 s boot + 2 x 3 s stagger = 11 s
+    }
+    // The nightly sleep, acknowledged now.
+    void sleepNow() {
+        rol.enterSleep();
+        ackSleep(*this);
+    }
+    size_t sends() { return tracker.sent_copies.size(); }
+};
+
+}  // namespace
+
+// ---- CHARACTERIZATION of what the gate does NOT change ----------------------
+
+// A node the hub does not model as asleep that simply does not answer: the full
+// ladder, then the session is cleared and a login forced. Unchanged -- the gate
+// is for a node KNOWN to be asleep, not a shield against silence.
+TEST(SleepGate, AnAwakeButSilentNodeStillRunsTheWholeLadderAndForcesARelogin) {
+    GateRig h;
+    h.rol.session_confirmed_ = true;
+    testing::internal::CaptureStderr();
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    const size_t s0 = h.sends();
+    exhaustRetries(h);
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_GE(h.sends(), s0 + 1) << "retransmissions went out";
+    EXPECT_TRUE(h.rol.commandFailed());
+    EXPECT_FALSE(h.rol.session_confirmed_) << "and the session was torn down";
+    EXPECT_EQ(occurrences(log, "Command failed after retries"), 1) << log;
+}
+
+// ---- the gate -----------------------------------------------------------------
+
+TEST(SleepGate, ACoverOpAfterTheSleepAckIsIgnoredWithOneLogLineAndNothingElse) {
+    GateRig h;
+    h.rol.session_confirmed_ = true;
+    h.sleepNow();
+    ASSERT_TRUE(GP(h).node_asleep_());
+    const size_t s0      = h.sends();
+    const int    logins0 = countLoginFrames(h);
+    h.failed.publishes   = 0;
+
+    testing::internal::CaptureStderr();
+    sendOpen(h);
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(occurrences(log, "cover op ignored — node asleep until 03:53 (sleep acknowledged 21:53)"), 1) << log;
+    EXPECT_EQ(h.sends(), s0) << "nothing sent";
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(GP(h).ctl().deferred_until_login) << "and not held for the wake";
+    EXPECT_EQ(GP(h).ctl_queue_.size(), 0u) << "no FIFO entry";
+    EXPECT_FALSE(h.rol.commandFailed()) << "no Command Failed";
+    EXPECT_EQ(h.failed.publishes, 0) << "the alarm sensor was not even touched";
+    EXPECT_EQ(airOrder(h), (Order{"S4"})) << "only the sleep itself ever went out";
+
+    testing::internal::CaptureStderr();
+    h.clock.tick(120'000);                              // no retry ladder, no relogin
+    const std::string later = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(h.sends(), s0);
+    EXPECT_EQ(countLoginFrames(h), logins0) << "no forced relogin";
+    EXPECT_EQ(occurrences(later, "Command failed"), 0) << later;
+    EXPECT_EQ(occurrences(later, "retransmit"), 0) << later;
+}
+
+// Every sysop, not only cover ops: OTA, STATUS, WiFi, a mode switch.
+TEST(SleepGate, EverySysopIsIgnoredWhileTheNodeSleepsAndNoneIsSentAtTheWake) {
+    GateRig h;
+    h.rol.session_confirmed_ = true;
+    h.sleepNow();
+    const size_t s0 = h.sends();
+
+    testing::internal::CaptureStderr();
+    h.rol.triggerOTA();
+    h.rol.sendDebugSysop(kOpStatus);
+    h.rol.sendDebugSysop(kOpWifiOn);
+    h.rol.sendDebugSysop(kOpWifiOff);
+    h.rol.set_auto_mode(true);
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(occurrences(log, "sysop ignored — node asleep until 03:53"), 5) << log;
+    EXPECT_EQ(h.sends(), s0);
+    EXPECT_EQ(airOrder(h), (Order{"S4"}));
+    EXPECT_EQ(GP(h).ctl_queue_.size(), 0u);
+    EXPECT_FALSE(h.rol.commandFailed());
+
+    // The wake: heard, new session. The OTA (and the rest) are NOT re-sent.
+    h.time.set_now(kWakeAt + 5, true);
+    GP(h).note_node_heard_();
+    GP(h).relogin_pending_ = true;
+    GP(h).confirm_session_();
+    EXPECT_EQ(airOrder(h), (Order{"S4"})) << "an ignored command is gone, not postponed";
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+// The sleep request itself is not a command to the sleeping node: it keeps its own
+// "already pending" dedupe and is not refused by the gate.
+TEST(SleepGate, ASleepRequestIsNeverRefusedByTheGate) {
+    GateRig h;
+    h.sleepNow();
+    ASSERT_TRUE(GP(h).node_asleep_());
+    const int sleeps0 = countSleepFrames(h);
+
+    h.rol.enterSleep();
+
+    EXPECT_EQ(countSleepFrames(h), sleeps0 + 1) << "the request went out";
+    EXPECT_TRUE(h.rol.awaitingAck());
+}
+
+TEST(SleepGate, ASleepAlreadyPendingIsStillDedupedNotIgnoredByTheGate) {
+    GateRig h;
+    h.rol.enterSleep();
+    const size_t s0 = h.sends();
+    testing::internal::CaptureStderr();
+    h.rol.enterSleep();
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(occurrences(log, "Sleep already pending"), 1) << log;
+    EXPECT_EQ(occurrences(log, "ignored — node asleep"), 0) << log;
+    EXPECT_EQ(h.sends(), s0);
+}
+
+// ---- the edge: the boot margin before the modelled wake -------------------------
+
+TEST(SleepGate, TheNodeIsTreatedAsAwakeFromElevenSecondsBeforeTheModelledWake) {
+    GateRig h;                                           // slot 2: 5 s boot + 6 s stagger
+    h.sleepNow();
+
+    h.time.set_now(kWakeAt - 12, true);
+    EXPECT_TRUE(GP(h).node_asleep_()) << "12 s ahead: still asleep";
+    sendOpen(h);
+    EXPECT_FALSE(h.rol.awaitingAck());
+
+    h.time.set_now(kWakeAt - 11, true);
+    EXPECT_FALSE(GP(h).node_asleep_()) << "exactly the margin ahead: awake";
+    sendOpen(h);
+    EXPECT_TRUE(h.rol.awaitingAck()) << "sent, and its ack ladder spans the boot";
+}
+
+TEST(SleepGate, TheMarginIsThe5SecondBootMarginPlus3SecondsPerLoginSlot) {
+    EXPECT_EQ(sleepmodel::marginMs(0), 5000u);
+    EXPECT_EQ(sleepmodel::marginMs(1), 8000u);
+    EXPECT_EQ(sleepmodel::marginMs(4), 17000u);
+}
+
+TEST(SleepGate, AnOpAfterTheModelledWakeIsSent) {
+    GateRig h;
+    h.sleepNow();
+    h.time.set_now(kWakeAt + 60, true);
+    EXPECT_FALSE(GP(h).node_asleep_());
+    sendOpen(h);
+    EXPECT_TRUE(h.rol.awaitingAck());
+}
+
+// ---- hearing the node beats the model -------------------------------------------
+
+TEST(SleepGate, ANodeHeardAgainIsAwakeAndItsOpIsSent) {
+    GateRig h;
+    h.sleepNow();
+    h.time.set_now(kModeBNow + 100, true);               // an early reboot: it announces itself
+    GP(h).note_node_heard_();
+    ASSERT_GT(kWakeAt - (kModeBNow + 100), 3600);        // the model alone still says "hours"
+    EXPECT_FALSE(GP(h).node_asleep_());
+    sendOpen(h);
+    EXPECT_TRUE(h.rol.awaitingAck());
+}
+
+// is_node_awake_()'s own "heard recently" window lapses after interactive_timeout_;
+// the node then reads as asleep to the clock again although it has been heard since
+// the sleep. The gate must not go back to refusing: awake stays awake until the
+// next acknowledged sleep.
+TEST(SleepGate, ANodeHeardSinceTheSleepStaysAwakeAfterTheHeardWindowLapses) {
+    GateRig h;
+    h.sleepNow();
+    h.time.set_now(kModeBNow + 100, true);
+    GP(h).note_node_heard_();
+    h.time.set_now(kModeBNow + 100 + 7200, true);        // well past the 30 min window
+    ASSERT_FALSE(GP(h).is_node_awake_()) << "precondition: the clock model alone says asleep again";
+    ASSERT_LT(kModeBNow + 100 + 7200, kWakeAt - 100);
+    EXPECT_FALSE(GP(h).node_asleep_());
+    sendOpen(h);
+    EXPECT_TRUE(h.rol.awaitingAck());
+}
+
+// ---- an unconfirmed sleep: the node is treated as awake ----------------------------
+
+TEST(SleepGate, AnUnconfirmedSleepLeavesTheNodeAwakeAndCommandsGoOut) {
+    GateRig h;
+    h.rol.session_confirmed_ = true;
+    h.rol.enterSleep();
+    exhaustRetries(h);
+    ASSERT_TRUE(GP(h).ctl().sleep_unconfirmed);
+    ASSERT_EQ(h.rol.last_sleep_epoch_, 0u);
+
+    EXPECT_FALSE(GP(h).node_asleep_());
+    const size_t s0 = h.sends();
+    sendOpen(h);
+    EXPECT_GT(h.sends(), s0) << "sent";
+    EXPECT_TRUE(h.rol.awaitingAck());
+}
+
+TEST(SleepGate, TheUnconfirmedFlagWinsOverAStaleSleepStamp) {
+    // A stamp from an EARLIER acknowledged sleep must not make an unconfirmed
+    // newer sleep look like sleep.
+    GateRig h;
+    h.rol.session_confirmed_ = true;
+    h.rol.last_sleep_epoch_ = kModeBNow + 1;
+    h.rol.last_heard_epoch_ = kModeBNow;
+    ASSERT_TRUE(GP(h).node_asleep_()) << "precondition: the stamp alone says asleep";
+    GP(h).ctl().sleep_unconfirmed = true;
+    EXPECT_FALSE(GP(h).node_asleep_());
+}
+
+// ---- what waits behind an in-flight sleep is still delivered at the wake --------------
+
+TEST(SleepGate, ACommandQueuedBehindAnInFlightSleepIsHeldAndDeliveredAtTheWake) {
+    GateRig h;
+    h.rol.enterSleep();
+    ASSERT_TRUE(DP(h).sleep_op_in_flight_());
+    testing::internal::CaptureStderr();
+    sendOpen(h);                                         // NOT asleep yet: queued, not ignored
+    const std::string queued = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(occurrences(queued, "ignored"), 0) << queued;
+    ASSERT_EQ(GP(h).ctl_queue_.size(), 1u);
+
+    ackSleep(h);
+    EXPECT_TRUE(GP(h).node_asleep_());
+    EXPECT_TRUE(GP(h).ctl().deferred_until_login) << "held for the wake, as hardware-verified";
+    EXPECT_EQ(airOrder(h), (Order{"S4"}));
+
+    h.time.set_now(kWakeAt + 5, true);                   // the node is back
+    GP(h).note_node_heard_();
+    GP(h).relogin_pending_ = true;
+    GP(h).confirm_session_();
+    EXPECT_TRUE(h.rol.awaitingAck());
+    EXPECT_EQ(airOrder(h), (Order{"S4", "C0"})) << "the held cover op (OPEN) went out once";
+}
+
+// ---- other nodes and modes -------------------------------------------------------------
+
+TEST(SleepGate, AnAutoModeNodeIsNeverGated) {
+    GateRig h;
+    h.rol.set_auto_mode_default(true);
+    h.rol.last_sleep_epoch_ = kModeBNow + 1;             // a stamp that would mean "asleep"
+    h.rol.last_heard_epoch_ = kModeBNow;
+    EXPECT_FALSE(GP(h).node_asleep_());
+    sendOpen(h);
+    EXPECT_TRUE(h.rol.awaitingAck()) << "an auto node's own flow is unchanged";
+    EXPECT_EQ(GP(h).sleep_state_(), sleepmodel::State::Auto);
+}
+
+TEST(SleepGate, TwoNodesAreGatedIndependently) {
+    TwoNodeHub h(false, false);
+    TzGuard tz(0);
+    for (LORAClient *r : {&h.rol_1, &h.rol_2}) {
+        r->registered_ = true;
+        r->login_acked_ = true;
+        r->pending_login_nonce_ = 0x1234;
+        GP(*r).login_slot_ = 0;
+    }
+    h.rol_1.last_sleep_epoch_ = kModeBNow + 1;           // node 17 sleeps, node 18 does not
+    h.rol_1.last_heard_epoch_ = kModeBNow;
+    ASSERT_TRUE(GP(h.rol_1).node_asleep_());
+    ASSERT_FALSE(GP(h.rol_2).node_asleep_());
+
+    sendOpenTo(h.rol_1);
+    sendOpenTo(h.rol_2);
+
+    EXPECT_FALSE(h.rol_1.awaitingAck());
+    EXPECT_TRUE(h.rol_2.awaitingAck());
+    EXPECT_EQ(airOrder(h.radio, 17), (Order{}));
+    EXPECT_EQ(airOrder(h.radio, 18), (Order{"C0"}));
+}
+
+TEST(SleepGate, ATimedModeNodeIsGatedLikeAModeANode) {
+    ensure_psa_ready();
+    ModeBRig r;
+    TzGuard tz(0);
+    r.session();
+    r.rol.enable_timed_mode(true);
+    r.ackGrid();
+    r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, /*node_timed_rx=*/true);   // promoted
+    r.rol.enterSleep();
+    r.secs(3);
+    ackSleep(r);
+    ASSERT_TRUE(GP(r).node_asleep_());
+    const size_t s0 = r.tracker.sent_copies.size();
+
+    sendClose(r.rol);
+    r.rol.triggerOTA();
+
+    EXPECT_EQ(r.tracker.sent_copies.size(), s0) << "nothing sent (the session is encrypted: count copies)";
+    EXPECT_FALSE(r.rol.awaitingAck());
+    EXPECT_EQ(GP(r).ctl_queue_.size(), 0u);
+}
+
+// ---- the cover entity ----------------------------------------------------------------------
+
+namespace {
+class DrivenCover : public esphome::loracov::LoraCoverComponent {
+public:
+    void drive(const esphome::cover::CoverCall &c) { this->control(c); }
+    bool busy() const { return this->busy_; }
+};
+}  // namespace
+
+// HA state after an ignored op: the entity stays at its REAL position, is not busy,
+// claims no target, and the unchanged state is re-published once so the UI drops
+// whatever it showed optimistically.
+TEST(SleepGate, AnIgnoredCoverCallLeavesTheEntityAtItsRealPositionAndNotBusy) {
+    GateRig h;
+    DrivenCover cover;
+    makeCover(h.rol, cover);
+    cover.position = 0.7f;
+    h.sleepNow();
+    const int published0 = cover.publish_count();
+    const size_t s0 = h.sends();
+
+    esphome::cover::CoverCall call;
+    call.set_position(0.2f);
+    cover.drive(call);
+
+    EXPECT_EQ(h.sends(), s0);
+    EXPECT_FLOAT_EQ(cover.position, 0.7f) << "the move did not happen";
+    EXPECT_FLOAT_EQ(cover.last_published(), 0.7f);
+    EXPECT_EQ(cover.publish_count(), published0 + 1) << "the real state is re-published";
+    EXPECT_FALSE(cover.busy()) << "not stuck 'moving'";
+
+    esphome::cover::CoverCall stop;
+    stop.set_stop(true);
+    cover.drive(stop);
+    EXPECT_EQ(h.sends(), s0) << "a stop is a command too";
+    EXPECT_FLOAT_EQ(cover.position, 0.7f);
+}
+
+TEST(SleepGate, AnAcceptedCoverCallStillMarksTheEntityBusy) {
+    GateRig h;
+    DrivenCover cover;
+    makeCover(h.rol, cover);
+    cover.position = 0.7f;
+    esphome::cover::CoverCall call;
+    call.set_position(0.2f);
+    cover.drive(call);
+    EXPECT_TRUE(cover.busy());
+    EXPECT_TRUE(h.rol.awaitingAck());
+}
+
+// ===========================================================================
+// FEATURE 2: the "Asleep" binary sensor and the "Sleep Status" text sensor.
+// ===========================================================================
+
+TEST(SleepStatus, AwakeThenAsleepOnTheAckThenAwakeWhenTheNodeIsHeard) {
+    GateRig h;
+    GP(h).refresh_sleep_status_();
+    EXPECT_FALSE(h.asleep.state);
+    EXPECT_EQ(h.status.state, "awake");
+
+    h.sleepNow();
+    EXPECT_TRUE(h.asleep.state);
+    EXPECT_EQ(h.status.state, "asleep until 03:53");
+
+    h.time.set_now(kModeBNow + 500, true);
+    GP(h).note_node_heard_();
+    EXPECT_FALSE(h.asleep.state);
+    EXPECT_EQ(h.status.state, "awake");
+}
+
+TEST(SleepStatus, AQuietNodeTurnsAwakeAtTheModelledWakeWithoutHearingAnything) {
+    GateRig h;
+    h.rol.set_sleep_duration(600);
+    GP(h).login_slot_ = 0;                               // margin 5 s
+    GP(h).refresh_sleep_status_();
+    h.sleepNow();
+    ASSERT_TRUE(h.asleep.state);
+
+    h.clock.tick(300'000);                               // time has not moved: nothing changes
+    EXPECT_TRUE(h.asleep.state);
+
+    h.time.set_now(kSleepStamp + 600 - 4, true);         // inside the margin, still silent
+    h.clock.tick(300'000);                               // the refresh timeout lands
+    EXPECT_FALSE(h.asleep.state) << "OFF without any uplink";
+    EXPECT_EQ(h.status.state, "awake");
+}
+
+TEST(SleepStatus, AnUnconfirmedSleepIsShownAndClearedWhenTheNodeIsHeard) {
+    GateRig h;
+    h.rol.session_confirmed_ = true;
+    GP(h).refresh_sleep_status_();
+    h.rol.enterSleep();
+    exhaustRetries(h);
+    EXPECT_FALSE(h.asleep.state);
+    EXPECT_EQ(h.status.state, "sleep unconfirmed");
+
+    h.time.set_now(kModeBNow + 30, true);
+    GP(h).note_node_heard_();
+    EXPECT_EQ(h.status.state, "awake");
+}
+
+TEST(SleepStatus, AnAutoModeNodeReadsAutoModeAndNeverAsleep) {
+    GateRig h;
+    h.rol.set_auto_mode_default(true);
+    h.rol.last_sleep_epoch_ = kModeBNow + 1;
+    GP(h).refresh_sleep_status_();
+    EXPECT_FALSE(h.asleep.state);
+    EXPECT_EQ(h.status.state, "auto mode");
+}
+
+TEST(SleepStatus, PublishesOnlyOnChange) {
+    GateRig h;
+    GP(h).refresh_sleep_status_();
+    h.sleepNow();
+    const int b = h.asleep.publishes;
+    const int t = h.status.publishes;
+    for (int i = 0; i < 6; ++i) GP(h).refresh_sleep_status_();
+    h.clock.tick(200'000);
+    EXPECT_EQ(h.asleep.publishes, b) << "no spam";
+    EXPECT_EQ(h.status.publishes, t) << "no spam";
+    h.time.set_now(kModeBNow + 30, true);
+    GP(h).note_node_heard_();                            // a real change
+    EXPECT_EQ(h.asleep.publishes, b + 1);
+    EXPECT_EQ(h.status.publishes, t + 1);
+    GP(h).note_node_heard_();
+    EXPECT_EQ(h.asleep.publishes, b + 1);
+    EXPECT_EQ(h.status.publishes, t + 1);
+}
+
+// A restored sleep becomes visible once the clock is valid: the slow safety net.
+TEST(SleepStatus, TheSafetyNetShowsARestoredSleepOnceTheClockIsValid) {
+    GateRig h;
+    h.time.set_now(kModeBNow, /*valid=*/false);
+    h.rol.last_sleep_epoch_ = kModeBNow + 1;             // restored from NVS
+    GP(h).start_sleep_status_();
+    EXPECT_FALSE(h.asleep.state) << "no clock: cannot tell, assume awake";
+    h.time.set_now(kModeBNow + 5, /*valid=*/true);
+    h.clock.tick(61'000);
+    EXPECT_TRUE(h.asleep.state);
+    EXPECT_EQ(h.status.state, "asleep until 03:53");
 }

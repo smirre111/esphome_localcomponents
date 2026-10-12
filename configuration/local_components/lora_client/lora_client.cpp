@@ -18,6 +18,7 @@
 #include "esphome/core/application.h"
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/switch/switch.h"
 #include "esp_random.h"
 #include <algorithm>
@@ -568,6 +569,8 @@ namespace esphome
         this->registered_ = false;
       }
 
+      this->start_sleep_status_();
+
       // Initialise PSA Crypto (idempotent — safe from multiple instances) and
       // derive K_auth once. Every other PSA user on the hub (session key
       // derivation, burst-copy tagging) relies on this having run.
@@ -830,6 +833,7 @@ namespace esphome
       this->last_heard_us_ = esp_timer_get_time();
       if (this->time != nullptr && this->time->now().is_valid())
         this->last_heard_epoch_ = static_cast<uint32_t>(this->time->now().timestamp);
+      this->refresh_sleep_status_();   // hearing the node ends "asleep" at once
     }
 
     pendingshadow::NodeInputs LORAListener::pending_shadow_inputs(int64_t now_us)
@@ -936,6 +940,86 @@ namespace esphome
       return static_cast<uint32_t>(
           std::min<uint64_t>(static_cast<uint64_t>(wake_at - now) * 1000ULL,
                              static_cast<uint64_t>(0xFFFFFFFFu)));
+    }
+
+    // THE HUB'S SLEEP MODEL (SleepModel.h documents the predicate and its edge).
+    // Reuses is_node_awake_() / ms_until_node_awake_(); adds only what they do not
+    // know: automatic mode, an unconfirmed sleep, "heard since the sleep", and the
+    // boot margin before the modelled wake.
+    sleepmodel::State LORAListener::sleep_state_() const
+    {
+      sleepmodel::Inputs in{};
+      in.auto_mode         = this->auto_mode_;
+      in.sleep_unconfirmed = this->ctl().sleep_unconfirmed;
+      in.last_sleep_epoch  = this->last_sleep_epoch_;
+      in.last_heard_epoch  = this->last_heard_epoch_;
+      in.ms_until_awake    = this->ms_until_node_awake_();
+      in.margin_ms         = sleepmodel::marginMs(this->login_slot_);
+      return sleepmodel::classify(in);
+    }
+
+    // One log line, nothing sent, nothing queued, no failure raised, no relogin:
+    // the user's decision is that a command issued to a sleeping node is ignored.
+    // The nightly SLEEP request is not a command TO the node in that sense; it
+    // keeps its own "already pending" dedupe.
+    bool LORAListener::refuse_while_asleep_(const deliverypolicy::ControlCmd &c)
+    {
+      if (!c.is_cover && c.sysop == CLIENT_OPERATION__CMD_SLEEP)
+        return false;
+      if (!this->node_asleep_())
+        return false;
+      const int32_t tz = esphome::ESPTime::timezone_offset();
+      unsigned wh = 0, wm = 0, sh = 0, sm = 0;
+      sleepmodel::clockHm(this->next_wake_epoch_(), tz, &wh, &wm);
+      sleepmodel::clockHm(this->last_sleep_epoch_, tz, &sh, &sm);
+      ESP_LOGW(TAG, "[%s] %s ignored — node asleep until %02u:%02u (sleep acknowledged %02u:%02u)",
+               this->get_name().c_str(), c.is_cover ? "cover op" : "sysop", wh, wm, sh, sm);
+      return true;
+    }
+
+    void LORAListener::publish_sleep_status_(sleepmodel::State s)
+    {
+      const int8_t asleep = (s == sleepmodel::State::Asleep) ? 1 : 0;
+      if (asleep != this->sleep_pub_asleep_)
+      {
+        this->sleep_pub_asleep_ = asleep;
+        if (this->asleep_bsensor_ != nullptr)
+          this->asleep_bsensor_->publish_state(asleep != 0);
+      }
+      char text[40];
+      sleepmodel::statusText(s, this->next_wake_epoch_(), esphome::ESPTime::timezone_offset(),
+                             text, sizeof(text));
+      if (this->sleep_pub_text_ != text)
+      {
+        this->sleep_pub_text_ = text;
+        if (this->sleep_status_tsensor_ != nullptr)
+          this->sleep_status_tsensor_->publish_state(this->sleep_pub_text_);
+      }
+    }
+
+    // Publishes on change only. While asleep, a timeout lands just past the moment
+    // the model turns the node awake (wake minus boot margin), so the sensors go
+    // OFF on time even if a Mode B node stays quiet and nothing is heard.
+    void LORAListener::refresh_sleep_status_()
+    {
+      const sleepmodel::State s = this->sleep_state_();
+      this->publish_sleep_status_(s);
+      if (s != sleepmodel::State::Asleep)
+      {
+        this->cancel_timeout("sleep_status");
+        return;
+      }
+      const uint32_t delay = sleepmodel::refreshDelayMs(this->ms_until_node_awake_(),
+                                                        sleepmodel::marginMs(this->login_slot_));
+      this->set_timeout("sleep_status", delay, [this]() { this->refresh_sleep_status_(); });
+    }
+
+    // A slow safety net on top of the event-driven refreshes: the clock may only
+    // become valid (or the restored sleep become visible) after setup().
+    void LORAListener::start_sleep_status_()
+    {
+      this->refresh_sleep_status_();
+      this->set_interval("sleep_status_net", 60000, [this]() { this->refresh_sleep_status_(); });
     }
 
     void LORAListener::schedule_startup_login_()
@@ -3602,9 +3686,9 @@ namespace esphome
       this->set_command_failed_(true);
     }
 
-    void LORAListener::send_cover_operation(uint32_t covop_case, int32_t operation, float position)
+    bool LORAListener::send_cover_operation(uint32_t covop_case, int32_t operation, float position)
     {
-      this->ctl_submit_({true, covop_case, operation, position, 0});
+      return this->ctl_submit_({true, covop_case, operation, position, 0});
     }
 
     void LORAListener::send_tracked_sysop_(int32_t sysop)
@@ -3625,16 +3709,20 @@ namespace esphome
     // other request waits its turn rather than overwriting what is in flight (a
     // SLEEP, an OTA or a mode switch is never superseded -- and the overwritten
     // SLEEP used to lose its own ack).
-    void LORAListener::ctl_submit_(const deliverypolicy::ControlCmd &c)
+    // Returns false when the command was IGNORED because the node sleeps.
+    bool LORAListener::ctl_submit_(const deliverypolicy::ControlCmd &c)
     {
+      if (this->refuse_while_asleep_(c))
+        return false;
       this->mbs_yield_to_op_();
       if (deliverypolicy::admitControl(this->ctl_busy_(), this->ctl().kind == TrackedOpKind::COVER,
                                        c.is_cover) == deliverypolicy::ControlAdmit::Queue)
       {
         this->ctl_enqueue_(c);
-        return;
+        return true;
       }
       this->ctl_begin_(c, false);
+      return true;
     }
 
     void LORAListener::ctl_begin_(const deliverypolicy::ControlCmd &c, bool hold)
@@ -4268,6 +4356,7 @@ namespace esphome
       // goes out when the node is back (confirm_session_).
       this->ctl_hold_for_wake_ = true;
       this->stamp_sleep_epoch_();
+      this->refresh_sleep_status_();
       this->login_acked_         = false;
       this->login_retry_count_   = 0;
       this->pending_login_nonce_ = 0;   // sleep ends the session; mint fresh on wake
@@ -4357,6 +4446,7 @@ namespace esphome
     {
       this->ctl().awaiting_ack   = false;
       this->ctl().sleep_unconfirmed = true;
+      this->refresh_sleep_status_();
       this->set_command_failed_(true);
       ESP_LOGE(TAG, "[%s] SLEEP command UNCONFIRMED after %u retries — the node may have "
                     "slept (ack lost) or never heard it. Session KEPT, sleep NOT recorded; "
@@ -4866,6 +4956,12 @@ namespace esphome
     {
       if (this->auto_mode_ == on)
         return;
+      // Asked BEFORE the flip: the flip itself would make an interactive node read
+      // as "auto" (never gated). A sleeping node is not told now; the schedule push
+      // at its wake carries the mode.
+      const bool ignored = this->session_confirmed_ &&
+          this->refuse_while_asleep_({false, 0, 0, 0.0f, on ? CLIENT_OPERATION__CMD_MODE_AUTO
+                                                            : CLIENT_OPERATION__CMD_MODE_INTERACTIVE});
       this->auto_mode_   = on;
       this->sched_dirty_ = true;
       // Persist the intent. Without this a hub reboot reverted the mode to the
@@ -4881,7 +4977,7 @@ namespace esphome
                this->get_name().c_str(), on ? "AUTO" : "INTERACTIVE");
       // An awake node can be switched immediately; a sleeping one picks it up
       // from the schedule push when it next beacons.
-      if (this->session_confirmed_)
+      if (this->session_confirmed_ && !ignored)
         this->send_tracked_sysop_(on ? CLIENT_OPERATION__CMD_MODE_AUTO
                                      : CLIENT_OPERATION__CMD_MODE_INTERACTIVE);
     }

@@ -19,6 +19,7 @@
 #include "esphome/components/lora_client/SingleShotAckWait.h"
 #include "esphome/components/lora_client/DeliveryPolicy.h"
 #include "esphome/components/lora_client/ModeBSupervisor.h"
+#include "esphome/components/lora_client/SleepModel.h"
 #include "esphome/components/lora_client/PendingShadow.h"
 
 #include "esphome/core/automation.h"
@@ -66,6 +67,8 @@ namespace esphome
   // binary sensor without forcing the binary_sensor component on every user of
   // this header (the full include lives in lora_client.cpp).
   namespace binary_sensor { class BinarySensor; }
+  // Same reason: the optional "Sleep Status" text sensor.
+  namespace text_sensor { class TextSensor; }
   // P4b: forward-declared for the same reason — this header is included by
   // every loracover platform, so pulling in switch.h would be gratuitous.
   namespace switch_ { class Switch; }
@@ -1247,11 +1250,19 @@ namespace esphome
       // marked failed and surfaced to Home Assistant via the optional binary
       // sensor.  covop_case / operation use the generated LoraCoverOperation /
       // CovOperation enum values; position is used only for the POSITION case.
-      void send_cover_operation(uint32_t covop_case, int32_t operation, float position);
+      //
+      // Returns false when the request was IGNORED because the hub models the node
+      // as asleep (node_asleep_()): nothing was sent or queued, no failure raised.
+      // The caller (the HA cover) must then not claim the move happened.
+      bool send_cover_operation(uint32_t covop_case, int32_t operation, float position);
       void set_command_failed_binary_sensor(binary_sensor::BinarySensor *bs) { this->command_failed_bsensor_ = bs; }
       // P4b: HA control/visibility of automatic mode.
       void set_auto_mode_switch(switch_::Switch *sw) { this->auto_mode_switch_ = sw; }
       void set_schedule_pending_binary_sensor(binary_sensor::BinarySensor *bs) { this->schedule_pending_bsensor_ = bs; }
+      // Diagnostics of the hub's sleep model (SleepModel.h): "Asleep" is ON from
+      // the SLEEP ack until the node is awake again; "Sleep Status" says why.
+      void set_asleep_binary_sensor(binary_sensor::BinarySensor *bs) { this->asleep_bsensor_ = bs; }
+      void set_sleep_status_text_sensor(text_sensor::TextSensor *ts) { this->sleep_status_tsensor_ = ts; }
 
       // std::string address_str() const;
       uint64_t address_uint64() const { return this->address_uint64_; };
@@ -1596,6 +1607,16 @@ namespace esphome
 
 
       bool     is_node_awake_() const;
+      // The hub's sleep model (SleepModel.h): asleep / awake / unconfirmed / auto.
+      sleepmodel::State sleep_state_() const;
+      bool     node_asleep_() const { return this->sleep_state_() == sleepmodel::State::Asleep; }
+      // Publish the "Asleep" / "Sleep Status" sensors if they changed and arm the
+      // refresh that ends "asleep" at the modelled wake.
+      void     refresh_sleep_status_();
+      void     start_sleep_status_();
+      void     publish_sleep_status_(sleepmodel::State s);
+      // True (and logs one line) when a request must be ignored: the node sleeps.
+      bool     refuse_while_asleep_(const deliverypolicy::ControlCmd &c);
       // Inputs of pending_shadow_inputs(), split out to keep it flat.
       bool     push_awaiting_ack_();
       bool     frames_queued_(int64_t now_us) const;
@@ -1692,6 +1713,11 @@ namespace esphome
       binary_sensor::BinarySensor *command_failed_bsensor_{nullptr};
       switch_::Switch             *auto_mode_switch_{nullptr};
       binary_sensor::BinarySensor *schedule_pending_bsensor_{nullptr};
+      binary_sensor::BinarySensor *asleep_bsensor_{nullptr};
+      text_sensor::TextSensor     *sleep_status_tsensor_{nullptr};
+      // What was last PUBLISHED (publish on change only). -1 / empty: nothing yet.
+      int8_t                       sleep_pub_asleep_{-1};
+      std::string                  sleep_pub_text_;
 
       // 3000 ms (not 2000): a burst is ~1.5 s and the tracker holds a post-burst
       // RX window after it, so the cycle is ~1.9 s.  2000 ms re-burst almost
@@ -1731,7 +1757,7 @@ namespace esphome
       void     on_ctl_abandoned_();
       // A Control request from outside: starts now, replaces a cover op, or waits
       // its turn (DeliveryPolicy.h, ControlQueue).
-      void     ctl_submit_(const deliverypolicy::ControlCmd &c);
+      bool     ctl_submit_(const deliverypolicy::ControlCmd &c);
       // Make `c` the slot's command and send it, or leave it deferred for
       // confirm_session_() (`hold`: the node is asleep, not merely re-logging in).
       void     ctl_begin_(const deliverypolicy::ControlCmd &c, bool hold);

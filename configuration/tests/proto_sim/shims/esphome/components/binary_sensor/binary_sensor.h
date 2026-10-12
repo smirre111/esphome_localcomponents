@@ -13,10 +13,12 @@ class BinarySensor : public EntityBase {
   void publish_state(bool state) {
     this->state = state;
     this->has_state_ = true;
+    this->publishes++;
   }
   bool has_state() const { return this->has_state_; }
 
   bool state{false};
+  int publishes{0};
 
  protected:
   bool has_state_{false};
