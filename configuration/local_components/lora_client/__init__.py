@@ -30,7 +30,7 @@ from esphome.core.entity_helpers import entity_duplicate_validator, setup_entity
 
 # AUTO_LOAD = ["esp32_ble"]
 CODEOWNERS = ["@buxtronix"]
-AUTO_LOAD = ["lora_tracker", "blindsproto"]
+AUTO_LOAD = ["lora_tracker", "blindsproto", "binary_sensor", "text_sensor"]
 DEPENDENCIES = ["lora_tracker", "time"]
 MULTI_CONF = True
 

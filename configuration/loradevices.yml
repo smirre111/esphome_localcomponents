@@ -1562,6 +1562,37 @@ binary_sensor:
     name: "RollladenWohnzimmer2 Schedule Pending"
     id: rol_2_schedule_pending
 
+  # The hub's picture of the node's sleep: ON from the SLEEP ack until the node
+  # is awake again (heard, or the modelled wake minus the boot margin). A cover
+  # op or sysop issued while it is ON is IGNORED (logged, nothing sent). Not a
+  # problem state, hence no device class.
+  - platform: loracover
+    lora_client_id: rol_1
+    type: asleep
+    device_class: ""
+    icon: "mdi:sleep"
+    name: "RollladenWohnzimmer1 Asleep"
+    id: rol_1_asleep
+  - platform: loracover
+    lora_client_id: rol_2
+    type: asleep
+    device_class: ""
+    icon: "mdi:sleep"
+    name: "RollladenWohnzimmer2 Asleep"
+    id: rol_2_asleep
+
+# Companion of the Asleep sensors: "awake", "asleep until 05:00",
+# "sleep unconfirmed" (or "auto mode").
+text_sensor:
+  - platform: loracover
+    lora_client_id: rol_1
+    name: "RollladenWohnzimmer1 Sleep Status"
+    id: rol_1_sleep_status
+  - platform: loracover
+    lora_client_id: rol_2
+    name: "RollladenWohnzimmer2 Sleep Status"
+    id: rol_2_sleep_status
+
 # ---- Schedule editing from Home Assistant (node 2 first) --------------------
 #
 # Four slots. The `schedule:` list above each client is now a FIRST-BOOT SEED:
