@@ -9316,9 +9316,10 @@ TEST(ControlQueue, ARetriedSleepsSecondAckChangesNothing) {
     EXPECT_FALSE(h.rol.awaitingAck());
 }
 
-// A node's position report confirms delivery of a COVER op. It is not the answer to
-// a sysop: with a sleep in flight it must not be taken for the sleep's ack.
-TEST(ControlQueue, APositionReportOnlyConfirmsACoverOp) {
+// A node's position report is not the answer to a sysop: with a sleep in flight it
+// must not be taken for the sleep's ack. Since review F3 (2026-10-16) it is not the
+// answer to a cover op either (PositionIsNotAnAck.* below has the full case).
+TEST(ControlQueue, APositionReportConfirmsNeitherASysopNorACoverOp) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
@@ -9334,13 +9335,15 @@ TEST(ControlQueue, APositionReportOnlyConfirmsACoverOp) {
     ackSleep(h);
     EXPECT_NE(h.rol.last_sleep_epoch_, 0u);
 
-    // A cover op IS confirmed by the position it produces.
+    // Nor is a cover op confirmed by a position: only its CommandAck does that.
     RealHubHarness g{18, kMacRol2};
     g.rol.registered_ = true;
     sendOpen(g);
     ASSERT_TRUE(g.rol.awaitingAck());
     QP(g).dispatch_payload_(&pos);
-    EXPECT_FALSE(g.rol.awaitingAck()) << "position confirms delivery of a cover op";
+    EXPECT_TRUE(g.rol.awaitingAck()) << "a position is telemetry, not the cover op's ack";
+    ackInFlight(g);
+    EXPECT_FALSE(g.rol.awaitingAck()) << "the ack is";
 }
 
 // A second sleep request while one is waiting in line is the same sleep.
@@ -11519,4 +11522,85 @@ TEST(SleepStatus, TheSafetyNetShowsARestoredSleepOnceTheClockIsValid) {
     h.clock.tick(61'000);
     EXPECT_TRUE(h.asleep.state);
     EXPECT_EQ(h.status.state, "asleep until 03:53");
+}
+
+// =============================================================================
+// F3 (docs/mac-review-2026-10-16.md): a POSITION report is telemetry, never
+// delivery evidence. The node publishes POSITION at the end of EVERY motor move,
+// including button- and schedule-driven ones, and CoverPosition carries no echo
+// of the command it would be answering. Until 2026-10-16 any POSITION that
+// arrived while a cover op was awaiting its ack completed that op, so a command
+// lost on the air while a schedule move happened to finish showed as delivered.
+// The CommandAck (plus the node's AckCache re-ack of a duplicate) is the only
+// confirmation; the position still reaches the cover entity unchanged.
+// =============================================================================
+namespace {
+std::vector<uint8_t> plaintextPositionFrom(uint8_t sender, uint32_t msgid, float pos) {
+    proto_sim::LoraClientResponseMessage m;
+    m.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    m.header.destSubnet    = 2;
+    m.header.senderAddress = sender;
+    m.header.msgId         = msgid;
+    m.proto                = proto_sim::LoraClientResponseMessage::Proto::Position;
+    m.position.position    = pos;
+    return proto_sim::serialize_resp(m);
+}
+// Every copy of the cover op `id` that has gone on the air (a retry re-sends the
+// same packed frame, so it repeats the msgid).
+int coverFramesWithId(proto_sim::SimRadio &radio, uint32_t id) {
+    int n = 0;
+    const auto frames = radio.hub_to_node_frames();
+    for (const auto &f : frames) {
+        auto m = proto_sim::as_op(f);
+        n += (m && m->cmd == OpCmd::Operation && m->header.msgId == id);
+    }
+    return n;
+}
+}  // namespace
+
+TEST(PositionIsNotAnAck, ASpontaneousPositionLeavesAnUnackedCoverOpPendingAndRetrying) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    h.rol.registered_ = true;
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    const uint32_t id = DP(h).ctl().last_msgid;
+    ASSERT_NE(id, 0u);
+    ASSERT_EQ(coverFramesWithId(h.radio, id), 1);
+
+    // A schedule/button move on the node ends and reports where it stopped, over
+    // the real receive path (no session yet: the plaintext bootstrap path).
+    auto pos = plaintextPositionFrom(18, 5, 0.42f);
+    h.rol.set_response(pos.data(), pos.size());
+
+    EXPECT_FLOAT_EQ(cover.position, 0.42f) << "the position itself still reaches the cover entity";
+    EXPECT_TRUE(h.rol.awaitingAck()) << "a position report is not the command's ack";
+    EXPECT_FALSE(h.rol.commandFailed());
+
+    h.clock.tick(3050);                                  // the first ack wait expires
+    EXPECT_EQ(coverFramesWithId(h.radio, id), 2) << "the command is retransmitted";
+    EXPECT_TRUE(h.rol.awaitingAck());
+
+    deliverAck(h.rol, id);                               // the real ack completes it
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_FALSE(h.rol.commandFailed());
+}
+
+// The same rule at the dispatch seam both receive paths share (plaintext and
+// decrypted uplinks reach dispatch_payload_ alike).
+TEST(PositionIsNotAnAck, APositionAtTheDispatchSeamDoesNotCompleteACoverOp) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    ASSERT_TRUE(h.rol.awaitingAck());
+    ASSERT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    ::LoraClientResponseMessage pos = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    pos.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION;
+
+    QP(h).dispatch_payload_(&pos);
+
+    EXPECT_TRUE(h.rol.awaitingAck());
 }

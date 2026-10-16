@@ -2087,6 +2087,21 @@ namespace esphome
     // refuses would leave a whole provisioned fleet unreachable until it was
     // re-flashed.
     //
+    // PRE-AUTHENTICATION, ACCEPTED (review F7, 2026-10-16,
+    // docs/mac-review-2026-10-16.md): this runs BEFORE any CMAC check — there is
+    // no key to check one with, which is the point. So ANY frame that merely
+    // looks like an encrypted uplink (PROTO_ENCRYPTED, a sender address that
+    // passed admit_frame_'s plaintext address filter) from a registered node the
+    // hub holds no session for makes the hub start a LOGIN. An attacker in
+    // radio range can therefore trigger LOGIN exchanges for such a node, e.g.
+    // right after a hub reboot. The cost is one LOGIN exchange (airtime and node
+    // battery), bounded by the onboarding gate (acquire_onboarding_) and the
+    // login retry ladder. It cannot install keys or confirm a session (the LOGIN
+    // is MIC-authenticated and only the real node can answer it); what
+    // send_login() does reset — this node's key ids and frame counters on the
+    // hub — belongs to a session the hub does not hold anyway. Kept deliberately: refusing would leave a whole fleet unreachable after
+    // a hub reboot (see above). Do not "harden" this by checking a tag first.
+    //
     // False = the frame is discarded (a login was started).
     bool LORAListener::uplink_check_base_nonce_(const EncUplink &up)
     {
@@ -2332,8 +2347,9 @@ namespace esphome
     // ACK / POSITION / BEACON, for both the encrypted and the plaintext path.
     //
     // These were two separate ladders. They were compared line by line before
-    // merging — identical, including the `awaiting_ack` guard that lets a
-    // position report count as delivery confirmation. If the plaintext path
+    // merging — identical. (The `awaiting_ack` guard that let a position report
+    // count as delivery confirmation was removed on both paths at once, review
+    // F3, 2026-10-16: see dispatch_payload_.) If the plaintext path
     // should ever accept LESS than the encrypted one (a defensible security
     // position), split them again deliberately rather than by drift.
     // -----------------------------------------------------------------------
@@ -2636,9 +2652,17 @@ namespace esphome
         this->notePhaseReport_(msg->ack->phase);
         this->handle_command_ack_(msg->ack->ack_msg_id);
       }
-      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION &&
-               this->ctl().awaiting_ack && this->ctl().kind == TrackedOpKind::COVER)
-        this->handle_command_ack_(this->ctl().last_msgid); // position confirms delivery
+      // A POSITION is telemetry, NOT delivery evidence (review F3, 2026-10-16,
+      // docs/mac-review-2026-10-16.md). Until then any POSITION arriving while a
+      // cover op awaited its ack completed that op. But the node publishes
+      // POSITION at the end of EVERY motor move, button- and schedule-driven ones
+      // included, and CoverPosition carries no echo of the command it would be
+      // answering — so a command lost on the air while a schedule move happened
+      // to end showed as delivered in Home Assistant and was never retried. The
+      // rule dates from the first ack work (a657b03), before the node acked every
+      // cover op; today it does (CommandAck, plus an AckCache re-ack of a
+      // duplicate). The position itself still reaches the cover entity through
+      // the children forward in the callers.
       else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && msg->beacon)
         this->handle_beacon_(msg->beacon);
       else

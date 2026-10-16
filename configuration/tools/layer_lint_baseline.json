@@ -7,7 +7,7 @@
   "client.psa_calls": 52,
   "client.raw_bytes_to_children": 3,
   "client.raw_parent_send": 14,
-  "client.telemetry_completes_delivery": 1,
+  "client.telemetry_completes_delivery": 0,
   "tracker.app_cmd_cases": 4,
   "tracker.client_iteration": 8,
   "tracker.psa_calls": 9,
