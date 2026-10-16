@@ -422,6 +422,16 @@ target_compile_definitions(golden_frames_test PRIVATE
     PROTO_SIM_GOLDEN_DIR="${PROTO_SIM_GOLDEN_DIR}")
 gtest_discover_tests(golden_frames_test)
 
+# Ratcheting layering lint (tools/layer_lint.py): counts of MAC/APP boundary
+# crossings may only fall, and a fall must lower tools/layer_lint_baseline.json
+# in the same commit.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME layer_lint_hub
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/layer_lint.py)
+endif()
+
 add_executable(golden_tracker_frames_test scenarios/golden_tracker_frames_test.cpp)
 target_link_libraries(golden_tracker_frames_test
     PRIVATE real_lora_tracker GTest::gtest GTest::gtest_main)

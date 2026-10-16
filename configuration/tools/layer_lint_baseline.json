@@ -1,0 +1,15 @@
+{
+  "children.sender_filter": 2,
+  "children.wire_unpack": 2,
+  "client.app_picks_encryption": 7,
+  "client.msgid_alloc_sites": 9,
+  "client.pack_sites": 8,
+  "client.psa_calls": 52,
+  "client.raw_bytes_to_children": 3,
+  "client.raw_parent_send": 14,
+  "client.telemetry_completes_delivery": 1,
+  "tracker.app_cmd_cases": 4,
+  "tracker.client_iteration": 8,
+  "tracker.psa_calls": 9,
+  "tracker.seal_upcalls": 1
+}
