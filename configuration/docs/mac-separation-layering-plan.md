@@ -32,28 +32,33 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
 - [x] `docs/mac-layer.md` §1 table, MAC-2 line, §2 crypto bullet, §3 msgId roles
       (7+), new §10 target architecture; this plan; the review saved as
       `docs/mac-review-2026-10-16.md`.
-- [~] Node side (sibling work in the node repo): node golden frames, node
-      `tools/layer_lint.py`.
-- [ ] `MacSap.h` (types only), shared header: belongs in the NODE repo first
-      (source of vendored headers), then vendored + drift-gated into the hub.
+- [x] Node side: node golden uplink frames (real CmdDispatcher, 8 cases / 19
+      frames), node `tools/layer_lint.py`, `MacSap.h`. Node `ec35a59`.
+- [x] `MacSap.h` (types only) + the `Mac1Freshness.h` it aliases, vendored
+      byte-identical into the hub and drift-gated (`macsap_drift_hub_vs_node`,
+      `mac1freshness_drift_hub_vs_node`). Hub `8dc0e8c`.
 
 ## S1 Findings (small, deliberate behaviour changes, each listed)
 
-- [ ] **F3 (hub)** a POSITION report no longer completes the in-flight cover op;
+- [x] **F3 (hub)** a POSITION report no longer completes the in-flight cover op;
       only the CommandAck (and the node's AckCache re-ack) does. The position
       still reaches the cover entity. See the commit for the history of the
       rule (introduced with the first login/ack work, `a657b03`, before the
-      node acked every cover op).
-- [ ] **F7 (hub)** documented (no behaviour change): an unauthenticated
+      node acked every cover op). Hub `964d686`.
+- [x] **F7 (hub)** documented (no behaviour change): an unauthenticated
       encrypted-looking uplink from a registered node without a session makes the
       hub start a LOGIN, before any CMAC check; accepted, bounded by the
-      onboarding gate.
+      onboarding gate. Hub `964d686`.
 - [-] **F4 (hub)** K_enc/K_mac generation pairing per frame, not per
       destination: moved to **S4**, where the `CopySealer` closure travels with
       the frame in `TxPolicy` (a correct fix needs the per-frame generation in
       the queued frame; a half fix in S1 would add a second mechanism S4 deletes).
 - [ ] **F1 (node)** retarget `destAddress` only after an encrypted/verified frame
-      or a verified LOGIN; fail-closed uplink when a session exists.
+      or a verified LOGIN; fail-closed uplink when a session exists. NOTE: the
+      hub-repo test `RealNodeFixture.AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsArmed`
+      (`tests/proto_sim/scenarios/real_cmd_dispatcher_test.cpp`) uses "a
+      plaintext ping retargets destAddress" as its witness and must move to
+      another witness (e.g. `ping_rx`) in the same change.
 - [ ] **F2 (node)** forged unicast LOGIN must not move mark-hit / missed-mark
       diagnostics (same root cause as F1).
 - [ ] **F5 (node)** `noteSessionProven()` only after `admitFrame` succeeds.
