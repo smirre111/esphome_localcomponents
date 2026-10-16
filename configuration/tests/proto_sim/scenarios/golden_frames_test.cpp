@@ -22,6 +22,9 @@
 #include "esphome/components/loracover/cover/lora_cover.h"
 
 #include "blinds.pb-c.h"
+// Not used yet: included so the hub's VENDORED MacSap.h (S0 types, node-owned,
+// drift-gated) is compiled in the hub's own include context.
+#include "MacSap.h"
 #include "sim/golden.h"
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
