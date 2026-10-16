@@ -156,6 +156,12 @@ public:
     std::vector<int> sent_copies;
     int last_copies{0};
 
+    // S0 golden frames (docs/mac-separation-layering-plan.md): the exact bytes
+    // and policy each producer handed to send(), BEFORE the shim's per-copy
+    // re-stamp/retag. The radio transcript holds what went on the air after it.
+    std::vector<std::vector<uint8_t>> sent_raw;
+    std::vector<TxPolicy>             sent_policy;
+
     // Emit `copies` AirFrames instead of one, so node-side duplicate handling
     // sees a real burst. OPT-IN: the default of one frame is what every
     // protocol test counts on, and silently multiplying their transcripts by

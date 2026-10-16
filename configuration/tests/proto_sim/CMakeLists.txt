@@ -409,6 +409,26 @@ target_link_libraries(real_lora_tracker_test
     PRIVATE real_lora_tracker GTest::gtest GTest::gtest_main)
 gtest_discover_tests(real_lora_tracker_test)
 
+# ----------------------------------------------------------------------------
+# S0 golden frames (docs/mac-separation-layering-plan.md): byte-exact wire
+# output of every hub producer, captured before the MAC separation refactor.
+# Re-record ONLY on a deliberate wire change: PROTO_SIM_GOLDEN_RECORD=1.
+# ----------------------------------------------------------------------------
+set(PROTO_SIM_GOLDEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/golden)
+add_executable(golden_frames_test scenarios/golden_frames_test.cpp)
+target_link_libraries(golden_frames_test
+    PRIVATE real_lora_client real_lora_cover GTest::gtest GTest::gtest_main)
+target_compile_definitions(golden_frames_test PRIVATE
+    PROTO_SIM_GOLDEN_DIR="${PROTO_SIM_GOLDEN_DIR}")
+gtest_discover_tests(golden_frames_test)
+
+add_executable(golden_tracker_frames_test scenarios/golden_tracker_frames_test.cpp)
+target_link_libraries(golden_tracker_frames_test
+    PRIVATE real_lora_tracker GTest::gtest GTest::gtest_main)
+target_compile_definitions(golden_tracker_frames_test PRIVATE
+    PROTO_SIM_GOLDEN_DIR="${PROTO_SIM_GOLDEN_DIR}")
+gtest_discover_tests(golden_tracker_frames_test)
+
 add_executable(real_lora_cover_test scenarios/real_lora_cover_test.cpp)
 target_link_libraries(real_lora_cover_test
     PRIVATE real_lora_cover GTest::gtest GTest::gtest_main)
