@@ -14,7 +14,12 @@ stops", which is a workaround for a missing layer. **With the boundary, the
 question dissolves: a MAC-layer test frame is consumed by the MAC and never
 reaches the application at all.**
 
-Everything here is analysis. No code has been changed.
+Everything here was analysis when written (2026-08/09). **Corrected 2026-10-16**
+against the code at hub `7a7d7de` / node `b6f2612` by the layering review
+`docs/mac-review-2026-10-16.md`: §1's file table, the MAC-2 line of the diagram
+(the crypto is Encrypt-then-CMAC, not AEAD, since the 2026-10-04 Tier-3 cutover)
+and §3's `msgId` roles. §10 points at the target architecture and the staged
+plan (`docs/mac-separation-layering-plan.md`) that now drives the separation.
 
 ---
 
@@ -32,7 +37,9 @@ above and below it.
      mac.on_payload(cb)          mac.transaction_complete()
      mac.request_wake(when)      mac.link_state()
   ┌──────────────────────────────────────────────────────────┐
-  │ MAC-2  security      AEAD, base nonce, session lifecycle  │  optional
+  │ MAC-2  security      Encrypt-then-CMAC (AES-CTR + AES-    │  optional
+  │                      CMAC/8B), K_auth/K_enc/K_mac KDF,    │
+  │                      base nonce, session lifecycle        │
   │ MAC-1  sequencing    frame counter, replay window, dedup  │  optional
   │ MAC-0  access        addressing, framing, RX windows,     │  ALWAYS
   │                      burst/slot scheduling, CAD, backoff, │
@@ -51,22 +58,33 @@ never once needs to know what a blind is.
 
 ### Today's code against that boundary
 
+Corrected 2026-10-16 (`docs/mac-review-2026-10-16.md` §1.1; the 2026-08 table
+missed `frtosTasks.cpp`, put all timing in `LoraInterface`, said "AEAD", and
+listed the tracker as PHY + MAC-0 only).
+
 | file | PHY | MAC-0 | MAC-1 | MAC-2 | APP |
 |---|---|---|---|---|---|
 | node `components/lora/lora.cpp` | ● | | | | |
-| node `LoraInterface.cpp` | ● | ● RX windows, `symTimeout`, CAD, backoff, TX queue | | | |
-| node `CmdDispatcher.cpp` | | ● address filter, burst deferral, drift | ● `msgid` replay | ● AEAD calls | ● cover, schedule, battery |
-| node `SessionManager.cpp` | | | ● replay window | ● session, base nonce | |
+| node `LoraInterface.cpp` | ● (radio wrapper) | ● RX windows, `symTimeout`, CAD, backoff, TX queue | | | (still includes `blinds.pb-c.h`; dead legacy `sendPacket`) |
+| node `frtosTasks.cpp` | ● DIO tasks, `lora_parsePacket`/sleep/IRQ clear | ● window end, mark missed, Class A hooks (half of MAC-0 RX) | | | |
+| node `CmdDispatcher.cpp` | ● reads RSSI | ● address filter, burst deferral, grid / phase / Class A / drift timing (most of the timing is here, not in `LoraInterface`), uplink target `destAddress` | ● replay check/commit, freshness | ● K_auth + KDF, AES-CTR + AES-CMAC (Encrypt-then-CMAC), LOGIN/REGISTER MIC, session lifecycle, **the session keys** | ● cover, schedule, battery, OTA, sysops |
+| node `SessionManager.cpp` | | | ● tx/rx counters, bitmap window, persistence | ● base/node/prior hub nonces (keys are NOT here) | |
 | node `MotorCtrl.cpp`, `Scheduler.cpp` | | | | | ● |
 | hub `lora.cpp` | ● | | | | |
-| hub `lora_tracker.cpp` | ● | ● burst TX, RX poll, response window | | | |
-| hub `lora_client.cpp` | | ● tracked ops, retransmit, wake model | ● `msgid` | ● AEAD, login | ● cover, schedule, telemetry |
-| hub `loracover/` | | | | | ● |
+| hub `lora_tracker.cpp` | ● | ● queue, placement, burst TX, RX poll, response window, beacon schedule | | ● **GridBeacon CMAC with the fleet key**; **per-copy retag up-call** (`sealBurstCopyTag`) | ● **unpacks/re-packs the APP protobuf for every copy**; builds GridBeacon as an APP oneof case |
+| hub `lora_client.cpp` | | ● placement, Class A, single-shot belief, Mode B supervisor, delivery/ARQ (`deliver_`) | ● `frame_counter_`, `commit_rx_msgid_` (strict ratchet) | ● 52 PSA calls, KDF, key maps, Encrypt-then-CMAC, LOGIN | ● cover ops, schedule, sleep model, telemetry, auto mode |
+| hub `loracover/` | | ● its own sender-address filter | | | ● (re-parses the raw wire bytes it is handed) |
 
-Two rows carry the whole problem. `CmdDispatcher.cpp` and `lora_client.cpp` each
-span **four layers**, which is `layering-proposal.md` §1's finding restated with
-the layers named: that is why changing when a move ends broke position
-reporting, and why a mode command vanished into an enum with no slot for it.
+Two rows carried the whole problem in 2026-08, and the review found more.
+`CmdDispatcher.cpp` and `lora_client.cpp` each span **all five layers** (the
+2026-08 text said four), which is `layering-proposal.md` §1's finding restated
+with the layers named: that is why changing when a move ends broke position
+reporting, and why a mode command vanished into an enum with no slot for it. The
+hub tracker is the third: its burst engine parses the application schema and
+calls up into MAC-2 for every copy it sends. The decisions themselves are well
+separated (pure headers: FrameCrypto, Mac1Freshness, FrameAdmission,
+MacSublayers, DeliveryPolicy, TimedGrid, ...); the control flow and the state
+are not.
 
 ---
 
@@ -81,7 +99,7 @@ reporting, and why a mode command vanished into an enum with no slot for it.
   │                         burstIndex, burstCount }          │
   │   oneof cmd: operation | sysop | clientconfig | ...       │
   │              | timesync | schedule | drifttest            │
-  │              | encrypted (AEAD blob)                      │
+  │              | encrypted (CTR ciphertext + 8 B CMAC tag)  │
   └───────────────────────────────────────────────────────────┘
 ```
 
@@ -98,11 +116,15 @@ reporting, and why a mode command vanished into an enum with no slot for it.
   be read without the full decoder.
 - **`burstIndex` / `burstCount` are pure MAC-0** — burst scheduling and reply
   deferral — sitting in the same message as `LoraCoverOperation`.
-- **`FrameCrypto.h` already reconstructs the fixed layout.** The AAD is
-  `destAddress_BE32 || destSubnet_BE32 || senderAddress_BE32 || msgid_BE32`, a
-  16-byte fixed-offset header built by hand at encrypt time. **The fixed MAC
-  header already exists; it is just not on the wire.** It lives only inside the
-  crypto, which is the one place it must not be the only copy.
+- **`FrameCrypto.h` already reconstructs the fixed layout.** Since the
+  2026-10-04 Encrypt-then-CMAC cutover it is the 45-byte CMAC prefix
+  (`buildEtmCmacPrefix`: direction, session id, addresses, msgid, the per-copy
+  timing fields burstIndex/burstCount/onMark/fireStamped/fireRound/fireOffsetUs
+  and ctLen), built by hand from DECODED fields at seal time (the 16-byte GCM
+  AAD it replaced was the same idea). **The fixed MAC header already exists; it
+  is just not on the wire.** It lives only inside the crypto, which is the one
+  place it must not be the only copy, and computing it over decoded fields is
+  what created the canonical-length problem (`FrameCanon.h`).
 
 ### The clean form, and the honest cost
 
@@ -130,22 +152,33 @@ change and a fleet migration.
 
 ---
 
-## 3. `msgId` does three jobs, and that is a bug generator
+## 3. `msgId` does (at least) seven jobs, and that is a bug generator
 
-One `uint32` is currently:
+The 2026-08 text counted three roles. The 2026-10-16 review
+(`docs/mac-review-2026-10-16.md` §3.2) counts seven, plus an eighth trigger, in
+four layers. One `uint32` is currently:
 
-| role | layer | required behaviour on retransmission |
-|---|---|---|
-| AEAD nonce input (`frameCounter(msgid, downlink)`) | MAC-2 | **must not repeat with different plaintext** — GCM nonce reuse |
-| replay-window key (`acceptRxId`: `msgid > rx_id_`) | MAC-1 | **must repeat** — a fresh id means the node executes the command twice |
-| application command identity | APP | **must repeat** — the ack must be attributable to the same command |
+| # | role | layer | required behaviour on retransmission | evidence (2026-10-16) |
+|---|---|---|---|---|
+| 1 | AES-CTR counter-block input (31 bits) | MAC-2 | **must not repeat with different plaintext** — CTR keystream reuse | `FrameCrypto.h` counter block; hub `s_pack_operation_message`; node decrypt |
+| 2 | field of the CMAC prefix (32 bits) | MAC-2 | repeats with the frame (the tag is recomputed per copy) | `buildEtmCmacPrefix` |
+| 3 | replay-window key | MAC-1 | **must repeat** — a fresh id means the node executes the command twice | node `SessionManager::wouldAcceptRxId/acceptRxId`; hub `commit_rx_msgid_` (strict ratchet within 1024) |
+| 4 | ARQ correlation (`CommandAck.ack_msg_id`, node AckCache re-ack, hub `dlv_ack_`) | MAC-0 | **must repeat** — the ack names the frame it answers | hub `handle_command_ack_`; node `sendCommandAck`, AckCache |
+| 5 | application command identity (pack-once frame, at-most-once OTA) | APP | **must repeat** — the ack must be attributable to the same command | hub Control channel (`tx_tracked_op_`, OTA guard) |
+| 6 | burst-copy identity (`CurrentBurstCopy`), phase "same frame" grouping | MAC-0 | must repeat across the copies of one burst | `Mac1Freshness.h`; node phase-sample grouping |
+| 7 | wake-clock pairing of a beacon's TxDone | MAC-0 timing | — (uplink only) | node `serviceTxCommand` wake-beacon stamp |
+| (8) | session-exhaustion trigger at 2^31 | MAC-2 | — | `framecrypto::msgidFitsCtr`; hub `msgid_relogin_pending_` |
 
 The MAC-1 and MAC-2 requirements are directly contradictory the moment the
 content changes mid-retry, and `implementation-plan.md` §4.7 documents the exact
-path: `tx_tracked_op_` re-reads `op_position_` at pack time, so a user moving the
-blind during a retry encrypts different plaintext under the same nonce. The
-plan's remedies — retransmit byte-identical frames, add a cached ack — are both
-**patches for the overload**, and both are correct given it.
+path: `tx_tracked_op_` re-read `op_position_` at pack time, so a user moving the
+blind during a retry encrypted different plaintext under the same counter. The
+remedies that shipped — pack once and retransmit byte-identical frames (the
+unified delivery refactor, 2026-10-12), the node's cached ack (AckCache), the
+key-generation checks on retag — are **patches for the overload**, and all are
+correct given it. They are also why the review says: **do not split `msgId`
+piecemeal before the explicit wire stage (S8)**; changing one role at a time
+re-opens nonce reuse.
 
 Under the split they are separate fields with separate rules:
 
@@ -355,3 +388,34 @@ with a fleet migration behind it.
 - `implementation-plan.md` — the three modes, all MAC-0; §2.1 T0, §4.3
   turnaround, §12 open measurements.
 - `architecture-review.md`, `hub-refactor-analysis.md` — prior structural work.
+- `mac-review-2026-10-16.md` — the layering review that corrected §1 and §3.
+- `mac-separation-layering-plan.md` — the staged plan (S0-S8) and its status.
+
+---
+
+## 10. Target architecture (2026-10-16)
+
+The review (`mac-review-2026-10-16.md` §5) sets the target; the staged plan
+(`mac-separation-layering-plan.md`) is how the code gets there. In short:
+
+- **Service primitives between adjacent layers**, request down / confirm and
+  indication up, sketched as a shared dependency-free `MacSap.h` (vendored and
+  drift-gated like `FrameCrypto.h`): `IMac0::dataRequest` with a per-frame
+  `CopySealer` (MAC-0 retags copies without knowing keys), `Sequencer`
+  (`allocate` / read-only `check` / `commit`) for MAC-1, `LinkSecurity` for
+  MAC-2, and a MAC **management entity** (MLME-style) that owns grid, mode and
+  session commands and configures the lower layers only by down-calls.
+- **MAC-1 and MAC-2 are not stacked naively in numbered order**: the CTR nonce is
+  the MAC-1 counter (MAC-2 needs it before sealing), and the replay window may
+  be committed only after MAC-2 authenticates. MAC-2 drives MAC-1's two-phase
+  check/commit; MAC-0 timing commits wait for MAC-1's freshness class via an
+  `RxTicket`.
+- **A port** (LoRaWAN FPort-like) demultiplexes payloads: 0 = MAC-0 management,
+  1 = MAC-2 session, >=2 = application. Until the wire stage it is computed from
+  the oneof case by one table.
+- **One owner per piece of state**; no virtual dispatch, logging or heap in the
+  retag/verify hot paths; no NVS layout/version change before S8.
+- **The wire changes once, at S8**: a fixed header (version byte != 0x0A so the
+  hub can be dual-stack during the node-1 OTA), FCnt/cmdId split, a MAC ACK bit,
+  CMAC over raw header bytes, `FrameCanon` deleted. S0-S7 change no wire byte,
+  which the golden frames (`tests/proto_sim/golden/`) enforce.
