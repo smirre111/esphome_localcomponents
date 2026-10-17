@@ -662,6 +662,9 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # alongside so the harness compiles the REAL class, not a shim.
     configure_file(${BLINDS_ESP_MAIN}/SessionManager.cpp ${NODE_STAGE}/SessionManager.cpp COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/include/SessionManager.h ${NODE_STAGE}/SessionManager.h COPYONLY)
+    # S3 (node 449b673): SessionManager.h includes the MAC-1 Sequencer.h, quoted --
+    # so it must sit next to it in the stage.
+    configure_file(${BLINDS_ESP_MAIN}/include/Sequencer.h ${NODE_STAGE}/Sequencer.h COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/comm_utils.c      ${NODE_STAGE}/comm_utils.c      COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/include/comm_utils.h ${NODE_STAGE}/comm_utils.h   COPYONLY)
     configure_file(${BLINDS_ESP_MAIN}/include/CmdDispatcher.h ${NODE_STAGE}/CmdDispatcher.h COPYONLY)
