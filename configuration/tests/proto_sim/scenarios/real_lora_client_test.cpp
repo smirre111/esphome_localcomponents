@@ -12,6 +12,8 @@
 #include "esphome/components/lora_tracker/lora_tracker.h"
 #include "esphome/components/homeassistant/time/homeassistant_time.h"
 #include "esphome/components/loracover/cover/lora_cover.h"
+#include "esphome/components/loracover/sensor/lora_sensor.h"
+#include "esphome/components/sensor/sensor.h"
 
 // The MAC tests build frames with the REAL generated stubs, so the bytes
 // are exactly what goes on the air.
@@ -12054,4 +12056,118 @@ TEST(Mac0TimingS5, TheCommittedOriginIsThisFramesStampAndUncertainty) {
     h.rol.set_response(b.data(), b.size());
     EXPECT_EQ(h.rol.last_uplink_t0_us_, 456'000);
     EXPECT_EQ(h.rol.last_uplink_unc_us_, 999u);
+}
+
+// =============================================================================
+// S6 characterization: what the application children (the cover entity and the
+// sensor platform) get from an uplink, pinned BEFORE they stop parsing raw wire
+// bytes. Positions and battery telemetry reach them from the node's OWN
+// admitted uplinks -- plaintext before a session, decrypted after one -- and
+// never from another node's frame or a refused one.
+// =============================================================================
+namespace {
+struct SensorRig {
+    esphome::loracov::LoraCover child;
+    esphome::sensor::Sensor battery, voltage, rssi, current;
+    explicit SensorRig(LORAClient &rol) {
+        child.set_battery(&battery);
+        child.set_voltage(&voltage);
+        child.set_rssi(&rssi);
+        child.set_motor_current(&current);
+        child.setup();
+        rol.register_lora_node(&child);
+    }
+};
+std::vector<uint8_t> plainFrom(uint8_t sender, uint32_t msgid,
+                               proto_sim::LoraClientResponseMessage m) {
+    m.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    m.header.destSubnet    = 2;
+    m.header.senderAddress = sender;
+    m.header.msgId         = msgid;
+    return proto_sim::serialize_resp(m);
+}
+proto_sim::LoraClientResponseMessage positionMsg(float pos, float v, float cur) {
+    proto_sim::LoraClientResponseMessage m;
+    m.proto = proto_sim::LoraClientResponseMessage::Proto::Position;
+    m.position.position = pos;
+    m.position.voltage  = v;
+    m.position.current  = cur;
+    return m;
+}
+proto_sim::LoraClientResponseMessage stateMsg(float v) {
+    proto_sim::LoraClientResponseMessage m;
+    m.proto = proto_sim::LoraClientResponseMessage::Proto::State;
+    m.state.voltage = v;
+    return m;
+}
+}  // namespace
+
+TEST(AppChildrenS6, OwnPlaintextPositionAndStateReachTheCoverAndTheSensor) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.tracker.last_rssi = -71;
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    SensorRig s(h.rol);
+
+    auto pos = plainFrom(18, 1, positionMsg(0.25f, 11.4f, 321.0f));
+    h.rol.set_response(pos.data(), pos.size());
+    EXPECT_FLOAT_EQ(cover.position, 0.25f);
+    EXPECT_FLOAT_EQ(s.voltage.state, 11.4f);
+    EXPECT_FLOAT_EQ(s.current.state, 321.0f);
+    EXPECT_FLOAT_EQ(s.rssi.state, -71.0f);
+    EXPECT_EQ(s.battery.publishes, 1);
+
+    auto st = plainFrom(18, 2, stateMsg(12.0f));
+    h.rol.set_response(st.data(), st.size());
+    EXPECT_FLOAT_EQ(s.voltage.state, 12.0f);
+    EXPECT_EQ(s.battery.publishes, 2);
+    EXPECT_FLOAT_EQ(cover.position, 0.25f) << "a STATE does not move the cover";
+}
+
+TEST(AppChildrenS6, AnotherNodesOrARefusedFrameReachesNoChild) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    SensorRig s(h.rol);
+    auto ok = plainFrom(18, 5, positionMsg(0.5f, 11.0f, 1.0f));
+    h.rol.set_response(ok.data(), ok.size());
+    ASSERT_FLOAT_EQ(cover.position, 0.5f);
+    const int pubs = s.voltage.publishes;
+
+    auto other = plainFrom(17, 6, positionMsg(0.9f, 12.5f, 2.0f));   // cross-talk
+    h.rol.set_response(other.data(), other.size());
+    auto stale = plainFrom(18, 5, positionMsg(0.1f, 12.5f, 2.0f));   // replayed id
+    h.rol.set_response(stale.data(), stale.size());
+    EXPECT_FLOAT_EQ(cover.position, 0.5f);
+    EXPECT_EQ(s.voltage.publishes, pubs);
+}
+
+TEST(AppChildrenS6, AnUnregisteredListenerForwardsNothingToTheChildren) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ASSERT_FALSE(h.rol.registered_);
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(h.rol, cover);
+    SensorRig s(h.rol);
+    const float start = cover.position;
+    auto pos = plainFrom(18, 1, positionMsg(0.7f, 11.0f, 1.0f));
+    h.rol.set_response(pos.data(), pos.size());
+    EXPECT_FLOAT_EQ(cover.position, start) << "nothing reaches a child before REGISTER";
+    EXPECT_EQ(s.voltage.publishes, 0);
+}
+
+TEST(AppChildrenS6, AnAuthenticPositionReachesTheChildrenOnceDecrypted) {
+    MsgidGuardFixture f;
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(f.rol, cover);
+    SensorRig s(f.rol);
+    const uint32_t rx = f.rol.seq_.rxId();
+    send_encrypted_uplink(f.rol, f.base, rx + 1, 18, 2, positionMsg(0.33f, 11.7f, 9.0f));
+    EXPECT_FLOAT_EQ(cover.position, 0.33f);
+    EXPECT_FLOAT_EQ(s.voltage.state, 11.7f);
+    EXPECT_FLOAT_EQ(s.current.state, 9.0f);
 }

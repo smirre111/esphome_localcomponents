@@ -20,6 +20,9 @@
 #include "esphome/components/lora_client/lora_client_node.h"
 #include "esphome/components/lora_client/FrameCrypto.h"
 #include "esphome/components/lora_client/MacSap.h"
+// Mirrors production: lora_tracker.h includes the generated stubs, and the
+// loracover children rely on that.
+#include "esphome/components/blindsproto/blinds.pb-c.h"
 
 namespace proto_sim { class SimRadio; }
 
@@ -150,6 +153,11 @@ public:
     // Mirrors production: the copy count a TxPolicy of 0 resolves to, so a
     // caller that must not be reduced to a single copy can ask for the burst.
     int defaultBurstCopies() const { return default_copies; }
+
+    // Mirrors production: the RSSI of the last packet (the sensor child
+    // publishes it). A test sets last_rssi.
+    int get_last_rssi() const { return last_rssi; }
+    int last_rssi{0};
 
     // Test hook: make the next `drop_next_sends` calls to send() report a drop,
     // the way production does when the buffer pool is exhausted or the handoff

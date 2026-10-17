@@ -93,6 +93,12 @@ public:
     template <typename T> ESPPreferenceObject make_entity_preference(uint32_t version = 0);
 };
 
+// S6: the loracover sensor child is a PollingComponent.
+class PollingComponent : public Component {
+public:
+    virtual void update() {}
+};
+
 } // namespace esphome
 
 #include "sim/sim_clock.h"
