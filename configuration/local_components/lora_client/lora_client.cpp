@@ -4,6 +4,8 @@
 #include "esphome/components/lora_client/FrameCrypto.h"
 // Is a frame's on-air length a trustworthy T0 input? See the banner in FrameCanon.h.
 #include "esphome/components/lora_client/FrameCanon.h"
+// MAC-2 (keys, KDF, Encrypt-then-CMAC, the session key store). See its banner.
+#include "esphome/components/lora_client/HubLinkSecurity.h"
 // The funnel rate arithmetic, so a ModeTest report is recomputed on the hub
 // rather than trusted from the node (test-plan.md I1).
 #include "esphome/components/lora_client/MacFunnel.h"
@@ -30,238 +32,41 @@
 #include "esphome/components/lora_client/TimedGrid.h"
 
 // ---------------------------------------------------------------------------
-// Crypto constants — kept identical to BlindsESP/main/CmdDispatcher.cpp
-// so both sides of the link derive the same key and use the same parameters.
+// MAC-2 lives in HubLinkSecurity.{h,cpp} since stage S2 (K_root/K_auth, the
+// session KDF, Encrypt-then-CMAC, and the SessionKeyStore that is the single
+// owner of every peer's session id, keys and generation). What stays here is
+// the protobuf framing around it: decode a LoraHeader into a mac::MacHdr, pack
+// the inner payload, wrap the ciphertext in the outer envelope.
 // ---------------------------------------------------------------------------
-// Tier-1 key sourcing: LORA_FLEET_KEY is a compile-time #define from
-// lora_tracker's `fleet_key` YAML option (normally !secret-resolved), so
-// this component's tracked source never contains the real deployed value —
-// only this named, obviously-a-placeholder dev fallback.
-#ifdef LORA_FLEET_KEY
-static constexpr const char    *kLoRaRootKeyPhrase = LORA_FLEET_KEY;
-#else
-static constexpr const char    *kLoRaRootKeyPhrase = "LoRaHome";
-#endif
-// K_root is 16 bytes (AES-128): SHA-256(phrase)[0:16].
-static constexpr size_t         kRootKeyBytes   = 16;
 
-// Tier 3 (docs/mac-separation-implementation-plan.md section 2(b)): K_auth,
-// derived once from K_root and used only to authenticate LOGIN/REGISTER.
-// Fleet-wide — there is one shared K_root, not per-node keys (see the plan's
-// Tier 2 postponement note).
-static psa_key_id_t s_k_auth_key_id = PSA_KEY_ID_NULL;
+static mac2::LinkSecurity &s_sec() { return mac2::LinkSecurity::hub(); }
+static mac2::SessionKeyStore &s_keys() { return mac2::LinkSecurity::hub().store(); }
 
-// File-scope encryption state, keyed by peer short address.
-// Only the base nonce (the session id feeding the CTR counter block) is
-// tracked per peer; the frame counter is the same value as the protobuf
-// LoraHeader.msgid — one unified counter per direction, used for both replay
-// protection and keystream derivation.
-// This map is shared across every LORAListener instance (lora_client is
-// MULTI_CONF), so a per-listener mutex cannot fully protect it; guard every
-// access with this one global mutex instead.
-static std::map<uint32_t, uint32_t> s_base_nonce_map;
-static std::mutex                   s_base_nonce_map_mutex;
-
-// Tier 3: per-peer K_enc/K_mac, mirroring s_base_nonce_map's shape — needed
-// because s_pack_operation_message() below is a free function (no `this`)
-// called from many sites that only know the destination address. The
-// authoritative copies live on the LORAListener itself
-// (k_enc_key_id_/k_mac_key_id_, written by deriveSessionKeys_()); these
-// maps are kept in sync with them at the same time, same reasoning as why
-// s_base_nonce_map exists alongside each listener's own session state.
-static std::map<uint32_t, psa_key_id_t> s_k_enc_map;
-static std::map<uint32_t, psa_key_id_t> s_k_mac_map;
-// Mirrors each listener's session_generation_, per dest — s_pack_operation_
-// message() (a free function) needs it and has no `this`. Updated at the
-// same time as s_k_enc_map/s_k_mac_map, under the same lock.
-static std::map<uint32_t, uint32_t>     s_session_generation_map;
-static std::mutex                       s_session_keys_mutex;
-
-// Invariant I3 (mac-separation-implementation-plan.md section 2(b)): a burst
-// copy's tag must be sealed under the SAME session the ciphertext was sealed
-// with, not whatever session happens to be current when the tracker's send
-// loop gets around to retagging it.
-//
-// Snapshotting the psa_key_id_t itself (the original version of this) is
-// UNSOUND: mbedTLS's volatile key ids are small reused slot indices, so a
-// later generation can be assigned the SAME id an earlier generation held —
-// a stale copy would then compare equal to "current" by coincidence.
-// session_generation_ is a plain monotonically-incrementing counter that is
-// NEVER reused, so it is the actual generation marker; s_seal_generation_map
-// mirrors it per dest for the same reason s_session_generation_map above
-// does. s_pack_operation_message() snapshots it at seal time;
-// sealBurstCopyTag() compares that snapshot against the listener's CURRENT
-// session_generation_ and refuses to retag a copy whose session has moved
-// on.
-//
-// This is dest-keyed, not per-frame: two frames for the SAME dest in flight
-// at once, straddling a re-login, could still mis-attribute — BUT the one
-// place a ciphertext is actually stored and re-sent later (frame, the
-// tracked-op retry buffer) is cleared on every fresh send_login() challenge
-// (see clearSessionKeys_()), which is the only way a "frame still in flight
-// across a re-login" can arise in this codebase: pack-once never re-seals
-// on retry, and nothing else holds a sealed buffer across a session change.
-// Fully closing the remaining in-the-air-right-now case (a copy literally
-// mid-burst in the tracker's queue the instant a re-login lands) means
-// threading the snapshot through rx_buffer_t the way TxPolicy already does
-// — not done here, and account for it as rare (a session change inside one
-// ~1.4s burst) rather than closed.
-static std::map<uint32_t, uint32_t>     s_seal_generation_map;
-
-// ---------------------------------------------------------------------------
-// Derive K_root, the 16-byte fleet key: SHA-256(kLoRaRootKeyPhrase)[0:16].
-// Mirrors derive_root_key() on the node (CmdDispatcher.cpp). It is the source
-// for K_auth (s_init_k_auth_key) and for K_enc/K_mac (session derivation);
-// changing a single byte of it breaks every frame on the air, so its output is
-// pinned by a test (HubRootKey in real_lora_client_test.cpp).
-// ---------------------------------------------------------------------------
-static bool s_derive_root_key(uint8_t key_out[kRootKeyBytes])
+// Decode the protobuf header into the MAC header MAC-2 works on. False when a
+// field does not fit MacHdr's width (an address, subnet or burst position above
+// 255): such a header is never produced by the hub or a node, and accepting it
+// would let two different wire headers map onto one CMAC input. A missing
+// header decodes as all-zero (what the per-field ternaries used to produce).
+static bool s_to_mac_hdr(const ::LoraHeader *h, mac::MacHdr *out)
 {
-  uint8_t hash[32];
-  size_t  hash_len = 0;
-  psa_status_t status = psa_hash_compute(
-      PSA_ALG_SHA_256,
-      reinterpret_cast<const uint8_t *>(kLoRaRootKeyPhrase),
-      strlen(kLoRaRootKeyPhrase),
-      hash, sizeof(hash), &hash_len);
-  if (status != PSA_SUCCESS)
+  *out = mac::MacHdr{};
+  if (h == nullptr)
+    return true;
+  if (h->destaddress > 0xFF || h->senderaddress > 0xFF || h->destsubnet > 0xFF ||
+      h->burstindex > 0xFF || h->burstcount > 0xFF)
     return false;
-  memcpy(key_out, hash, kRootKeyBytes);
+  out->dst           = static_cast<mac::Addr>(h->destaddress);
+  out->src           = static_cast<mac::Addr>(h->senderaddress);
+  out->subnet        = static_cast<uint8_t>(h->destsubnet);
+  out->fcnt          = h->msgid;
+  out->burst_idx     = static_cast<uint8_t>(h->burstindex);
+  out->burst_cnt     = static_cast<uint8_t>(h->burstcount);
+  out->on_mark       = h->onmark;
+  out->stamped       = h->firestamped;
+  out->fire_round    = h->fireround;
+  out->fire_off_us   = h->fireoffsetus;
+  out->session_nonce = h->sessionnonce;
   return true;
-}
-
-// ---------------------------------------------------------------------------
-// Tier 3: derive K_auth = AES-CMAC(K_root, framecrypto::buildKAuthKdfInput())
-// once, from K_root. Mirrors
-// CmdDispatcher::init_k_auth_() on the node — both sides must derive
-// bit-identical K_auth from the same K_root for LOGIN/REGISTER MICs to
-// verify.
-// ---------------------------------------------------------------------------
-static bool s_init_k_auth_key()
-{
-  if (s_k_auth_key_id != PSA_KEY_ID_NULL)
-    return true; // already derived
-
-  if (psa_crypto_init() != PSA_SUCCESS)
-    return false;
-
-  uint8_t root_material[kRootKeyBytes];
-  if (!s_derive_root_key(root_material))
-    return false;
-
-  psa_key_attributes_t root_attrs = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_usage_flags(&root_attrs, PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE |
-                                        PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH);
-  psa_set_key_algorithm(&root_attrs, PSA_ALG_AT_LEAST_THIS_LENGTH_MAC(PSA_ALG_CMAC, 8));
-  psa_set_key_type(&root_attrs, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&root_attrs, kRootKeyBytes * 8);
-  psa_set_key_lifetime(&root_attrs, PSA_KEY_LIFETIME_VOLATILE);
-
-  psa_key_id_t root_key_id = PSA_KEY_ID_NULL;
-  psa_status_t status = psa_import_key(&root_attrs, root_material, kRootKeyBytes, &root_key_id);
-  memset(root_material, 0, sizeof(root_material));
-  if (status != PSA_SUCCESS)
-    return false;
-
-  uint8_t kdf_input[framecrypto::kKdfInputBytes];
-  framecrypto::buildKAuthKdfInput(kdf_input);
-
-  uint8_t k_auth_material[kRootKeyBytes];
-  size_t k_auth_len = 0;
-  status = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kRootKeyBytes),
-                           kdf_input, sizeof(kdf_input),
-                           k_auth_material, sizeof(k_auth_material), &k_auth_len);
-  psa_destroy_key(root_key_id);
-  if (status != PSA_SUCCESS || k_auth_len != kRootKeyBytes)
-    return false;
-
-  psa_key_attributes_t auth_attrs = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_usage_flags(&auth_attrs, PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE |
-                                        PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH);
-  psa_set_key_algorithm(&auth_attrs, PSA_ALG_AT_LEAST_THIS_LENGTH_MAC(PSA_ALG_CMAC, 8));
-  psa_set_key_type(&auth_attrs, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&auth_attrs, kRootKeyBytes * 8);
-  psa_set_key_lifetime(&auth_attrs, PSA_KEY_LIFETIME_VOLATILE);
-
-  status = psa_import_key(&auth_attrs, k_auth_material, sizeof(k_auth_material), &s_k_auth_key_id);
-  memset(k_auth_material, 0, sizeof(k_auth_material));
-  if (status != PSA_SUCCESS)
-  {
-    s_k_auth_key_id = PSA_KEY_ID_NULL;
-    return false;
-  }
-  return true;
-}
-
-// Shared import helpers for the per-session keys below — mirrors
-// comm_utils.c's comm_utils_import_cmac_key()/comm_utils_import_ctr_key(),
-// which the hub has no equivalent of (comm_utils.c is node-only).
-static bool s_import_cmac_key(const uint8_t *key_material, size_t key_bytes, psa_key_id_t *out_id)
-{
-  psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE |
-                                   PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH);
-  psa_set_key_algorithm(&attrs, PSA_ALG_AT_LEAST_THIS_LENGTH_MAC(PSA_ALG_CMAC, 8));
-  psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attrs, (psa_key_bits_t)(key_bytes * 8));
-  psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
-  *out_id = PSA_KEY_ID_NULL;
-  return psa_import_key(&attrs, key_material, key_bytes, out_id) == PSA_SUCCESS;
-}
-
-static bool s_import_ctr_key(const uint8_t *key_material, size_t key_bytes, psa_key_id_t *out_id)
-{
-  psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT);
-  psa_set_key_algorithm(&attrs, PSA_ALG_CTR);
-  psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attrs, (psa_key_bits_t)(key_bytes * 8));
-  psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
-  *out_id = PSA_KEY_ID_NULL;
-  return psa_import_key(&attrs, key_material, key_bytes, out_id) == PSA_SUCCESS;
-}
-
-// The session id the peer's keys were derived for (s_base_nonce_map); false
-// when the peer has no entry. An entry whose value is 0 is "found" with 0.
-static bool s_session_id_for(uint32_t peer, uint32_t *out)
-{
-  std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-  auto it = s_base_nonce_map.find(peer);
-  if (it == s_base_nonce_map.end()) return false;
-  *out = it->second;
-  return true;
-}
-
-// One AES-CTR pass (encrypt or decrypt) of in -> out under key_id. `out` must
-// hold in_len bytes. Shared by the downlink seal below and the uplink open in
-// handle_encrypted_. The caller holds s_session_keys_mutex whenever the key
-// could be destroyed concurrently.
-static bool s_ctr_pass(bool encrypt, psa_key_id_t key_id,
-                       const uint8_t (&ctr_block)[framecrypto::kCtrBlockBytes],
-                       const uint8_t *in, size_t in_len, uint8_t *out)
-{
-  psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
-  bool ok = (encrypt ? psa_cipher_encrypt_setup(&op, key_id, PSA_ALG_CTR)
-                     : psa_cipher_decrypt_setup(&op, key_id, PSA_ALG_CTR)) == PSA_SUCCESS;
-  if (ok) ok = psa_cipher_set_iv(&op, ctr_block, sizeof(ctr_block)) == PSA_SUCCESS;
-  size_t out_total = 0, part_len = 0;
-  if (ok)
-  {
-    ok = psa_cipher_update(&op, in, in_len, out, in_len, &part_len) == PSA_SUCCESS;
-    out_total += part_len;
-  }
-  if (ok)
-  {
-    size_t finish_len = 0;
-    ok = psa_cipher_finish(&op, out + out_total, in_len - out_total, &finish_len) == PSA_SUCCESS;
-    out_total += finish_len;
-    ok = ok && (out_total == in_len);
-  }
-  else
-  {
-    psa_cipher_abort(&op);
-  }
-  return ok;
 }
 
 // The plaintext pack: *out is malloc'd, the caller frees it.
@@ -290,34 +95,6 @@ static bool s_pack_inner(const LoraClientOperationMessage *plain, uint8_t **inne
   return true;
 }
 
-enum class CtrSeal { NoKey, Failed, Ok };
-
-// The key id is read AND USED under s_session_keys_mutex. s_pack_operation_message
-// also runs on the esp_timer task (build_mac_ping_frame_) while the ESPHome loop
-// can install/destroy this peer's keys; reading the id, releasing the lock
-// and only then calling PSA would let the key be destroyed (and its volatile
-// slot reused) mid-operation. The critical section is one short CTR pass.
-//
-// Invariant I3: also snapshot which session generation this ciphertext is
-// sealed under, so sealBurstCopyTag() can refuse to retag it under a
-// DIFFERENT one later. The generation, not the psa_key_id_t: mbedTLS's
-// volatile key ids are reused slot indices, so a later generation could
-// otherwise be assigned the SAME id an earlier generation held.
-// No logging inside the critical section.
-static CtrSeal s_ctr_seal_locked(uint32_t dest, const uint8_t (&ctr_block)[framecrypto::kCtrBlockBytes],
-                                 const uint8_t *inner, size_t inner_len, uint8_t *cipher)
-{
-  std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-  auto kit = s_k_enc_map.find(dest);
-  const psa_key_id_t enc_key_id = (kit != s_k_enc_map.end()) ? kit->second : PSA_KEY_ID_NULL;
-  if (enc_key_id == PSA_KEY_ID_NULL)
-    return CtrSeal::NoKey;
-  auto git = s_session_generation_map.find(dest);
-  s_seal_generation_map[dest] = (git != s_session_generation_map.end()) ? git->second : 0;
-  return s_ctr_pass(true, enc_key_id, ctr_block, inner, inner_len, cipher) ? CtrSeal::Ok
-                                                                           : CtrSeal::Failed;
-}
-
 // Wrap the sealed ciphertext in the plaintext outer header and pack it.
 // The caller keeps ownership of `cipher`.
 static bool s_pack_sealed(const LoraClientOperationMessage *plain, uint8_t *cipher,
@@ -326,23 +103,20 @@ static bool s_pack_sealed(const LoraClientOperationMessage *plain, uint8_t *ciph
   // Outer header mirrors the inner addressing + msgid. Encryption is
   // signalled by the `encrypted` oneof case, not a header flag.
   //
-  // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
-  // Encrypt-then-CMAC replaces AES-GCM. The ciphertext is sealed ONCE,
-  // here, under K_enc via CTR; the tag written here is only a PLACEHOLDER —
-  // the real tag, which DOES cover burstIndex/burstCount/onMark/
-  // fireStamped/fireRound/fireOffsetUs, is computed per copy by
-  // LORAListener::sealBurstCopyTag() inside the tracker's send loop, once
-  // those fields are actually stamped.
+  // The ciphertext is sealed ONCE (CTR under K_enc); the tag written here is
+  // only a PLACEHOLDER — the real tag, which DOES cover burstIndex/burstCount/
+  // onMark/fireStamped/fireRound/fireOffsetUs, is computed per copy by
+  // LORAListener::sealBurstCopyTag() inside the tracker's send loop, once those
+  // fields are actually stamped.
   LoraHeader outer      = LORA_HEADER__INIT;
   outer.destaddress     = plain->header->destaddress;
   outer.destsubnet      = plain->header->destsubnet;
   outer.senderaddress   = plain->header->senderaddress;
   outer.msgid           = plain->header->msgid;
 
-  // Placeholder tag — see the comment above. Must be the right LENGTH
-  // (kSessionCmacTagBytes) since sealBurstCopyTag() overwrites in place
-  // without resizing. lora_client_operation_message__pack() below copies
-  // these bytes into *out immediately, so this local's lifetime is fine.
+  // Placeholder tag — must be the right LENGTH (kSessionCmacTagBytes) since
+  // sealBurstCopyTag() overwrites in place without resizing. The pack below
+  // copies these bytes into *out immediately, so this local's lifetime is fine.
   uint8_t placeholder_tag[framecrypto::kSessionCmacTagBytes] = {0};
 
   EncryptedPayload enc     = ENCRYPTED_PAYLOAD__INIT;
@@ -369,14 +143,20 @@ static bool s_pack_sealed(const LoraClientOperationMessage *plain, uint8_t *ciph
 static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t dest,
                             uint8_t **out, size_t *out_len, bool *msgid_refused)
 {
+  mac::MacHdr hdr;
+  if (!s_to_mac_hdr(plain->header, &hdr))
+  {
+    ESP_LOGE("lora_client", "Refusing to seal a downlink whose header does not fit the MAC header");
+    return false;
+  }
   // The CTR counter block holds 31 bits of msgid but the CMAC covers 32, so a
   // msgid >= 2^31 would reuse the keystream of (msgid - 2^31). The allocator
   // (incrTxMessageId) never hands one out; this is the seal-point backstop for
   // ids that bypass it (a restored counter, a reserved block).
-  if (!framecrypto::msgidFitsCtr(plain->header->msgid))
+  if (!framecrypto::msgidFitsCtr(hdr.fcnt))
   {
     ESP_LOGE("lora_client", "Refusing to seal msgid %u for peer %u: beyond the CTR space",
-             (unsigned) plain->header->msgid, (unsigned) dest);
+             (unsigned) hdr.fcnt, (unsigned) dest);
     if (msgid_refused) *msgid_refused = true;
     return false;
   }
@@ -386,19 +166,6 @@ static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t de
   if (!s_pack_inner(plain, &inner, &inner_len))
     return false;
 
-  uint32_t session_id = 0;
-  s_session_id_for(dest, &session_id);
-  if (session_id == 0)
-  {
-    ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
-    free(inner);
-    return false;
-  }
-
-  uint8_t ctr_block[framecrypto::kCtrBlockBytes];
-  framecrypto::buildCtrInitialBlock(session_id, dest, /*downlink=*/true, plain->header->msgid,
-                                    /*block_idx=*/0, ctr_block);
-
   uint8_t *cipher = static_cast<uint8_t *>(malloc(inner_len));
   if (!cipher)
   {
@@ -406,16 +173,15 @@ static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t de
     return false;
   }
 
-  const CtrSeal sealed = s_ctr_seal_locked(dest, ctr_block, inner, inner_len, cipher);
-  if (sealed == CtrSeal::NoKey)
+  const mac2::LinkSecurity::Seal sealed = s_sec().sealDownlink(hdr, inner, inner_len, cipher);
+  free(inner);
+  if (sealed == mac2::LinkSecurity::Seal::NoSession || sealed == mac2::LinkSecurity::Seal::NoKey)
     ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
-  if (sealed != CtrSeal::Ok)
+  if (sealed != mac2::LinkSecurity::Seal::Ok)
   {
-    free(inner);
     free(cipher);
     return false;
   }
-  free(inner);
 
   const bool packed = s_pack_sealed(plain, cipher, inner_len, out, out_len);
   free(cipher);
@@ -445,7 +211,7 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
   // or no base nonce exists yet.  This keeps a node that never established
   // encryption controllable and avoids emitting ciphertext it cannot decrypt.
   uint32_t unused_session_id = 0;
-  const bool has_base_nonce = s_session_id_for(dest, &unused_session_id);
+  const bool has_base_nonce = dest <= 0xFF && s_keys().sessionId(static_cast<mac::Addr>(dest), &unused_session_id);
   if (!encrypt || !has_base_nonce)
     return s_pack_plaintext(plain, out, out_len);
 
@@ -489,15 +255,15 @@ namespace esphome
     LORAListener::~LORAListener()
     {
       s_onboarding_gate_.release(this);
-      // Tier 3: per-listener keys, otherwise never freed — fine for the
+      // Tier 3: this node's keys, otherwise never freed — fine for the
       // handful of LORAListener instances a real hub constructs once at
       // boot, but the host test harness constructs many short-lived ones
       // in one process against mbedTLS's finite PSA key slot table (same
-      // reasoning as CmdDispatcher's destructor on the node side).
-      if (this->k_enc_key_id_ != PSA_KEY_ID_NULL)
-        psa_destroy_key(this->k_enc_key_id_);
-      if (this->k_mac_key_id_ != PSA_KEY_ID_NULL)
-        psa_destroy_key(this->k_mac_key_id_);
+      // reasoning as CmdDispatcher's destructor on the node side). Since S2
+      // the store drops the whole entry (session id and generation too): the
+      // generation belongs to the listener's lifetime, as it did when it was a
+      // member.
+      s_keys().forget(static_cast<mac::Addr>(this->short_address_));
     }
 
     void LORAListener::setup()
@@ -574,14 +340,9 @@ namespace esphome
       // Initialise PSA Crypto (idempotent — safe from multiple instances) and
       // derive K_auth once. Every other PSA user on the hub (session key
       // derivation, burst-copy tagging) relies on this having run.
-      psa_status_t psa_ret = psa_crypto_init();
-      if (psa_ret != PSA_SUCCESS)
+      if (!s_sec().initAuthKey())
       {
-        ESP_LOGE(TAG, "psa_crypto_init failed: %d", (int)psa_ret);
-      }
-      if (psa_ret == PSA_SUCCESS && !s_init_k_auth_key())
-      {
-        ESP_LOGE(TAG, "Failed to derive K_auth — LOGIN/REGISTER MICs will fail");
+        ESP_LOGE(TAG, "psa_crypto_init or the K_auth derivation failed — LOGIN/REGISTER MICs will fail");
       }
 
       // Schedule a login challenge so frame counters and session keys are
@@ -1275,15 +1036,10 @@ namespace esphome
           const uint32_t msgid  = rcv_message->header ? rcv_message->header->msgid         : 0;
           framecrypto::buildRegisterMicInput(reg->mac_addr, reg->needs_config,
                                              dest, subnet, sender, msgid, mic_input);
-          // Lazy-import, same reasoning as send_login().
-          if (s_k_auth_key_id == PSA_KEY_ID_NULL)
-            s_init_k_auth_key();
-          const bool mic_ok = s_k_auth_key_id != PSA_KEY_ID_NULL &&
-                              reg->mic.len == framecrypto::kSessionCmacTagBytes &&
-                              psa_mac_verify(s_k_auth_key_id,
-                                            PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, reg->mic.len),
-                                            mic_input, sizeof(mic_input),
-                                            reg->mic.data, reg->mic.len) == PSA_SUCCESS;
+          // Lazy-derive, same reasoning as send_login().
+          s_sec().initAuthKey();
+          const bool mic_ok = s_sec().verifyAuthMic(mic_input, sizeof(mic_input),
+                                                    reg->mic.data, reg->mic.len);
           if (!mic_ok)
           {
             ESP_LOGW(TAG, "%s: REGISTER failed MIC verification — dropping", this->get_name().c_str());
@@ -1747,112 +1503,38 @@ namespace esphome
 
     // Tier 3 (mac-separation-implementation-plan.md section 2(b)): derive
     // this listener's K_enc/K_mac from (K_root, session_id, node_nonce,
-    // hub/node addresses). Mirrors CmdDispatcher::deriveSessionKeys_() on
-    // the node — both sides must land on identical keys from the same
-    // four inputs.
+    // hub/node addresses) — never installed here. Mirrors
+    // CmdDispatcher::deriveSessionKeys_() on the node. MAC-2: LinkSecurity.
     bool LORAListener::deriveSessionKeyCandidate_(uint32_t session_id, uint32_t node_nonce,
-                                                  psa_key_id_t *out_enc_id, psa_key_id_t *out_mac_id)
+                                                  mac2::KeyPair *out)
     {
-      uint8_t root_material[kRootKeyBytes];
-      if (!s_derive_root_key(root_material))
-        return false;
-
-      psa_key_id_t root_key_id = PSA_KEY_ID_NULL;
-      if (!s_import_cmac_key(root_material, sizeof(root_material), &root_key_id))
-      {
-        memset(root_material, 0, sizeof(root_material));
-        return false;
-      }
-      memset(root_material, 0, sizeof(root_material));
-
-      const uint8_t hub_addr  = static_cast<uint8_t>(kHubAddress);
-      const uint8_t node_addr = static_cast<uint8_t>(this->short_address_);
-
-      uint8_t enc_input[framecrypto::kKdfInputBytes];
-      uint8_t mac_input[framecrypto::kKdfInputBytes];
-      framecrypto::buildSessionKeyKdfInput(0x01, session_id, node_nonce, hub_addr, node_addr, enc_input);
-      framecrypto::buildSessionKeyKdfInput(0x02, session_id, node_nonce, hub_addr, node_addr, mac_input);
-
-      uint8_t k_enc_material[kRootKeyBytes];
-      uint8_t k_mac_material[kRootKeyBytes];
-      size_t enc_len = 0, mac_len = 0;
-      const bool enc_ok = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kRootKeyBytes),
-                                          enc_input, sizeof(enc_input),
-                                          k_enc_material, sizeof(k_enc_material), &enc_len) == PSA_SUCCESS &&
-                          enc_len == kRootKeyBytes;
-      const bool mac_ok = psa_mac_compute(root_key_id, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kRootKeyBytes),
-                                          mac_input, sizeof(mac_input),
-                                          k_mac_material, sizeof(k_mac_material), &mac_len) == PSA_SUCCESS &&
-                          mac_len == kRootKeyBytes;
-      psa_destroy_key(root_key_id);
-      if (!enc_ok || !mac_ok)
-      {
-        memset(k_enc_material, 0, sizeof(k_enc_material));
-        memset(k_mac_material, 0, sizeof(k_mac_material));
-        return false;
-      }
-
-      psa_key_id_t new_enc_id = PSA_KEY_ID_NULL, new_mac_id = PSA_KEY_ID_NULL;
-      const bool imported = s_import_ctr_key(k_enc_material, sizeof(k_enc_material), &new_enc_id) &&
-                            s_import_cmac_key(k_mac_material, sizeof(k_mac_material), &new_mac_id);
-      memset(k_enc_material, 0, sizeof(k_enc_material));
-      memset(k_mac_material, 0, sizeof(k_mac_material));
-      if (!imported)
-      {
-        if (new_enc_id != PSA_KEY_ID_NULL) psa_destroy_key(new_enc_id);
-        if (new_mac_id != PSA_KEY_ID_NULL) psa_destroy_key(new_mac_id);
-        return false;
-      }
-
-      *out_enc_id = new_enc_id;
-      *out_mac_id = new_mac_id;
-      return true;
+      return s_sec().deriveCandidate(static_cast<mac::Addr>(kHubAddress),
+                                     static_cast<mac::Addr>(this->short_address_), session_id,
+                                     node_nonce, out);
     }
 
-    void LORAListener::installSessionKeys_(uint32_t session_id, psa_key_id_t enc_id, psa_key_id_t mac_id)
+    // Invariant I3 (c): the store installs under its key lock, racing the
+    // tracker task's retag safely. Logged after the lock is released.
+    void LORAListener::installSessionKeys_(uint32_t session_id, const mac2::KeyPair &keys)
     {
-      // Invariant I3 (c): the member writes below race sealBurstCopyTag()
-      // reading k_mac_key_id_/session_generation_ on the tracker task — both
-      // sides now take s_session_keys_mutex over the read/write, not just
-      // over the shared maps, even though the members themselves are
-      // per-listener (a global lock serialising rare install/clear calls
-      // across every listener is a fine price for not needing a second
-      // mutex per instance).
-      std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-      if (this->k_enc_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_enc_key_id_);
-      if (this->k_mac_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_mac_key_id_);
-      this->k_enc_key_id_ = enc_id;
-      this->k_mac_key_id_ = mac_id;
-      this->installed_session_id_ = session_id;
-      ++this->session_generation_;
-      s_k_enc_map[this->short_address_] = enc_id;
-      s_k_mac_map[this->short_address_] = mac_id;
-      s_session_generation_map[this->short_address_] = this->session_generation_;
+      const mac::Addr peer = static_cast<mac::Addr>(this->short_address_);
+      s_keys().install(peer, session_id, keys);
       ESP_LOGI(TAG, "[%s] Session keys installed (generation=%u)", this->get_name().c_str(),
-               (unsigned) this->session_generation_);
+               (unsigned) s_keys().generation(peer));
     }
 
     bool LORAListener::deriveSessionKeys_(uint32_t session_id, uint32_t node_nonce)
     {
-      psa_key_id_t enc_id = PSA_KEY_ID_NULL, mac_id = PSA_KEY_ID_NULL;
-      if (!this->deriveSessionKeyCandidate_(session_id, node_nonce, &enc_id, &mac_id))
+      mac2::KeyPair keys;
+      if (!this->deriveSessionKeyCandidate_(session_id, node_nonce, &keys))
         return false;
-      this->installSessionKeys_(session_id, enc_id, mac_id);
+      this->installSessionKeys_(session_id, keys);
       return true;
     }
 
     void LORAListener::clearSessionKeys_()
     {
-      std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-      if (this->k_enc_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_enc_key_id_);
-      if (this->k_mac_key_id_ != PSA_KEY_ID_NULL) psa_destroy_key(this->k_mac_key_id_);
-      this->k_enc_key_id_ = PSA_KEY_ID_NULL;
-      this->k_mac_key_id_ = PSA_KEY_ID_NULL;
-      this->installed_session_id_ = 0;
-      s_k_enc_map.erase(this->short_address_);
-      s_k_mac_map.erase(this->short_address_);
-      s_seal_generation_map.erase(this->short_address_);
-      s_session_generation_map.erase(this->short_address_);
+      s_keys().clearKeys(static_cast<mac::Addr>(this->short_address_));
 
       // Invariant I3 (a): the ONE place a sealed ciphertext is stored and
       // re-sent later, across however much time passes — pack-once means a
@@ -1870,114 +1552,45 @@ namespace esphome
       this->ctl().frame_msgid = 0;
     }
 
+    uint32_t LORAListener::sessionGenerationForTest() const
+    {
+      return s_keys().generation(static_cast<mac::Addr>(this->short_address_));
+    }
+
+    bool LORAListener::ctrEncryptForTest(const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out)
+    {
+      return s_sec().ctrEncryptForTest(static_cast<mac::Addr>(this->short_address_), iv, in, len, out);
+    }
+
     bool LORAListener::deriveRootKeyForTest(uint8_t out[16])
     {
-      return s_derive_root_key(out);
+      return mac2::LinkSecurity::deriveRootKey(out);
     }
 
     bool LORAListener::deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce)
     {
-      {
-        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-        s_base_nonce_map[this->short_address_] = session_id;
-      }
+      s_keys().setSessionId(static_cast<mac::Addr>(this->short_address_), session_id);
       return this->deriveSessionKeys_(session_id, node_nonce);
     }
 
-    // ---- sealBurstCopyTag stages -------------------------------------------
-    //
-    // sealBurstCopyTag is the H-1-measured per-copy retag hot path. The split
-    // below keeps its shape: everything that needs no key runs BEFORE the key
-    // lock, the lock covers one psa_mac_compute and nothing else, and nothing
-    // logs while it is held.
-
-    enum class RetagMac { Ok, Stale, Failed };
-
-    // The CMAC input of one downlink burst copy: the authenticated prefix
-    // (header fields incl. the per-copy timing fields) then the ciphertext.
-    // Needs no key, so it is built outside the key lock.
-    static std::vector<uint8_t> s_retag_mac_input(const ::EncryptedPayload *enc,
-                                                  const ::LoraHeader *header,
-                                                  uint32_t session_id)
-    {
-      framecrypto::EtmHeaderFields etm{};
-      etm.downlink       = true;
-      etm.session_id     = session_id;
-      etm.dest_address   = header->destaddress;
-      etm.dest_subnet    = header->destsubnet;
-      etm.sender_address = header->senderaddress;
-      etm.msgid          = header->msgid;
-      etm.burst_index    = header->burstindex;
-      etm.burst_count    = header->burstcount;
-      etm.on_mark        = header->onmark;
-      etm.fire_stamped   = header->firestamped;
-      etm.fire_round     = header->fireround;
-      etm.fire_offset_us = header->fireoffsetus;
-
-      uint8_t prefix[framecrypto::kEtmPrefixBytes];
-      framecrypto::buildEtmCmacPrefix(etm, static_cast<uint16_t>(enc->ciphertext.len), prefix);
-
-      std::vector<uint8_t> mac_input(sizeof(prefix) + enc->ciphertext.len);
-      memcpy(mac_input.data(), prefix, sizeof(prefix));
-      memcpy(mac_input.data() + sizeof(prefix), enc->ciphertext.data, enc->ciphertext.len);
-      return mac_input;
-    }
-
-    // The ONLY step that holds s_session_keys_mutex. `generation` and `key_id`
-    // are taken BY REFERENCE and read inside the lock: the key id is read AND
-    // USED under the lock. The loop task's installSessionKeys_()/
-    // clearSessionKeys_() destroy the key under this same mutex, and a
-    // destroyed volatile key's slot id can be reused, so reading the id and
-    // calling PSA after releasing could MAC under a destroyed or a different
-    // session's key.
-    // Lock order: this mutex is taken before any PSA-internal lock and never
-    // while holding s_base_nonce_map_mutex, so there is no cycle.
-    // No logging inside the critical section.
-    static RetagMac s_retag_mac_locked(uint32_t dest, const uint32_t &generation,
-                                       const psa_key_id_t &key_id,
-                                       const std::vector<uint8_t> &mac_input,
-                                       uint8_t (&tag)[framecrypto::kSessionCmacTagBytes])
-    {
-      size_t tag_len = 0;
-      std::lock_guard<std::mutex> lock(s_session_keys_mutex);
-      auto it = s_seal_generation_map.find(dest);
-      if (it == s_seal_generation_map.end() || it->second != generation)
-        return RetagMac::Stale;
-      if (key_id == PSA_KEY_ID_NULL)
-        return RetagMac::Failed;
-      const bool mac_ok = psa_mac_compute(key_id,
-                                          PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(tag)),
-                                          mac_input.data(), mac_input.size(),
-                                          tag, sizeof(tag), &tag_len) == PSA_SUCCESS &&
-                          tag_len == sizeof(tag);
-      return mac_ok ? RetagMac::Ok : RetagMac::Failed;
-    }
-
+    // The per-copy retag up-call from the tracker's send loop (until S4 moves it
+    // into a CopySealer that travels with the frame). Invariant I3 (stale-
+    // generation refusal) and I3 (c) (key read AND used under the key lock) live
+    // in LinkSecurity::retagCopy, which builds its input on the stack and logs
+    // nothing; the stale count and its log line stay here, outside any lock.
     bool LORAListener::sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header)
     {
       if (enc == nullptr || header == nullptr)
         return false;
-
-      // Invariant I3 (stale-generation refusal) and I3 (c) (key read AND used
-      // under s_session_keys_mutex) are implemented in s_retag_mac_locked.
-      // The CTR space guard again, at the retag point (s_pack_operation_message
-      // already refused to seal such a frame, so this is defence in depth).
-      if (!framecrypto::msgidFitsCtr(header->msgid))
+      mac::MacHdr copy;
+      if (!s_to_mac_hdr(header, &copy))
         return false;
-
-      uint32_t session_id = 0;
-      if (!s_session_id_for(this->short_address_, &session_id))
-        return false;
-
-      // Everything that needs no key is done BEFORE the key lock is taken, so
-      // the critical section is one psa_mac_compute and nothing else (this is
-      // the H-1-measured retag path).
-      const std::vector<uint8_t> mac_input = s_retag_mac_input(enc, header, session_id);
 
       uint8_t tag[framecrypto::kSessionCmacTagBytes];
-      const RetagMac verdict = s_retag_mac_locked(header->destaddress, this->session_generation_,
-                                                  this->k_mac_key_id_, mac_input, tag);
-      if (verdict == RetagMac::Stale)
+      const mac2::LinkSecurity::Retag verdict =
+          s_sec().retagCopy(static_cast<mac::Addr>(this->short_address_), copy,
+                            enc->ciphertext.data, enc->ciphertext.len, tag);
+      if (verdict == mac2::LinkSecurity::Retag::Stale)
       {
         // Invariant I3: refuse to retag a copy whose ciphertext was sealed
         // under a DIFFERENT session generation than the one current right now
@@ -1990,7 +1603,7 @@ namespace esphome
                  this->get_name().c_str(), (unsigned) this->tx_stale_session_drops_);
         return false;
       }
-      if (verdict != RetagMac::Ok)
+      if (verdict != mac2::LinkSecurity::Retag::Ok)
         return false;
 
       // enc->tag already has kSessionCmacTagBytes allocated (sealed at pack
@@ -2003,73 +1616,15 @@ namespace esphome
     }
 
     // ---- handle_encrypted_ stages ------------------------------------------
-
-    // The CMAC-covered header fields of an UPLINK, from the outer header. A
-    // missing header reads as all-zero (the same values the old per-field
-    // ternaries produced).
-    static framecrypto::EtmHeaderFields s_uplink_etm_fields(const ::LoraHeader *h,
-                                                            uint32_t session_id, uint32_t sender)
-    {
-      static const ::LoraHeader kNoHeader = LORA_HEADER__INIT;
-      const ::LoraHeader *hh = h ? h : &kNoHeader;
-      framecrypto::EtmHeaderFields etm{};
-      etm.downlink       = false;
-      etm.session_id     = session_id;
-      etm.dest_address   = hh->destaddress;
-      etm.dest_subnet    = hh->destsubnet;
-      etm.sender_address = sender;
-      etm.msgid          = hh->msgid;
-      etm.burst_index    = hh->burstindex;
-      etm.burst_count    = hh->burstcount;
-      etm.on_mark        = hh->onmark;
-      etm.fire_stamped   = hh->firestamped;
-      etm.fire_round     = hh->fireround;
-      etm.fire_offset_us = hh->fireoffsetus;
-      return etm;
-    }
-
-    enum class CmacVerify { Ok, NoMem, BadTag };
-
-    // Encrypt-then-CMAC replaces AES-GCM. Verify the tag BEFORE decrypting — a
-    // tampered ciphertext or header field fails the check without ever running
-    // the cipher over attacker-controlled bytes. Node uplinks never burst, so
-    // burstIndex/burstCount/onMark/fireStamped/fireRound/fireOffsetUs are
-    // always 0/false on this path (whatever the node actually sealed).
-    static CmacVerify s_verify_uplink_cmac(psa_key_id_t mac_key_id,
-                                           const framecrypto::EtmHeaderFields &etm,
-                                           const ::EncryptedPayload *enc)
-    {
-      size_t cipher_len = enc->ciphertext.len;
-
-      uint8_t cmac_prefix[framecrypto::kEtmPrefixBytes];
-      framecrypto::buildEtmCmacPrefix(etm, static_cast<uint16_t>(cipher_len), cmac_prefix);
-
-      uint8_t *mac_input = static_cast<uint8_t *>(malloc(sizeof(cmac_prefix) + cipher_len));
-      if (!mac_input)
-        return CmacVerify::NoMem;
-      memcpy(mac_input, cmac_prefix, sizeof(cmac_prefix));
-      memcpy(mac_input + sizeof(cmac_prefix), enc->ciphertext.data, cipher_len);
-
-      // NIT (security review): pin the received tag to exactly
-      // kSessionCmacTagBytes, same as LOGIN/REGISTER already require and
-      // the node's mirror of this check — the key policy floors
-      // truncation at 8 bytes regardless, so this is defense-in-depth,
-      // not a live exploit.
-      const bool mac_ok = enc->tag.len == framecrypto::kSessionCmacTagBytes &&
-                          psa_mac_verify(mac_key_id,
-                                         PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, enc->tag.len),
-                                         mac_input, sizeof(cmac_prefix) + cipher_len,
-                                         enc->tag.data, enc->tag.len) == PSA_SUCCESS;
-      free(mac_input);
-      return mac_ok ? CmacVerify::Ok : CmacVerify::BadTag;
-    }
+    //
+    // The crypto of each stage is LinkSecurity's (MacHdr + bytes); what stays
+    // here is the order, the logging and the protobuf around it.
 
     // A candidate not yet installed must be destroyed on every exit that is not
     // the install call at the end of a successful verify+decrypt.
     void LORAListener::uplink_drop_candidate_(EncUplink &up)
     {
-      if (up.candidate_enc_id != PSA_KEY_ID_NULL) psa_destroy_key(up.candidate_enc_id);
-      if (up.candidate_mac_id != PSA_KEY_ID_NULL) psa_destroy_key(up.candidate_mac_id);
+      mac2::LinkSecurity::destroy(up.candidate);
     }
 
     // If we don't have a base nonce for this peer (e.g. recovery after reboot),
@@ -2106,7 +1661,8 @@ namespace esphome
     bool LORAListener::uplink_check_base_nonce_(const EncUplink &up)
     {
       uint32_t unused_session_id = 0;
-      if (s_session_id_for(up.sender, &unused_session_id))
+      if (up.sender <= 0xFF &&
+          s_keys().sessionId(static_cast<mac::Addr>(up.sender), &unused_session_id))
         return true;
       // Security review finding 9: go through do_login_and_arm_retry_(),
       // not a bare send_login(). The bare call bypassed
@@ -2152,27 +1708,23 @@ namespace esphome
     // False = derivation failed, the frame is dropped.
     bool LORAListener::uplink_select_keys_(EncUplink &up)
     {
-      {
-        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-        up.session_id = s_base_nonce_map[up.sender];
-      }
-      up.enc_key_id = this->k_enc_key_id_;
-      up.mac_key_id = this->k_mac_key_id_;
+      // uplink_check_base_nonce_ ran first: the sender has a session id.
+      s_keys().sessionId(static_cast<mac::Addr>(up.sender), &up.session_id);
+      const mac::Addr self = static_cast<mac::Addr>(this->short_address_);
+      up.keys = s_keys().liveKeys(self);
       const ::LoraHeader *hdr = up.msg->header;
       const bool is_session_opening = hdr && hdr->sessionnonce != 0;
       up.needs_candidate =
           is_session_opening &&
-          (this->k_enc_key_id_ == PSA_KEY_ID_NULL || this->installed_session_id_ != up.session_id);
+          (up.keys.enc == PSA_KEY_ID_NULL || s_keys().installedSessionId(self) != up.session_id);
       if (!up.needs_candidate)
         return true;
-      if (!this->deriveSessionKeyCandidate_(up.session_id, hdr->sessionnonce,
-                                            &up.candidate_enc_id, &up.candidate_mac_id))
+      if (!this->deriveSessionKeyCandidate_(up.session_id, hdr->sessionnonce, &up.candidate))
       {
         ESP_LOGE(TAG, "Session key candidate derivation failed for peer %u", up.sender);
         return false;
       }
-      up.enc_key_id = up.candidate_enc_id;
-      up.mac_key_id = up.candidate_mac_id;
+      up.keys = up.candidate;
       return true;
     }
 
@@ -2180,25 +1732,31 @@ namespace esphome
     // msgid is inside the CTR space. Every failure destroys the candidate.
     bool LORAListener::uplink_verify_(EncUplink &up)
     {
-      if (up.enc_key_id == PSA_KEY_ID_NULL || up.mac_key_id == PSA_KEY_ID_NULL)
+      if (!up.keys.complete())
       {
         ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", up.sender);
         this->uplink_drop_candidate_(up);
         return false;
       }
 
-      const framecrypto::EtmHeaderFields etm =
-          s_uplink_etm_fields(up.msg->header, up.session_id, up.sender);
-      up.msgid = etm.msgid;
-
-      const CmacVerify verdict = s_verify_uplink_cmac(up.mac_key_id, etm, up.msg->encrypted);
-      if (verdict == CmacVerify::NoMem)
+      // Node uplinks never burst, so the per-copy timing fields are 0/false on
+      // this path in practice -- but the tag covers whatever the header carries.
+      // A header that does not fit the MAC header cannot carry a genuine tag.
+      const bool fits = s_to_mac_hdr(up.msg->header, &up.hdr);
+      up.hdr.src = static_cast<mac::Addr>(up.sender);
+      up.msgid   = up.hdr.fcnt;
+      const ::EncryptedPayload *enc = up.msg->encrypted;
+      const mac2::LinkSecurity::Verify verdict =
+          fits ? s_sec().verifyUplink(up.hdr, up.session_id, up.keys, enc->ciphertext.data,
+                                      enc->ciphertext.len, enc->tag.data, enc->tag.len)
+               : mac2::LinkSecurity::Verify::BadTag;
+      if (verdict == mac2::LinkSecurity::Verify::NoMem)
       {
         ESP_LOGE(TAG, "Memory allocation failed for MAC input");
         this->uplink_drop_candidate_(up);
         return false;
       }
-      if (verdict == CmacVerify::BadTag)
+      if (verdict != mac2::LinkSecurity::Verify::Ok)
       {
         ESP_LOGE(TAG, "Encrypt-then-CMAC verification failed");
         this->uplink_drop_candidate_(up);
@@ -2211,10 +1769,10 @@ namespace esphome
       // a forged frame must not be able to make the hub tear a session down.
       // The peer has run its counter off the end; the repair is a fresh
       // session (LOGIN resets both counters), requested once per exhaustion.
-      if (!framecrypto::msgidFitsCtr(etm.msgid))
+      if (!framecrypto::msgidFitsCtr(up.msgid))
       {
         ESP_LOGW(TAG, "[%s] Authentic uplink with msgid %u beyond the CTR space — refusing it",
-                 this->get_name().c_str(), (unsigned) etm.msgid);
+                 this->get_name().c_str(), (unsigned) up.msgid);
         this->uplink_drop_candidate_(up);
         this->requestMsgidRelogin_("uplink");
         return false;
@@ -2229,10 +1787,6 @@ namespace esphome
       const ::EncryptedPayload *enc = up.msg->encrypted;
       size_t cipher_len = enc->ciphertext.len;
 
-      uint8_t ctr_block[framecrypto::kCtrBlockBytes];
-      framecrypto::buildCtrInitialBlock(up.session_id, up.sender, /*downlink=*/false,
-                                        up.msgid, /*block_idx=*/0, ctr_block);
-
       uint8_t *plaintext = static_cast<uint8_t *>(malloc(cipher_len));
       if (!plaintext)
       {
@@ -2241,7 +1795,8 @@ namespace esphome
         return nullptr;
       }
 
-      if (!s_ctr_pass(false, up.enc_key_id, ctr_block, enc->ciphertext.data, cipher_len, plaintext))
+      if (!s_sec().decryptUplink(up.hdr, up.session_id, up.keys, enc->ciphertext.data, cipher_len,
+                                 plaintext))
       {
         ESP_LOGE(TAG, "CTR decryption failed despite a verified CMAC — this should never happen");
         this->uplink_drop_candidate_(up);
@@ -2266,7 +1821,7 @@ namespace esphome
       // newly-derived candidate; every early return above destroyed it
       // instead.
       if (up.needs_candidate)
-        this->installSessionKeys_(up.session_id, up.candidate_enc_id, up.candidate_mac_id);
+        this->installSessionKeys_(up.session_id, up.candidate);
 
       // A successful decrypt proves the node holds the matching base nonce —
       // the encrypted session is confirmed both ways.  Only now do we treat
@@ -4675,8 +4230,7 @@ namespace esphome
       // Store the base-nonce on the hub side before sending so it is ready to
       // validate the first encrypted response the node sends back.
       {
-        std::lock_guard<std::mutex> lock(s_base_nonce_map_mutex);
-        s_base_nonce_map[this->short_address_] = base;
+        s_keys().setSessionId(static_cast<mac::Addr>(this->short_address_), base);
       }
 
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
@@ -4758,19 +4312,9 @@ namespace esphome
       // Lazy-derive, as setup() does — this path
       // can be reached without setup() ever having run (e.g. a test driving
       // send_login() directly), and K_auth is needed right now, not later.
-      if (s_k_auth_key_id == PSA_KEY_ID_NULL)
-        s_init_k_auth_key();
-      if (s_k_auth_key_id != PSA_KEY_ID_NULL)
+      if (s_sec().initAuthKey() && !s_sec().authMic(mic_input, sizeof(mic_input), mic_tag))
       {
-        size_t mic_len = 0;
-        if (psa_mac_compute(s_k_auth_key_id,
-                            PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, sizeof(mic_tag)),
-                            mic_input, sizeof(mic_input),
-                            mic_tag, sizeof(mic_tag), &mic_len) != PSA_SUCCESS ||
-            mic_len != sizeof(mic_tag))
-        {
-          ESP_LOGE(TAG, "LOGIN MIC computation failed — sending unauthenticated (node will reject)");
-        }
+        ESP_LOGE(TAG, "LOGIN MIC computation failed — sending unauthenticated (node will reject)");
       }
       login.mic.data = mic_tag;
       login.mic.len  = sizeof(mic_tag);

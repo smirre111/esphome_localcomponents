@@ -31,6 +31,7 @@ BASELINE = os.path.join(ROOT, "tools", "layer_lint_baseline.json")
 
 TRACKER = "lora_tracker/lora_tracker.cpp"
 CLIENT = "lora_client/lora_client.cpp"
+CLIENT_H = "lora_client/lora_client.h"
 CHILDREN = ["loracover/cover/lora_cover.cpp", "loracover/sensor/lora_sensor.cpp"]
 
 # metric -> (files, regex, what it means)
@@ -62,6 +63,9 @@ METRICS = {
     # MAC-2 spread through the listener (target: one SessionKeyStore/LinkSecurity).
     "client.psa_calls": ([CLIENT], r"\bpsa_\w+\s*\(",
                          "PSA crypto calls in lora_client.cpp"),
+    # Key handles outside MAC-2 (S2: HubLinkSecurity's SessionKeyStore owns them).
+    "client.psa_key_handles": ([CLIENT, CLIENT_H], r"psa_key_id_t|PSA_KEY_ID_NULL",
+                               "PSA key handles in the listener"),
     # APP telemetry completing MAC-0 delivery (V7 / F3).
     "client.telemetry_completes_delivery": ([CLIENT], r"handle_command_ack_\s*\(\s*this->ctl\(\)",
                                             "a non-ack message completes the tracked op"),
@@ -136,7 +140,8 @@ def main(argv):
             base = json.load(fh)
     except FileNotFoundError:
         base = {}
-    rises = [(k, base.get(k), v) for k, v in cur.items() if k not in base or v > base[k]]
+    rises = [(k, base[k], v) for k, v in cur.items() if k in base and v > base[k]]
+    new = [k for k in cur if k not in base]   # a new metric enters with --update
     falls = [(k, base[k], v) for k, v in cur.items() if k in base and v < base[k]]
     stale = [k for k in base if k not in cur]
     if "--update" in argv:
@@ -152,6 +157,9 @@ def main(argv):
     rc = 0
     for k, b, v in rises:
         print("LAYERING REGRESSION: %s %s -> %d (%s)" % (k, b, v, METRICS[k][2]))
+        rc = 1
+    for k in new:
+        print("NEW METRIC: %s = %d (not in the baseline; add it with --update)" % (k, cur[k]))
         rc = 1
     for k in stale:
         print("STALE BASELINE METRIC: %s (no longer measured)" % k)

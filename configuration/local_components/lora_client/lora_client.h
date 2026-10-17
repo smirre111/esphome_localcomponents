@@ -20,6 +20,8 @@
 #include "esphome/components/lora_client/DeliveryPolicy.h"
 #include "esphome/components/lora_client/ModeBSupervisor.h"
 #include "esphome/components/lora_client/SleepModel.h"
+// MAC-2: keys, KDF, Encrypt-then-CMAC and the session key store (stage S2).
+#include "esphome/components/lora_client/HubLinkSecurity.h"
 #include "esphome/components/lora_client/PendingShadow.h"
 
 #include "esphome/core/automation.h"
@@ -428,7 +430,7 @@ namespace esphome
 
       // For tests: how many times this listener's session keys have been
       // (re)derived — mirrors CmdDispatcher::sessionGenerationForTest().
-      uint32_t sessionGenerationForTest() const { return this->session_generation_; }
+      uint32_t sessionGenerationForTest() const;
       // For tests: install a session directly (sets the base nonce AND
       // derives K_enc/K_mac from it), without a real LOGIN/uplink round
       // trip. Mirrors CmdDispatcher's setBaseNonceForTest reasoning: some
@@ -450,22 +452,7 @@ namespace esphome
       // For tests: encrypt a block under this listener's CURRENT K_enc with
       // CTR — the only way to prove the hub and node landed on bit-IDENTICAL
       // session keys, since opaque PSA key ids can't be compared directly.
-      // Inline PSA calls rather than comm_utils.h, which is node-only.
-      bool ctrEncryptForTest(const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out) {
-        if (this->k_enc_key_id_ == PSA_KEY_ID_NULL || len == 0) return false;
-        psa_cipher_operation_t op = PSA_CIPHER_OPERATION_INIT;
-        if (psa_cipher_encrypt_setup(&op, this->k_enc_key_id_, PSA_ALG_CTR) != PSA_SUCCESS)
-          return false;
-        if (psa_cipher_set_iv(&op, iv, 16) != PSA_SUCCESS) { psa_cipher_abort(&op); return false; }
-        size_t out_len = 0, total = 0;
-        if (psa_cipher_update(&op, in, len, out, len, &out_len) != PSA_SUCCESS)
-        { psa_cipher_abort(&op); return false; }
-        total += out_len;
-        size_t finish_len = 0;
-        if (psa_cipher_finish(&op, out + total, len - total, &finish_len) != PSA_SUCCESS)
-          return false;
-        return total + finish_len == len;
-      }
+      bool ctrEncryptForTest(const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out);
 
       // U-2: the node's radio-busy skip count, as of its last PhaseReport.
       //
@@ -1425,24 +1412,12 @@ namespace esphome
       // accepted one, so regenerating leaves hub and node with disagreeing
       // base nonces and every subsequent encrypted reply fails IV check.
       uint32_t pending_login_nonce_{0};
-      // Tier 3 (mac-separation-implementation-plan.md section 2(b)): this
-      // node's session keys, re-derived when its sessionNonce arrives on
-      // the session-opening uplink. Per-listener (unlike K_auth, which is a
-      // fleet-wide static) because each node contributes
-      // its own node_nonce. These seal every confirmed-session downlink.
-      psa_key_id_t k_enc_key_id_{PSA_KEY_ID_NULL};
-      psa_key_id_t k_mac_key_id_{PSA_KEY_ID_NULL};
-      uint32_t     session_generation_{0};
-      // The session_id (== hub_nonce) the CURRENTLY INSTALLED k_enc_key_id_/
-      // k_mac_key_id_ were derived for. Lets handle_encrypted_ tell "this
-      // session-opening uplink is for the session I already hold" (skip
-      // re-deriving — a duplicate burst copy must not force a fresh PSA
-      // import and bump the generation) apart from "this is a NEW session"
-      // (re-derive). Fixes a real bug: without tracking this, a node's
-      // SECOND-ever login in one hub uptime kept the FIRST session's keys
-      // forever, because the old code only derived when the key id was
-      // still null.
-      uint32_t     installed_session_id_{0};
+      // This node's session keys, generation and installed session id live in
+      // mac2::SessionKeyStore (HubLinkSecurity.h) since stage S2 — the single
+      // owner, keyed by short_address_. The installed session id is what lets
+      // handle_encrypted_ tell "this session-opening uplink is for the session
+      // I already hold" (a duplicate burst copy must not force a fresh PSA
+      // import and bump the generation) apart from "this is a NEW session".
       // Invariant I3: burst copies sealBurstCopyTag() refused because their
       // ciphertext was sealed under a session that is no longer current.
       uint32_t     tx_stale_session_drops_{0};
@@ -1515,12 +1490,11 @@ namespace esphome
       {
         ::LoraClientResponseMessage *msg{nullptr};
         uint32_t     sender{0};
-        uint32_t     session_id{0};
-        psa_key_id_t enc_key_id{PSA_KEY_ID_NULL};       // the keys this frame is tried under
-        psa_key_id_t mac_key_id{PSA_KEY_ID_NULL};       // (live, or the unverified candidate)
-        psa_key_id_t candidate_enc_id{PSA_KEY_ID_NULL};
-        psa_key_id_t candidate_mac_id{PSA_KEY_ID_NULL};
-        bool         needs_candidate{false};
+        uint32_t      session_id{0};
+        mac2::KeyPair keys{};        // the keys this frame is tried under (live, or the candidate)
+        mac2::KeyPair candidate{};   // an unverified candidate; destroyed unless installed
+        mac::MacHdr   hdr{};         // the outer header, decoded for MAC-2
+        bool          needs_candidate{false};
         uint32_t     msgid{0};
       };
       bool     uplink_check_base_nonce_(const EncUplink &up);
@@ -1547,16 +1521,15 @@ namespace esphome
       // sessionNonce, since nothing committed is touched. The caller must
       // either installSessionKeys_() these ids after verifying a frame
       // under them, or destroy both ids itself if it does not.
-      bool deriveSessionKeyCandidate_(uint32_t session_id, uint32_t node_nonce,
-                                      psa_key_id_t *out_enc_id, psa_key_id_t *out_mac_id);
+      bool deriveSessionKeyCandidate_(uint32_t session_id, uint32_t node_nonce, mac2::KeyPair *out);
       // Installs a previously-derived candidate as this listener's LIVE
-      // session keys: destroys whatever was live before, updates the
-      // shared maps, bumps session_generation_, and records session_id so
+      // session keys: destroys whatever was live before, bumps the store's
+      // generation for this node, and records session_id so
       // a later duplicate of the same session-opening uplink is recognised
       // and skipped rather than re-derived.
-      void installSessionKeys_(uint32_t session_id, psa_key_id_t enc_id, psa_key_id_t mac_id);
-      // Destroys whatever session keys are live and clears them from the
-      // shared maps — called when send_login() mints a FRESH challenge
+      void installSessionKeys_(uint32_t session_id, const mac2::KeyPair &keys);
+      // Destroys whatever session keys are live (and the seal snapshot) in the
+      // store — called when send_login() mints a FRESH challenge
       // nonce (a genuinely new session), so a stale key from the session
       // just superseded cannot be used to (mis)encrypt a downlink in the
       // window before the new session-opening uplink arrives; the hub

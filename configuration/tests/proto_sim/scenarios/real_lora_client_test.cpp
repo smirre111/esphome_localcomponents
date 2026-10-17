@@ -5449,20 +5449,22 @@ TEST(MsgidGuard, EveryRetagRefusalLeavesTheTagBytesAlone) {
       untouched(c); }
     { // no MAC key installed: not stale, not tagged, not counted
       RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      const psa_key_id_t saved = f.rol.k_mac_key_id_;
+      auto &st = mac2::LinkSecurity::hub().store();
+      const psa_key_id_t saved = st.liveKeys(18).mac;
       const uint32_t before = f.rol.staleSessionDropsForTest();
-      f.rol.k_mac_key_id_ = PSA_KEY_ID_NULL;
+      st.setMacKeyForTest(18, PSA_KEY_ID_NULL);
       EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "no K_mac";
-      f.rol.k_mac_key_id_ = saved;
+      st.setMacKeyForTest(18, saved);
       EXPECT_EQ(f.rol.staleSessionDropsForTest(), before);
       untouched(c); }
     { // a MAC key id PSA does not know: psa_mac_compute fails, nothing is written
       RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      const psa_key_id_t saved = f.rol.k_mac_key_id_;
+      auto &st = mac2::LinkSecurity::hub().store();
+      const psa_key_id_t saved = st.liveKeys(18).mac;
       const uint32_t before = f.rol.staleSessionDropsForTest();
-      f.rol.k_mac_key_id_ = static_cast<psa_key_id_t>(0x7FFFFFF0u);
+      st.setMacKeyForTest(18, static_cast<psa_key_id_t>(0x7FFFFFF0u));
       EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "PSA rejects the key";
-      f.rol.k_mac_key_id_ = saved;
+      st.setMacKeyForTest(18, saved);
       EXPECT_EQ(f.rol.staleSessionDropsForTest(), before);
       untouched(c); }
     { // a peer this hub has no session id for
@@ -6547,9 +6549,10 @@ std::vector<uint8_t> avail_payload() {
     return proto_sim::serialize_resp_payload(inner);
 }
 
+// Since S2 the installed session id lives in the hub's SessionKeyStore.
+uint32_t installedSessionId(uint8_t peer) { return mac2::LinkSecurity::hub().store().installedSessionId(peer); }
 struct EncProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::clearSessionKeys_;
-    using esphome::lora_tracker::LORAListener::installed_session_id_;
     using esphome::lora_tracker::LORAListener::last_heard_us_;
     using esphome::lora_tracker::LORAListener::login_acked_;
 };
@@ -6595,7 +6598,7 @@ TEST(EncUplink, AForgedSessionOpeningFrameLeavesTheLiveSessionExactlyAsItWas) {
     RecordingNode node;
     f.rol.register_lora_node(&node);
     const uint32_t gen = f.rol.sessionGenerationForTest();
-    const uint32_t installed = EP(f.rol).installed_session_id_;
+    const uint32_t installed = installedSessionId(18);
     const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
     ASSERT_EQ(installed, f.base);
 
@@ -6605,7 +6608,7 @@ TEST(EncUplink, AForgedSessionOpeningFrameLeavesTheLiveSessionExactlyAsItWas) {
                                    /*session_nonce=*/0xBADC0DE5u, /*corrupt_tag=*/true);
     f.rol.set_response(bad.data(), bad.size());
     EXPECT_EQ(f.rol.sessionGenerationForTest(), gen);
-    EXPECT_EQ(EP(f.rol).installed_session_id_, installed);
+    EXPECT_EQ(installedSessionId(18), installed);
     EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before);
     EXPECT_TRUE(node.got.empty());
 
@@ -6619,7 +6622,7 @@ TEST(EncUplink, AForgedSessionOpeningFrameLeavesTheLiveSessionExactlyAsItWas) {
 TEST(EncUplink, ADuplicateSessionOpeningCopyOfTheInstalledSessionUsesTheLiveKeys) {
     MsgidGuardFixture f;
     const uint32_t gen = f.rol.sessionGenerationForTest();
-    ASSERT_EQ(EP(f.rol).installed_session_id_, f.base);
+    ASSERT_EQ(installedSessionId(18), f.base);
     const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
     // Same session id, sessionNonce present again (another burst copy of the
     // opening uplink): verified under the live keys, no new import, no bump.
@@ -6683,19 +6686,19 @@ TEST(EncUplink, AFramePastTheTagCheckIsStillRefusedWhenItsMsgidBreaksTheReplayWi
 }
 
 TEST(EncUplink, ASessionOpeningUplinkWhoseSessionDiffersFromTheInstalledOneReplacesTheLiveKeys) {
-    // installed_session_id_ drifting from the session the peer is on (a re-login
+    // The installed session id drifting from the session the peer is on (a re-login
     // whose old keys were never cleared): the session-opening uplink must derive
     // a candidate and, once it verifies, install it -- not ride the stale keys.
     MsgidGuardFixture f;
     const uint32_t gen = f.rol.sessionGenerationForTest();
-    ASSERT_EQ(EP(f.rol).installed_session_id_, f.base);
-    EP(f.rol).installed_session_id_ = f.base ^ 0x5A5A5A5Au;
+    ASSERT_EQ(installedSessionId(18), f.base);
+    mac2::LinkSecurity::hub().store().setInstalledSessionIdForTest(18, f.base ^ 0x5A5A5A5Au);
     const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
     auto open = sealed_uplink_bytes(f.base, rx_before + 1, avail_payload(), /*session_nonce=*/kTestNodeNonce);
     f.rol.set_response(open.data(), open.size());
     EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before + 1);
     EXPECT_EQ(f.rol.sessionGenerationForTest(), gen + 1) << "a fresh candidate was installed";
-    EXPECT_EQ(EP(f.rol).installed_session_id_, f.base);
+    EXPECT_EQ(installedSessionId(18), f.base);
 }
 
 TEST(EncUplink, EveryTimingFieldOfTheOuterHeaderIsUnderTheUplinkCmac) {
@@ -11676,4 +11679,53 @@ TEST(KeyStoreS2, TwoNodesKeepIndependentGenerationsAndSealSnapshots) {
     EXPECT_TRUE(changed);
     RetagCase c18;
     EXPECT_FALSE(f.rol.sealBurstCopyTag(&c18.enc, &c18.hdr)) << "node 18's old copy is stale";
+}
+
+// S2: MAC-2 works on mac::MacHdr, whose address, subnet and burst fields are one
+// byte wide. A wire header carrying a wider value is refused rather than
+// truncated: truncation would map two different wire headers onto one CMAC
+// input. Neither the hub nor a node ever sends such a header.
+namespace {
+std::vector<uint8_t> uplinkWithBurstIndex(uint32_t base, uint32_t msgid, uint32_t burst_index) {
+    proto_sim::LoraHeader h;
+    h.destAddress   = esphome::lora_tracker::kHubAddress;
+    h.destSubnet    = 2;
+    h.senderAddress = 18;
+    h.msgId         = msgid;
+    h.burstIndex    = burst_index;
+    auto enc = seal_uplink_like_node(base, h, avail_payload());   // a GENUINE tag over that header
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header               = h;
+    outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
+    outer.encrypted.ciphertext = enc.ciphertext;
+    return proto_sim::serialize_resp(outer);
+}
+}  // namespace
+
+TEST(KeyStoreS2, AnUplinkHeaderWiderThanTheMacHeaderIsRefusedEvenUnderAGenuineTag) {
+    MsgidGuardFixture f;
+    RecordingNode node;
+    f.rol.register_lora_node(&node);
+    const uint32_t rx_before = f.rol.frame_counter_.rx_message_id;
+    auto wide = uplinkWithBurstIndex(f.base, rx_before + 1, 0x101);
+    f.rol.set_response(wide.data(), wide.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before) << "refused, nothing committed";
+    EXPECT_TRUE(node.got.empty());
+    // Control: the same frame with a byte-wide value is accepted.
+    auto narrow = uplinkWithBurstIndex(f.base, rx_before + 1, 0xFF);
+    f.rol.set_response(narrow.data(), narrow.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx_before + 1);
+    EXPECT_EQ(node.got.size(), 1u);
+}
+
+TEST(KeyStoreS2, ACopyHeaderWiderThanTheMacHeaderIsNotRetagged) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();
+    { RetagCase c; c.hdr.burstindex = 0xFF;
+      EXPECT_TRUE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "control: a byte-wide index retags"; }
+    RetagCase c; c.hdr.burstindex = 0x100; memset(c.tag, 0xAA, sizeof(c.tag));
+    EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr));
+    for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
 }

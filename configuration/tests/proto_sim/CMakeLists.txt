@@ -243,6 +243,8 @@ set(NODE_SHIM_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/shims_node)
 # linked via proto_sim.
 add_library(real_lora_client STATIC
     ${LORA_CLIENT_DIR}/lora_client.cpp
+    # MAC-2 (stage S2): keys, KDF, Encrypt-then-CMAC, the session key store.
+    ${LORA_CLIENT_DIR}/HubLinkSecurity.cpp
     # The hub predicts an auto-mode node's wake with the NODE'S own scheduler,
     # vendored rather than re-implemented — see Scheduler.h's banner.
     ${LORA_CLIENT_DIR}/Scheduler.cpp
