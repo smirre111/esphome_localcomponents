@@ -11604,3 +11604,76 @@ TEST(PositionIsNotAnAck, APositionAtTheDispatchSeamDoesNotCompleteACoverOp) {
 
     EXPECT_TRUE(h.rol.awaitingAck());
 }
+
+// =============================================================================
+// S2 characterization (docs/mac-separation-layering-plan.md): what the hub's
+// MAC-2 key state does today, pinned BEFORE it moves into one SessionKeyStore.
+// Generation is per node address and per listener lifetime; clearing keys keeps
+// the counter; a frame sealed before a clear is never retagged after it; two
+// nodes never disturb each other's generation.
+// =============================================================================
+namespace {
+struct KeyStoreProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::clearSessionKeys_;
+};
+KeyStoreProbe &KP(LORAClient &c) { return static_cast<KeyStoreProbe &>(c); }
+}  // namespace
+
+TEST(KeyStoreS2, AFreshListenerForTheSameAddressStartsAtGenerationOneAgain) {
+    { MsgidGuardFixture f; ASSERT_EQ(f.rol.sessionGenerationForTest(), 1u); }
+    { MsgidGuardFixture g; EXPECT_EQ(g.rol.sessionGenerationForTest(), 1u)
+          << "the generation belongs to the listener, not to a process-wide counter"; }
+}
+
+TEST(KeyStoreS2, ClearingTheKeysKeepsTheGenerationCounterMonotonic) {
+    MsgidGuardFixture f;
+    ASSERT_EQ(f.rol.sessionGenerationForTest(), 1u);
+    KP(f.rol).clearSessionKeys_();
+    EXPECT_EQ(f.rol.sessionGenerationForTest(), 1u) << "a clear does not reset the counter";
+    ASSERT_TRUE(f.rol.deriveSessionKeysForTest(0xDEADBEEFu, kTestNodeNonce));
+    EXPECT_EQ(f.rol.sessionGenerationForTest(), 2u) << "and the next session is a NEW generation";
+}
+
+TEST(KeyStoreS2, AFrameSealedBeforeAClearIsNeverRetaggedAfterIt) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();                          // seals: snapshots generation 1
+    { RetagCase c; uint8_t want[framecrypto::kSessionCmacTagBytes];
+      c.oracle(f.base, want);
+      ASSERT_TRUE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "control";
+      EXPECT_EQ(0, memcmp(c.tag, want, sizeof(want))) << "the tag is the oracle's"; }
+    KP(f.rol).clearSessionKeys_();
+    const uint32_t before = f.rol.staleSessionDropsForTest();
+    RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
+    EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr));
+    EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1) << "counted as stale";
+    for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
+}
+
+TEST(KeyStoreS2, TwoNodesKeepIndependentGenerationsAndSealSnapshots) {
+    MsgidGuardFixture f;                                  // node 18, generation 1
+    LORAClient other;
+    other.set_name("other");
+    other.set_short_address(17);
+    other.set_subnet_address(2);
+    other.set_address(0x0102030405ULL);
+    other.set_time(&f.time);
+    f.tracker.register_client(&other);
+    ASSERT_TRUE(other.deriveSessionKeysForTest(0x17171717u, kTestNodeNonce));
+    other.mark_session_confirmed_for_test();
+    other.send_remote_config();                           // node 17 sealed under its generation 1
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();                           // node 18 sealed under its generation 1
+
+    ASSERT_TRUE(f.rol.deriveSessionKeysForTest(0xDEADBEEFu, kTestNodeNonce));   // node 18 re-keys
+    ASSERT_EQ(f.rol.sessionGenerationForTest(), 2u);
+    EXPECT_EQ(other.sessionGenerationForTest(), 1u) << "node 17 is untouched";
+
+    RetagCase c17; c17.hdr.destaddress = 17; memset(c17.tag, 0xAA, sizeof(c17.tag));
+    EXPECT_TRUE(other.sealBurstCopyTag(&c17.enc, &c17.hdr)) << "node 17's copy still retags";
+    bool changed = false;
+    for (uint8_t b : c17.tag) changed |= (b != 0xAA);
+    EXPECT_TRUE(changed);
+    RetagCase c18;
+    EXPECT_FALSE(f.rol.sealBurstCopyTag(&c18.enc, &c18.hdr)) << "node 18's old copy is stale";
+}
