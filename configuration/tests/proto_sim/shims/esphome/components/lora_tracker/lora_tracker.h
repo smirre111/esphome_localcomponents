@@ -19,6 +19,7 @@
 #include "esphome/components/lora_client/lora_client.h"
 #include "esphome/components/lora_client/lora_client_node.h"
 #include "esphome/components/lora_client/FrameCrypto.h"
+#include "esphome/components/lora_client/MacSap.h"
 
 namespace proto_sim { class SimRadio; }
 
@@ -41,6 +42,11 @@ struct TxPolicy {
     bool     on_mark{false};
     // Whether a node answers the frame (response window held), mirrored.
     bool     expects_reply{true};
+    // S4, mirrored: MAC-2's per-copy sealer bound to this frame, and the
+    // opaque binding handed back to it as ctx. nullptr = plaintext.
+    mac::CopySealer sealer{nullptr};
+    uint64_t        seal_binding{0};
+    bool            fire_stamp{true};
 };
 
 

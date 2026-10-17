@@ -18,6 +18,7 @@
 #include "blinds.pb-c.h"
 #include "TimedGrid.h"
 #include "ClassAWindows.h"
+#include "MacHdrCodec.h"
 #include "LoraTiming.h"
 
 #include "sim/sim_clock.h"
@@ -28,6 +29,8 @@
 #include <psa/crypto.h>
 
 #include <gtest/gtest.h>
+#include <chrono>
+#include <algorithm>
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 
@@ -1419,7 +1422,7 @@ TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
 }
 
 // Invariant I3 (mac-separation-implementation-plan.md section 2(b)):
-// sealBurstCopyTag() must refuse to retag a copy whose ciphertext was
+// retagLikeLastFrameForTest() must refuse to retag a copy whose ciphertext was
 // sealed under a session that is no longer current — sealing it anyway
 // would pair an OLD ciphertext with a NEW tag, silently wasting the copy
 // (the node's CMAC check fails) rather than visibly dropping it here.
@@ -1427,7 +1430,7 @@ TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
 // The real queue/burst path retags synchronously inside the same call that
 // seals (both the shim and the real tracker), so there is no window to
 // inject a re-login between the two through the public send APIs. This
-// calls sealBurstCopyTag() directly instead, after s_pack_operation_message
+// calls retagLikeLastFrameForTest() directly instead, after s_pack_operation_message
 // has snapshotted session #1's key id and a second LOGIN has moved the
 // listener on to session #2 — exactly the ordering a re-login mid-burst
 // would produce.
@@ -1482,7 +1485,7 @@ TEST(RealLoraClient, StaleSessionCopyIsRefusedNotRetaggedUnderTheWrongKey) {
     enc.tag.data        = tag;
     enc.tag.len         = sizeof(tag);
 
-    EXPECT_FALSE(rol.sealBurstCopyTag(&enc, &hdr))
+    EXPECT_FALSE(rol.retagLikeLastFrameForTest(&enc, &hdr))
         << "a copy sealed under session #1 must not be retagged under #2's key";
     EXPECT_EQ(rol.staleSessionDropsForTest(), 1u);
 
@@ -5210,11 +5213,11 @@ TEST(MsgidGuard, TheRetagPointRefusesAMsgidBeyondTheCtrSpace) {
     enc.tag.data        = tag;
     enc.tag.len         = sizeof(tag);
 
-    ASSERT_TRUE(f.rol.sealBurstCopyTag(&enc, &hdr)) << "control: an ordinary msgid is retagged";
+    ASSERT_TRUE(f.rol.retagLikeLastFrameForTest(&enc, &hdr)) << "control: an ordinary msgid is retagged";
 
     memset(tag, 0, sizeof(tag));
     hdr.msgid = 0x80000000u + 999;
-    EXPECT_FALSE(f.rol.sealBurstCopyTag(&enc, &hdr)) << "msgid beyond the CTR space is not tagged";
+    EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&enc, &hdr)) << "msgid beyond the CTR space is not tagged";
     EXPECT_EQ(f.rol.staleSessionDropsForTest(), 0u) << "refused for the msgid, not as a stale session";
     for (uint8_t b : tag) EXPECT_EQ(b, 0) << "the tag bytes must be untouched";
 }
@@ -5391,7 +5394,7 @@ TEST(MsgidGuard, TheRetagIsExactlyTheCmacOverEveryBurstField) {
         memset(c.tag, 0xAA, sizeof(c.tag));
         uint8_t want[framecrypto::kSessionCmacTagBytes];
         c.oracle(f.base, want);
-        ASSERT_TRUE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << what;
+        ASSERT_TRUE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << what;
         EXPECT_EQ(0, memcmp(c.tag, want, sizeof(want))) << what;
     };
     RetagCase base;
@@ -5427,24 +5430,24 @@ TEST(MsgidGuard, EveryRetagRefusalLeavesTheTagBytesAlone) {
         for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
     };
     { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      ASSERT_TRUE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "control"; }
+      ASSERT_TRUE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "control"; }
 
     { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(nullptr, &c.hdr)); untouched(c); }
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(nullptr, &c.hdr)); untouched(c); }
     { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, nullptr)); untouched(c); }
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, nullptr)); untouched(c); }
     { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.len = sizeof(c.tag) - 1;
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "wrong tag length"; untouched(c); }
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "wrong tag length"; untouched(c); }
     { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.len = sizeof(c.tag) + 1;
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "wrong tag length"; untouched(c); }
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "wrong tag length"; untouched(c); }
     { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.data = nullptr;
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "no tag buffer"; untouched(c); }
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "no tag buffer"; untouched(c); }
     { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.hdr.msgid = 0x80000000u;
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "beyond the CTR space"; untouched(c); }
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "beyond the CTR space"; untouched(c); }
     { // a destination that was never sealed under: generation lookup misses -> stale
       RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.hdr.destaddress = 77;
       const uint32_t before = f.rol.staleSessionDropsForTest();
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr));
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr));
       EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1) << "counted as a stale-session drop";
       untouched(c); }
     { // no MAC key installed: not stale, not tagged, not counted
@@ -5453,7 +5456,7 @@ TEST(MsgidGuard, EveryRetagRefusalLeavesTheTagBytesAlone) {
       const psa_key_id_t saved = st.liveKeys(18).mac;
       const uint32_t before = f.rol.staleSessionDropsForTest();
       st.setMacKeyForTest(18, PSA_KEY_ID_NULL);
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "no K_mac";
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "no K_mac";
       st.setMacKeyForTest(18, saved);
       EXPECT_EQ(f.rol.staleSessionDropsForTest(), before);
       untouched(c); }
@@ -5463,14 +5466,14 @@ TEST(MsgidGuard, EveryRetagRefusalLeavesTheTagBytesAlone) {
       const psa_key_id_t saved = st.liveKeys(18).mac;
       const uint32_t before = f.rol.staleSessionDropsForTest();
       st.setMacKeyForTest(18, static_cast<psa_key_id_t>(0x7FFFFFF0u));
-      EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "PSA rejects the key";
+      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "PSA rejects the key";
       st.setMacKeyForTest(18, saved);
       EXPECT_EQ(f.rol.staleSessionDropsForTest(), before);
       untouched(c); }
     { // a peer this hub has no session id for
       LORAClient other; other.set_name("other"); other.set_short_address(77);
       RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      EXPECT_FALSE(other.sealBurstCopyTag(&c.enc, &c.hdr)) << "no session id for the peer";
+      EXPECT_FALSE(other.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "no session id for the peer";
       untouched(c); }
 }
 
@@ -11643,12 +11646,12 @@ TEST(KeyStoreS2, AFrameSealedBeforeAClearIsNeverRetaggedAfterIt) {
     f.rol.send_remote_config();                          // seals: snapshots generation 1
     { RetagCase c; uint8_t want[framecrypto::kSessionCmacTagBytes];
       c.oracle(f.base, want);
-      ASSERT_TRUE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "control";
+      ASSERT_TRUE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "control";
       EXPECT_EQ(0, memcmp(c.tag, want, sizeof(want))) << "the tag is the oracle's"; }
     KP(f.rol).clearSessionKeys_();
     const uint32_t before = f.rol.staleSessionDropsForTest();
     RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-    EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr));
+    EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr));
     EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1) << "counted as stale";
     for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
 }
@@ -11673,12 +11676,12 @@ TEST(KeyStoreS2, TwoNodesKeepIndependentGenerationsAndSealSnapshots) {
     EXPECT_EQ(other.sessionGenerationForTest(), 1u) << "node 17 is untouched";
 
     RetagCase c17; c17.hdr.destaddress = 17; memset(c17.tag, 0xAA, sizeof(c17.tag));
-    EXPECT_TRUE(other.sealBurstCopyTag(&c17.enc, &c17.hdr)) << "node 17's copy still retags";
+    EXPECT_TRUE(other.retagLikeLastFrameForTest(&c17.enc, &c17.hdr)) << "node 17's copy still retags";
     bool changed = false;
     for (uint8_t b : c17.tag) changed |= (b != 0xAA);
     EXPECT_TRUE(changed);
     RetagCase c18;
-    EXPECT_FALSE(f.rol.sealBurstCopyTag(&c18.enc, &c18.hdr)) << "node 18's old copy is stale";
+    EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c18.enc, &c18.hdr)) << "node 18's old copy is stale";
 }
 
 // S2: MAC-2 works on mac::MacHdr, whose address, subnet and burst fields are one
@@ -11724,8 +11727,151 @@ TEST(KeyStoreS2, ACopyHeaderWiderThanTheMacHeaderIsNotRetagged) {
     f.rol.mark_session_confirmed_for_test();
     f.rol.send_remote_config();
     { RetagCase c; c.hdr.burstindex = 0xFF;
-      EXPECT_TRUE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr)) << "control: a byte-wide index retags"; }
+      EXPECT_TRUE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "control: a byte-wide index retags"; }
     RetagCase c; c.hdr.burstindex = 0x100; memset(c.tag, 0xAA, sizeof(c.tag));
-    EXPECT_FALSE(f.rol.sealBurstCopyTag(&c.enc, &c.hdr));
+    EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr));
     for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
+}
+
+// =============================================================================
+// F4 (docs/mac-review-2026-10-16.md): K_enc/K_mac generation pairing must hold
+// PER FRAME. Before S4 the retag checked a per-destination snapshot that the next
+// seal for that destination overwrote, so a frame still stored from generation g
+// passed once anything was sealed under g+1: its copies went out with a g+1 tag
+// over a g ciphertext (the node verifies, then decrypts garbage). Since S4 the
+// copy sealer travels with the frame, bound to the key epoch it was sealed under.
+// =============================================================================
+TEST(F4PerFrameSeal, AStoredFrameSealedBeforeAReKeyIsNeverTaggedAfterIt) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    f.clock.tick(10);
+    const uint32_t id = static_cast<AckProbe &>(f.rol).ctl().last_msgid;
+    ASSERT_NE(id, 0u);
+    auto copiesOf = [&](uint32_t msgid) {
+        int n = 0;
+        const auto frames = f.radio.hub_to_node_frames();
+        for (const auto &fr : frames) {
+            auto m = proto_sim::as_op(fr);
+            n += (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Encrypted &&
+                  m->header.msgId == msgid);
+        }
+        return n;
+    };
+    ASSERT_EQ(copiesOf(id), 1) << "precondition: the op went out once, sealed";
+
+    // A re-key that does NOT pass through send_login (which would drop the
+    // stored frame): the generation moves on, and a new frame is sealed under it.
+    ASSERT_TRUE(f.rol.deriveSessionKeysForTest(0xDEADBEEFu, kTestNodeNonce));
+    f.rol.send_remote_config();
+    f.clock.tick(10);
+
+    f.clock.tick(3050);                                  // the op's retry re-sends the STORED frame
+    EXPECT_EQ(copiesOf(id), 1)
+        << "the stored frame belongs to the old keys: its retry copy must be dropped, never tagged";
+}
+
+// S4: every frame leaves through mac0_send_, which attaches the frame's OWN copy
+// sealer -- for a sealed frame the MAC-2 one, bound to this node; for a
+// plaintext frame none.
+TEST(F4PerFrameSeal, ASealedFrameCarriesItsOwnCopySealerAndAPlaintextOneNone) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();
+    ASSERT_FALSE(f.tracker.sent_policy.empty());
+    const auto &sealed = f.tracker.sent_policy.back();
+    EXPECT_EQ(sealed.sealer, &mac2::LinkSecurity::copySealer);
+    const mac2::FrameSeal b = mac2::FrameSeal::fromBinding(sealed.seal_binding);
+    EXPECT_TRUE(b.sealed);
+    EXPECT_EQ(b.peer, 18u);
+
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;                            // no session: plaintext
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    ASSERT_FALSE(h.tracker.sent_policy.empty());
+    EXPECT_EQ(h.tracker.sent_policy.back().sealer, nullptr);
+    EXPECT_EQ(h.tracker.sent_policy.back().seal_binding, 0u);
+}
+
+// The frame's binding names the keys it was sealed under: after a fresh LOGIN
+// challenge (keys cleared) or a re-key, the sealer refuses a copy of it, and the
+// refusal is counted as stale.
+TEST(F4PerFrameSeal, TheCopySealerRefusesAFrameAfterAClearAndAfterAReKey) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();
+    uint64_t binding = f.tracker.sent_policy.back().seal_binding;
+    RetagCase c;
+    mac::MacHdr hdr;
+    ASSERT_TRUE(machdr::fromLoraHeader(&c.hdr, &hdr));
+    uint8_t tag[8];
+    ASSERT_TRUE(mac2::LinkSecurity::copySealer(&binding, hdr, c.ct, sizeof(c.ct), tag)) << "control";
+    ASSERT_TRUE(f.rol.deriveSessionKeysForTest(0xDEADBEEFu, kTestNodeNonce));
+    const uint32_t before = f.rol.staleSessionDropsForTest();
+    EXPECT_FALSE(mac2::LinkSecurity::copySealer(&binding, hdr, c.ct, sizeof(c.ct), tag))
+        << "re-keyed since the frame was sealed";
+    EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1);
+    // A frame sealed under the NEW keys is fine...
+    f.rol.send_remote_config();
+    uint64_t fresh = f.tracker.sent_policy.back().seal_binding;
+    EXPECT_TRUE(mac2::LinkSecurity::copySealer(&fresh, hdr, c.ct, sizeof(c.ct), tag));
+    // ...until the keys are cleared (a fresh LOGIN challenge).
+    KP(f.rol).clearSessionKeys_();
+    EXPECT_FALSE(mac2::LinkSecurity::copySealer(&fresh, hdr, c.ct, sizeof(c.ct), tag));
+    EXPECT_FALSE(mac2::LinkSecurity::copySealer(nullptr, hdr, c.ct, sizeof(c.ct), tag)) << "no binding";
+}
+
+// H-1 host sanity (S4): the per-copy sealer on its hot path -- one stack-built
+// CMAC input, two map look-ups and one psa_mac_compute under the key lock. The
+// bench budget is 1 ms p50 / 3 ms max on the ESP32; on a host it must be far
+// below that, and a regression of an order of magnitude (a heap allocation per
+// byte, a key re-import per copy) shows up here before a bench run.
+TEST(F4PerFrameSeal, TheCopySealerHotPathStaysCheapOnTheHost) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_remote_config();
+    uint64_t binding = f.tracker.sent_policy.back().seal_binding;
+    RetagCase c;
+    mac::MacHdr hdr;
+    ASSERT_TRUE(machdr::fromLoraHeader(&c.hdr, &hdr));
+    uint8_t ct[120];
+    for (size_t i = 0; i < sizeof(ct); ++i) ct[i] = (uint8_t) i;
+    std::vector<int64_t> us;
+    us.reserve(2000);
+    uint8_t tag[8];
+    for (int i = 0; i < 2000; ++i) {
+        hdr.burst_idx = (uint8_t) (i % 17);
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ok = mac2::LinkSecurity::copySealer(&binding, hdr, ct, sizeof(ct), tag);
+        const auto t1 = std::chrono::steady_clock::now();
+        ASSERT_TRUE(ok);
+        us.push_back(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+    }
+    std::sort(us.begin(), us.end());
+    EXPECT_LT(us[us.size() / 2], 200) << "p50 us";
+    EXPECT_LT(us[us.size() * 99 / 100], 1000) << "p99 us";
+}
+
+// The other half of F4: under UNCHANGED keys the stored frame's retry carries the
+// same binding and is tagged -- it goes out, and the node can verify and open it.
+TEST(F4PerFrameSeal, AStoredFramesRetryUnderTheSameKeysIsTaggedAndVerifies) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    f.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    f.clock.tick(10);
+    const uint32_t id = static_cast<AckProbe &>(f.rol).ctl().last_msgid;
+    f.clock.tick(3050);                                  // the retry re-sends the stored frame
+    int copies = 0, opened = 0;
+    const auto frames = f.radio.hub_to_node_frames();
+    for (const auto &fr : frames) {
+        auto m = proto_sim::as_op(fr);
+        if (!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Encrypted ||
+            m->header.msgId != id)
+            continue;
+        ++copies;
+        opened += decrypt_downlink(fr, f.base).has_value();
+    }
+    EXPECT_EQ(copies, 2) << "the original and its retry";
+    EXPECT_EQ(opened, 2) << "both verify under the node's keys";
 }

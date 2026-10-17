@@ -55,6 +55,7 @@ void SessionKeyStore::install(mac::Addr peer, uint32_t session_id, const KeyPair
     k.live                 = keys;
     k.installed_session_id = session_id;
     ++k.generation;
+    ++k.key_epoch;
 }
 
 void SessionKeyStore::clearKeys(mac::Addr peer)
@@ -65,8 +66,7 @@ void SessionKeyStore::clearKeys(mac::Addr peer)
         return;
     LinkSecurity::destroy(it->second.live);
     it->second.installed_session_id = 0;
-    it->second.has_seal             = false;
-    it->second.seal_generation      = 0;
+    ++it->second.key_epoch;
 }
 
 void SessionKeyStore::forget(mac::Addr peer)
@@ -95,6 +95,13 @@ uint32_t SessionKeyStore::generation(mac::Addr peer) const
     std::lock_guard<std::mutex> lock(this->keys_mutex_);
     auto it = this->keys_.find(peer);
     return it == this->keys_.end() ? 0u : it->second.generation;
+}
+
+uint32_t SessionKeyStore::staleDrops(mac::Addr peer) const
+{
+    std::lock_guard<std::mutex> lock(this->keys_mutex_);
+    auto it = this->keys_.find(peer);
+    return it == this->keys_.end() ? 0u : it->second.stale_drops;
 }
 
 uint32_t SessionKeyStore::installedSessionId(mac::Addr peer) const
@@ -328,10 +335,10 @@ static bool s_ctr_pass(bool encrypt, psa_key_id_t key_id,
 
 // The key id is read AND USED under keys_mutex_: this also runs on the esp_timer
 // task (build_mac_ping_frame_) while the ESPHome loop can install/destroy keys.
-// Snapshots the generation the ciphertext is sealed under (I3): the generation,
+// Records which key epoch the ciphertext is sealed under (I3, F4): the epoch,
 // not the key id, because volatile key ids are reused slot indices.
 LinkSecurity::Seal LinkSecurity::sealDownlink(const mac::MacHdr &hdr, const uint8_t *pt,
-                                              size_t len, uint8_t *ct)
+                                              size_t len, uint8_t *ct, FrameSeal *seal)
 {
     // The CTR counter block holds 31 bits of msgid but the CMAC covers 32.
     if (!framecrypto::msgidFitsCtr(hdr.fcnt))
@@ -348,21 +355,24 @@ LinkSecurity::Seal LinkSecurity::sealDownlink(const mac::MacHdr &hdr, const uint
     auto it = this->store_.keys_.find(hdr.dst);
     if (it == this->store_.keys_.end() || it->second.live.enc == PSA_KEY_ID_NULL)
         return Seal::NoKey;
-    it->second.has_seal        = true;
-    it->second.seal_generation = it->second.generation;
-    return s_ctr_pass(true, it->second.live.enc, ctr_block, pt, len, ct) ? Seal::Ok : Seal::Failed;
+    if (!s_ctr_pass(true, it->second.live.enc, ctr_block, pt, len, ct))
+        return Seal::Failed;
+    seal->sealed    = true;
+    seal->peer      = hdr.dst;
+    seal->key_epoch = it->second.key_epoch;
+    return Seal::Ok;
 }
 
 // The H-1-measured per-copy path: everything that needs no key runs before the
 // lock, the lock covers one psa_mac_compute, the input lives on the stack.
-LinkSecurity::Retag LinkSecurity::retagCopy(mac::Addr self, const mac::MacHdr &copy,
+LinkSecurity::Retag LinkSecurity::retagCopy(const FrameSeal &seal, const mac::MacHdr &copy,
                                             const uint8_t *ct, size_t ct_len,
                                             uint8_t tag[kTagBytes])
 {
     if (!framecrypto::msgidFitsCtr(copy.fcnt))
         return Retag::MsgidSpent;
     uint32_t session_id = 0;
-    if (!this->store_.sessionId(self, &session_id))
+    if (!seal.sealed || !this->store_.sessionId(seal.peer, &session_id))
         return Retag::NoSession;
     if (ct_len > kMaxCt)
         return Retag::Failed;
@@ -375,27 +385,31 @@ LinkSecurity::Retag LinkSecurity::retagCopy(mac::Addr self, const mac::MacHdr &c
     const size_t input_len = framecrypto::kEtmPrefixBytes + ct_len;
 
     uint8_t out[kTagBytes];
-    const Retag verdict = this->macUnderKeyLock_(self, copy.dst, mac_input, input_len, out);
+    FrameSeal bound = seal;
+    if (copy.dst != seal.peer)
+        bound.key_epoch = ~seal.key_epoch;   // a copy for another node: never this frame's
+    const Retag verdict = this->macUnderKeyLock_(bound, mac_input, input_len, out);
     if (verdict == Retag::Ok)
         memcpy(tag, out, sizeof(out));
     return verdict;
 }
 
-// The ONLY part of the retag that holds keys_mutex_: self's generation and K_mac
-// and the destination's seal snapshot are read AND USED inside it (I3, I3 (c)).
-// One psa_mac_compute, no logging, no heap.
-LinkSecurity::Retag LinkSecurity::macUnderKeyLock_(mac::Addr self, mac::Addr dst,
-                                                   const uint8_t *in, size_t len,
-                                                   uint8_t (&out)[kTagBytes])
+// The ONLY part of the retag that holds keys_mutex_: the peer's key epoch and
+// K_mac are read AND USED inside it (I3, I3 (c), F4). One psa_mac_compute, no
+// logging, no heap.
+LinkSecurity::Retag LinkSecurity::macUnderKeyLock_(const FrameSeal &seal, const uint8_t *in,
+                                                   size_t len, uint8_t (&out)[kTagBytes])
 {
     std::lock_guard<std::mutex> lock(this->store_.keys_mutex_);
-    const auto end = this->store_.keys_.end();
-    auto s = this->store_.keys_.find(self);
-    const uint32_t generation = (s == end) ? 0u : s->second.generation;
-    auto d = this->store_.keys_.find(dst);
-    if (d == end || !d->second.has_seal || d->second.seal_generation != generation)
+    auto s = this->store_.keys_.find(seal.peer);
+    if (s == this->store_.keys_.end())
         return Retag::Stale;
-    const psa_key_id_t mac_key = (s == end) ? PSA_KEY_ID_NULL : s->second.live.mac;
+    if (s->second.key_epoch != seal.key_epoch)
+    {
+        ++s->second.stale_drops;
+        return Retag::Stale;
+    }
+    const psa_key_id_t mac_key = s->second.live.mac;
     if (mac_key == PSA_KEY_ID_NULL)
         return Retag::Failed;
     size_t out_len = 0;
@@ -439,6 +453,15 @@ bool LinkSecurity::decryptUplink(const mac::MacHdr &hdr, uint32_t session_id, co
     framecrypto::buildCtrInitialBlock(session_id, hdr.src, /*downlink=*/false, hdr.fcnt,
                                       /*block_idx=*/0, ctr_block);
     return s_ctr_pass(false, keys.enc, ctr_block, ct, ct_len, pt);
+}
+
+bool LinkSecurity::copySealer(void *ctx, const mac::MacHdr &copy, const uint8_t *ct,
+                              size_t ct_len, uint8_t tag[8])
+{
+    if (ctx == nullptr)
+        return false;
+    const FrameSeal seal = FrameSeal::fromBinding(*static_cast<const uint64_t *>(ctx));
+    return hub().retagCopy(seal, copy, ct, ct_len, tag) == Retag::Ok;
 }
 
 bool LinkSecurity::ctrEncryptForTest(mac::Addr peer, const uint8_t iv[16], const uint8_t *in,

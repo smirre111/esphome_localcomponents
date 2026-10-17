@@ -17,6 +17,8 @@
 
 #include "esphome/components/lora_client/lora_client.h"
 #include "esphome/components/blindsproto/blinds.pb-c.h"
+// mac::CopySealer: MAC-2's per-copy sealer travels with an encrypted frame (S4).
+#include "esphome/components/lora_client/MacSap.h"
 // B1a: the reordering transmit queue. Dependency-free (stdint only), so
 // including it here costs nothing; qualified path for the same reason as
 // TimedGrid.h in the .cpp.
@@ -65,6 +67,11 @@ typedef struct
   uint32_t tx_supersede_gen;
   uint8_t  tx_on_mark;        // TxPolicy::on_mark, stamped into the header
   uint8_t  tx_expects_reply;  // TxPolicy::expects_reply: hold the response window
+  // S4: MAC-2's sealer for THIS frame's copies and the binding it is called
+  // with (TxPolicy::sealer / seal_binding). Opaque here: MAC-0 never sees a key.
+  mac::CopySealer tx_sealer;
+  uint64_t        tx_seal_binding;
+  uint8_t         tx_fire_stamp;  // TxPolicy::fire_stamp
 } rx_buffer_t;
 
 // Statistics
@@ -135,6 +142,19 @@ namespace esphome
     // made the hub skip two marks — lost frames and empty windows around every
     // beacon.
     bool     expects_reply{true};
+
+    // S4: MAC-2's per-copy sealer for an ENCRYPTED frame (review 5.3), set by
+    // the producer that sealed it and bound to that ONE frame: `seal_binding`
+    // is opaque to MAC-0, stored with the queued frame and handed back to the
+    // sealer as its ctx (a pointer to it) once per stamped copy. The tracker
+    // never looks up a client or a key. nullptr = a plaintext frame.
+    mac::CopySealer sealer{nullptr};
+    uint64_t        seal_binding{0};
+
+    // Stamp each copy's fire instant (fireRound/fireOffsetUs). False only for
+    // the broadcast beacon: it declares its own round and slot, the node reads
+    // it on its own path, and the stamp would take it past kBeaconPayloadBytes.
+    bool     fire_stamp{true};
   };
 
 
@@ -397,7 +417,8 @@ namespace esphome
 
       void sendPacketBurst(uint8_t *data, size_t len, int copies = 0,
                            uint32_t stride_ms = 0, int64_t not_before_us = 0,
-                           bool on_mark = false);
+                           bool on_mark = false, mac::CopySealer sealer = nullptr,
+                           uint64_t seal_binding = 0, bool fire_stamp = true);
 
       // Drift test: emit ONE copy instead of txSlotsPerRound.
       //
@@ -502,6 +523,9 @@ namespace esphome
       uint32_t worst_poll_gap_us_{0};
 
       esp_err_t init_memory_pool(void);
+      // S4: one copy's tag through the frame's own MAC-2 sealer (sendPacketBurst).
+      bool sealCopy_(mac::CopySealer sealer, uint64_t *binding, const ::LoraHeader *header,
+                     ::EncryptedPayload *enc);
       int64_t grid_anchor_us_{0};
       // The last beacon round this hub queued a frame for, so loop() does not
       // queue the same beacon repeatedly while its mark approaches. Held as
@@ -556,7 +580,7 @@ namespace esphome
       uint32_t tx_stamp_misses_{0};
       // H-1 (mac-separation-implementation-plan.md's hardware acceptance
       // gates): per-copy tag-write latency (stamp -> tag written, i.e. the
-      // wall-clock cost of sealBurstCopyTag() inside sendPacketBurst's retag
+      // wall-clock cost of the copy sealer (sealCopy_) inside sendPacketBurst's retag
       // loop). A fixed-width histogram rather than storing samples: the
       // accept gate only needs p50/p99/max against a 1ms/3ms budget, and a
       // run exercises far more than kTagLatencyReportEvery copies.

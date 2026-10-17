@@ -1762,3 +1762,141 @@ TEST(RealTrackerBeacon, ALaterBeaconCarriesItsOwnRoundAndTheFullBroadcastHeader)
     EXPECT_EQ(t.postTxHoldMs(), 0u) << "a broadcast nobody answers: no hold after it";
     lora_client_operation_message__free_unpacked(msg, nullptr);
 }
+
+// =============================================================================
+// S4 (docs/mac-separation-layering-plan.md): an encrypted frame carries its own
+// MAC-2 copy sealer in TxPolicy. MAC-0 stamps each copy, hands the sealer the
+// stamped header (as a mac::MacHdr), the ciphertext and the frame's opaque
+// binding, and writes the returned tag -- it never looks up a client or a key.
+// =============================================================================
+namespace {
+struct SealLog {
+    int calls{0};
+    uint64_t binding{0};
+    std::vector<mac::MacHdr> hdrs;
+    bool answer{true};
+};
+SealLog g_seal;
+bool fakeSealer(void *ctx, const mac::MacHdr &h, const uint8_t *ct, size_t len, uint8_t tag[8]) {
+    g_seal.calls++;
+    g_seal.binding = *static_cast<uint64_t *>(ctx);
+    g_seal.hdrs.push_back(h);
+    (void) ct; (void) len;
+    for (int i = 0; i < 8; ++i) tag[i] = (uint8_t) (0xC0 + h.burst_idx);
+    return g_seal.answer;
+}
+std::vector<uint8_t> encryptedFrame() {
+    LoraHeader hdr = LORA_HEADER__INIT;
+    hdr.destaddress = 18; hdr.destsubnet = 2; hdr.senderaddress = 1; hdr.msgid = 42;
+    uint8_t ct[4] = {1, 2, 3, 4};
+    uint8_t tag[8] = {0};
+    EncryptedPayload enc = ENCRYPTED_PAYLOAD__INIT;
+    enc.ciphertext.data = ct; enc.ciphertext.len = sizeof(ct);
+    enc.tag.data = tag; enc.tag.len = sizeof(tag);
+    LoraClientOperationMessage msg = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    msg.header = &hdr;
+    msg.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
+    msg.encrypted = &enc;
+    std::vector<uint8_t> buf(lora_client_operation_message__get_packed_size(&msg));
+    lora_client_operation_message__pack(&msg, buf.data());
+    return buf;
+}
+LoraClientOperationMessage *unpackPacket(size_t i) {
+    const auto &p = lorahal::rec().packets.at(i);
+    return lora_client_operation_message__unpack(NULL, p.size(), p.data());
+}
+constexpr uint64_t kBinding = 0x8000001200000005ULL;
+}  // namespace
+
+TEST(RealTrackerSealer, EveryCopyIsTaggedByTheFramesOwnSealerOverItsStampedHeader) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(3'000'000);
+    g_seal = SealLog{};
+    LORATracker t;
+    t.startGrid();
+    auto f = encryptedFrame();
+    t.sendPacketBurst(f.data(), f.size(), /*copies=*/3, /*stride_ms=*/40, 0, false,
+                      &fakeSealer, kBinding);
+    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 3);
+    ASSERT_EQ(g_seal.calls, 3) << "one sealer call per copy";
+    EXPECT_EQ(g_seal.binding, kBinding) << "the frame's own binding is handed back";
+    for (size_t k = 0; k < 3; ++k) {
+        LoraClientOperationMessage *m = unpackPacket(k);
+        ASSERT_NE(m, nullptr);
+        const mac::MacHdr &h = g_seal.hdrs[k];
+        EXPECT_EQ(h.burst_idx, k);
+        EXPECT_EQ(h.burst_cnt, 3u);
+        EXPECT_EQ(h.dst, 18u);
+        EXPECT_EQ(h.fcnt, 42u);
+        EXPECT_TRUE(h.stamped) << "the sealer sees the STAMPED header";
+        EXPECT_EQ(h.fire_round, m->header->fireround);
+        EXPECT_EQ(h.fire_off_us, m->header->fireoffsetus);
+        ASSERT_EQ(m->encrypted->tag.len, 8u);
+        for (int i = 0; i < 8; ++i) EXPECT_EQ(m->encrypted->tag.data[i], (uint8_t) (0xC0 + k));
+        lora_client_operation_message__free_unpacked(m, NULL);
+    }
+}
+
+TEST(RealTrackerSealer, ACopyTheSealerRefusesIsDropped) {
+    lorahal::rec().reset();
+    g_seal = SealLog{};
+    g_seal.answer = false;
+    LORATracker t;
+    auto f = encryptedFrame();
+    t.sendPacketBurst(f.data(), f.size(), 2, 0, 0, false, &fakeSealer, kBinding);
+    EXPECT_EQ(g_seal.calls, 2);
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0) << "refused copies never leave";
+}
+
+TEST(RealTrackerSealer, AnEncryptedFrameWithoutASealerIsNeverSentHalfSealed) {
+    lorahal::rec().reset();
+    LORATracker t;
+    auto f = encryptedFrame();
+    t.sendPacketBurst(f.data(), f.size(), 2, 0);
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0);
+}
+
+TEST(RealTrackerSealer, APlaintextFrameNeverReachesTheSealer) {
+    lorahal::rec().reset();
+    g_seal = SealLog{};
+    LORATracker t;
+    auto f = packedOperationFrame();
+    t.sendPacketBurst(f.data(), f.size(), 2, 0, 0, false, &fakeSealer, kBinding);
+    EXPECT_EQ(g_seal.calls, 0);
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 2);
+}
+
+TEST(RealTrackerSealer, TheSealerAndItsBindingTravelWithTheQueuedFrame) {
+    lorahal::rec().reset();
+    g_seal = SealLog{};
+    TxProbe t;
+    t.init();
+    auto f = encryptedFrame();
+    TxPolicy p;
+    p.copies = 1;
+    p.sealer = &fakeSealer;
+    p.seal_binding = kBinding;
+    ASSERT_TRUE(t.send(f.data(), f.size(), p));
+    ASSERT_TRUE(t.serviceTxQueue(0));
+    EXPECT_EQ(g_seal.calls, 1);
+    EXPECT_EQ(g_seal.binding, kBinding);
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+}
+
+TEST(RealTrackerSealer, AFrameAskingForNoFireStampIsNotStampedEvenOnAGrid) {
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(3'000'000);
+    for (bool stamp : {true, false}) {
+        lorahal::rec().reset();
+        LORATracker t;
+        t.startGrid();
+        auto f = packedOperationFrame();
+        t.sendPacketBurst(f.data(), f.size(), 1, 0, 0, false, nullptr, 0, stamp);
+        ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
+        LoraClientOperationMessage *m = unpackPacket(0);
+        ASSERT_NE(m, nullptr);
+        EXPECT_EQ((bool) m->header->firestamped, stamp);
+        lora_client_operation_message__free_unpacked(m, NULL);
+    }
+}

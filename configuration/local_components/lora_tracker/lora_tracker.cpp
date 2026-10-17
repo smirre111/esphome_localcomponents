@@ -40,6 +40,8 @@
 // Section 4.4's pending-data bitmap. The tracker publishes it because the
 // fleet-wide view is here, where the queues are.
 #include "esphome/components/lora_client/PendingData.h"
+// S4: the stamped copy header, decoded for the frame's own copy sealer.
+#include "esphome/components/lora_client/MacHdrCodec.h"
 
 #ifdef USE_OTA
 #include "esphome/components/ota/ota_backend.h"
@@ -439,7 +441,9 @@ namespace esphome
       lora_tx_busy_ = true;
       this->sendPacketBurst(rx_buffer->data, rx_buffer->length,
                             rx_buffer->tx_copies, rx_buffer->tx_stride_ms,
-                            fire_at_us, rx_buffer->tx_on_mark != 0);
+                            fire_at_us, rx_buffer->tx_on_mark != 0,
+                            rx_buffer->tx_sealer, rx_buffer->tx_seal_binding,
+                            rx_buffer->tx_fire_stamp != 0);
       lora_tx_busy_ = false;
 
       if (rx_buffer->length > 0)
@@ -847,6 +851,7 @@ namespace esphome
       p.earliest_us = fire;
       p.priority    = 0;              // a beacon that slips its mark is useless
       p.expects_reply = false;        // a broadcast nobody answers: no hold after it
+      p.fire_stamp  = false;          // declares its own round/slot; kBeaconPayloadBytes
       if (!this->send(buf.data(), buf.size(), p))
       {
         // Dropped rather than queued: no pool buffer. Say so, and let the next
@@ -1149,6 +1154,9 @@ namespace esphome
         rx_buffer->tx_supersede_gen = policy.supersede_gen;
         rx_buffer->tx_on_mark       = policy.on_mark ? 1 : 0;
         rx_buffer->tx_expects_reply = policy.expects_reply ? 1 : 0;
+        rx_buffer->tx_sealer        = policy.sealer;
+        rx_buffer->tx_seal_binding  = policy.seal_binding;
+        rx_buffer->tx_fire_stamp    = policy.fire_stamp ? 1 : 0;
 
         // Recorded HERE, at the moment the frame is accepted, not when it
         // reaches the front. A second command queued while the first is still
@@ -1196,9 +1204,28 @@ namespace esphome
       return false;
     }
 
+    // One copy's tag, through the frame's own MAC-2 sealer: decode the stamped
+    // header into a MacHdr, let the sealer compute the tag over it and the
+    // ciphertext, write it over the placeholder in place. No key, no client, no
+    // heap here. False drops the copy.
+    bool LORATracker::sealCopy_(mac::CopySealer sealer, uint64_t *binding,
+                                const ::LoraHeader *header, ::EncryptedPayload *enc)
+    {
+      mac::MacHdr hdr;
+      uint8_t tag[8];
+      if (sealer == nullptr || !machdr::fromLoraHeader(header, &hdr) ||
+          enc->tag.data == nullptr || enc->tag.len != sizeof(tag))
+        return false;
+      if (!sealer(binding, hdr, enc->ciphertext.data, enc->ciphertext.len, tag))
+        return false;
+      memcpy(enc->tag.data, tag, sizeof(tag));
+      return true;
+    }
+
     void LORATracker::sendPacketBurst(uint8_t *data, size_t len, int copies,
                                       uint32_t stride_ms, int64_t not_before_us,
-                                      bool on_mark)
+                                      bool on_mark, mac::CopySealer sealer,
+                                      uint64_t seal_binding, bool fire_stamp)
     {
 
       // const TickType_t xFrequency = pdMS_TO_TICKS(142); // For RX /TX config 3x RX + 7x TX
@@ -1236,6 +1263,10 @@ namespace esphome
       LoraClientOperationMessage *burstMsg =
           lora_client_operation_message__unpack(NULL, len, data);
       const bool canStamp = (burstMsg != nullptr && burstMsg->header != nullptr);
+      // Sealed once at pack time; every copy needs its own tag (below).
+      const bool encrypted = canStamp &&
+                             burstMsg->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED &&
+                             burstMsg->encrypted != nullptr;
       // A placed frame that reaches the radio after its mark is no longer ON it.
       // Sending it is still better than dropping a command, but it must not claim
       // the mark, and it must be visible: the node anchors to arrival, so a late
@@ -1294,11 +1325,11 @@ namespace esphome
           // now if that has passed or it has none. firePacket then waits to it.
           int64_t fire_at_us = copy_at_us;
           bool stamped = false;
-          // Not the broadcast beacon: it already declares its own round and slot,
-          // the node reads it on its own path, and the stamp would take it past
-          // kBeaconPayloadBytes — the size its fleet-wide airtime is budgeted on.
-          if (this->grid_started_ &&
-              burstMsg->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON)
+          // Not the broadcast beacon (fire_stamp false, TxPolicy): it already
+          // declares its own round and slot, the node reads it on its own path,
+          // and the stamp would take it past kBeaconPayloadBytes — the size its
+          // fleet-wide airtime is budgeted on.
+          if (this->grid_started_ && fire_stamp)
           {
             const int64_t reachable = esp_timer_get_time() + kStampLeadUs;
             if (fire_at_us < reachable)
@@ -1319,31 +1350,26 @@ namespace esphome
           // the loop. Recompute it now, per copy, right before packing.
           // A copy whose session has no keys (or has gone stale) is
           // dropped rather than sent half-sealed.
+          //
+          // S4: through the frame's OWN sealer (TxPolicy::sealer), bound to the
+          // keys this frame was sealed under — never a client looked up by
+          // address. A frame sealed before a re-login is refused here (F4).
           bool skip_copy = false;
-          if (burstMsg->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED &&
-              burstMsg->encrypted != nullptr)
+          if (encrypted)
           {
-            LORAClient *dest_client = nullptr;
-            for (auto *c : this->clients_)
-            {
-              if (c->short_address_ == burstMsg->header->destaddress)
-              {
-                dest_client = c;
-                break;
-              }
-            }
             // H-1: the wall-clock cost of this call, whether it succeeds or
             // not — a session gone stale mid-burst is itself cheap to
             // detect, but the acceptance gate is about the ordinary case,
             // which is the overwhelming majority of samples.
             const int64_t seal_t0 = esp_timer_get_time();
-            const bool sealed = dest_client != nullptr &&
-                                dest_client->sealBurstCopyTag(burstMsg->encrypted, burstMsg->header);
+            const bool sealed = this->sealCopy_(sealer, &seal_binding, burstMsg->header,
+                                                burstMsg->encrypted);
             this->noteTagWriteLatencyUs_(
                 (uint32_t) (esp_timer_get_time() - seal_t0));
             if (!sealed)
             {
-              ESP_LOGW(TAG, "Could not seal copy %d's tag (no session?) — dropping this copy", cnt);
+              ESP_LOGW(TAG, "Could not seal copy %d's tag (no session, or keys changed since the "
+                            "frame was sealed) — dropping this copy", cnt);
               skip_copy = true;
             }
           }
@@ -1377,11 +1403,11 @@ namespace esphome
                        (unsigned) this->tx_stamp_misses_);
             }
           }
-          else if (!skip_copy && burstMsg->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED)
+          else if (!skip_copy && !encrypted)
           {
             // OOM fallback: unindexed copy, still placed. Plaintext only —
             // an encrypted frame's `data`/`len` still carry the placeholder
-            // tag from pack time (sealBurstCopyTag never ran on them), so
+            // tag from pack time (the copy sealer never ran on them), so
             // sending them raw would ship an unverifiable frame instead of
             // dropping it.
             this->sendPacketAt(data, len, copy_at_us);
@@ -1433,7 +1459,7 @@ namespace esphome
         lora_client_operation_message__free_unpacked(burstMsg, NULL);
     }
 
-    // H-1 acceptance gate: bucket one sealBurstCopyTag() latency sample and,
+    // H-1 acceptance gate: bucket one copy-sealer (sealCopy_) latency sample and,
     // every kTagLatencyReportEvery samples, log a p50/p99/max/n summary
     // computed from the cumulative bucket counts, then reset for the next
     // window. Buckets rather than raw samples because the gate only needs

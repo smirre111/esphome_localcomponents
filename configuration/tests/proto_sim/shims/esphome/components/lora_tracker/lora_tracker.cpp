@@ -8,6 +8,7 @@
 #include "sim/sim_radio.h"
 #include "TimedGrid.h"
 #include "blinds.pb-c.h"
+#include "esphome/components/lora_client/MacHdrCodec.h"
 
 #include <cstring>
 #include <psa/crypto.h>
@@ -174,14 +175,20 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
                     m->encrypted != nullptr) {
                     m->header->burstindex = i;
                     m->header->burstcount = n;
-                    LORAClient *dest = nullptr;
-                    for (auto *c : clients_) {
-                        if (c->short_address_ == m->header->destaddress) {
-                            dest = c;
-                            break;
-                        }
-                    }
-                    if (dest == nullptr || !dest->sealBurstCopyTag(m->encrypted, m->header)) {
+                    // S4, mirrored: through the frame's OWN sealer, never a
+                    // client looked up by address (sealCopy_ in production).
+                    uint64_t binding = policy.seal_binding;
+                    mac::MacHdr hdr;
+                    uint8_t tag[8];
+                    const bool ok = policy.sealer != nullptr &&
+                                    machdr::fromLoraHeader(m->header, &hdr) &&
+                                    m->encrypted->tag.data != nullptr &&
+                                    m->encrypted->tag.len == sizeof(tag) &&
+                                    policy.sealer(&binding, hdr, m->encrypted->ciphertext.data,
+                                                  m->encrypted->ciphertext.len, tag);
+                    if (ok)
+                        memcpy(m->encrypted->tag.data, tag, sizeof(tag));
+                    if (!ok) {
                         lora_client_operation_message__free_unpacked(m, NULL);
                         continue;   // drop this copy, matching production's skip_copy
                     }

@@ -1,33 +1,17 @@
-// Minimal stub for LORAListener::sealBurstCopyTag(), used ONLY by the
-// real_lora_tracker target (tests/proto_sim/CMakeLists.txt).
+// Minimal LORAListener stubs for the real_lora_tracker target
+// (tests/proto_sim/CMakeLists.txt), which compiles the REAL lora_tracker.cpp
+// without the real lora_client.cpp.
 //
-// That target compiles the REAL lora_tracker.cpp against a STUBBED hub
-// client side (shims/esphome/components/lora_tracker/lora_tracker.cpp
-// provides the fake LORATracker; there is no fake LORAListener), so it
-// never links the real lora_client.cpp and has no other source of this
-// symbol. sendPacketBurst() now calls it unconditionally when sealing an
-// encrypted burst copy (Tier 3, mac-separation-implementation-plan.md
-// section 2(b)) — the call is a direct, non-virtual function call, so the
-// linker needs a definition to exist even on a path these tracker-only
-// tests never actually execute at runtime (clients_ is empty here; this
-// is reachable only through a real LORAClient this target never
-// constructs).
-//
-// Always failing is the correct behaviour for a stub: sendPacketBurst()
-// already treats a failed seal as "drop this copy, do not send it
-// half-sealed", which is exactly right when there is no real session to
-// seal under.
+// Since S4 the tracker no longer calls LORAListener::sealBurstCopyTag(): an
+// encrypted frame carries its own MAC-2 copy sealer in TxPolicy, so the
+// sealBurstCopyTag stub that used to live here is gone. What remains is the
+// shadow pending-mask gather below.
 #include "esphome/components/lora_client/lora_client.h"
 
 namespace esphome
 {
   namespace lora_tracker
   {
-    bool LORAListener::sealBurstCopyTag(::EncryptedPayload *, const ::LoraHeader *)
-    {
-      return false;
-    }
-
     // serviceBeacon gathers the SHADOW pending-mask inputs from every registered
     // listener. This target registers none, so the call is never reached at
     // runtime; the stub answers "listen" (the default-constructed inputs) for

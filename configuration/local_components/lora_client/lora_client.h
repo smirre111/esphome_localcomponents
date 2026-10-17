@@ -39,6 +39,7 @@
 #include <psa/crypto.h>
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -60,8 +61,8 @@ struct LoraClientOperationMessage;  // a Fire request fills it; send_cover_confi
 struct TimeSync;                    // filled by fill_timesync_
 struct ClientConfig;                // filled by fill_client_config_
 struct CoverConfig;                 // send_cover_config takes it by reference
-struct EncryptedPayload;            // Tier 3: sealBurstCopyTag takes it by pointer
-struct LoraHeader;                  // Tier 3: sealBurstCopyTag takes it by pointer
+struct EncryptedPayload;            // retagLikeLastFrameForTest takes it by pointer
+struct LoraHeader;                  // retagLikeLastFrameForTest takes it by pointer
 
 namespace esphome
 {
@@ -195,6 +196,9 @@ namespace esphome
       // The exact bytes sent (pack once), and the msgid they carry.
       std::vector<uint8_t> frame;
       uint32_t             frame_msgid{0};
+      // Which keys `frame` was sealed under (S4): a retry hands the SAME binding
+      // to the tracker, so a frame sealed before a re-key is never re-tagged (F4).
+      mac2::FrameSeal      frame_seal{};
       // Security review finding 1: a cover op / sysop issued while
       // relogin_pending_ is true would otherwise pack plaintext (session not
       // confirmed yet) and get stored — then every retry is rejected by the
@@ -599,7 +603,8 @@ namespace esphome
       // Place one copy in this node's next OPEN Class A window — RX1 if the
       // queue can still fire on it, otherwise RX2, which the node arms exactly
       // when RX1 passed with no data.
-      ClassAPlacement send_into_class_a_window_(const uint8_t *buf, size_t len);
+      ClassAPlacement send_into_class_a_window_(const uint8_t *buf, size_t len,
+                                                const mac2::FrameSeal &seal = {});
       // The mark a placed frame for this node would go out on. Shared with
       // send_grid_sync, which must declare the round it will be transmitted in.
       // The frame's SHAPE is required, not optional: clearance depends on how
@@ -864,8 +869,30 @@ namespace esphome
       // full stop. It matters most for the frames that carry no ack and have
       // no retry (a key-installing frame was the worst case, before the node
       // dropped BaseNonceExchange; LOGIN now carries the nonce with its own retry).
-      bool send_aligned_(const uint8_t *buf, size_t len);
-      bool send_aligned_(const uint8_t *buf, size_t len, const TxPolicy &policy);
+      // `seal`: which keys the frame's copies are tagged under (a plaintext frame
+      // passes none). A sealed frame sent without its seal is dropped per copy.
+      bool send_aligned_(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal = {});
+      bool send_aligned_(const uint8_t *buf, size_t len, const TxPolicy &policy,
+                         const mac2::FrameSeal &seal = {});
+
+      // ---- S4: the single MAC data path (docs/mac-separation-layering-plan.md)
+      // One packed hub->node data frame, ready for MAC-0.
+      struct MacFrame
+      {
+        std::vector<uint8_t> bytes;
+        mac2::FrameSeal      seal{};    // sealed=false: plaintext
+        uint32_t             msgid{0};  // set even when packing failed (it was allocated)
+      };
+      // THE framing path for hub->node data frames: the header (this node, the
+      // hub, the msgid), the pack and, under a confirmed session, the seal.
+      // `op` carries the payload only. The first form allocates the msgid from
+      // the session counter and encrypts iff the session is confirmed; the
+      // second is the MAC ping's (reserved / dedicated msgids, its own choice).
+      bool mac_frame_(::LoraClientOperationMessage *op, MacFrame *out);
+      bool mac_frame_(::LoraClientOperationMessage *op, uint32_t msgid, bool encrypt, MacFrame *out);
+      // THE MAC-0 data request: every frame this listener puts on the air
+      // passes here, with its copy sealer attached when it is sealed.
+      bool mac0_send_(const uint8_t *buf, size_t len, TxPolicy policy, const mac2::FrameSeal &seal);
 
       // B4: the exact bytes of the tracked op in flight, so a retry
       // retransmits them rather than re-packing from live state.
@@ -1011,6 +1038,7 @@ namespace esphome
       esp_timer_handle_t drift_timer_{nullptr};
       uint8_t  drift_frame_[128]{};
       size_t   drift_frame_len_{0};
+      mac2::FrameSeal drift_seal_{};
 
       // ModeTest state. Mirrors the drift test's, plus the parameters the node
       // needs on every frame (the node arms on the first one it hears, so every
@@ -1034,6 +1062,7 @@ namespace esphome
       esp_timer_handle_t mode_test_timer_{nullptr};
       uint8_t  mt_frame_[160]{};
       size_t   mt_frame_len_{0};
+      mac2::FrameSeal mt_seal_{};
       std::string last_mode_test_report_{};
       ModeTestSummary mode_test_summary_{};
 
@@ -1057,6 +1086,7 @@ namespace esphome
       esp_timer_handle_t mac_ping_timer_{nullptr};
       uint8_t  mac_ping_frame_[192]{};
       size_t   mac_ping_frame_len_{0};
+      mac2::FrameSeal mac_ping_seal_{};
       MacStats mac_stats_{};
       // Mode C's Class A ledger; see class_a_stats().
       ClassAStats class_a_stats_{};
@@ -1319,28 +1349,16 @@ namespace esphome
       };
 
     public:
-      // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
-      // recompute this frame's Encrypt-then-CMAC tag over its JUST-STAMPED
-      // header fields (burstIndex/burstCount/onMark/fireStamped/fireRound/
-      // fireOffsetUs) plus the already-sealed ciphertext, and overwrite
-      // `enc->tag` in place (same length, no realloc). Called by
-      // LORATracker::sendPacketBurst() once per copy, after stamping and
-      // before packing — this is what the plan's "per-copy sealing" step
-      // actually is: the ciphertext is sealed once (at
-      // pack_response_message/encrypt time), only the tag is per-copy.
-      // Returns false (caller must not send this copy) if this listener
-      // has no session keys yet.
-      //
-      // Invariant I3: refuses to retag (returns false) when the ciphertext's
-      // sealed-at session generation (s_seal_generation_map, dest-keyed) no
-      // longer matches this listener's CURRENT session_generation_ — see
-      // the map's own comment in lora_client.cpp for the one residual gap
-      // (a frame mid-burst in the tracker's queue the instant a re-login
-      // lands) and for why the generation, not the psa_key_id_t, is the
-      // marker.
-      bool sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header);
-      // For tests: how many burst copies were dropped by the check above.
-      uint32_t staleSessionDropsForTest() const { return this->tx_stale_session_drops_; }
+      // For tests (S4): retag one stamped copy exactly as the tracker does for a
+      // frame, with the copy sealer bound to the LAST frame this listener sealed
+      // (production never calls this: the tracker uses each frame's own sealer,
+      // TxPolicy::sealer). Writes enc->tag in place; false = the copy is dropped
+      // (no session, the keys changed since that frame was sealed, a copy for
+      // another node, or a tag buffer of the wrong size).
+      bool retagLikeLastFrameForTest(::EncryptedPayload *enc, const ::LoraHeader *header);
+      // For tests: how many burst copies of this node's frames were refused as
+      // stale (sealed under keys the node no longer holds).
+      uint32_t staleSessionDropsForTest() const;
 
       uint8_t  short_address_{0};
       uint8_t  subnet_address_{0};
@@ -1418,9 +1436,6 @@ namespace esphome
       // handle_encrypted_ tell "this session-opening uplink is for the session
       // I already hold" (a duplicate burst copy must not force a fresh PSA
       // import and bump the generation) apart from "this is a NEW session".
-      // Invariant I3: burst copies sealBurstCopyTag() refused because their
-      // ciphertext was sealed under a session that is no longer current.
-      uint32_t     tx_stale_session_drops_{0};
       // Set to true as soon as the startup-login path is initiated (either the
       // timer is armed or the login has already been sent).  Checked by the NTP
       // on_time_sync callback so that NTP resyncs (which fire the callback again)
@@ -1603,7 +1618,10 @@ namespace esphome
       // plus that request when the seal was refused for the msgid alone.
       void     requestMsgidRelogin_(const char *where);
       bool     pack_operation_(::LoraClientOperationMessage *plain, bool encrypt,
-                               uint8_t **out, size_t *out_len);
+                               uint8_t **out, size_t *out_len, mac2::FrameSeal *seal = nullptr);
+      // The binding of the last frame this listener sealed (FrameSeal::binding),
+      // for retagLikeLastFrameForTest. Atomic: the MAC ping builds on the timer task.
+      std::atomic<uint64_t> last_seal_binding_{0};
       bool     msgid_relogin_pending_{false};
       uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       // Arm a ONE-SHOT login retry that re-arms itself, mirroring
@@ -1640,9 +1658,8 @@ namespace esphome
       // involved. True when the frame went out. Reached only through deliver_.
       bool     dlv_fire_(DeliveryRequest &req);
       // Put the packed frame on the air the way `shape` says. True when it went out.
-      bool     fire_place_(deliverypolicy::Shape shape, const uint8_t *buf, size_t len,
-                           const char *what);
-      bool     fire_class_a_(const uint8_t *buf, size_t len, const char *what);
+      bool     fire_place_(deliverypolicy::Shape shape, const MacFrame &f, const char *what);
+      bool     fire_class_a_(const MacFrame &f, const char *what);
       // TimeSync / ClientConfig, as Fire requests.
       void     fill_timesync_(::LoraClientOperationMessage *op, ::TimeSync *ts);
       void     fill_client_config_(::LoraClientOperationMessage *op, ::ClientConfig *cc);

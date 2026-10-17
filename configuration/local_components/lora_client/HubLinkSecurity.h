@@ -11,7 +11,7 @@
 //   * Encrypt-then-CMAC: the downlink CTR seal, the per-copy downlink retag, the
 //     uplink CMAC verify and CTR decrypt.
 // SessionKeyStore is the SINGLE owner of every peer's session state (session
-// id = base nonce, live K_enc/K_mac, generation, seal-generation snapshot,
+// id = base nonce, live K_enc/K_mac, generation, key epoch,
 // installed session id). It replaces the listener members k_enc_key_id_,
 // k_mac_key_id_, session_generation_, installed_session_id_ and the five static
 // maps s_k_enc_map, s_k_mac_map, s_session_generation_map,
@@ -37,6 +37,8 @@
 //     there is no lock-order cycle.
 //   * The generation is a monotonically increasing per-peer counter, never
 //     reused (key ids are); a clear keeps it, forget (listener destroyed) drops it.
+//     A frame is bound to the KEY EPOCH instead (FrameSeal), which also moves on
+//     a clear, so a copy sealed before a fresh LOGIN challenge is refused too.
 
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +55,32 @@ namespace mac2
 
 static constexpr size_t kRootKeyBytes = 16;
 static constexpr size_t kTagBytes     = framecrypto::kSessionCmacTagBytes;
+
+// Which keys ONE sealed frame belongs to (S4, closes review F4). Travels with
+// the frame (TxPolicy::seal_binding, the queued buffer) to the tracker, whose
+// per-copy CopySealer call is refused once the peer's keys have moved on: the
+// key epoch moves on every install AND every clear, so a frame sealed before a
+// re-login is never tagged after it, however many frames are sealed since.
+struct FrameSeal
+{
+    bool      sealed{false};   // false: a plaintext frame, no sealer
+    mac::Addr peer{0};
+    uint32_t  key_epoch{0};
+    // The opaque 64-bit value MAC-0 stores with the frame and hands back to
+    // LinkSecurity::copySealer as its ctx (a pointer to it).
+    uint64_t binding() const
+    {
+        return sealed ? ((1ull << 63) | ((uint64_t) peer << 32) | key_epoch) : 0;
+    }
+    static FrameSeal fromBinding(uint64_t b)
+    {
+        FrameSeal f;
+        f.sealed    = (b >> 63) != 0;
+        f.peer      = static_cast<mac::Addr>((b >> 32) & 0xFF);
+        f.key_epoch = static_cast<uint32_t>(b & 0xFFFFFFFFu);
+        return f;
+    }
+};
 
 // The two session keys of one peer (or one unverified candidate).
 struct KeyPair
@@ -78,8 +106,8 @@ public:
     // ones, records session_id as installed, bumps the generation. Takes
     // ownership of `keys`.
     void install(mac::Addr peer, uint32_t session_id, const KeyPair &keys);
-    // Destroy the peer's live keys and its seal snapshot. Keeps the session id
-    // and the generation counter.
+    // Destroy the peer's live keys (and so every frame sealed under them: the key
+    // epoch moves). Keeps the session id and the generation counter.
     void clearKeys(mac::Addr peer);
     // Drop everything held for the peer (its listener is going away).
     void forget(mac::Addr peer);
@@ -87,6 +115,9 @@ public:
     KeyPair  liveKeys(mac::Addr peer) const;
     uint32_t generation(mac::Addr peer) const;
     uint32_t installedSessionId(mac::Addr peer) const;
+    // Burst copies refused because their frame was sealed under keys the peer
+    // no longer holds (I3 / F4).
+    uint32_t staleDrops(mac::Addr peer) const;
 
     // Test seams (characterization of the stale/failed retag rungs and of the
     // session-opening candidate decision).
@@ -100,8 +131,8 @@ private:
         KeyPair  live{};
         uint32_t generation{0};            // per peer, monotonic, never reused
         uint32_t installed_session_id{0};  // the session id `live` was derived for
-        bool     has_seal{false};          // a downlink was sealed under...
-        uint32_t seal_generation{0};       // ...this generation (I3 snapshot)
+        uint32_t key_epoch{0};             // moves on every install and clear (FrameSeal)
+        uint32_t stale_drops{0};           // copies refused as stale
     };
     mutable std::mutex                session_mutex_;   // session_ids_
     std::map<mac::Addr, uint32_t>     session_ids_;
@@ -135,16 +166,23 @@ public:
 
     // -- downlink --------------------------------------------------------------
     enum class Seal : uint8_t { Ok, MsgidSpent, NoSession, NoKey, Failed };
-    // CTR-seal `pt` for hdr.dst under hdr.fcnt into `ct` (len bytes), and
-    // snapshot the generation it was sealed under (invariant I3).
-    Seal sealDownlink(const mac::MacHdr &hdr, const uint8_t *pt, size_t len, uint8_t *ct);
+    // CTR-seal `pt` for hdr.dst under hdr.fcnt into `ct` (len bytes). On Ok,
+    // *seal says which keys the frame belongs to (invariant I3, F4).
+    Seal sealDownlink(const mac::MacHdr &hdr, const uint8_t *pt, size_t len, uint8_t *ct,
+                      FrameSeal *seal);
 
     enum class Retag : uint8_t { Ok, MsgidSpent, NoSession, Stale, Failed };
-    // The CMAC tag of one stamped burst copy, computed by listener `self`: the
-    // copy's destination must hold a seal snapshot equal to self's CURRENT
-    // generation (else Stale), and self's K_mac signs. `tag` is written only on Ok.
-    Retag retagCopy(mac::Addr self, const mac::MacHdr &copy, const uint8_t *ct,
+    // The CMAC tag of one stamped burst copy of the frame `seal` describes: the
+    // copy must be addressed to seal.peer and the peer must still hold the keys
+    // the frame was sealed under (else Stale, counted). `tag` is written only on
+    // Ok. Stack only, no logging.
+    Retag retagCopy(const FrameSeal &seal, const mac::MacHdr &copy, const uint8_t *ct,
                     size_t ct_len, uint8_t tag[kTagBytes]);
+
+    // The mac::CopySealer MAC-0 calls per copy: ctx points at the frame's
+    // FrameSeal::binding(), stored with the queued frame.
+    static bool copySealer(void *ctx, const mac::MacHdr &copy, const uint8_t *ct,
+                           size_t ct_len, uint8_t tag[8]);
 
     // -- uplink ----------------------------------------------------------------
     enum class Verify : uint8_t { Ok, NoKeys, NoMem, BadTag };
@@ -162,7 +200,7 @@ public:
                            uint8_t *out);
 
 private:
-    Retag macUnderKeyLock_(mac::Addr self, mac::Addr dst, const uint8_t *in, size_t len,
+    Retag macUnderKeyLock_(const FrameSeal &seal, const uint8_t *in, size_t len,
                            uint8_t (&out)[kTagBytes]);
     SessionKeyStore store_;
     psa_key_id_t    auth_key_{PSA_KEY_ID_NULL};

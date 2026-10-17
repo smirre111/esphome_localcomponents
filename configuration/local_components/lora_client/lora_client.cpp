@@ -6,6 +6,8 @@
 #include "esphome/components/lora_client/FrameCanon.h"
 // MAC-2 (keys, KDF, Encrypt-then-CMAC, the session key store). See its banner.
 #include "esphome/components/lora_client/HubLinkSecurity.h"
+// LoraHeader -> mac::MacHdr, shared with the tracker's copy sealer call (S4).
+#include "esphome/components/lora_client/MacHdrCodec.h"
 // The funnel rate arithmetic, so a ModeTest report is recomputed on the hub
 // rather than trusted from the node (test-plan.md I1).
 #include "esphome/components/lora_client/MacFunnel.h"
@@ -41,33 +43,6 @@
 
 static mac2::LinkSecurity &s_sec() { return mac2::LinkSecurity::hub(); }
 static mac2::SessionKeyStore &s_keys() { return mac2::LinkSecurity::hub().store(); }
-
-// Decode the protobuf header into the MAC header MAC-2 works on. False when a
-// field does not fit MacHdr's width (an address, subnet or burst position above
-// 255): such a header is never produced by the hub or a node, and accepting it
-// would let two different wire headers map onto one CMAC input. A missing
-// header decodes as all-zero (what the per-field ternaries used to produce).
-static bool s_to_mac_hdr(const ::LoraHeader *h, mac::MacHdr *out)
-{
-  *out = mac::MacHdr{};
-  if (h == nullptr)
-    return true;
-  if (h->destaddress > 0xFF || h->senderaddress > 0xFF || h->destsubnet > 0xFF ||
-      h->burstindex > 0xFF || h->burstcount > 0xFF)
-    return false;
-  out->dst           = static_cast<mac::Addr>(h->destaddress);
-  out->src           = static_cast<mac::Addr>(h->senderaddress);
-  out->subnet        = static_cast<uint8_t>(h->destsubnet);
-  out->fcnt          = h->msgid;
-  out->burst_idx     = static_cast<uint8_t>(h->burstindex);
-  out->burst_cnt     = static_cast<uint8_t>(h->burstcount);
-  out->on_mark       = h->onmark;
-  out->stamped       = h->firestamped;
-  out->fire_round    = h->fireround;
-  out->fire_off_us   = h->fireoffsetus;
-  out->session_nonce = h->sessionnonce;
-  return true;
-}
 
 // The plaintext pack: *out is malloc'd, the caller frees it.
 static bool s_pack_plaintext(const LoraClientOperationMessage *plain, uint8_t **out, size_t *out_len)
@@ -106,7 +81,8 @@ static bool s_pack_sealed(const LoraClientOperationMessage *plain, uint8_t *ciph
   // The ciphertext is sealed ONCE (CTR under K_enc); the tag written here is
   // only a PLACEHOLDER — the real tag, which DOES cover burstIndex/burstCount/
   // onMark/fireStamped/fireRound/fireOffsetUs, is computed per copy by
-  // LORAListener::sealBurstCopyTag() inside the tracker's send loop, once those
+  // the frame's copy sealer (LinkSecurity::copySealer, travelling in TxPolicy)
+  // inside the tracker's send loop, once those
   // fields are actually stamped.
   LoraHeader outer      = LORA_HEADER__INIT;
   outer.destaddress     = plain->header->destaddress;
@@ -115,7 +91,7 @@ static bool s_pack_sealed(const LoraClientOperationMessage *plain, uint8_t *ciph
   outer.msgid           = plain->header->msgid;
 
   // Placeholder tag — must be the right LENGTH (kSessionCmacTagBytes) since
-  // sealBurstCopyTag() overwrites in place without resizing. The pack below
+  // the copy sealer's tag is written over it in place, without resizing. The pack below
   // copies these bytes into *out immediately, so this local's lifetime is fine.
   uint8_t placeholder_tag[framecrypto::kSessionCmacTagBytes] = {0};
 
@@ -141,10 +117,11 @@ static bool s_pack_sealed(const LoraClientOperationMessage *plain, uint8_t *ciph
 // The encrypted branch of s_pack_operation_message: a session (base nonce)
 // exists for `dest` and the caller asked for encryption.
 static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t dest,
-                            uint8_t **out, size_t *out_len, bool *msgid_refused)
+                            uint8_t **out, size_t *out_len, bool *msgid_refused,
+                            mac2::FrameSeal *seal)
 {
   mac::MacHdr hdr;
-  if (!s_to_mac_hdr(plain->header, &hdr))
+  if (!machdr::fromLoraHeader(plain->header, &hdr))
   {
     ESP_LOGE("lora_client", "Refusing to seal a downlink whose header does not fit the MAC header");
     return false;
@@ -173,7 +150,8 @@ static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t de
     return false;
   }
 
-  const mac2::LinkSecurity::Seal sealed = s_sec().sealDownlink(hdr, inner, inner_len, cipher);
+  mac2::FrameSeal bound;
+  const mac2::LinkSecurity::Seal sealed = s_sec().sealDownlink(hdr, inner, inner_len, cipher, &bound);
   free(inner);
   if (sealed == mac2::LinkSecurity::Seal::NoSession || sealed == mac2::LinkSecurity::Seal::NoKey)
     ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
@@ -185,6 +163,8 @@ static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t de
 
   const bool packed = s_pack_sealed(plain, cipher, inner_len, out, out_len);
   free(cipher);
+  if (packed)
+    *seal = bound;   // `seal` is never null: pack_operation_ always passes one
   return packed;
 }
 
@@ -200,8 +180,9 @@ static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t de
 // must then ask for a fresh session, see LORAListener::pack_operation_().
 static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool encrypt,
                                      uint8_t **out, size_t *out_len,
-                                     bool *msgid_refused = nullptr)
+                                     bool *msgid_refused, mac2::FrameSeal *seal)
 {
+  *seal = mac2::FrameSeal{};   // never null (pack_operation_)
   if (!plain || !plain->header || !out || !out_len)
     return false;
 
@@ -215,7 +196,7 @@ static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool enc
   if (!encrypt || !has_base_nonce)
     return s_pack_plaintext(plain, out, out_len);
 
-  return s_seal_downlink(plain, dest, out, out_len, msgid_refused);
+  return s_seal_downlink(plain, dest, out, out_len, msgid_refused, seal);
 }
 
 namespace esphome
@@ -1573,46 +1554,30 @@ namespace esphome
       return this->deriveSessionKeys_(session_id, node_nonce);
     }
 
-    // The per-copy retag up-call from the tracker's send loop (until S4 moves it
-    // into a CopySealer that travels with the frame). Invariant I3 (stale-
-    // generation refusal) and I3 (c) (key read AND used under the key lock) live
-    // in LinkSecurity::retagCopy, which builds its input on the stack and logs
-    // nothing; the stale count and its log line stay here, outside any lock.
-    bool LORAListener::sealBurstCopyTag(::EncryptedPayload *enc, const ::LoraHeader *header)
+    // For tests only (S4): the tracker no longer calls back into the listener --
+    // it retags each copy through the frame's own CopySealer (TxPolicy::sealer,
+    // LinkSecurity::copySealer). This drives that same sealer with the binding of
+    // the last frame this listener sealed, so a test can retag a hand-built copy
+    // exactly as the tracker would.
+    bool LORAListener::retagLikeLastFrameForTest(::EncryptedPayload *enc, const ::LoraHeader *header)
     {
       if (enc == nullptr || header == nullptr)
         return false;
       mac::MacHdr copy;
-      if (!s_to_mac_hdr(header, &copy))
-        return false;
-
       uint8_t tag[framecrypto::kSessionCmacTagBytes];
-      const mac2::LinkSecurity::Retag verdict =
-          s_sec().retagCopy(static_cast<mac::Addr>(this->short_address_), copy,
-                            enc->ciphertext.data, enc->ciphertext.len, tag);
-      if (verdict == mac2::LinkSecurity::Retag::Stale)
-      {
-        // Invariant I3: refuse to retag a copy whose ciphertext was sealed
-        // under a DIFFERENT session generation than the one current right now
-        // (a re-login landed between pack time and this copy's turn in the
-        // burst loop). Sealing it anyway would pair an OLD ciphertext with a
-        // NEW tag, which the node simply fails to verify — not a security
-        // issue, but a silently wasted copy this at least counts.
-        ++this->tx_stale_session_drops_;
-        ESP_LOGW(TAG, "[%s] Dropping burst copy sealed under a stale session (%u so far)",
-                 this->get_name().c_str(), (unsigned) this->tx_stale_session_drops_);
+      uint64_t binding = this->last_seal_binding_.load();
+      if (!machdr::fromLoraHeader(header, &copy) || enc->tag.data == nullptr ||
+          enc->tag.len != sizeof(tag) ||
+          !mac2::LinkSecurity::copySealer(&binding, copy, enc->ciphertext.data,
+                                          enc->ciphertext.len, tag))
         return false;
-      }
-      if (verdict != mac2::LinkSecurity::Retag::Ok)
-        return false;
-
-      // enc->tag already has kSessionCmacTagBytes allocated (sealed at pack
-      // time with a placeholder) — overwrite in place, no resize.
-      if (enc->tag.data != nullptr && enc->tag.len == sizeof(tag))
-        memcpy(enc->tag.data, tag, sizeof(tag));
-      else
-        return false;
+      memcpy(enc->tag.data, tag, sizeof(tag));
       return true;
+    }
+
+    uint32_t LORAListener::staleSessionDropsForTest() const
+    {
+      return s_keys().staleDrops(static_cast<mac::Addr>(this->short_address_));
     }
 
     // ---- handle_encrypted_ stages ------------------------------------------
@@ -1742,7 +1707,7 @@ namespace esphome
       // Node uplinks never burst, so the per-copy timing fields are 0/false on
       // this path in practice -- but the tag covers whatever the header carries.
       // A header that does not fit the MAC header cannot carry a genuine tag.
-      const bool fits = s_to_mac_hdr(up.msg->header, &up.hdr);
+      const bool fits = machdr::fromLoraHeader(up.msg->header, &up.hdr);
       up.hdr.src = static_cast<mac::Addr>(up.sender);
       up.msgid   = up.hdr.fcnt;
       const ::EncryptedPayload *enc = up.msg->encrypted;
@@ -1925,12 +1890,7 @@ namespace esphome
     void LORAListener::build_mac_ping_frame_()
     {
       LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.burstindex    = 0;
-      header.burstcount    = 0;
+      uint32_t msgid = 0;
 
       // MAC-2 OFF (the default): a DEDICATED counter, deliberately not
       // incrTxMessageId().
@@ -1954,9 +1914,9 @@ namespace esphome
           this->mac_ping_crypto_ && this->session_confirmed_ &&
           this->mac_ping_crypto_next_msgid_ <= this->mac_ping_crypto_last_msgid_;
       if (encrypt_this_one)
-        header.msgid = this->mac_ping_crypto_next_msgid_++;
+        msgid = this->mac_ping_crypto_next_msgid_++;
       else
-        header.msgid = ++this->mac_ping_msgid_;
+        msgid = ++this->mac_ping_msgid_;
       if (this->mac_ping_crypto_ && !encrypt_this_one)
         ESP_LOGW(TAG, "[%s] MAC ping: reserved msgid range exhausted — this ping "
                       "is plaintext (the run outran its own estimate)",
@@ -1981,30 +1941,28 @@ namespace esphome
         mc.pad.data = pad;
       }
 
-      op_message.header     = &header;
       op_message.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
       op_message.maccontrol = &mc;
 
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
-      if (!this->pack_operation_(&op_message, encrypt_this_one, &buf, &len))
+      MacFrame f;
+      if (!this->mac_frame_(&op_message, msgid, encrypt_this_one, &f))
       {
         ESP_LOGE(TAG, "[%s] MAC ping: failed to pack", this->get_name().c_str());
         this->mac_ping_frame_len_ = 0;
         return;
       }
-      if (len > sizeof(this->mac_ping_frame_))
+      if (f.bytes.size() > sizeof(this->mac_ping_frame_))
       {
         ESP_LOGE(TAG, "[%s] MAC ping frame too large (%u B) — not sent",
-                 this->get_name().c_str(), (unsigned) len);
+                 this->get_name().c_str(), (unsigned) f.bytes.size());
         this->mac_ping_frame_len_ = 0;
       }
       else
       {
-        memcpy(this->mac_ping_frame_, buf, len);
-        this->mac_ping_frame_len_ = len;
+        memcpy(this->mac_ping_frame_, f.bytes.data(), f.bytes.size());
+        this->mac_ping_frame_len_ = f.bytes.size();
+        this->mac_ping_seal_      = f.seal;
       }
-      free(buf);
     }
 
     void LORAListener::mac_ping_timer_cb_(void *arg)
@@ -2040,7 +1998,7 @@ namespace esphome
       p.copies        = 1;
       p.stride_ms     = 0;
       p.expects_reply = self->mac_ping_want_echo_;
-      if (self->send_aligned_(self->mac_ping_frame_, self->mac_ping_frame_len_, p))
+      if (self->send_aligned_(self->mac_ping_frame_, self->mac_ping_frame_len_, p, self->mac_ping_seal_))
       {
         self->mac_stats_.pings_offered++;
         self->mac_stats_.last_seq_sent = self->mac_ping_seq_;
@@ -2692,11 +2650,6 @@ namespace esphome
     uint32_t LORAListener::tx_grid_sync_(bool retry, uint32_t *msgid_tag)
     {
       LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
 
       // Chosen BEFORE the frame is built, because the frame declares it.
       const int64_t planned_t0 = this->grid_sync_planned_t0_();
@@ -2705,13 +2658,11 @@ namespace esphome
       GridSync gs = GRID_SYNC__INIT;
       this->fill_grid_sync_(&gs, planned_t0);
 
-      op_message.header   = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
       op_message.gridsync = &gs;
 
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
-      if (!this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
+      MacFrame f;
+      if (!this->mac_frame_(&op_message, &f))
       {
         ESP_LOGE(TAG, "[%s] failed to pack GridSync", this->get_name().c_str());
         return 0;
@@ -2736,17 +2687,16 @@ namespace esphome
       // out where it says it does.
       p.earliest_us = (planned_t0 != 0)
                           ? loratiming::fireInstantUs(planned_t0, 0) : 0;
-      this->send_aligned_(buf, len, p);
+      this->send_aligned_(f.bytes.data(), f.bytes.size(), p, f.seal);
       {
         const int64_t published_us = esp_timer_get_time();
         this->last_gridsync_publish_us_ = (published_us > 0) ? published_us : 1;
       }
-      free(buf);
       ESP_LOGI(TAG, "[%s] GridSync PUBLISHED (slot %u)", this->get_name().c_str(),
                (unsigned) this->grid_slot_);
       // The tag is the msgid itself: it is what the ack log names.
-      *msgid_tag = header.msgid;
-      return header.msgid;
+      *msgid_tag = f.msgid;
+      return f.msgid;
     }
 
     // The node confirmed the grid (any of the published msgids): it is on the
@@ -2787,21 +2737,13 @@ namespace esphome
       // promotion, which is where a node that has just lost its grid belongs.
       this->published_resync_max_s_ = 0;
       LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
-
       GridSync gs = GRID_SYNC__INIT;
       gs.enable = false;
-      op_message.header   = &header;
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
       op_message.gridsync = &gs;
 
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
-      if (!this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
+      MacFrame f;
+      if (!this->mac_frame_(&op_message, &f))
       {
         ESP_LOGE(TAG, "[%s] failed to pack GridSync", this->get_name().c_str());
         return;
@@ -2812,8 +2754,7 @@ namespace esphome
       // path, and it is addressed to nodes whose anchor may already be wrong
       // — placing it on a mark they may not agree about is the one thing it
       // must not depend on.
-      this->parent_->send(buf, len);
-      free(buf);
+      this->mac0_send_(f.bytes.data(), f.bytes.size(), TxPolicy{}, f.seal);
       ESP_LOGI(TAG, "[%s] GridSync WITHDRAWN (slot %u)", this->get_name().c_str(),
                (unsigned) this->grid_slot_);
     }
@@ -2920,14 +2861,14 @@ namespace esphome
       // Unplaced, and as a burst: it is broadcast, and it is addressed to nodes
       // whose anchor is by definition already wrong — so there is no mark to
       // place it on that any of them would agree with.
-      this->parent_->send(buf.data(), buf.size());
+      this->mac0_send_(buf.data(), buf.size(), TxPolicy{}, mac2::FrameSeal{});   // an unsealed broadcast
       ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent (%u B)",
                this->get_name().c_str(), (unsigned) len);
     }
 
-    bool LORAListener::send_aligned_(const uint8_t *buf, size_t len)
+    bool LORAListener::send_aligned_(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
     {
-      return this->send_aligned_(buf, len, TxPolicy{});
+      return this->send_aligned_(buf, len, TxPolicy{}, seal);
     }
 
     // The mark a placed frame for this node would go out on.
@@ -2966,7 +2907,7 @@ namespace esphome
     }
 
     bool LORAListener::send_aligned_(const uint8_t *buf, size_t len,
-                                     const TxPolicy &in_policy)
+                                     const TxPolicy &in_policy, const mac2::FrameSeal &seal)
     {
       if (buf == nullptr || len == 0)
         return false;
@@ -3023,7 +2964,7 @@ namespace esphome
 
       if (!this->grid_aligned_ || !this->parent_->gridStarted())
       {
-        return this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
+        return this->mac0_send_(buf, len, policy, seal);
       }
 
       // The next mark that is CLEAR of the hub's own burst, not simply the next
@@ -3071,7 +3012,7 @@ namespace esphome
       // drops silently when the buffer pool is exhausted or the handoff queue
       // is full; recording the mark anyway would push the NEXT command for this
       // node a further round out to make room for a frame that does not exist.
-      if (this->parent_->send(const_cast<uint8_t *>(buf), len, policy))
+      if (this->mac0_send_(buf, len, policy, seal))
       {
         this->last_placed_t0_us_ = t0;
         return true;
@@ -3086,12 +3027,6 @@ namespace esphome
     uint32_t LORAListener::tx_tracked_op_()
     {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
-      op_message.header    = &header;
 
       // The tracked op is either a cover operation or a system operation; both are
       // (re)built here with a fresh msgid so the retransmit path is identical.
@@ -3119,9 +3054,8 @@ namespace esphome
 
       // Encrypt the command in-session (CTR + CMAC) so the downlink op is
       // authenticated; falls back to plaintext only before a session exists.
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
-      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
+      MacFrame f;
+      if (this->mac_frame_(&op_message, &f))
       {
         // B4: PACK ONCE. Keep the exact bytes so a retry retransmits THESE,
         // rather than re-packing from live state.
@@ -3134,27 +3068,27 @@ namespace esphome
         // a reused msgid that is keystream reuse, and with a fresh one it is a
         // duplicate command. Storing the frame removes both: same msgid, same
         // ciphertext, and the node can recognise a duplicate and re-ack it.
-        this->ctl().frame.assign(buf, buf + len);
-        this->ctl().frame_msgid = header.msgid;
+        this->ctl().frame       = f.bytes;
+        this->ctl().frame_msgid = f.msgid;
+        this->ctl().frame_seal  = f.seal;
 
         // The tracked command downlink is the one B1's gate is about: with
         // alignment on, this is the burst that must observably start on the
         // grid. With it off (the default) behaviour is byte-for-byte as before.
-        this->send_aligned_(buf, len, this->tracked_op_policy_());
+        this->send_aligned_(f.bytes.data(), f.bytes.size(), this->tracked_op_policy_(), f.seal);
         // Rule 4's exposure is THIS command's, so the shape is recorded here
         // rather than inside send_aligned_, where every other producer would
         // overwrite it.
         this->ctl().sent_single_shot = this->last_placed_single_shot_;
         this->ctl().sent_optimistic  = this->last_placed_optimistic_;
         this->ctl().mark_us          = this->last_placed_single_shot_ ? this->last_placed_t0_us_ : 0;
-        free(buf);
       }
       else
       {
         this->ctl().mark_us = 0;
         ESP_LOGE(TAG, "[%s] Failed to pack tracked operation", this->get_name().c_str());
       }
-      return header.msgid;
+      return f.msgid;
     }
 
     // The Control channel's request: the command the slot describes, delivered by
@@ -3409,7 +3343,7 @@ namespace esphome
       // logical command, and giving it a fresh one would let a retry supersede
       // the frame it is a retry of.
       this->send_aligned_(this->ctl().frame.data(), this->ctl().frame.size(),
-                          this->tracked_op_policy_());
+                          this->tracked_op_policy_(), this->ctl().frame_seal);
       this->ctl().sent_single_shot = this->last_placed_single_shot_;
       this->ctl().sent_optimistic  = this->last_placed_optimistic_;
       return this->ctl().frame_msgid;
@@ -3476,45 +3410,38 @@ namespace esphome
         return false;
 
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
-      op_message.header    = &header;
       req.fill(&op_message);
 
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
-      if (!this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
+      MacFrame f;
+      if (!this->mac_frame_(&op_message, &f))
       {
         ESP_LOGE(TAG, "[%s] Failed to pack %s", this->get_name().c_str(), req.what);
         return false;
       }
-      const bool sent = this->fire_place_(req.policy.shape, buf, len, req.what);
-      free(buf);
+      const bool sent = this->fire_place_(req.policy.shape, f, req.what);
       if (sent && req.on_sent)
-        req.on_sent(header.msgid);
+        req.on_sent(f.msgid);
       return sent;
     }
 
-    bool LORAListener::fire_place_(deliverypolicy::Shape shape, const uint8_t *buf, size_t len,
-                                   const char *what)
+    bool LORAListener::fire_place_(deliverypolicy::Shape shape, const MacFrame &f, const char *what)
     {
+      const uint8_t *buf = f.bytes.data();
+      const size_t   len = f.bytes.size();
       switch (shape)
       {
       case deliverypolicy::Shape::Bare:
-        return this->parent_->send(const_cast<uint8_t *>(buf), len);
+        return this->mac0_send_(buf, len, TxPolicy{}, f.seal);
       case deliverypolicy::Shape::Auto:
-        return this->send_aligned_(buf, len);
+        return this->send_aligned_(buf, len, f.seal);
       case deliverypolicy::Shape::Burst:
       {
         TxPolicy p;
         p.copies = this->parent_->defaultBurstCopies();
-        return this->send_aligned_(buf, len, p);
+        return this->send_aligned_(buf, len, p, f.seal);
       }
       case deliverypolicy::Shape::ClassA:
-        return this->fire_class_a_(buf, len, what);
+        return this->fire_class_a_(f, what);
       }
       return false;
     }
@@ -3522,9 +3449,10 @@ namespace esphome
     // C2 when the hub has a usable uplink stamp for this node, today's burst
     // otherwise. Not a switch: the fallback IS the old behaviour, so a node the hub
     // cannot place still gets its frame the way it always did.
-    bool LORAListener::fire_class_a_(const uint8_t *buf, size_t len, const char *what)
+    bool LORAListener::fire_class_a_(const MacFrame &f, const char *what)
     {
-      const ClassAPlacement placement = this->send_into_class_a_window_(buf, len);
+      const ClassAPlacement placement =
+          this->send_into_class_a_window_(f.bytes.data(), f.bytes.size(), f.seal);
       if (placement == ClassAPlacement::Placed)
         return true;
 
@@ -3566,7 +3494,7 @@ namespace esphome
         // where it knows precisely, and knows the answer is "nowhere".
         TxPolicy p;
         p.copies = this->parent_->defaultBurstCopies();
-        this->send_aligned_(buf, len, p);
+        this->send_aligned_(f.bytes.data(), f.bytes.size(), p, f.seal);
         return true;
       }
       return false;   // NotSendable: nothing to send
@@ -4142,13 +4070,61 @@ namespace esphome
     }
 
     bool LORAListener::pack_operation_(LoraClientOperationMessage *plain, bool encrypt,
-                                       uint8_t **out, size_t *out_len)
+                                       uint8_t **out, size_t *out_len, mac2::FrameSeal *seal)
     {
       bool refused = false;
-      const bool ok = s_pack_operation_message(plain, encrypt, out, out_len, &refused);
+      mac2::FrameSeal bound;
+      const bool ok = s_pack_operation_message(plain, encrypt, out, out_len, &refused, &bound);
       if (refused)
         this->requestMsgidRelogin_("seal");
+      if (ok && bound.sealed)
+        this->last_seal_binding_.store(bound.binding());
+      if (seal)
+        *seal = bound;
       return ok;
+    }
+
+    // ---- S4: the single MAC data path ---------------------------------------
+    //
+    // Every hub->node data frame is framed by mac_frame_ (header, msgid, pack,
+    // seal) and leaves through mac0_send_, which attaches the frame's own copy
+    // sealer. LOGIN and the GridDemote broadcast build their own bootstrap
+    // frames (MIC-authenticated / unsealed broadcast) but leave through
+    // mac0_send_ too.
+
+    bool LORAListener::mac_frame_(LoraClientOperationMessage *op, MacFrame *out)
+    {
+      return this->mac_frame_(op, this->incrTxMessageId(), this->session_confirmed_, out);
+    }
+
+    bool LORAListener::mac_frame_(LoraClientOperationMessage *op, uint32_t msgid, bool encrypt,
+                                  MacFrame *out)
+    {
+      LoraHeader header = LORA_HEADER__INIT;
+      header.destaddress   = this->short_address_;
+      header.destsubnet    = this->subnet_address_;
+      header.senderaddress = kHubAddress;
+      header.msgid         = msgid;
+      op->header           = &header;
+      out->msgid           = msgid;
+      out->bytes.clear();
+      uint8_t *buf = nullptr;
+      size_t   len = 0;
+      const bool ok = this->pack_operation_(op, encrypt, &buf, &len, &out->seal);
+      op->header = nullptr;   // the header is this frame's, and it is gone
+      if (!ok)
+        return false;
+      out->bytes.assign(buf, buf + len);
+      free(buf);
+      return true;
+    }
+
+    bool LORAListener::mac0_send_(const uint8_t *buf, size_t len, TxPolicy policy,
+                                  const mac2::FrameSeal &seal)
+    {
+      policy.sealer       = seal.sealed ? &mac2::LinkSecurity::copySealer : nullptr;
+      policy.seal_binding = seal.binding();
+      return this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
     }
 
     void LORAListener::setRxMessageId(uint32_t msg_id)
@@ -4325,7 +4301,7 @@ namespace esphome
       txLen  = lora_client_operation_message__get_packed_size(&op_message);
       txBuf  = new uint8_t[txLen];
       lora_client_operation_message__pack(&op_message, txBuf);
-      this->parent_->send(txBuf, txLen);
+      this->mac0_send_(txBuf, txLen, TxPolicy{}, mac2::FrameSeal{});   // MIC-authenticated, unsealed
       delete[] txBuf;
 
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
@@ -4656,8 +4632,8 @@ namespace esphome
       // proven path is reused rather than duplicated — and, unlike the old
       // global setBurstCopies(1), it cannot leak onto an ordinary command that
       // a user happens to send during the test.
-      self->parent_->send(self->drift_frame_, self->drift_frame_len_,
-                          {/*copies=*/1, /*stride_ms=*/0});
+      self->mac0_send_(self->drift_frame_, self->drift_frame_len_,
+                       TxPolicy{/*copies=*/1, /*stride_ms=*/0}, self->drift_seal_);
 
       // Build the next one now, in the 99% of the period that is idle.
       self->build_drift_frame_(true);
@@ -4677,14 +4653,6 @@ namespace esphome
     void LORAListener::build_mode_test_frame_(bool enable)
     {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
-      header.burstindex    = 0;
-      header.burstcount    = 0;
-      op_message.header    = &header;
 
       ModeTest mt = MODE_TEST__INIT;
       mt.enable           = enable;
@@ -4711,27 +4679,26 @@ namespace esphome
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
       op_message.modetest = &mt;
 
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
       // Encrypted, like every other command, and for the same two reasons the
       // drift frame is: the node rejects unencrypted commands once a session
       // exists, and exempting this one would let an unauthenticated frame pin a
       // node in a test mode. The node refuses to ARM without a session anyway
       // (ModeTestPolicy::armRefusal), so this is the second of two locks.
-      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
+      MacFrame f;
+      if (this->mac_frame_(&op_message, &f))
       {
-        if (len <= sizeof(this->mt_frame_))
+        if (f.bytes.size() <= sizeof(this->mt_frame_))
         {
-          memcpy(this->mt_frame_, buf, len);
-          this->mt_frame_len_ = len;
+          memcpy(this->mt_frame_, f.bytes.data(), f.bytes.size());
+          this->mt_frame_len_ = f.bytes.size();
+          this->mt_seal_      = f.seal;
         }
         else
         {
           ESP_LOGE(TAG, "[%s] ModeTest frame too large (%u B)",
-                   this->get_name().c_str(), (unsigned) len);
+                   this->get_name().c_str(), (unsigned) f.bytes.size());
           this->mt_frame_len_ = 0;
         }
-        free(buf);
       }
       else
       {
@@ -4823,7 +4790,7 @@ namespace esphome
                  self->get_name().c_str(), (unsigned) self->mt_mode_,
                  (int) self->parent_->gridStarted());
       }
-      self->parent_->send(self->mt_frame_, self->mt_frame_len_, p);
+      self->mac0_send_(self->mt_frame_, self->mt_frame_len_, p, self->mt_seal_);
 
       // Build the next one now, in the idle part of the period.
       self->build_mode_test_frame_(true);
@@ -4871,7 +4838,7 @@ namespace esphome
       // the node received nothing at all for eight minutes.
       this->build_mode_test_frame_(true);
       if (this->mt_frame_len_ > 0)
-        this->parent_->send(this->mt_frame_, this->mt_frame_len_);
+        this->mac0_send_(this->mt_frame_, this->mt_frame_len_, TxPolicy{}, this->mt_seal_);
 
       if (this->mode_test_timer_ == nullptr)
       {
@@ -4931,7 +4898,7 @@ namespace esphome
       {
         this->build_mode_test_frame_(false);
         if (this->mt_frame_len_ > 0)
-          this->parent_->send(this->mt_frame_, this->mt_frame_len_);
+          this->mac0_send_(this->mt_frame_, this->mt_frame_len_, TxPolicy{}, this->mt_seal_);
       }
 
       ESP_LOGI(TAG, "[%s] ModeTest STOP (%u marks sent)",
@@ -4941,16 +4908,9 @@ namespace esphome
     void LORAListener::build_drift_frame_(bool enable)
     {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      // msgid is the ruler mark. The node indexes samples by it, so a frame
-      // lost to the air leaves a gap instead of shifting every later sample.
-      header.msgid         = this->incrTxMessageId();
-      header.burstindex    = 0;
-      header.burstcount    = 0;
-      op_message.header    = &header;
+      // msgid is the ruler mark (mac_frame_ allocates it). The node indexes
+      // samples by it, so a frame lost to the air leaves a gap instead of
+      // shifting every later sample.
 
       DriftTest dt = DRIFT_TEST__INIT;
       dt.enable       = enable;
@@ -4960,8 +4920,7 @@ namespace esphome
       op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST;
       op_message.drifttest = &dt;
 
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
+      MacFrame f;
       // ENCRYPTED, like every other command.
       //
       // Plaintext was tried first, to keep variable-time crypto out of the
@@ -4976,14 +4935,14 @@ namespace esphome
       // every drift frame was silently dropped and the test never started.
       // Exempting DriftTest would let an unauthenticated frame pin a node in
       // ~11 mA continuous RX — a battery-drain vector on a 1.2 mA device.
-      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
+      if (this->mac_frame_(&op_message, &f))
       {
-        if (len <= sizeof(this->drift_frame_))
+        if (f.bytes.size() <= sizeof(this->drift_frame_))
         {
-          memcpy(this->drift_frame_, buf, len);
-          this->drift_frame_len_ = len;
+          memcpy(this->drift_frame_, f.bytes.data(), f.bytes.size());
+          this->drift_frame_len_ = f.bytes.size();
+          this->drift_seal_      = f.seal;
         }
-        free(buf);
       }
     }
 
@@ -5018,7 +4977,7 @@ namespace esphome
       // continuous RX and hears every one.
       this->build_drift_frame_(true);
       if (this->drift_frame_len_ > 0)
-        this->parent_->send(this->drift_frame_, this->drift_frame_len_);
+        this->mac0_send_(this->drift_frame_, this->drift_frame_len_, TxPolicy{}, this->drift_seal_);
 
       if (this->drift_timer_ == nullptr)
       {
@@ -5064,7 +5023,7 @@ namespace esphome
       // more — the single-copy choice never left the frame it applied to.
       this->build_drift_frame_(false);
       if (this->drift_frame_len_ > 0)
-        this->parent_->send(this->drift_frame_, this->drift_frame_len_);
+        this->mac0_send_(this->drift_frame_, this->drift_frame_len_, TxPolicy{}, this->drift_seal_);
       this->drift_frame_len_ = 0;
 
       ESP_LOGI(TAG, "[%s] drift test STOP", this->get_name().c_str());
@@ -5096,18 +5055,10 @@ namespace esphome
     uint32_t LORAListener::tx_schedule_config_(bool retry, uint32_t *version)
     {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
       // Single-shot, NOT bursted: a full 8-entry schedule is ~152 B, whose
       // ~95 ms airtime overruns the 88 ms burst slot. It is only ever sent in
       // reply to a beacon, so the node is provably listening and the burst
       // would be redundant anyway.
-      header.burstindex    = 0;
-      header.burstcount    = 0;
-      op_message.header    = &header;
 
       ScheduleEntry  entries[kMaxScheduleEntries];
       ScheduleEntry *entry_ptrs[kMaxScheduleEntries];
@@ -5144,9 +5095,8 @@ namespace esphome
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
       op_message.schedule = &sc;
 
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
-      if (this->pack_operation_(&op_message, this->session_confirmed_, &buf, &len))
+      MacFrame f;
+      if (this->mac_frame_(&op_message, &f))
       {
         // PLACED. It used to go out through the bare send(), so in Mode B it
         // left whenever the queue drained — into a window the node had stopped
@@ -5158,17 +5108,16 @@ namespace esphome
         // missed single copy is visible and the retry above is already a burst.
         // That is exactly Rule 4's bounded exposure. TimeSync carries no ack
         // and asks for the burst explicitly.
-        this->send_aligned_(buf, len);
-        free(buf);
+        this->send_aligned_(f.bytes.data(), f.bytes.size(), f.seal);
         // The retransmit is the delivery glue's: the node acks a schedule push
         // (unlike TimeSync), and that ack is what ends the ladder.
         ESP_LOGI(TAG, "[%s] ScheduleConfig %s (version=0x%08x mode=%s entries=%u %u B msgid=%u)",
                  this->get_name().c_str(), retry ? "resent" : "sent", (unsigned) sc.version,
                  this->auto_mode_ ? "AUTO" : "INTERACTIVE",
-                 (unsigned) this->sched_entry_count_, (unsigned) len,
-                 (unsigned) header.msgid);
+                 (unsigned) this->sched_entry_count_, (unsigned) f.bytes.size(),
+                 (unsigned) f.msgid);
         *version = sc.version;
-        return header.msgid;
+        return f.msgid;
       }
       ESP_LOGE(TAG, "[%s] Failed to pack ScheduleConfig", this->get_name().c_str());
       return 0;
@@ -5646,7 +5595,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // which case the caller must fall back to today's behaviour rather than
     // guess an origin.
     LORAListener::ClassAPlacement
-    LORAListener::send_into_class_a_window_(const uint8_t *buf, size_t len)
+    LORAListener::send_into_class_a_window_(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
     {
       if (this->parent_ == nullptr || buf == nullptr || len == 0)
         return ClassAPlacement::NotSendable;
@@ -5769,7 +5718,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       p.earliest_us = target;
       p.priority    = 0;              // Immediate: a missed window is a lost
                                       // reply, and the next one is a wake away
-      this->parent_->send(const_cast<uint8_t *>(buf), len, p);
+      this->mac0_send_(buf, len, p, seal);
 
       ESP_LOGI(TAG, "[%s] reply aimed at %s: T0_uplink %lld, wanted T0 %lld, "
                     "fire %lld (hub stamp +/-%u us)",
@@ -6156,7 +6105,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         return;
       this->build_mode_test_frame_(false);
       if (this->mt_frame_len_ > 0)
-        this->parent_->send(this->mt_frame_, this->mt_frame_len_);
+        this->mac0_send_(this->mt_frame_, this->mt_frame_len_, TxPolicy{}, this->mt_seal_);
     }
 
     // A cover op / sysop was just issued for this node: never fight it.

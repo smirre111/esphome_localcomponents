@@ -9,7 +9,8 @@
 //   raw : what the producer handed to LORATracker::send(), with its TxPolicy
 //         (the MAC-0 data request as it stands today);
 //   air : what went on the air after the per-copy re-stamp and CMAC retag
-//         (sealBurstCopyTag, production code; the shim mirrors the tracker's
+//         (the frame's own copy sealer, LinkSecurity::copySealer, production
+//         code since S4; the shim mirrors the tracker's
 //         unpack/stamp/repack around it).
 // Stages S2-S7 must leave every file in tests/proto_sim/golden/ untouched.
 // Only S8 (the explicit wire break) re-records, deliberately.
@@ -308,7 +309,7 @@ TEST(GoldenHubFrames, DriftTestStream) {
 }
 
 // Per-copy retag: a full 17-copy encrypted burst, each copy re-stamped and
-// re-tagged by sealBurstCopyTag.
+// re-tagged by the frame's own copy sealer.
 TEST(GoldenHubFrames, EncryptedBurstRetagEveryCopy) {
     GoldenHub h;
     h.session();
@@ -318,7 +319,7 @@ TEST(GoldenHubFrames, EncryptedBurstRetagEveryCopy) {
     EXPECT_TRUE(golden::matches("hub_encrypted_burst_retag", h.dump()));
 }
 
-// sealBurstCopyTag over every timing field the CMAC prefix covers.
+// The copy sealer over every timing field the CMAC prefix covers.
 TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
     GoldenHub h;
     h.session();
@@ -342,7 +343,7 @@ TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
         m->header->firestamped  = c[3];
         m->header->fireround    = c[4];
         m->header->fireoffsetus = c[5];
-        ASSERT_TRUE(h.rol.sealBurstCopyTag(m->encrypted, m->header));
+        ASSERT_TRUE(h.rol.retagLikeLastFrameForTest(m->encrypted, m->header));
         std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(m));
         lora_client_operation_message__pack(m, out.data());
         s << "retag " << c[0] << "/" << c[1] << " onmark=" << c[2] << " stamped=" << c[3]
