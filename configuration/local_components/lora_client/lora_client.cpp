@@ -1247,7 +1247,26 @@ namespace esphome
     // frames timed AT the mark earn it for a node the hub has no evidence
     // about. Tying the measurement to the same rule as the counter means a
     // frame moves the hub's beliefs only once it has earned the right to.
-    void LORAListener::noteAuthenticatedUplink_()
+    //
+    // S5: the stamp is captured with the frame (mac0_ticket_, at admission) and
+    // committed here, called by MAC-1 once the frame earned it -- the hub's
+    // RxTicket / commitTiming. Same values as before: admission and commit run
+    // in one synchronous pass on the loop task, where the tracker writes the
+    // stamp before it hands the frame up.
+    LORAListener::Mac0Rx LORAListener::mac0_ticket_(size_t len) const
+    {
+      Mac0Rx rx;
+      rx.ticket.len            = static_cast<uint32_t>(len);
+      rx.ticket.timing_trusted = this->rx_timing_trusted_;
+      if (this->parent_ != nullptr)
+      {
+        rx.ticket.t0_us = this->parent_->last_rx_t0_us();
+        rx.unc_us       = this->parent_->rx_stamp_uncertainty_us();
+      }
+      return rx;
+    }
+
+    void LORAListener::mac0_commit_timing_(const Mac0Rx &rx)
     {
       if (this->parent_ == nullptr)
         return;
@@ -1255,14 +1274,14 @@ namespace esphome
       // (FrameCanon.h): record "no usable origin" (0) rather than a skewed one,
       // so send_into_class_a_window_() answers NoUplinkStamp and falls back to
       // the burst, and the wake-clock pairing is skipped.
-      if (!this->rx_timing_trusted_)
+      if (!rx.ticket.timing_trusted)
       {
         this->last_uplink_t0_us_  = 0;
         this->last_uplink_unc_us_ = 0;
         return;
       }
-      this->last_uplink_t0_us_  = this->parent_->last_rx_t0_us();
-      this->last_uplink_unc_us_ = this->parent_->rx_stamp_uncertainty_us();
+      this->last_uplink_t0_us_  = rx.ticket.t0_us;
+      this->last_uplink_unc_us_ = rx.unc_us;
       // §4.6: the same stamp answers a second question — did this uplink land
       // where the grid says this node transmits?
       this->noteUplinkPlacement_(this->last_uplink_t0_us_);
@@ -1288,8 +1307,9 @@ namespace esphome
         this->have_plaintext_hwm_ = true;
         this->last_uplink_msgid_  = m->header->msgid;
       }
-      // The same frame, having earned the counter, has earned the measurement.
-      this->noteAuthenticatedUplink_();
+      // The same frame, having earned the counter, has earned the measurement:
+      // MAC-1 hands MAC-0 the ticket back (commitTiming).
+      this->mac0_commit_timing_(this->rx_ticket_);
     }
 
     // A successful decrypt proves the node holds the matching base nonce, so
@@ -2377,6 +2397,7 @@ namespace esphome
       }
 
       this->check_uplink_canonical_(rcv_message, len);
+      this->rx_ticket_ = this->mac0_ticket_(len);   // MAC-0: this frame's timing, held until MAC-1 commits
 
       // Ownership for the rest of the function. Before this, every early exit
       // freed by hand — a dozen sites, each one an edit away from a leak.
@@ -2434,7 +2455,7 @@ namespace esphome
     // order step 1): the hub's T0 stamp for this uplink is derived from the
     // on-air length, which the CMAC does not cover. DEMOTE, DO NOT DROP --
     // see FrameCanon.h. The frame is processed as usual; only its use as a
-    // timing origin (noteAuthenticatedUplink_) is withheld.
+    // timing origin (mac0_commit_timing_) is withheld.
     void LORAListener::check_uplink_canonical_(const LoraClientResponseMessage *rcv_message, size_t len)
     {
       this->rx_timing_trusted_ = framecanon::timingTrusted(framecanon::classify(

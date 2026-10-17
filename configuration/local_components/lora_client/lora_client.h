@@ -613,7 +613,21 @@ namespace esphome
       // Capture this node's own uplink T0 and score it against the grid. Called
       // only for a frame that has earned the replay counter — see
       // commit_rx_msgid_.
-      void noteAuthenticatedUplink_();
+      // MAC-0 receive ticket (S5, mirrors the node's RxTicket/commitTiming): what
+      // MAC-0 knows about the frame being processed -- the tracker's T0 stamp,
+      // its uncertainty, the on-air length and whether that length is a
+      // trustworthy T0 input (FrameCanon). Captured at admission (set_response),
+      // committed by MAC-1 only once the frame has earned it (commit_rx_msgid_).
+      struct Mac0Rx
+      {
+        mac::RxTicket ticket{};
+        uint32_t      unc_us{0};
+      };
+      Mac0Rx mac0_ticket_(size_t len) const;
+      // THE MAC-0 timing commit: this node's uplink origin (C2 Class A windows,
+      // §4.6 placement belief) moves here and nowhere else.
+      void   mac0_commit_timing_(const Mac0Rx &rx);
+      Mac0Rx rx_ticket_{};
       // §4.6's promotion evidence, taken from a DECRYPTED uplink — the wake
       // beacon or, far more usefully, a CommandAck.
       void notePhaseReport_(const ::PhaseReport *pr);
@@ -1230,7 +1244,7 @@ namespace esphome
       uint32_t      gridsync_requests_ignored_{0};
       uint32_t      plaintext_refused_{0};
       // FrameCanon.h verdict for the uplink being processed (set once per frame
-      // in set_response, read by noteAuthenticatedUplink_). false = the frame's
+      // in set_response, carried in rx_ticket_ to mac0_commit_timing_). false = the frame's
       // on-air length is not a trustworthy T0 input.
       bool          rx_timing_trusted_{true};
       uint32_t      noncanonical_frames_{0};

@@ -12023,3 +12023,35 @@ TEST(Mac1HubS3, AMacPingReservationTakesABlockAndPersistsItsEnd) {
     EXPECT_EQ(lastSaved().tx_message_id, tx + 12) << "the reservation's end is persisted";
     f.rol.stop_mac_ping();
 }
+
+// =============================================================================
+// S5 characterization: the hub's MAC-0 timing commit. The tracker's receive
+// stamp (T0 and its uncertainty) of the frame being processed becomes this
+// node's uplink origin only once the frame earned it (MAC-1 commit), only when
+// its length is a trustworthy T0 input, and it is the stamp of THAT frame.
+// =============================================================================
+TEST(Mac0TimingS5, TheCommittedOriginIsThisFramesStampAndUncertainty) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.tracker.last_rx_t0_us_v  = 123'000;
+    h.tracker.rx_uncertainty_v = 250;
+    auto a = serialize_avail(18, 1);
+    h.rol.set_response(a.data(), a.size());
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 123'000);
+    EXPECT_EQ(h.rol.last_uplink_unc_us_, 250u);
+
+    // A refused frame (stale id) commits nothing: the origin stays.
+    h.tracker.last_rx_t0_us_v  = 456'000;
+    h.tracker.rx_uncertainty_v = 999;
+    auto stale = serialize_avail(18, 1);
+    h.rol.set_response(stale.data(), stale.size());
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 123'000);
+    EXPECT_EQ(h.rol.last_uplink_unc_us_, 250u);
+
+    // The next admitted one moves both.
+    auto b = serialize_avail(18, 2);
+    h.rol.set_response(b.data(), b.size());
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 456'000);
+    EXPECT_EQ(h.rol.last_uplink_unc_us_, 999u);
+}
