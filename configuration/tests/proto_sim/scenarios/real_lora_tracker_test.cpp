@@ -1603,8 +1603,8 @@ TEST(RealTrackerBeaconShadow, TheVerdictIsCountedAndRemembered) {
 // ---------------------------------------------------------------------------
 namespace {
 struct BeaconProbe : TxProbe {
-    using LORATracker::net_key_;
-    using LORATracker::listeners_;
+    // S5: the fleet key and the shadow sources live in the MAC management unit.
+    uint8_t *net_key() { return this->mgmt().netKeyForTest(); }
     using LORATracker::beacon_round_queued_;
     using LORATracker::grid_started_;
 };
@@ -1617,10 +1617,10 @@ TEST(RealTrackerBeacon, ABeaconThatCannotBeSignedIsNotSentAndIsNotRecordedAsQueu
     BeaconProbe t;
     t.init();
     t.startGrid();
-    uint8_t saved[sizeof(t.net_key_)];
-    memcpy(saved, t.net_key_, sizeof(saved));
+    uint8_t saved[framecrypto::kNetKeyBytes];
+    memcpy(saved, t.net_key(), sizeof(saved));
     ASSERT_NE(t.netKeyId(), 0u);
-    memset(t.net_key_, 0, sizeof(t.net_key_));      // a hub that lost its key
+    memset(t.net_key(), 0, sizeof(saved));          // a hub that lost its key
 
     t.serviceBeacon();
     EXPECT_EQ(t.beaconsSent(), 0u) << "no beacon rather than an unsigned one";
@@ -1628,7 +1628,7 @@ TEST(RealTrackerBeacon, ABeaconThatCannotBeSignedIsNotSentAndIsNotRecordedAsQueu
     EXPECT_EQ(t.beacon_round_queued_, 0xFFFFFFFFu) << "not recorded, so the next pass retries";
     EXPECT_EQ(t.txDrainUs(), 0) << "nothing entered the transmit queue";
 
-    memcpy(t.net_key_, saved, sizeof(saved));       // the key is back
+    memcpy(t.net_key(), saved, sizeof(saved));      // the key is back
     t.serviceBeacon();
     EXPECT_EQ(t.beaconsSent(), 1u);
     EXPECT_EQ(t.shadowBeacons(), 1u);
@@ -1664,8 +1664,8 @@ TEST(RealTrackerBeacon, NullListenerEntriesAreSkippedWhenGatheringTheShadow) {
     BeaconProbe t;
     t.init();
     t.startGrid();
-    t.listeners_.push_back(nullptr);
-    t.listeners_.push_back(nullptr);
+    t.mgmt().addShadowSource(nullptr);
+    t.mgmt().addShadowSource(nullptr);
     t.serviceBeacon();
     EXPECT_EQ(t.beaconsSent(), 1u);
     EXPECT_EQ(t.shadowBeacons(), 1u);

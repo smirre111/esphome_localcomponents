@@ -340,6 +340,7 @@ file(WRITE ${TRACKER_OVERLAY}/esphome/components/lora_tracker/lora_tracker.h
 
 add_library(real_lora_tracker STATIC
     ${LORA_TRACKER_DIR}/lora_tracker.cpp
+    ${LORA_TRACKER_DIR}/mac_mgmt.cpp     # S5: the MAC management unit
     ${SHIM_DIR}/lora_hal_stub.cpp
     ${SHIM_DIR}/esphome/core/component.cpp
     ${SHIM_DIR}/esp_random.c

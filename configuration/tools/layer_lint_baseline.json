@@ -10,8 +10,8 @@
   "client.raw_frame_counter": 0,
   "client.raw_parent_send": 1,
   "client.telemetry_completes_delivery": 0,
-  "tracker.app_cmd_cases": 2,
-  "tracker.client_iteration": 7,
-  "tracker.psa_calls": 9,
+  "tracker.app_cmd_cases": 0,
+  "tracker.client_iteration": 3,
+  "tracker.psa_calls": 0,
   "tracker.seal_upcalls": 0
 }

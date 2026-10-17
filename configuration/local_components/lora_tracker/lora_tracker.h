@@ -29,6 +29,8 @@
 // SHADOW pending-data mask: the would-be bitmap, computed and logged by
 // serviceBeacon but never transmitted. Dependency-free, hub-only.
 #include "esphome/components/lora_client/PendingShadow.h"
+// S5: the MAC management unit (fleet key, beacon build, shadow inputs).
+#include "mac_mgmt.h"
 
 // Configuration
 #define POOL_SIZE 5
@@ -258,15 +260,23 @@ namespace esphome
       // would need NVS on a hub that has just lost the state a counter is for.
       // A node holding a different id refuses the beacon and coasts on
       // resyncMaxS, which is the pre-beacon behaviour and safe.
-      const uint8_t *netKey() const   { return this->net_key_; }
-      uint32_t       netKeyId() const { return this->net_key_id_; }
+      // Owned by the MAC management unit since S5 (mac_mgmt.h); these delegate.
+      const uint8_t *netKey() const   { return this->mgmt_.netKey(); }
+      uint32_t       netKeyId() const { return this->mgmt_.netKeyId(); }
       // The beacon's authenticator over the fields it carries. Returns false if
       // no key has been minted or PSA refuses, and the caller then sends no
       // beacon at all rather than an unsigned one: an unsigned beacon from a
       // hub that HAS a key is indistinguishable on the air from a forgery.
       bool      beaconMac(uint32_t tx_round, uint32_t tx_slot,
                           uint32_t pending_mask, bool pending_mask_valid,
-                          uint32_t burst_index, uint8_t *out, size_t out_len) const;
+                          uint32_t burst_index, uint8_t *out, size_t out_len) const
+      {
+        return this->mgmt_.beaconMac(tx_round, tx_slot, pending_mask, pending_mask_valid,
+                                     burst_index, out, out_len);
+      }
+      // The MAC management unit (S5): fleet key, beacon build, shadow inputs.
+      macmgmt::HubMacManagement       &mgmt()       { return this->mgmt_; }
+      const macmgmt::HubMacManagement &mgmt() const { return this->mgmt_; }
 
       // How many queued frames were dropped at the front because a newer
       // generation had superseded them. Diagnostic, and the only visible sign
@@ -499,13 +509,9 @@ namespace esphome
       uint32_t worst_poll_gap_us() const { return this->worst_poll_gap_us_; }
 
     protected:
-      // Stages of serviceBeacon().
-      enum class BeaconBuild { Ok, Unsigned, TooBig };
+      // Stages of serviceBeacon(). The build and the shadow gather are the MAC
+      // management unit's (mgmt_.buildBeacon, S5).
       bool         beacon_due_(int64_t &now, int64_t &t0, uint32_t &round, int64_t &fire);
-      void         gather_shadow_inputs_(int64_t now,
-                                         std::vector<pendingshadow::NodeInputs> &shadow_in,
-                                         std::vector<std::string> &shadow_names);
-      BeaconBuild  build_beacon_(uint32_t round, std::vector<uint8_t> &buf);
       bool         queue_beacon_(std::vector<uint8_t> &buf, int64_t fire, uint32_t round);
 
       int   last_packet_rssi_{0};
@@ -523,9 +529,7 @@ namespace esphome
       uint32_t worst_poll_gap_us_{0};
 
       esp_err_t init_memory_pool(void);
-      // S4: one copy's tag through the frame's own MAC-2 sealer (sendPacketBurst).
-      bool sealCopy_(mac::CopySealer sealer, uint64_t *binding, const ::LoraHeader *header,
-                     ::EncryptedPayload *enc);
+
       int64_t grid_anchor_us_{0};
       // The last beacon round this hub queued a frame for, so loop() does not
       // queue the same beacon repeatedly while its mark approaches. Held as
@@ -543,10 +547,10 @@ namespace esphome
       uint32_t shadow_last_mask_{0xFFFFFFFFu};
       bool    grid_started_{false};
       bool    setup_done_{false};
-      // Section 4.4's fleet key. Minted in startGrid(), published inside each
-      // node's already-encrypted GridSync, never sent in the clear.
-      uint8_t  net_key_[framecrypto::kNetKeyBytes]{};
-      uint32_t net_key_id_{0};
+      // Section 4.4's fleet key (minted in startGrid(), published inside each
+      // node's already-encrypted GridSync, never sent in the clear), the beacon
+      // build and the shadow-mask sources: the MAC management unit's (S5).
+      macmgmt::HubMacManagement mgmt_;
       // When the hub's own burst stops occupying the channel, including the
       // post-burst response window sendTask holds the radio in.
       int64_t burst_busy_until_us_{0};
@@ -580,7 +584,7 @@ namespace esphome
       uint32_t tx_stamp_misses_{0};
       // H-1 (mac-separation-implementation-plan.md's hardware acceptance
       // gates): per-copy tag-write latency (stamp -> tag written, i.e. the
-      // wall-clock cost of the copy sealer (sealCopy_) inside sendPacketBurst's retag
+      // wall-clock cost of the copy sealer (BurstFrame::seal) inside sendPacketBurst's retag
       // loop). A fixed-width histogram rather than storing samples: the
       // accept gate only needs p50/p99/max against a 1ms/3ms budget, and a
       // run exercises far more than kTagLatencyReportEvery copies.
@@ -627,7 +631,6 @@ namespace esphome
       bool validate_buffer(rx_buffer_t *buffer);
 
       // Group 1: Large objects (12+ bytes) - vectors and callback manager
-      std::vector<LORAListener *> listeners_;
       std::vector<LORAClient *> clients_;
       // Group 4: 1-byte types (enums, uint8_t, bool)
       uint8_t app_id_{0};

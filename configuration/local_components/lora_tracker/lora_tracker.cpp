@@ -41,7 +41,10 @@
 // fleet-wide view is here, where the queues are.
 #include "esphome/components/lora_client/PendingData.h"
 // S4: the stamped copy header, decoded for the frame's own copy sealer.
-#include "esphome/components/lora_client/MacHdrCodec.h"
+// S5: the one place the burst engine touches the app schema, and the MAC
+// management unit that builds the beacon.
+#include "burst_frame.h"
+#include "mac_mgmt.h"
 
 #ifdef USE_OTA
 #include "esphome/components/ota/ota_backend.h"
@@ -554,41 +557,9 @@ namespace esphome
       this->grid_anchor_us_ = esp_timer_get_time();
       this->grid_started_   = true;
 
-      // PSA is initialised HERE, not left to whichever component happened to
-      // set up first. LORAListener::setup() calls psa_crypto_init() for the
-      // session keys, and the tracker's beacon MAC used to be able to free-ride on
-      // that — but component setup order is not a contract, and the failure it
-      // produces is psa_import_key: -137 (BAD_STATE) at beacon time, which
-      // reads as a crypto fault rather than as an ordering one. The call is
-      // idempotent, which is what makes stating the dependency free.
-      const psa_status_t psa_ret = psa_crypto_init();
-      if (psa_ret != PSA_SUCCESS)
-        ESP_LOGE(TAG, "psa_crypto_init failed: %d — beacons cannot be signed",
-                 (int) psa_ret);
-
-      // Section 4.4's fleet key, minted WITH the anchor.
-      //
-      // Not derived from a compile-time secret, which was the obvious cheaper
-      // option and is worth naming as rejected: a key every node can compute is
-      // a key every node can forge under, and the whole point of authenticating
-      // the beacon is that only the hub may move an anchor or clear a bit.
-      //
-      // Re-minted on every restart, and that costs nothing — a restart already
-      // invalidates every node's anchor and forces GridSync to be re-published,
-      // so the key's lifetime is exactly the grid's and there is nothing to
-      // persist. The id is random for the same reason: a counter would need NVS
-      // on a hub that has just lost the state a counter exists to survive.
-      for (size_t i = 0; i < sizeof(this->net_key_); i += 4)
-      {
-        const uint32_t r = esp_random();
-        std::memcpy(this->net_key_ + i, &r,
-                    std::min(sizeof(uint32_t), sizeof(this->net_key_) - i));
-      }
-      // Zero means "no key" to every reader of this field, so a one-in-four-
-      // billion draw must not be allowed to mean it.
-      do { this->net_key_id_ = esp_random(); } while (this->net_key_id_ == 0);
-      ESP_LOGI(TAG, "Fleet key minted for the grid (id %08x)",
-               (unsigned) this->net_key_id_);
+      // The fleet key is the management plane's (mac_mgmt.h), minted WITH the
+      // anchor because its lifetime is exactly the grid's.
+      this->mgmt_.mintFleetKey();
       ESP_LOGI(TAG, "Grid anchor set at %lld us (%u slots of %u us in %u us)",
                (long long) this->grid_anchor_us_,
                (unsigned) timedgrid::kSlotCount,
@@ -642,66 +613,6 @@ namespace esphome
       return base + ((now_us - base + stride - 1) / stride) * stride;
     }
 
-    // The beacon's authenticator: AES-CMAC over the fields the beacon carries.
-    //
-    // A MAC with its own key, not the per-session CTR+CMAC the rest of the link uses, and the reasoning is in
-    // FrameCrypto.h: nothing in a beacon is secret, and extending a counter-mode keystream to a
-    // one-to-many key would need a never-repeating counter that a hub reboot
-    // restarts. CMAC has no nonce to reuse.
-    //
-    // The key is imported per call rather than held in a PSA slot. A beacon is
-    // one frame every 350 s, so the import costs nothing measurable, and a slot
-    // held across a startGrid() would authenticate the NEW grid's beacons with
-    // the OLD grid's key — silently, because both ends would simply stop
-    // agreeing.
-    bool LORATracker::beaconMac(uint32_t tx_round, uint32_t tx_slot,
-                                uint32_t pending_mask, bool pending_mask_valid,
-                                uint32_t burst_index, uint8_t *out, size_t out_len) const
-    {
-      if (out == nullptr || out_len != framecrypto::kBeaconMacBytes)
-        return false;
-      if (!framecrypto::netKeyIsSet(this->net_key_, sizeof(this->net_key_),
-                                    this->net_key_id_))
-        return false;
-
-      uint8_t input[framecrypto::kBeaconMacInputBytes];
-      framecrypto::buildBeaconMacInput(this->net_key_id_, tx_round, tx_slot,
-                                       pending_mask, pending_mask_valid,
-                                       burst_index, input);
-
-      psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-      psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE);
-      psa_set_key_algorithm(&attrs, PSA_ALG_CMAC);
-      psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-      psa_set_key_bits(&attrs, framecrypto::kNetKeyBytes * 8);
-      psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
-
-      psa_key_id_t kid = PSA_KEY_ID_NULL;
-      psa_status_t st = psa_import_key(&attrs, this->net_key_,
-                                       sizeof(this->net_key_), &kid);
-      if (st != PSA_SUCCESS)
-      {
-        ESP_LOGE(TAG, "beacon MAC: psa_import_key failed: %d", (int) st);
-        return false;
-      }
-
-      // The full CMAC is 16 bytes and only the first 8 go on the air, so it is
-      // computed into a full-width buffer and truncated here. Asking PSA for a
-      // short output would fail rather than truncate.
-      uint8_t full[16];
-      size_t  full_len = 0;
-      st = psa_mac_compute(kid, PSA_ALG_CMAC, input, sizeof(input),
-                           full, sizeof(full), &full_len);
-      psa_destroy_key(kid);
-      if (st != PSA_SUCCESS || full_len < framecrypto::kBeaconMacBytes)
-      {
-        ESP_LOGE(TAG, "beacon MAC: psa_mac_compute failed: %d", (int) st);
-        return false;
-      }
-      std::memcpy(out, full, framecrypto::kBeaconMacBytes);
-      return true;
-    }
-
     // Section 4.4. The frame that keeps a node IN Mode B.
     //
     // Without it a node holds phase only for resyncMaxS after each addressed
@@ -738,110 +649,6 @@ namespace esphome
       return true;
     }
 
-    // SHADOW pending mask: gather what each node's bit WOULD depend on, here,
-    // before this beacon enters the transmit queue (so the beacon itself does
-    // not count as "queued frames" for every node). Evaluated and logged only
-    // once the beacon is actually queued. The node states are read on this loop
-    // task, which is where they are written.
-    void LORATracker::gather_shadow_inputs_(int64_t now,
-                                            std::vector<pendingshadow::NodeInputs> &shadow_in,
-                                            std::vector<std::string> &shadow_names)
-    {
-      shadow_in.reserve(this->listeners_.size());
-      shadow_names.reserve(this->listeners_.size());
-      for (LORAListener *l : this->listeners_)
-      {
-        if (l == nullptr)
-          continue;
-        shadow_in.push_back(l->pending_shadow_inputs(now));
-        shadow_names.push_back(l->get_name());
-      }
-    }
-
-    // Builds and packs the signed beacon for `round` into `buf`.
-    LORATracker::BeaconBuild LORATracker::build_beacon_(uint32_t round, std::vector<uint8_t> &buf)
-    {
-      LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = LORATracker::broadcastAddressing;
-      header.destsubnet    = LORATracker::subnetAddressing;
-      header.senderaddress = esphome::lora_tracker::kHubAddress;
-      // A broadcast belongs to no per-node sequence, and the nodes exempt it
-      // from their replay filter for exactly that reason: running it through
-      // one would ratchet every node's rx counter onto the beacon's. Its replay
-      // protection is txRound — a replayed beacon predicts a mark rounds in the
-      // past, which no node will accept.
-      header.msgid         = 0;
-      header.burstindex    = 0;
-      header.burstcount    = 1;
-      op.header = &header;
-
-      GridBeacon gb = GRID_BEACON__INIT;
-      gb.txround = round;
-      gb.txslot  = timedgrid::kBeaconSlotIndex;
-      // ALL LISTENING, deliberately, and still not a placeholder.
-      //
-      // A clear bit tells a node to stop listening for up to a beacon interval.
-      // Two independent things had to be true before this hub could clear one.
-      // ONE OF THEM IS NOW TRUE and the other is not:
-      //
-      //   * The beacon was unauthenticated, so the nodes refused a mask from it
-      //     outright. That is fixed below: it carries an AES-CMAC under the
-      //     fleet key, and a node holding that key adopts the mask.
-      //   * A cleared bit is still a promise this hub cannot keep for an
-      //     INTERACTIVE node: Home Assistant can produce a command at any
-      //     instant, and the node would not be listening for up to 5.8 minutes.
-      //     Tier 3 suits automatic-mode nodes, which are already unreachable
-      //     between check-ins by design (section 5.5).
-      //
-      // So authenticating the beacon does NOT by itself start clearing bits.
-      // What it buys today is the other thing an unauthenticated beacon could
-      // do: nudge the anchor. The guard band bounded ONE nudge, not a sequence
-      // of them, so anything in radio range could walk a node off the grid
-      // 14 ms at a time. Only the hub can now.
-      gb.pendingmask      = pending::allListening();
-      gb.pendingmaskvalid = true;
-
-      // Signed over exactly the fields above, plus the key id and the OUTER
-      // header's burstIndex (always 0 here — one copy, not a burst), so a
-      // node can tell "this hub" from "something in radio range" AND catch
-      // an attacker altering just the plaintext outer header of an otherwise-
-      // genuine beacon to make the node back out a bogus copy offset
-      // (review-2026-09-15 finding 2). No timestamp: a replayed beacon
-      // declares its own round, so its predicted mark is rounds in the past
-      // and the node's reanchorIsSane already refuses it.
-      uint8_t mac[framecrypto::kBeaconMacBytes];
-      if (!this->beaconMac(gb.txround, gb.txslot, gb.pendingmask,
-                           gb.pendingmaskvalid, header.burstindex, mac, sizeof(mac)))
-      {
-        // No beacon rather than an unsigned one. A hub that HAS a key and emits
-        // an unsigned beacon is indistinguishable on the air from an attacker,
-        // and every node holding the key would refuse it anyway — so sending it
-        // costs air time and buys nothing. Not recorded as queued: a hub that
-        // has stopped being able to sign should show as a hub that has stopped
-        // beaconing.
-        ESP_LOGE(TAG, "beacon for round %u could not be signed — not sent",
-                 (unsigned) round);
-        return BeaconBuild::Unsigned;
-      }
-      gb.netkeyid  = this->net_key_id_;
-      gb.mac.data  = mac;
-      gb.mac.len   = sizeof(mac);
-
-      op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON;
-      op.gridbeacon = &gb;
-
-      const size_t len = lora_client_operation_message__get_packed_size(&op);
-      if (len == 0 || len > BUFFER_SIZE)
-      {
-        ESP_LOGE(TAG, "beacon would not fit (%u B)", (unsigned) len);
-        return BeaconBuild::TooBig;
-      }
-      buf.resize(len);
-      lora_client_operation_message__pack(&op, buf.data());
-      return BeaconBuild::Ok;
-    }
-
     // Places the packed beacon on its mark. False = dropped (no pool buffer).
     bool LORATracker::queue_beacon_(std::vector<uint8_t> &buf, int64_t fire, uint32_t round)
     {
@@ -871,21 +678,19 @@ namespace esphome
       if (!this->beacon_due_(now, t0, round, fire))
         return;
 
-      std::vector<pendingshadow::NodeInputs> shadow_in;
-      std::vector<std::string>               shadow_names;
-      this->gather_shadow_inputs_(now, shadow_in, shadow_names);
-
-      std::vector<uint8_t> buf;
-      const BeaconBuild built = this->build_beacon_(round, buf);
-      if (built == BeaconBuild::Unsigned)
+      // The management plane builds the frame and gathers the shadow inputs
+      // (mac_mgmt.h); MAC-0 only places the opaque bytes on the mark.
+      macmgmt::BeaconFrame frame;
+      const macmgmt::BeaconBuild built = this->mgmt_.buildBeacon(round, now, BUFFER_SIZE, &frame);
+      if (built == macmgmt::BeaconBuild::Unsigned)
         return;
-      if (built == BeaconBuild::TooBig)
+      if (built == macmgmt::BeaconBuild::TooBig)
       {
         this->beacon_round_queued_ = round;   // do not retry it every loop
         return;
       }
 
-      if (!this->queue_beacon_(buf, fire, round))
+      if (!this->queue_beacon_(frame.bytes, fire, round))
         return;
 
       this->beacon_round_queued_ = round;
@@ -894,8 +699,8 @@ namespace esphome
                (unsigned) round, (unsigned) timedgrid::kBeaconSlotIndex,
                (long long) t0, (long long) fire);
       // Shadow only: what was transmitted above is allListening(), whatever this says.
-      this->recordShadowPending(shadow_in.data(), shadow_names.data(),
-                                shadow_in.size(), round);
+      this->recordShadowPending(frame.shadow_in.data(), frame.shadow_names.data(),
+                                frame.shadow_in.size(), round);
     }
 
     // One line per beacon: the slot map, the would-be mask, who would have been
@@ -1204,24 +1009,6 @@ namespace esphome
       return false;
     }
 
-    // One copy's tag, through the frame's own MAC-2 sealer: decode the stamped
-    // header into a MacHdr, let the sealer compute the tag over it and the
-    // ciphertext, write it over the placeholder in place. No key, no client, no
-    // heap here. False drops the copy.
-    bool LORATracker::sealCopy_(mac::CopySealer sealer, uint64_t *binding,
-                                const ::LoraHeader *header, ::EncryptedPayload *enc)
-    {
-      mac::MacHdr hdr;
-      uint8_t tag[8];
-      if (sealer == nullptr || !machdr::fromLoraHeader(header, &hdr) ||
-          enc->tag.data == nullptr || enc->tag.len != sizeof(tag))
-        return false;
-      if (!sealer(binding, hdr, enc->ciphertext.data, enc->ciphertext.len, tag))
-        return false;
-      memcpy(enc->tag.data, tag, sizeof(tag));
-      return true;
-    }
-
     void LORATracker::sendPacketBurst(uint8_t *data, size_t len, int copies,
                                       uint32_t stride_ms, int64_t not_before_us,
                                       bool on_mark, mac::CopySealer sealer,
@@ -1260,13 +1047,10 @@ namespace esphome
       // reply into the clear window afterwards.  Unpack once; each copy is
       // re-packed with its own index.  On unpack failure (should not happen for
       // our own freshly-packed frames) fall back to sending the raw bytes.
-      LoraClientOperationMessage *burstMsg =
-          lora_client_operation_message__unpack(NULL, len, data);
-      const bool canStamp = (burstMsg != nullptr && burstMsg->header != nullptr);
+      mac0::BurstFrame frame(data, len);   // S5: the only schema access (burst_frame.h)
+      const bool canStamp  = frame.ok();
       // Sealed once at pack time; every copy needs its own tag (below).
-      const bool encrypted = canStamp &&
-                             burstMsg->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED &&
-                             burstMsg->encrypted != nullptr;
+      const bool encrypted = frame.encrypted();
       // A placed frame that reaches the radio after its mark is no longer ON it.
       // Sending it is still better than dropping a command, but it must not claim
       // the mark, and it must be visible: the node anchors to arrival, so a late
@@ -1286,11 +1070,10 @@ namespace esphome
 
       if (canStamp)
       {
-        burstMsg->header->burstcount = burstCopies;
-        // Whether copy 0 sits on the destination's grid mark — the node's only
-        // licence to read this frame's arrival as a phase sample. Never claimed
-        // for an unplaced frame, whatever the caller asked.
-        burstMsg->header->onmark = on_mark_eff ? 1 : 0;
+        // burstCount, and whether copy 0 sits on the destination's grid mark —
+        // the node's only licence to read this frame's arrival as a phase
+        // sample. Never claimed for an unplaced frame, whatever the caller asked.
+        frame.setBurst(burstCopies, on_mark_eff);
       }
 
       // for (int cnt = 0; cnt < 7; cnt++)
@@ -1316,7 +1099,7 @@ namespace esphome
 
         if (canStamp)
         {
-          burstMsg->header->burstindex = cnt;
+          frame.setIndex(cnt);
 
           // THE DECLARED FIRE INSTANT. Every copy states where its own T0 is on
           // the hub grid, so every heard copy is a phase sample for the node —
@@ -1337,9 +1120,7 @@ namespace esphome
             uint32_t round = 0, offset = 0;
             stamped = this->fireStampFor_(loratiming::t0FromFireInstantUs(fire_at_us, 0),
                                           &round, &offset);
-            burstMsg->header->firestamped  = stamped ? 1 : 0;
-            burstMsg->header->fireround    = round;
-            burstMsg->header->fireoffsetus = offset;
+            frame.setFireStamp(stamped, round, offset);
           }
 
           // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
@@ -1362,8 +1143,7 @@ namespace esphome
             // detect, but the acceptance gate is about the ordinary case,
             // which is the overwhelming majority of samples.
             const int64_t seal_t0 = esp_timer_get_time();
-            const bool sealed = this->sealCopy_(sealer, &seal_binding, burstMsg->header,
-                                                burstMsg->encrypted);
+            const bool sealed = frame.seal(sealer, &seal_binding);
             this->noteTagWriteLatencyUs_(
                 (uint32_t) (esp_timer_get_time() - seal_t0));
             if (!sealed)
@@ -1374,11 +1154,11 @@ namespace esphome
             }
           }
 
-          size_t clen  = skip_copy ? 0 : lora_client_operation_message__get_packed_size(burstMsg);
+          size_t clen  = skip_copy ? 0 : frame.packedSize();
           uint8_t *cbuf = skip_copy ? nullptr : static_cast<uint8_t *>(malloc(clen));
           if (cbuf)
           {
-            lora_client_operation_message__pack(burstMsg, cbuf);
+            frame.packInto(cbuf);
             this->sendPacketAt(cbuf, clen, stamped ? fire_at_us : copy_at_us);
             free(cbuf);
             // The stamp check below compares against the stamp, which is moved
@@ -1391,7 +1171,7 @@ namespace esphome
             {
               this->tx_mark_late_++;
               ESP_LOGW(TAG, "on-mark frame msgid %u left %lld us after its mark (%u so far)",
-                       (unsigned) burstMsg->header->msgid,
+                       (unsigned) frame.msgid(),
                        (long long) (this->last_fire_us_ - copy_at_us),
                        (unsigned) this->tx_mark_late_);
             }
@@ -1455,11 +1235,9 @@ namespace esphome
         }
       }
 
-      if (burstMsg != nullptr)
-        lora_client_operation_message__free_unpacked(burstMsg, NULL);
     }
 
-    // H-1 acceptance gate: bucket one copy-sealer (sealCopy_) latency sample and,
+    // H-1 acceptance gate: bucket one copy-sealer (BurstFrame::seal) latency sample and,
     // every kTagLatencyReportEvery samples, log a p50/p99/max/n summary
     // computed from the cumulative bucket counts, then reset for the next
     // window. Buckets rather than raw samples because the gate only needs
@@ -1715,7 +1493,7 @@ namespace esphome
     void LORATracker::register_listener(LORAListener *listener)
     {
       listener->set_parent(this);
-      this->listeners_.push_back(listener);
+      this->mgmt_.addShadowSource(listener);   // its state feeds the shadow mask
     }
 
     // Initialize memory pool and queues
