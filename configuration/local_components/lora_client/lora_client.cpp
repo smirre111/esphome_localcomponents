@@ -8,6 +8,8 @@
 #include "esphome/components/lora_client/HubLinkSecurity.h"
 // LoraHeader -> mac::MacHdr, shared with the tracker's copy sealer call (S4).
 #include "esphome/components/lora_client/MacHdrCodec.h"
+// S6: the one oneof -> mac::Port table.
+#include "esphome/components/lora_client/PortTable.h"
 // The funnel rate arithmetic, so a ModeTest report is recomputed on the hub
 // rather than trusted from the node (test-plan.md I1).
 #include "esphome/components/lora_client/MacFunnel.h"
@@ -1086,7 +1088,6 @@ namespace esphome
         const bool needs_cfg    = reg->needs_config;
         const bool push_config  = needs_cfg || !this->config_synced_;
 
-        // Free before dispatching — nodes re-parse the raw bytes independently.
         lora_client_response_message__free_unpacked(rcv_message, NULL);
 
         // An unprovisioned node holds no session, so plaintext is the only way
@@ -1100,10 +1101,10 @@ namespace esphome
           ESP_LOGI(TAG, "[%s] Pushing config in the clear (node reports unprovisioned)",
                    this->get_name().c_str());
           this->send_remote_config();   // ClientConfig (address, subnet, name, sleepDuration)
-          // Dispatch REGISTER to all nodes so each can send its own configuration
-          // (e.g. LoraCoverComponent sends CoverConfig; sensor is a no-op).
+          // Tell every child the node REGISTERed (mac::Port::Session), so each
+          // can send its own configuration (LoraCoverComponent: CoverConfig).
           for (auto *node : this->nodes_)
-            node->set_response(data, len);
+            node->on_register();
           this->config_synced_ = true;
         }
         else if (push_config)
@@ -1111,7 +1112,7 @@ namespace esphome
           ESP_LOGI(TAG, "[%s] Config push deferred until the session is confirmed",
                    this->get_name().c_str());
           this->config_push_pending_ = true;
-          this->pending_register_frame_.assign(data, data + len);
+          this->pending_register_notice_ = true;
         }
         else
         {
@@ -1344,12 +1345,11 @@ namespace esphome
         ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred config push",
                  this->get_name().c_str());
         this->send_remote_config();
-        if (!this->pending_register_frame_.empty())
+        if (this->pending_register_notice_)
         {
           for (auto *node : this->nodes_)
-            node->set_response(this->pending_register_frame_.data(),
-                               this->pending_register_frame_.size());
-          this->pending_register_frame_.clear();
+            node->on_register();
+          this->pending_register_notice_ = false;
         }
         this->config_synced_ = true;
       }
@@ -1831,23 +1831,10 @@ namespace esphome
     void LORAListener::forward_uplink_(LoraClientResponseMessage *inner,
                                        const LoraClientResponseMessage *outer)
     {
-      // Was a verbatim copy of dispatch_payload_'s chain. The comment on
-      // that function says the two paths are identical and must be split
-      // only deliberately — so call it rather than maintaining a second
-      // copy that a new message type can silently be added to just once.
-      this->dispatch_payload_(inner);
-
-      inner->header = outer->header; // borrow outer header for forwarding
-      size_t   fwd_len = lora_client_response_message__get_packed_size(inner);
-      uint8_t *fwd     = static_cast<uint8_t *>(malloc(fwd_len));
-      if (fwd)
-      {
-        lora_client_response_message__pack(inner, fwd);
-        for (size_t i = 0; i < this->nodes_.size(); i++)
-          this->nodes_[i]->set_response(fwd, fwd_len);
-        free(fwd);
-      }
-      inner->header = nullptr; // detach borrowed header before free (rcv_message owns it)
+      // The same chain as the plaintext path (deliver_uplink_), authentic.
+      // S6: the children get a decoded indication with the outer header; the
+      // inner message is no longer re-packed into wire bytes for them.
+      this->deliver_uplink_(inner, outer->header, /*authentic=*/true);
       lora_client_response_message__free_unpacked(inner, NULL);
     }
 
@@ -2172,16 +2159,17 @@ namespace esphome
                (unsigned) this->mac_stats_.echo_seq_gaps);
     }
 
+    // S6: demultiplexed by the one table (PortTable.h). MAC management frames
+    // (ack, MAC control, ModeTest report, GridSync request) go to the MAC
+    // handlers; application frames to the listener's application handlers
+    // (and, in deliver_uplink_, to the children); Session frames (REGISTER,
+    // LOGIN) never reach this point.
     void LORAListener::dispatch_payload_(LoraClientResponseMessage *msg)
     {
-      if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && msg->ack)
+      if (porttable::uplinkPort(msg->proto_case) == mac::Port::Mac0Mgmt)
       {
-        // §4.6's evidence, on the carrier that makes it useful. The ack answers
-        // the very command single-shot is decided for, so the belief is
-        // refreshed at the one moment it is about to be read — without the
-        // periodic per-node uplink §4.4 prices and rejects at 32 nodes.
-        this->notePhaseReport_(msg->ack->phase);
-        this->handle_command_ack_(msg->ack->ack_msg_id);
+        this->dispatch_mac_payload_(msg);
+        return;
       }
       // A POSITION is telemetry, NOT delivery evidence (review F3, 2026-10-16,
       // docs/mac-review-2026-10-16.md). Until then any POSITION arriving while a
@@ -2192,20 +2180,42 @@ namespace esphome
       // to end showed as delivered in Home Assistant and was never retried. The
       // rule dates from the first ack work (a657b03), before the node acked every
       // cover op; today it does (CommandAck, plus an AckCache re-ack of a
-      // duplicate). The position itself still reaches the cover entity through
-      // the children forward in the callers.
-      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && msg->beacon)
+      // duplicate). The position itself still reaches the cover entity as an
+      // application indication (deliver_uplink_).
+      if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && msg->beacon)
         this->handle_beacon_(msg->beacon);
-      else
-        this->dispatch_mac_payload_(msg);
+    }
+
+    void LORAListener::deliver_uplink_(LoraClientResponseMessage *msg, const ::LoraHeader *outer,
+                                       bool authentic)
+    {
+      this->dispatch_payload_(msg);
+      if (porttable::uplinkPort(msg->proto_case) != mac::Port::App)
+        return;
+      AppIndication ind;
+      if (!machdr::fromLoraHeader(outer, &ind.hdr))
+        return;   // a header wider than the MAC header is never handed upward
+      ind.msg       = msg;
+      ind.authentic = authentic;
+      for (auto *node : this->nodes_)
+        node->on_app_indication(ind);
     }
 
     // The MAC-layer tail of dispatch_payload_ (moved out unchanged): consumed
     // here, never forwarded to a cover or a schedule.
     void LORAListener::dispatch_mac_payload_(LoraClientResponseMessage *msg)
     {
+      if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && msg->ack)
+      {
+        // §4.6's evidence, on the carrier that makes it useful. The ack answers
+        // the very command single-shot is decided for, so the belief is
+        // refreshed at the one moment it is about to be read — without the
+        // periodic per-node uplink §4.4 prices and rejects at 32 nodes.
+        this->notePhaseReport_(msg->ack->phase);
+        this->handle_command_ack_(msg->ack->ack_msg_id);
+      }
       // MAC-0: consumed here, never forwarded to a cover or a schedule.
-      if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL &&
+      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL &&
                msg->maccontrol)
         this->handle_mac_echo_(msg->maccontrol);
       // ModeTest results. Also MAC-layer: never forwarded to a cover.
@@ -2446,9 +2456,7 @@ namespace esphome
       // gone with the frames it bounded: on a confirmed session none of them
       // reach this point any more. It is still maintained in commit_rx_msgid_,
       // where it belongs to the authenticated counter.
-      this->dispatch_payload_(rcv_message);
-      for (size_t i = 0; i < this->nodes_.size(); i++)
-        this->nodes_[i]->set_response(data, len);
+      this->deliver_uplink_(rcv_message, rcv_message->header, /*authentic=*/false);
     }
 
     // Length re-encode check (mac-separation-implementation-plan.md, receiver

@@ -18,7 +18,8 @@ namespace esphome
       void update() override;
       // void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
       //                          esp_ble_gattc_cb_param_t *param) override;
-      void set_response(uint8_t *data, size_t len) override;
+      void on_app_indication(const esphome::lora_tracker::AppIndication &ind) override;
+      void on_register() override;
       void publish_battery_(float voltage);
       void publish_link_rssi_();
 
@@ -34,7 +35,7 @@ namespace esphome
       // rather than a pre-divided ratio, matching the wire field's own
       // reasoning: more useful for later analysis, and proto3's "0 = absent"
       // convention means these only publish when a calibration event just
-      // happened -- see set_response()'s guard.
+      // happened -- see on_app_indication()'s guard.
       void set_calib_actual_run(sensor::Sensor *s) { calib_actual_run_ = s; }
       void set_calib_nominal_run(sensor::Sensor *s) { calib_nominal_run_ = s; }
       // P2: node clock minus hub clock, from the wake beacon.

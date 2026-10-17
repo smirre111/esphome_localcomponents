@@ -14,7 +14,6 @@ namespace esphome
     public:
       TriggerOtaButton() = default;
 
-      void set_response(uint8_t *data, size_t len) override;
 
       void dump_config() override;
 

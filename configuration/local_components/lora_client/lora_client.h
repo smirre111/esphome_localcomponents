@@ -1145,7 +1145,8 @@ namespace esphome
       uint32_t             node_rx_busy_skips_{0};
       bool                 have_rx_busy_skips_{false};
       bool                 config_push_pending_{false};
-      std::vector<uint8_t> pending_register_frame_;
+      // A REGISTER whose children notice (on_register) waits for the session.
+      bool pending_register_notice_{false};
       uint32_t plaintext_hwm_{0};
       bool     have_plaintext_hwm_{false};
       uint32_t node_sched_version_{0};
@@ -1585,6 +1586,10 @@ namespace esphome
       void commit_rx_msgid_(const ::LoraClientResponseMessage *rcv_message);
       void dispatch_payload_(::LoraClientResponseMessage *msg);
       void dispatch_mac_payload_(::LoraClientResponseMessage *msg);
+      // S6: the listener's own handling (dispatch_payload_, demultiplexed by
+      // PortTable.h), then -- for a mac::Port::App frame only -- one decoded
+      // AppIndication to each child. `outer` is the frame's (outer) header.
+      void deliver_uplink_(::LoraClientResponseMessage *msg, const ::LoraHeader *outer, bool authentic);
       void confirm_session_();
       void send_deferred_tracked_op_();
       void send_deferred_config_push_();

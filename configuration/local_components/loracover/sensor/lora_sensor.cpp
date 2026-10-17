@@ -96,56 +96,31 @@ namespace esphome
         this->rssi_->publish_state(this->parent_->parent_->get_last_rssi());
     }
 
-    void LoraCover::set_response(uint8_t *data, size_t len)
+    // S6: the node REGISTERed. The sensor platform has no configuration of its
+    // own to push (send_remote_config is a no-op), as before.
+    void LoraCover::on_register()
     {
-      LoraClientResponseMessage *rcv_message;
+      ESP_LOGI(TAG, "Received REGISTER — sending sensor config (no-op)");
+      this->send_remote_config();
+    }
 
-      rcv_message = lora_client_response_message__unpack(NULL, len, data);
-
-      if (rcv_message == NULL)
-      {
-        ESP_LOGE(TAG, "Could not read protobuf");
+    // S6: a decoded application uplink from THIS sensor's node (see
+    // AppIndication): no wire unpack, no own address filter.
+    void LoraCover::on_app_indication(const esphome::lora_tracker::AppIndication &ind)
+    {
+      const ::LoraClientResponseMessage *m = ind.msg;
+      if (m == nullptr)
         return;
-      }
 
-      if (!rcv_message->header)
+      if (m->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE && m->state != nullptr)
       {
-        ESP_LOGE(TAG, "Response missing header, ignoring");
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
-      }
-
-      // REGISTER is handled before the address filter: the node may not yet have
-      // its assigned address in LittleFS (first-time or power-loss scenario).
-      // LORAListener already verified the MAC before dispatching, so this is safe.
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
-      {
-        ESP_LOGI(TAG, "Received REGISTER — sending sensor config (no-op)");
-        this->send_remote_config();
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
-      }
-
-      if (rcv_message->header->senderaddress != this->parent_->short_address_ && this->parent_->registered_)
-      {
-        ESP_LOGE(TAG, "Adress not for me");
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
-      }
-
-      // NOTE: message-ID validation is done once by LORAListener::set_response
-      // before dispatching bytes here.  Do NOT re-check it — the counter has
-      // already been advanced and a second check would always reject the message.
-
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE)
-      {
-        this->publish_battery_(rcv_message->state->voltage);
+        this->publish_battery_(m->state->voltage);
         this->publish_link_rssi_();
       }
 
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION)
+      if (m->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION && m->position != nullptr)
       {
-        CoverPosition *position = rcv_message->position;
+        const CoverPosition *position = m->position;
         this->publish_battery_(position->voltage);
         // F-11: motor current rides in the position frame (raw ADC counts).
         if (this->motor_current_ != nullptr)
@@ -160,7 +135,6 @@ namespace esphome
           this->calib_nominal_run_->publish_state(position->nominalruns);
         this->publish_link_rssi_();
       }
-      lora_client_response_message__free_unpacked(rcv_message, NULL);
     }
 
 

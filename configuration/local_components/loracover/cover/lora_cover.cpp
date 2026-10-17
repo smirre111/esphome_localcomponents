@@ -129,56 +129,26 @@ namespace esphome
       }
     }
 
-    void LoraCoverComponent::set_response(uint8_t *data, size_t len)
+    // S6: the node REGISTERed -- push this cover's configuration. Was the
+    // REGISTER branch of set_response(), ahead of its own address filter.
+    void LoraCoverComponent::on_register()
     {
-      LoraClientResponseMessage *rcv_message;
+      ESP_LOGI(TAG, "Received REGISTER — sending CoverConfig");
+      this->send_remote_config();
+    }
 
-      rcv_message = lora_client_response_message__unpack(NULL, len, data);
-
-      if (rcv_message == NULL)
-      {
-        ESP_LOGE(TAG, "Could not read protobuf");
+    // S6: a decoded application uplink from THIS cover's node, already
+    // demultiplexed, address-filtered and (with a session) authenticated by the
+    // listener. The cover no longer unpacks wire bytes or runs its own sender
+    // filter (whose `registered_ == false` case let every sender through).
+    void LoraCoverComponent::on_app_indication(const esphome::lora_tracker::AppIndication &ind)
+    {
+      if (ind.msg == nullptr ||
+          ind.msg->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION ||
+          ind.msg->position == nullptr)
         return;
-      }
-
-      if (!rcv_message->header)
-      {
-        ESP_LOGE(TAG, "Response missing header, ignoring");
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
-      }
-
-      // REGISTER is handled before the address filter: the node may not yet have
-      // its assigned address in LittleFS (first-time or power-loss scenario).
-      // LORAListener already verified the MAC before dispatching, so this is safe.
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
-      {
-        ESP_LOGI(TAG, "Received REGISTER — sending CoverConfig");
-        this->send_remote_config();
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
-      }
-
-      if (rcv_message->header->senderaddress != this->parent_->short_address_ && this->parent_->registered_)
-      {
-        ESP_LOGE(TAG, "Adress not for me");
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
-        return;
-      }
-
-      // NOTE: message-ID validation is done once by LORAListener::set_response
-      // before dispatching bytes here.  Do NOT re-check it — the counter has
-      // already been advanced and a second check would always reject the message.
-
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION)
-      {
-        CoverPosition *position = rcv_message->position;
-        float pos = position->position;
-
-        this->position = pos;
-        this->publish_state(true);
-      }
-      lora_client_response_message__free_unpacked(rcv_message, NULL);
+      this->position = ind.msg->position->position;
+      this->publish_state(true);
     }
 
     // void LoraCoverComponent::send_remote_duration()

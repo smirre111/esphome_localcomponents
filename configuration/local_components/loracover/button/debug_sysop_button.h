@@ -27,7 +27,6 @@ namespace esphome
 
       void set_op(int32_t op) { this->op_ = op; }
 
-      void set_response(uint8_t *data, size_t len) override;
 
       void dump_config() override;
 

@@ -21,6 +21,7 @@
 #include "TimedGrid.h"
 #include "ClassAWindows.h"
 #include "MacHdrCodec.h"
+#include "PortTable.h"
 #include "LoraTiming.h"
 
 #include "sim/sim_clock.h"
@@ -949,9 +950,25 @@ TEST(RealLoraClient, PlaintextIsStillTheBootstrapBeforeASessionExists) {
 // reaches -- undecodable bytes, the never-legitimate plaintext LOGIN uplink,
 // and the fan-out of an admitted plaintext frame to the child nodes.
 namespace {
+// Records every application indication (S6) it is handed: the decoded outer
+// header, the payload re-packed (so a test can inspect it after the listener
+// freed the original), and the authentic flag; plus REGISTER notices.
 struct RecordingNode : esphome::lora_tracker::LORAClientNode {
-    std::vector<std::vector<uint8_t>> got;
-    void set_response(uint8_t *d, size_t n) override { got.emplace_back(d, d + n); }
+    struct Got {
+        mac::MacHdr hdr;
+        int proto_case;
+        std::vector<uint8_t> payload;
+        bool authentic;
+    };
+    std::vector<Got> got;
+    int registers{0};
+    void on_app_indication(const esphome::lora_tracker::AppIndication &ind) override {
+        Got g{ind.hdr, (int) ind.msg->proto_case, {}, ind.authentic};
+        g.payload.resize(lora_client_response_message__get_packed_size(ind.msg));
+        lora_client_response_message__pack(ind.msg, g.payload.data());
+        got.push_back(std::move(g));
+    }
+    void on_register() override { ++registers; }
     void send_remote_config() override {}
 };
 
@@ -1005,23 +1022,40 @@ TEST(RealLoraClient, AnUnauthenticatedLoginUplinkIsIgnoredAndTearsNothingDown) {
     EXPECT_TRUE(node.got.empty());
 }
 
-TEST(RealLoraClient, AnAdmittedPlaintextFrameIsFannedOutVerbatimToTheChildNodes) {
+// S6: since the port demux an admitted plaintext APPLICATION frame reaches every
+// child as one decoded indication (it used to be the verbatim wire bytes, and
+// every frame, a CommandAck included, was fanned out).
+TEST(RealLoraClient, AnAdmittedPlaintextFrameIsFannedOutDecodedToTheChildNodes) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;           // no session: plaintext is the bootstrap
     RecordingNode a, b;
     h.rol.register_lora_node(&a);
     h.rol.register_lora_node(&b);
-    auto frame = plaintext_ack_frame(/*msgid=*/5, /*ack_msg_id=*/1, /*timed=*/false);
+    auto position_frame = [](uint32_t msgid) {
+        proto_sim::LoraClientResponseMessage m;
+        m.header.destAddress   = esphome::lora_tracker::kHubAddress;
+        m.header.destSubnet    = 2;
+        m.header.senderAddress = 18;
+        m.header.msgId         = msgid;
+        m.proto                = proto_sim::LoraClientResponseMessage::Proto::Position;
+        m.position.position    = 0.6f;
+        return proto_sim::serialize_resp(m);
+    };
+    auto frame = position_frame(5);
     h.rol.set_response(frame.data(), frame.size());
     ASSERT_EQ(a.got.size(), 1u);
     ASSERT_EQ(b.got.size(), 1u);
-    EXPECT_EQ(a.got[0], frame);
-    EXPECT_EQ(b.got[0], frame);
+    for (const RecordingNode *n : {&a, &b}) {
+        EXPECT_EQ(n->got[0].proto_case, (int) LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION);
+        EXPECT_EQ(n->got[0].hdr.src, 18u);
+        EXPECT_EQ(n->got[0].hdr.fcnt, 5u);
+        EXPECT_FALSE(n->got[0].authentic);
+    }
 
     // Once a session is confirmed the same frame is refused outright: no fan-out.
     h.rol.session_confirmed_ = true;
-    auto again = plaintext_ack_frame(/*msgid=*/6, /*ack_msg_id=*/1, /*timed=*/false);
+    auto again = position_frame(6);
     h.rol.set_response(again.data(), again.size());
     EXPECT_EQ(a.got.size(), 1u);
     EXPECT_EQ(b.got.size(), 1u);
@@ -6654,7 +6688,7 @@ TEST(EncUplink, AVerifiedFrameWhosePayloadIsNotAMessageStillCommitsAndConfirmsBu
     EXPECT_TRUE(node.got.empty()) << "but there is nothing to dispatch or forward";
 }
 
-TEST(EncUplink, AnAuthenticBeaconIsForwardedToTheChildNodesWithTheOuterHeaderReattached) {
+TEST(EncUplink, AnAuthenticBeaconReachesTheChildNodesWithTheOuterHeaderDecoded) {
     MsgidGuardFixture f;
     RecordingNode node;
     f.rol.register_lora_node(&node);
@@ -6663,13 +6697,15 @@ TEST(EncUplink, AnAuthenticBeaconIsForwardedToTheChildNodesWithTheOuterHeaderRea
     send_encrypted_uplink(f.rol, f.base, rx_before + 1, 18, 2,
                           make_beacon(kHubEpoch + 7, /*clock_valid=*/true));
     ASSERT_EQ(node.got.size(), 1u);
+    // S6: a decoded indication, the outer header as a MacHdr -- no re-packed
+    // wire frame any more.
+    EXPECT_EQ(node.got[0].hdr.src, 18u);
+    EXPECT_EQ(node.got[0].hdr.dst, (uint32_t) esphome::lora_tracker::kHubAddress);
+    EXPECT_EQ(node.got[0].hdr.fcnt, rx_before + 1);
+    EXPECT_TRUE(node.got[0].authentic);
     LoraClientResponseMessage *fwd = lora_client_response_message__unpack(
-        nullptr, node.got[0].size(), node.got[0].data());
+        nullptr, node.got[0].payload.size(), node.got[0].payload.data());
     ASSERT_NE(fwd, nullptr);
-    ASSERT_NE(fwd->header, nullptr) << "loracover needs the addressing header";
-    EXPECT_EQ(fwd->header->senderaddress, 18u);
-    EXPECT_EQ(fwd->header->destaddress, (uint32_t) esphome::lora_tracker::kHubAddress);
-    EXPECT_EQ(fwd->header->msgid, rx_before + 1);
     EXPECT_EQ(fwd->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON);
     ASSERT_NE(fwd->beacon, nullptr);
     EXPECT_EQ(fwd->beacon->nodeepoch, (uint64_t) (kHubEpoch + 7));
@@ -12170,4 +12206,49 @@ TEST(AppChildrenS6, AnAuthenticPositionReachesTheChildrenOnceDecrypted) {
     EXPECT_FLOAT_EQ(cover.position, 0.33f);
     EXPECT_FLOAT_EQ(s.voltage.state, 11.7f);
     EXPECT_FLOAT_EQ(s.current.state, 9.0f);
+}
+
+// S6: the demultiplexer. Only mac::Port::App frames reach a child, decoded and
+// flagged authentic or not; MAC management frames (an ack, a ModeTest report,
+// a MAC echo, a GridSync request) stay with the MAC handlers; a REGISTER is a
+// notice, not a frame.
+TEST(AppChildrenS6, OnlyApplicationFramesReachAChildAndAREGISTERIsANotice) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    RecordingNode node;
+    h.rol.register_lora_node(&node);
+    proto_sim::LoraClientResponseMessage ack;
+    ack.proto = proto_sim::LoraClientResponseMessage::Proto::Ack;
+    ack.ack.ack_msg_id = 3;
+    auto a = plainFrom(18, 1, ack);
+    h.rol.set_response(a.data(), a.size());
+    EXPECT_TRUE(node.got.empty()) << "a CommandAck is MAC management, not application";
+
+    auto pos = plainFrom(18, 2, positionMsg(0.4f, 11.0f, 1.0f));
+    h.rol.set_response(pos.data(), pos.size());
+    ASSERT_EQ(node.got.size(), 1u);
+    EXPECT_EQ(node.got[0].proto_case, (int) LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION);
+    EXPECT_FALSE(node.got[0].authentic) << "the pre-session plaintext bootstrap";
+    EXPECT_EQ(node.got[0].hdr.src, 18u);
+    EXPECT_EQ(node.got[0].hdr.fcnt, 2u);
+
+    auto reg = real_helpers::serialize_register(kMacRol2, /*needs_config=*/true);
+    h.rol.set_response(reg.data(), reg.size());
+    EXPECT_EQ(node.registers, 1) << "the child is told the node registered";
+    EXPECT_EQ(node.got.size(), 1u) << "and gets no REGISTER frame";
+}
+
+TEST(AppChildrenS6, ThePortTableClassifiesEveryUplinkCase) {
+    using porttable::uplinkPort;
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER), mac::Port::Session);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN), mac::Port::Session);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK), mac::Port::Mac0Mgmt);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL), mac::Port::Mac0Mgmt);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT), mac::Port::Mac0Mgmt);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST), mac::Port::Mac0Mgmt);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL), mac::Port::App);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE), mac::Port::App);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION), mac::Port::App);
+    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON), mac::Port::App);
 }

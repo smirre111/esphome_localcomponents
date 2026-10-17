@@ -35,7 +35,8 @@ namespace esphome
       void set_blind_thickness_mm(float v) { this->blind_thickness_mm_ = v; }
       // void set_sleep_duration(uint64_t sleep_duration) { this->sleep_duration_ = sleep_duration; }
 
-      void set_response(uint8_t *data, size_t len) override;
+      void on_app_indication(const esphome::lora_tracker::AppIndication &ind) override;
+      void on_register() override;
 
       // void send_remote_duration();
       void send_remote_config() override;

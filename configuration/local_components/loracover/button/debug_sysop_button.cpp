@@ -25,9 +25,6 @@ namespace esphome
     {
     }
 
-    void DebugSysopButton::set_response(uint8_t *data, size_t len)
-    {
-    }
 
   } // namespace loracov
 } // namespace esphome
