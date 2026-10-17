@@ -34,12 +34,21 @@ inline void format_mac_addr_upper(const uint8_t mac[6], char* out_18) {
 // Minimal ESPPreferenceObject — a per-key in-RAM blob with load/save that
 // returns bool to mirror the production API. Test fixtures can inject and
 // inspect the blob via the global PreferenceStore (declared below).
+// Test observation of preference writes (S3 characterization): every save()
+// call is counted and its bytes kept, whether or not a slot is attached (the
+// listener scenarios never run setup(), so their rtc_ has none).
+inline int &prefs_save_count() { static int n = 0; return n; }
+inline std::vector<uint8_t> &prefs_last_save() { static std::vector<uint8_t> v; return v; }
+
 class ESPPreferenceObject {
 public:
     ESPPreferenceObject() = default;
     explicit ESPPreferenceObject(std::vector<uint8_t>* slot) : slot_(slot) {}
 
     template <typename T> bool save(const T* value) {
+        ++prefs_save_count();
+        prefs_last_save().assign(reinterpret_cast<const uint8_t*>(value),
+                                 reinterpret_cast<const uint8_t*>(value) + sizeof(T));
         if (!slot_) return false;
         slot_->assign(reinterpret_cast<const uint8_t*>(value),
                       reinterpret_cast<const uint8_t*>(value) + sizeof(T));

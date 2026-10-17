@@ -11875,3 +11875,129 @@ TEST(F4PerFrameSeal, AStoredFramesRetryUnderTheSameKeysIsTaggedAndVerifies) {
     EXPECT_EQ(copies, 2) << "the original and its retry";
     EXPECT_EQ(opened, 2) << "both verify under the node's keys";
 }
+
+// =============================================================================
+// S3 characterization (docs/mac-separation-layering-plan.md): the hub's MAC-1
+// counters, pinned BEFORE they move into mac1::Sequencer (ForwardRatchet).
+// Window: accept only rx < msgid <= rx + 1024. Persistence cadence: every msgid
+// handed out and every committed uplink is saved at once (one write each);
+// a login reset, the boot margin and the NVS apply write nothing themselves.
+// =============================================================================
+namespace {
+esphome::lora_tracker::LORAClientRestoreState lastSaved() {
+    esphome::lora_tracker::LORAClientRestoreState r{};
+    const auto &b = esphome::prefs_last_save();
+    EXPECT_EQ(b.size(), sizeof(r));
+    if (b.size() == sizeof(r)) memcpy(&r, b.data(), sizeof(r));
+    return r;
+}
+std::vector<uint8_t> plainAvail(uint8_t sender, uint32_t msgid) {
+    return real_helpers::serialize_avail(sender, msgid);
+}
+}  // namespace
+
+TEST(Mac1HubS3, EveryHandedOutMsgidIsPersistedAtOnceOneWriteEach) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    const uint32_t tx0 = h.rol.incrTxMessageId();
+    const int n0 = esphome::prefs_save_count();
+    const uint32_t a = h.rol.incrTxMessageId();
+    const uint32_t b = h.rol.incrTxMessageId();
+    EXPECT_EQ(a, tx0 + 1);
+    EXPECT_EQ(b, tx0 + 2);
+    EXPECT_EQ(esphome::prefs_save_count(), n0 + 2) << "one write per msgid";
+    EXPECT_EQ(lastSaved().tx_message_id, b) << "written before it is used";
+}
+
+TEST(Mac1HubS3, TheReceiveWindowIsStrictlyForwardAndAtMost1024Wide) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    auto first = plainAvail(18, 10);
+    h.rol.set_response(first.data(), first.size());
+    ASSERT_EQ(h.rol.frame_counter_.rx_message_id, 10u);
+    for (uint32_t bad : {10u, 9u, 10u + 1025u}) {
+        auto f = plainAvail(18, bad);
+        h.rol.set_response(f.data(), f.size());
+        EXPECT_EQ(h.rol.frame_counter_.rx_message_id, 10u) << "refused: " << bad;
+    }
+    auto edge = plainAvail(18, 10u + 1024u);
+    const int n0 = esphome::prefs_save_count();
+    h.rol.set_response(edge.data(), edge.size());
+    EXPECT_EQ(h.rol.frame_counter_.rx_message_id, 10u + 1024u) << "the window's far edge is in";
+    EXPECT_EQ(esphome::prefs_save_count(), n0 + 1) << "one write per committed uplink";
+    EXPECT_EQ(lastSaved().rx_message_id, 10u + 1024u);
+}
+
+TEST(Mac1HubS3, AnAuthenticatedUplinkCommitsAndPersistsOnceAForgedOneNeither) {
+    MsgidGuardFixture f;
+    const uint32_t rx = f.rol.frame_counter_.rx_message_id;
+    const int n0 = esphome::prefs_save_count();
+    auto bad = sealed_uplink_bytes(f.base, rx + 1, avail_payload(), 0, /*corrupt_tag=*/true);
+    f.rol.set_response(bad.data(), bad.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx) << "checked, not committed";
+    EXPECT_EQ(esphome::prefs_save_count(), n0);
+    auto good = sealed_uplink_bytes(f.base, rx + 1, avail_payload());
+    f.rol.set_response(good.data(), good.size());
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, rx + 1);
+    EXPECT_EQ(esphome::prefs_save_count(), n0 + 1);
+    EXPECT_EQ(lastSaved().rx_message_id, rx + 1);
+}
+
+TEST(Mac1HubS3, ALoginResetZeroesBothCountersWithoutAWriteAndTheNextIdIsOne) {
+    real_helpers::RealHubHarness f{18, kMacRol2};      // no login-ack sink on this radio
+    f.rol.registered_ = true;
+    f.rol.incrTxMessageId();
+    ASSERT_GT(f.rol.frame_counter_.tx_message_id, 0u);
+    f.rol.pending_login_nonce_ = 0;                      // a FRESH challenge
+    const int n0 = esphome::prefs_save_count();
+    f.rol.send_login();
+    EXPECT_EQ(f.rol.frame_counter_.rx_message_id, 0u);
+    EXPECT_EQ(f.rol.frame_counter_.tx_message_id, 1u) << "the LOGIN itself took id 1";
+    EXPECT_EQ(esphome::prefs_save_count(), n0 + 1) << "only the LOGIN's id was written";
+    EXPECT_EQ(lastSaved().tx_message_id, 1u);
+}
+
+TEST(Mac1HubS3, TheBootMarginMovesTxWithoutAWriteAndTheNextIdIsPersisted) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    const uint32_t tx = h.rol.incrTxMessageId();
+    ::NodeWakeBeacon b = NODE_WAKE_BEACON__INIT;
+    const int n0 = esphome::prefs_save_count();
+    h.rol.advance_tx_for_boot_(&b);
+    EXPECT_EQ(h.rol.frame_counter_.tx_message_id, tx + modebsup::kTxBootMargin);
+    EXPECT_EQ(esphome::prefs_save_count(), n0) << "the margin itself writes nothing";
+    const uint32_t next = h.rol.incrTxMessageId();
+    EXPECT_EQ(next, tx + modebsup::kTxBootMargin + 1);
+    EXPECT_EQ(esphome::prefs_save_count(), n0 + 1);
+    EXPECT_EQ(lastSaved().tx_message_id, next);
+}
+
+TEST(Mac1HubS3, TheNvsApplyRestoresRxAndTxPlus64) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    esphome::lora_tracker::LORAClientRestoreState r{};
+    r.version = esphome::lora_tracker::LORAListener::kRestoreStateVersion;
+    r.rx_message_id = 100;
+    r.tx_message_id = 200;
+    r.logged_in = true;
+    const int n0 = esphome::prefs_save_count();
+    r.apply(&h.rol);
+    EXPECT_EQ(h.rol.frame_counter_.rx_message_id, 100u);
+    EXPECT_EQ(h.rol.frame_counter_.tx_message_id, 264u);
+    EXPECT_EQ(esphome::prefs_save_count(), n0);
+    EXPECT_EQ(h.rol.incrTxMessageId(), 265u);
+    EXPECT_EQ(lastSaved().tx_message_id, 265u);
+    EXPECT_EQ(lastSaved().rx_message_id, 100u);
+}
+
+TEST(Mac1HubS3, AMacPingReservationTakesABlockAndPersistsItsEnd) {
+    MsgidGuardFixture f;
+    f.rol.mark_session_confirmed_for_test();
+    const uint32_t tx = f.rol.frame_counter_.tx_message_id;
+    f.rol.start_mac_ping(/*duration_s=*/10, /*grid_ms=*/1000, true, 0, /*crypto=*/true);
+    // frames = 10 s / 1 s + 2 = 12: ids tx+1 .. tx+12 reserved.
+    EXPECT_EQ(f.rol.frame_counter_.tx_message_id, tx + 12);
+    EXPECT_EQ(lastSaved().tx_message_id, tx + 12) << "the reservation's end is persisted";
+    f.rol.stop_mac_ping();
+}
