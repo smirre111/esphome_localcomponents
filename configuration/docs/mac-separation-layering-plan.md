@@ -53,26 +53,32 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
       destination: moved to **S4**, where the `CopySealer` closure travels with
       the frame in `TxPolicy` (a correct fix needs the per-frame generation in
       the queued frame; a half fix in S1 would add a second mechanism S4 deletes).
-- [ ] **F1 (node)** retarget `destAddress` only after an encrypted/verified frame
+- [x] **F1 (node)** retarget `destAddress` only after an encrypted/verified frame
       or a verified LOGIN; fail-closed uplink when a session exists. NOTE: the
       hub-repo test `RealNodeFixture.AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsArmed`
       (`tests/proto_sim/scenarios/real_cmd_dispatcher_test.cpp`) uses "a
       plaintext ping retargets destAddress" as its witness and must move to
       another witness (e.g. `ping_rx`) in the same change.
-- [ ] **F2 (node)** forged unicast LOGIN must not move mark-hit / missed-mark
+- [x] **F2 (node)** forged unicast LOGIN must not move mark-hit / missed-mark
       diagnostics (same root cause as F1).
-- [ ] **F5 (node)** `noteSessionProven()` only after `admitFrame` succeeds.
-- [ ] **F6 (node)** sequence authenticated MAC_CONFIG through the session window.
-- [ ] **F9 (node)** delete dead `LoraInterface::sendPacket` and the unused
+- [x] **F5 (node)** `noteSessionProven()` only after `admitFrame` succeeds.
+- [x] **F6 (node)** sequence authenticated MAC_CONFIG through the session window.
+- [x] **F9 (node)** delete dead `LoraInterface::sendPacket` and the unused
       `blinds.pb-c.h` include.
+- Node F1/F2/F5/F6/F9: node `5fa7e15`..`5ba6900` (fw 1.1.39). Hub mirror of the
+  two affected RealNodeFixture tests: hub `3bd4e1e`.
 - F8: no change (accepted: pre-auth burst fields are clamped; jamming does the same).
 
 ## S2 MAC-2 extract
 
 - [ ] Node `LinkSecurity` (keys out of CmdDispatcher; LOGIN/REGISTER crypto).
-- [ ] Hub `SessionKeyStore` (one owner, replaces the listener members + 5 static
-      maps) + the s_* crypto + the EncUplink pipeline; API on header fields +
-      bytes, not protobuf. Key-lifetime / mutex rules move intact.
+- [x] Hub `mac2::SessionKeyStore` (one owner, replaces the listener members + 5
+      static maps) + `mac2::LinkSecurity` (K_root/K_auth, MICs, KDF, seal, retag,
+      uplink verify/decrypt) in `local_components/lora_client/HubLinkSecurity.{h,cpp}`;
+      API on `mac::MacHdr` + bytes. Mutex rules intact; retag input moved to the
+      stack. Characterization `f13ec7f`, extract `89e054e`. Goldens unchanged.
+      H-1 not re-measured on hardware (same PSA work and lock span, one heap
+      allocation less per copy).
 - Gate: golden frames identical; EncUplink / MsgidGuard / seal tests ported;
   H-1 retag latency must not regress.
 
