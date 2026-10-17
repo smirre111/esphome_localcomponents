@@ -84,9 +84,13 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
 
 ## S3 MAC-1 extract
 
-- [ ] Shared `Sequencer` with two-phase check/commit (node bitmap window; hub keeps
-      its strict ratchet via a policy flag; switching the hub to the bitmap is a
-      separate, deliberate change). Persistence bit-identical.
+- [x] Shared `mac1::Sequencer` (node `ec2a814`..`449b673`), vendored into the hub
+      and drift-gated; the hub uses `Config{ForwardRatchet, 1, 1}` with a persist
+      hook = save_state_ + notePersisted, so the window (rx < id <= rx+1024) and
+      the NVS write cadence (one write per id handed out and per committed
+      uplink) are unchanged; check/commit stay two-phase around MAC-2 verify.
+      Counters set without a write go through `Sequencer::restore(tx-1, rx-1)`.
+      Characterization `f6e8954`, adoption `9528bcb`. No NVS change.
 
 ## S4 One data-request path
 
@@ -110,9 +114,16 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
 
 - [ ] Node `Mac0Access` (LoraInterface + frtosTasks RX logic + timing state from
       CmdDispatcher); `RxTicket` + `commitTiming`.
-- [ ] Hub: tracker gets a framing callback instead of `__CMD_` branching; the
-      beacon build moves to the management entity (lint: `tracker.app_cmd_cases`,
-      `tracker.psa_calls`).
+- [x] Hub: beacon build, fleet key, beacon CMAC and the shadow-mask sources moved
+      to a MAC management unit (`lora_tracker/mac_mgmt.{h,cpp}`); the tracker
+      gets an opaque frame. All per-copy schema work behind `mac0::BurstFrame`
+      (`burst_frame.h`); `lora_tracker.cpp` has no protobuf, `__CMD_` or PSA left.
+      Lint: app_cmd_cases 2->0, psa_calls 9->0, client_iteration 7->3. Hub
+      `84460b0`. Pre-existing: only SleepTrigger objects reach
+      register_listener(), so the shadow mask has never seen the real nodes.
+- [x] Hub MAC-0 timing: `rx_ticket_` (mac::RxTicket + uncertainty) captured at
+      admission, committed by MAC-1 through `mac0_commit_timing_` (the hub's
+      commitTiming). Hub `3b4afed`. Per-copy decode/re-encode stays until S8.
 - Gate: phase/anchor/WMR tests; bench Mode A/B turnaround vs 7.0/8.2 and
   10.0/10.6 ms; ISR/IRAM rules kept (INT_WDT history).
 
