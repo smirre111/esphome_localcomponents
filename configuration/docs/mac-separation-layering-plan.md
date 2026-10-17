@@ -49,8 +49,8 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
       encrypted-looking uplink from a registered node without a session makes the
       hub start a LOGIN, before any CMAC check; accepted, bounded by the
       onboarding gate. Hub `964d686`.
-- [-] **F4 (hub)** K_enc/K_mac generation pairing per frame, not per
-      destination: moved to **S4**, where the `CopySealer` closure travels with
+- [x] **F4 (hub)** K_enc/K_mac generation pairing per frame, not per
+      destination: done in **S4** (hub `ee83ae4`), originally moved there, where the `CopySealer` closure travels with
       the frame in `TxPolicy` (a correct fix needs the per-frame generation in
       the queued frame; a half fix in S1 would add a second mechanism S4 deletes).
 - [x] **F1 (node)** retarget `destAddress` only after an encrypted/verified frame
@@ -91,11 +91,18 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
 ## S4 One data-request path
 
 - [ ] Node: one `macDataRequest` for the 3 uplink builders (closes V10).
-- [ ] Hub: one `mac_data_request_` for the ~10 build sites (lint:
-      `client.msgid_alloc_sites`, `client.pack_sites`, `client.raw_parent_send`,
-      `client.app_picks_encryption` fall).
-- [ ] `CopySealer` closure in `TxPolicy`; the tracker stops looking up clients
-      (lint: `tracker.seal_upcalls`, `tracker.client_iteration`). **Closes F4.**
+- [x] Hub: one framing path `mac_frame_` (header, msgid, pack, seal) for all
+      data build sites and one MAC-0 data request `mac0_send_` (the only
+      `parent_->send`; LOGIN and GridDemote keep their bootstrap builds but leave
+      through it). Lint: raw_parent_send 14->1, msgid_alloc_sites 9->3,
+      pack_sites 8->1, app_picks_encryption 7->0. Hub `ee83ae4`.
+- [x] `mac::CopySealer` + an opaque 64-bit binding (`mac2::FrameSeal`: peer +
+      key epoch) in `TxPolicy` and the queued frame; the tracker calls it per
+      copy (`sealCopy_`) and no longer looks up clients or calls the listener
+      (lint: seal_upcalls 1->0, client_iteration 8->7, app_cmd_cases 4->2 -- the
+      beacon asks for `fire_stamp=false`). **F4 closed** (red-first test).
+      Per-copy decode/re-encode for the restamp stays until S5/S8. H-1: host
+      sanity test added; bench re-measure still open.
 - Gate: golden frames, burst retag tests, H-1 bench re-measure; no heap in the
   closure context.
 
