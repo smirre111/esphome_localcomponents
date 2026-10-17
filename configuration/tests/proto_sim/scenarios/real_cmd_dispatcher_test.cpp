@@ -7717,8 +7717,10 @@ TEST_F(RealNodeFixture, AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsA
 
     auto p2 = admit_plain_ping(/*sender=*/77, /*seq=*/2, /*msgid=*/501);
     disp.onReceiveNew(p2.data(), static_cast<int>(p2.size()));
-    EXPECT_EQ(disp.destAddress, 77u) << "control: the same ping IS admitted while a test is armed";
-    EXPECT_EQ(disp.macCounters().ping_rx, 1u);
+    // Admission is witnessed by ping_rx since node F1 (MAC review, node 5ba6900):
+    // an unauthenticated frame no longer retargets the uplinks at its sender.
+    EXPECT_EQ(disp.macCounters().ping_rx, 1u) << "control: the same ping IS admitted while a test is armed";
+    EXPECT_EQ(disp.destAddress, kHubAddr) << "but a plaintext frame never retargets the uplinks (F1)";
 }
 
 // --- the freshness query's inputs -------------------------------------------
@@ -7875,27 +7877,48 @@ TEST_F(RealNodeFixture, AdmitFrame_ThePingSeqHighWaterMarkOnlyAdvancesOnAccepted
     EXPECT_EQ(disp.macCounters().ping_rx, 2u);
 }
 
-TEST_F(RealNodeFixture, AdmitFrame_AnEncryptedMacConfigIsSequencedByNeitherRule) {
-    disp.setBenchNode(true);   // a degrading MAC_CONFIG is bench-only
-    holdSessionAndArmTest(disp, /*counter_on=*/true);
-    ASSERT_TRUE(disp.modeTestActive());
-    ASSERT_TRUE(disp.macSublayers().counter_enabled);
-
-    // A control frame with a msgid far outside the session's replay window and
-    // a seq of 0 (CONFIG carries none). Neither the ping rule (seq > high-water)
-    // nor the session window may touch it.
+namespace {
+std::vector<uint8_t> mac_config_frame(CmdDispatcher &disp, uint32_t msgid, bool disable_crypto) {
     MacControl mc = MAC_CONTROL__INIT;
-    mc.kind = MAC_CONTROL__KIND__MAC_CONFIG;
-    mc.disablecrypto = true;
-    mc.durations = 60;
+    mc.kind          = MAC_CONTROL__KIND__MAC_CONFIG;
+    mc.disablecrypto = disable_crypto;
+    mc.durations     = 60;
     LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    inner.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
     inner.maccontrol = &mc;
-    auto cfg = encrypt_op(disp, inner, /*msgid=*/5000, kMtNonce, 0, false);
-    disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
-    EXPECT_FALSE(disp.macSublayers().crypto_enabled)
-        << "an authenticated MAC_CONFIG reaches MAC-0 whatever its msgid";
-    EXPECT_TRUE(disp.macSublayers().counter_enabled);
+    return encrypt_op(disp, inner, msgid, kMtNonce, 0, false);
+}
+}  // namespace
+
+// Node F6 (MAC review, node aa49b93): an AUTHENTICATED MAC_CONFIG is checked
+// against the session replay window -- also with the MAC-1 switch for control
+// frames OFF (that switch is set by the very frame being sequenced). Before, no
+// rule sequenced it, so a captured MAC_CONFIG could be replayed within the
+// session to switch MAC-2 off again after the hub had switched it back on.
+TEST_F(RealNodeFixture, AdmitFrame_AnAuthenticatedMacConfigIsSequencedByTheSessionWindow) {
+    disp.setBenchNode(true);   // a degrading MAC_CONFIG is bench-only
+    holdSessionAndArmTest(disp, /*counter_on=*/false, /*crypto_on=*/true);
+    ASSERT_TRUE(disp.modeTestActive());
+    ASSERT_FALSE(disp.macSublayers().counter_enabled) << "precondition: MAC-1 off for control frames";
+    ASSERT_TRUE(disp.macSublayers().crypto_enabled) << "precondition: MAC-2 on";
+
+    // Far outside the window: refused, though authentic.
+    auto far = mac_config_frame(disp, /*msgid=*/5000, /*disable_crypto=*/true);
+    disp.onReceiveNew(far.data(), static_cast<int>(far.size()));
+    EXPECT_TRUE(disp.macSublayers().crypto_enabled) << "a MAC_CONFIG outside the window is refused";
+
+    // In the window: applied.
+    auto off = mac_config_frame(disp, /*msgid=*/3, /*disable_crypto=*/true);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    ASSERT_FALSE(disp.macSublayers().crypto_enabled) << "the genuine MAC_CONFIG applies";
+    auto on = mac_config_frame(disp, /*msgid=*/4, /*disable_crypto=*/false);
+    disp.onReceiveNew(on.data(), static_cast<int>(on.size()));
+    ASSERT_TRUE(disp.macSublayers().crypto_enabled) << "the hub switched MAC-2 back on";
+
+    // The replay of msgid 3 is refused by the window.
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
+    EXPECT_TRUE(disp.macSublayers().crypto_enabled)
+        << "a replayed MAC_CONFIG must not switch MAC-2 off again";
 }
 
 TEST_F(RealNodeFixture, AdmitFrame_ApplicationTrafficStaysSequencedWhenMac1IsOff) {
