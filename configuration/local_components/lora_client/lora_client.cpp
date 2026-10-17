@@ -282,8 +282,8 @@ namespace esphome
         restore->apply(this);
         ESP_LOGI(TAG, "[%s] After apply — rx_id=%u tx_id=%u (tx+64) registered=%s",
                  this->get_name().c_str(),
-                 (unsigned)this->frame_counter_.rx_message_id,
-                 (unsigned)this->frame_counter_.tx_message_id,
+                 (unsigned)this->seq_.rxId(),
+                 (unsigned)this->seq_.txId(),
                  this->registered_ ? "yes" : "no");
 
         // finding 2: only an UNCHANGED config skips the REGISTER round trip a
@@ -311,8 +311,7 @@ namespace esphome
         ESP_LOGW(TAG, "[%s] NVS restore failed or version mismatch (expected v%u) — "
                  "starting fresh, waiting for REGISTER",
                  this->get_name().c_str(), (unsigned)kRestoreStateVersion);
-        this->frame_counter_.rx_message_id = 0;
-        this->frame_counter_.tx_message_id = 0;
+        this->set_counters_no_write_(0, 0);
         this->registered_ = false;
       }
 
@@ -430,8 +429,8 @@ namespace esphome
         LORAClientRestoreState restore{};
         memset(&restore, 0, sizeof(restore));
         restore.version          = kRestoreStateVersion;
-        restore.rx_message_id    = this->frame_counter_.rx_message_id;
-        restore.tx_message_id    = this->frame_counter_.tx_message_id;
+        restore.rx_message_id    = this->seq_.rxId();
+        restore.tx_message_id    = this->seq_.txId();
         restore.logged_in        = this->registered_;
         restore.last_sleep_epoch = this->last_sleep_epoch_;
         restore.config_hash      = this->currentConfigHash_();
@@ -1168,7 +1167,7 @@ namespace esphome
     {
       if (rcv_message->header) {
         ESP_LOGI(TAG, "Received message with ID %d from address %d", rcv_message->header->msgid, rcv_message->header->senderaddress);
-        ESP_LOGI(TAG, "My message ID: %d", this->frame_counter_.rx_message_id);
+        ESP_LOGI(TAG, "My message ID: %d", this->seq_.rxId());
         ESP_LOGI(TAG, "My address: %d",  this->short_address_);
       } else {
         ESP_LOGI(TAG, "Received message without header");
@@ -1193,13 +1192,11 @@ namespace esphome
       // The message ID is checked only after login
       if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
       {
-        // Accept only a forward jump within a bounded window — a huge msgid from a
-        // corrupt/spurious frame would otherwise ratchet rx up and wedge the link
-        // (dropping every legitimate lower id) until the next login resets it.
-        static constexpr uint32_t kMsgIdWindow = 1024;
-        if (rcv_message->header &&
-            rcv_message->header->msgid > this->frame_counter_.rx_message_id &&
-            rcv_message->header->msgid <= this->frame_counter_.rx_message_id + kMsgIdWindow)
+        // Accept only a forward jump within a bounded window (mac1::kForwardWindow,
+        // 1024) — a huge msgid from a corrupt/spurious frame would otherwise
+        // ratchet rx up and wedge the link (dropping every legitimate lower id)
+        // until the next login resets it. MAC-1's read-only check (S3).
+        if (rcv_message->header && this->seq_.check(rcv_message->header->msgid))
         {
           // CHECKED here, COMMITTED later — see commit_rx_msgid_().
           //
@@ -1220,7 +1217,7 @@ namespace esphome
         }
         else
         {
-          ESP_LOGE(TAG, "%s, duplicate or old message ID: %d, ignoring. My MsgID: %d",this->get_name().c_str(), (rcv_message->header? rcv_message->header->msgid : 0), this->frame_counter_.rx_message_id);
+          ESP_LOGE(TAG, "%s, duplicate or old message ID: %d, ignoring. My MsgID: %d",this->get_name().c_str(), (rcv_message->header? rcv_message->header->msgid : 0), this->seq_.rxId());
           return false;
         }
       }
@@ -1847,7 +1844,7 @@ namespace esphome
       ESP_LOGI(TAG, "Received encrypted payload ciphertext=%d bytes", (int)enc->ciphertext.len);
 
       // Use the header's msgid as the unified frame counter.  Replay protection
-      // was already enforced above (msgid > frame_counter_.rx_message_id).
+      // was already enforced above (seq_.check(msgid)).
       EncUplink up;
       up.msg    = rcv_message;
       up.sender = rcv_message->header ? rcv_message->header->senderaddress : 0;
@@ -2081,8 +2078,9 @@ namespace esphome
         this->mac_ping_crypto_next_msgid_ = this->incrTxMessageId();       // one NVS save
         {
           std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-          this->frame_counter_.tx_message_id += (frames - 1);               // reserve the rest
-          this->mac_ping_crypto_last_msgid_ = this->frame_counter_.tx_message_id;
+          this->set_counters_no_write_(this->seq_.txId() + (frames - 1),    // reserve the rest
+                                       this->seq_.rxId());
+          this->mac_ping_crypto_last_msgid_ = this->seq_.txId();
         }
         this->save_state_(true);                                          // ...and persist it
       }
@@ -4033,7 +4031,8 @@ namespace esphome
       bool exhausted = false;
       {
         std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-        if (!framecrypto::nextMsgidFitsCtr(this->frame_counter_.tx_message_id))
+        const mac1::Alloc a = this->seq_.allocate(this->persist_());
+        if (a.status != mac1::AllocStatus::Ok)
         {
           // The CTR counter block holds 31 bits of msgid: handing out 2^31 would
           // reuse the keystream of msgid 0. Do not advance the counter (it must
@@ -4044,9 +4043,9 @@ namespace esphome
         }
         else
         {
-          val = ++this->frame_counter_.tx_message_id;
-          // Persist the updated tx id so reboots don't reuse IDs
-          this->save_state_(true);
+          // Persisted before it is handed out (persist_hook_, margin 1), so a
+          // reboot never reuses an id.
+          val = a.fcnt;
         }
       }
       if (exhausted)
@@ -4127,11 +4126,19 @@ namespace esphome
       return this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
     }
 
+    // MAC-1 commit (S3): only for an id admit_frame_ already check()ed; the
+    // Sequencer persists the new mark at once (margin 1).
     void LORAListener::setRxMessageId(uint32_t msg_id)
     {
-      this->frame_counter_.rx_message_id = msg_id;
-      // Persist updated rx id
-      this->save_state_(true);
+      this->seq_.commit(msg_id, esp_timer_get_time(), this->persist_());
+    }
+
+    bool LORAListener::persist_hook_(void *ctx)
+    {
+      auto *self = static_cast<LORAListener *>(ctx);
+      self->save_state_(true);
+      self->seq_.notePersisted();
+      return true;
     }
 
     void LORAListener::send_login()
@@ -4192,8 +4199,7 @@ namespace esphome
 
       {
         std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-        this->frame_counter_.tx_message_id = 0;
-        this->frame_counter_.rx_message_id = 0;
+        this->set_counters_no_write_(0, 0);   // a new session: both directions restart
       }
       this->msgid_relogin_pending_ = false;   // the msgid space restarts here
       this->dlv_forget_ids_();
@@ -4306,7 +4312,7 @@ namespace esphome
 
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
                this->get_name().c_str(), (unsigned)base,
-               (unsigned)this->frame_counter_.tx_message_id,
+               (unsigned)this->seq_.txId(),
                (int)login.request_register);
     }
 
@@ -5314,11 +5320,11 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       const int64_t now_us = esp_timer_get_time();
       this->last_boot_advance_us_ = (now_us > 0) ? now_us : 1;
       this->last_wake_key_        = b->prevbeaconmsgid;
-      this->frame_counter_.tx_message_id += modebsup::kTxBootMargin;
+      this->set_counters_no_write_(this->seq_.txId() + modebsup::kTxBootMargin, this->seq_.rxId());
       ESP_LOGI(TAG, "[%s] Node reset (%s%s) — advancing tx_message_id by %u to %u",
                this->get_name().c_str(), s_reset_reason_name(b->resetreason),
                b->resetreason == modebsup::kResetDeepSleep ? ", resumed wake" : ", non-deep-sleep",
-               (unsigned) modebsup::kTxBootMargin, (unsigned) this->frame_counter_.tx_message_id);
+               (unsigned) modebsup::kTxBootMargin, (unsigned) this->seq_.txId());
     }
 
     void LORAListener::note_beacon_clock_(const ::NodeWakeBeacon *b)

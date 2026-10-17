@@ -22,6 +22,8 @@
 #include "esphome/components/lora_client/SleepModel.h"
 // MAC-2: keys, KDF, Encrypt-then-CMAC and the session key store (stage S2).
 #include "esphome/components/lora_client/HubLinkSecurity.h"
+// MAC-1: the shared frame counter (node-owned, vendored, drift-gated; stage S3).
+#include "esphome/components/lora_client/Sequencer.h"
 #include "esphome/components/lora_client/PendingShadow.h"
 
 #include "esphome/core/automation.h"
@@ -96,12 +98,6 @@ namespace esphome
     class LORAListener;
     struct TxPolicy;
 
-    struct FrameCounter
-    {
-      uint32_t rx_message_id;
-      uint32_t tx_message_id;
-
-    };
 
     struct LORAClientRestoreState
     {
@@ -1117,7 +1113,7 @@ namespace esphome
       // Duplicate suppression for plaintext frames that arrive on a CONFIRMED
       // session — the ones commit_rx_msgid_ deliberately refuses to let move
       // the authenticated counter. Deliberately separate from
-      // frame_counter_.rx_message_id and never persisted: it exists only to
+      // the MAC-1 rx mark (seq_.rxId()) and never persisted: it exists only to
       // stop the same unauthenticated frame being replayed without limit.
       // handle_register_ defers a provisioned node's config push to
       // confirm_session_, which is the first moment it can be encrypted. The
@@ -1377,8 +1373,25 @@ namespace esphome
 
       // uint32_t rx_message_id_{0};
       // uint32_t tx_message_id_{0};
-      FrameCounter frame_counter_{0, 0};
-      // Guards frame_counter_.tx_message_id allocation and this listener's
+      // MAC-1 (stage S3): the shared mac1::Sequencer, ForwardRatchet policy --
+      // accept only rx < id <= rx + 1024, commit sets rx := id -- with persist
+      // margins of 1, i.e. every id handed out and every committed uplink is
+      // written at once (persist_hook_), exactly the cadence this listener has
+      // always had. Two-phase: admit_frame_ check()s, commit_rx_msgid_ commit()s
+      // only after MAC-2 verified (or before any session exists).
+      mac1::Sequencer seq_{mac1::Config{mac1::Policy::ForwardRatchet, 1, 1}};
+      // The Sequencer's PersistHook: save_state_ + notePersisted.
+      static bool persist_hook_(void *ctx);
+      mac1::PersistHook persist_() { return mac1::PersistHook{&LORAListener::persist_hook_, this}; }
+      // Set both counters WITHOUT a write and count them as persisted (NVS
+      // apply, login reset, boot margin, MAC ping reservation -- none of which
+      // has ever written by itself). Uses Sequencer::restore with the margins
+      // of 1 subtracted, which is exact in uint32 arithmetic (0 - 1 + 1 == 0).
+      void set_counters_no_write_(uint32_t tx, uint32_t rx) { this->seq_.restore(tx - 1u, rx - 1u); }
+    public:
+      // For tests: put the counters anywhere (a boundary, an exhausted space).
+      void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
+      // Guards the Sequencer's tx allocation and this listener's
       // entry in s_base_nonce_map. mode_test_timer_cb_/drift_timer_cb_
       // increment tx_message_id and seal frames from the esp_timer ("Tmr
       // Svc") task, concurrently with the ESPHome main loop doing the same
@@ -1791,8 +1804,7 @@ namespace esphome
 
     inline void LORAClientRestoreState::apply(LORAListener *listener)
     {
-      listener->frame_counter_.rx_message_id = this->rx_message_id;
-      listener->frame_counter_.tx_message_id = this->tx_message_id + 64;
+      listener->set_counters_no_write_(this->tx_message_id + 64, this->rx_message_id);
       listener->registered_       = this->logged_in;
       listener->last_sleep_epoch_ = this->last_sleep_epoch;
     }
