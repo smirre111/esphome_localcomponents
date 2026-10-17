@@ -129,12 +129,21 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
 
 ## S6 Port demux
 
-- [ ] One table oneof -> port; `dispatchCommand` gets APP only; MAC management
-      frames go to the management entity.
-- [ ] Hub children receive decoded indications, not raw bytes (lint:
-      `client.raw_bytes_to_children`, `children.wire_unpack`,
-      `children.sender_filter` fall to 0; closes the `lora_cover.cpp` sender
-      filter hole while unregistered).
+- [ ] Node: one table oneof -> port; `dispatchCommand` gets APP only; MAC
+      management frames go to the management entity (node agent).
+- [x] Hub: `PortTable.h` (`porttable::uplinkPort`) is the one uplink table;
+      `dispatch_payload_` demultiplexes through it (MAC management frames to
+      the MAC handlers). Hub `1abd0ce`.
+- [x] Hub children receive decoded `AppIndication`s (MacHdr, payload,
+      authentic) for App-port frames only, and an `on_register()` notice; the
+      re-pack and the children's own unpack/sender filter are gone (lint:
+      raw_bytes_to_children 3->0, children.wire_unpack 2->0,
+      children.sender_filter 2->0; the cover's unregistered-sender hole
+      closed). Sensor platform now host-tested. Hub `06285e3`, `1abd0ce`.
+- Note (pre-existing, unchanged by request): the shadow pending mask's inputs
+  come only from register_listener() objects, i.e. SleepTriggers; production
+  registers the real nodes with register_client(), so the mask has never seen
+  their state.
 
 ## S7 ARQ ownership
 
