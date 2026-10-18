@@ -602,7 +602,7 @@ struct BeaconProbe : LORAClient {
 // One wake beacon carrying the PREVIOUS wake's Class A funnel.
 //
 // Only the fields the ledger reads are set; the rest stay at INIT defaults.
-// prevbeaconmsgid is the wake's identity — the ledger keys on it so a wake
+// prevbeaconfcnt is the wake's identity — the ledger keys on it so a wake
 // reported twice is counted once.
 void deliverBeaconWithWakeFunnel(LORAClient &rol, uint32_t prev_msgid,
                                  uint32_t windows, uint32_t hits,
@@ -610,7 +610,7 @@ void deliverBeaconWithWakeFunnel(LORAClient &rol, uint32_t prev_msgid,
     NodeWakeBeacon b     = NODE_WAKE_BEACON__INIT;
     b.reason             = (WakeReason) WAKE_REASON__WAKE_TIMER_CHECKIN;
     b.mode               = NODE_MODE__MODE_AUTO;
-    b.prevbeaconmsgid    = prev_msgid;
+    b.prevbeaconfcnt    = prev_msgid;
     b.prevwakewindows    = windows;
     b.prevwakehits       = hits;
     b.prevwakedetected   = detected;
@@ -806,7 +806,7 @@ TEST(RealLoraClient, TheClassALedgerDoesNotDoubleCountOneWake) {
     h.rol.registered_ = true;
 
     // THE GUARD THIS TEST EXISTS FOR. Each beacon reports the PREVIOUS wake, so
-    // two beacons from one wake carry the SAME prevbeaconmsgid and the same
+    // two beacons from one wake carry the SAME prevbeaconfcnt and the same
     // funnel. fw 1.1.2 and 1.1.3 both did exactly that — a MODE_CHANGED and a
     // TIMER_CHECKIN per wake — and the one-uplink fix in 1.1.4 is what stopped
     // it. The ledger must not depend on that fix holding.
@@ -9917,7 +9917,7 @@ void deliverRebootBeacon(LORAClient &rol, WakeReason reason, uint32_t reset_reas
     b.mode         = mode;
     b.fwversion    = 0x00010203;
     b.sessionresume = resume;
-    b.prevbeaconmsgid = prev_msgid;
+    b.prevbeaconfcnt = prev_msgid;
     b.phase        = &pr;
     static_cast<BeaconProbe &>(rol).handle_beacon_(&b);
 }

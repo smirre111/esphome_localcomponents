@@ -1135,7 +1135,7 @@ namespace esphome
       MacStats mac_stats_{};
       // Mode C's Class A ledger; see class_a_stats().
       ClassAStats class_a_stats_{};
-      // The prevbeaconmsgid whose funnel has already been added. Each beacon
+      // The prevbeaconfcnt whose funnel has already been added. Each beacon
       // reports the PREVIOUS wake, so two beacons from one wake would count
       // that wake twice — exactly what fw 1.1.2 and 1.1.3 did before the
       // one-uplink fix. Keying on the msgid makes the accumulation idempotent

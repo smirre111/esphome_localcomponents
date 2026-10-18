@@ -5309,7 +5309,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       if (this->parent_ != nullptr && this->last_uplink_t0_us_ > 0 &&
           this->last_uplink_t0_us_ == this->parent_->last_rx_t0_us())
       {
-        const bool sampled = this->wake_fit_.addReported(b->prevbeaconmsgid, b->prevbeacont0ticks);
+        const bool sampled = this->wake_fit_.addReported(b->prevbeaconfcnt, b->prevbeacont0ticks);
         this->wake_fit_.noteHeard(this->last_uplink_msgid_, this->last_uplink_t0_us_);
         if (sampled)
           ESP_LOGW(TAG, "[%s] Wake clock: n %u span %u s ppm %d | crystal period %u Q19 -> %d ppm "
@@ -5344,15 +5344,15 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       // offered count above and the pair is what makes a Class A success rate
       // a number rather than a correlation exercise.
       //
-      // IDEMPOTENT ON prevbeaconmsgid. Each beacon reports the previous wake,
+      // IDEMPOTENT ON prevbeaconfcnt. Each beacon reports the previous wake,
       // so two beacons from one wake would add that wake twice — precisely
       // what fw 1.1.2 and 1.1.3 did before the one-uplink fix. Keying on the
       // msgid means a duplicate, a retransmission or a regression of that fix
       // cannot inflate the ledger.
-      if (b->prevbeaconmsgid != 0 &&
-          b->prevbeaconmsgid != this->class_a_last_prev_msgid_)
+      if (b->prevbeaconfcnt != 0 &&
+          b->prevbeaconfcnt != this->class_a_last_prev_msgid_)
       {
-        this->class_a_last_prev_msgid_ = b->prevbeaconmsgid;
+        this->class_a_last_prev_msgid_ = b->prevbeaconfcnt;
         this->class_a_stats_.windows   += b->prevwakewindows;
         this->class_a_stats_.hits      += b->prevwakehits;
         this->class_a_stats_.detected  += b->prevwakedetected;
@@ -5371,7 +5371,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       const bool changed = (b->resetreason != this->last_handled_reset_reason_);
       this->last_handled_reset_reason_ = b->resetreason;
       if (modebsup::bootAdvancesTx((uint32_t) b->reason, b->resetreason, changed, b->sessionresume,
-                                   b->prevbeaconmsgid != this->last_wake_key_,
+                                   b->prevbeaconfcnt != this->last_wake_key_,
                                    this->s_since_(this->last_boot_advance_us_)))
         this->advance_tx_for_boot_(b);
       return changed;
@@ -5388,7 +5388,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
     {
       const int64_t now_us = esp_timer_get_time();
       this->last_boot_advance_us_ = (now_us > 0) ? now_us : 1;
-      this->last_wake_key_        = b->prevbeaconmsgid;
+      this->last_wake_key_        = b->prevbeaconfcnt;
       this->set_counters_no_write_(this->seq_.txId() + modebsup::kTxBootMargin, this->seq_.rxId());
       ESP_LOGI(TAG, "[%s] Node reset (%s%s) — advancing tx_message_id by %u to %u",
                this->get_name().c_str(), s_reset_reason_name(b->resetreason),

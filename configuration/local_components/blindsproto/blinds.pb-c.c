@@ -1222,7 +1222,277 @@ void   lora_client_response_message__free_unpacked
   assert(message->base.descriptor == &lora_client_response_message__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
-static const ProtobufCFieldDescriptor lora_cover_operation__field_descriptors[2] =
+void   hub_mac_pdu__init
+                     (HubMacPdu         *message)
+{
+  static const HubMacPdu init_value = HUB_MAC_PDU__INIT;
+  *message = init_value;
+}
+size_t hub_mac_pdu__get_packed_size
+                     (const HubMacPdu *message)
+{
+  assert(message->base.descriptor == &hub_mac_pdu__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t hub_mac_pdu__pack
+                     (const HubMacPdu *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &hub_mac_pdu__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t hub_mac_pdu__pack_to_buffer
+                     (const HubMacPdu *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &hub_mac_pdu__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+HubMacPdu *
+       hub_mac_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (HubMacPdu *)
+     protobuf_c_message_unpack (&hub_mac_pdu__descriptor,
+                                allocator, len, data);
+}
+void   hub_mac_pdu__free_unpacked
+                     (HubMacPdu *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &hub_mac_pdu__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   sysop_cmd__init
+                     (SysopCmd         *message)
+{
+  static const SysopCmd init_value = SYSOP_CMD__INIT;
+  *message = init_value;
+}
+size_t sysop_cmd__get_packed_size
+                     (const SysopCmd *message)
+{
+  assert(message->base.descriptor == &sysop_cmd__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t sysop_cmd__pack
+                     (const SysopCmd *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &sysop_cmd__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t sysop_cmd__pack_to_buffer
+                     (const SysopCmd *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &sysop_cmd__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+SysopCmd *
+       sysop_cmd__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (SysopCmd *)
+     protobuf_c_message_unpack (&sysop_cmd__descriptor,
+                                allocator, len, data);
+}
+void   sysop_cmd__free_unpacked
+                     (SysopCmd *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &sysop_cmd__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   hub_app_pdu__init
+                     (HubAppPdu         *message)
+{
+  static const HubAppPdu init_value = HUB_APP_PDU__INIT;
+  *message = init_value;
+}
+size_t hub_app_pdu__get_packed_size
+                     (const HubAppPdu *message)
+{
+  assert(message->base.descriptor == &hub_app_pdu__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t hub_app_pdu__pack
+                     (const HubAppPdu *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &hub_app_pdu__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t hub_app_pdu__pack_to_buffer
+                     (const HubAppPdu *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &hub_app_pdu__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+HubAppPdu *
+       hub_app_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (HubAppPdu *)
+     protobuf_c_message_unpack (&hub_app_pdu__descriptor,
+                                allocator, len, data);
+}
+void   hub_app_pdu__free_unpacked
+                     (HubAppPdu *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &hub_app_pdu__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   mac_ack__init
+                     (MacAck         *message)
+{
+  static const MacAck init_value = MAC_ACK__INIT;
+  *message = init_value;
+}
+size_t mac_ack__get_packed_size
+                     (const MacAck *message)
+{
+  assert(message->base.descriptor == &mac_ack__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t mac_ack__pack
+                     (const MacAck *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &mac_ack__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t mac_ack__pack_to_buffer
+                     (const MacAck *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &mac_ack__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+MacAck *
+       mac_ack__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (MacAck *)
+     protobuf_c_message_unpack (&mac_ack__descriptor,
+                                allocator, len, data);
+}
+void   mac_ack__free_unpacked
+                     (MacAck *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &mac_ack__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   node_mac_pdu__init
+                     (NodeMacPdu         *message)
+{
+  static const NodeMacPdu init_value = NODE_MAC_PDU__INIT;
+  *message = init_value;
+}
+size_t node_mac_pdu__get_packed_size
+                     (const NodeMacPdu *message)
+{
+  assert(message->base.descriptor == &node_mac_pdu__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t node_mac_pdu__pack
+                     (const NodeMacPdu *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &node_mac_pdu__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t node_mac_pdu__pack_to_buffer
+                     (const NodeMacPdu *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &node_mac_pdu__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+NodeMacPdu *
+       node_mac_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (NodeMacPdu *)
+     protobuf_c_message_unpack (&node_mac_pdu__descriptor,
+                                allocator, len, data);
+}
+void   node_mac_pdu__free_unpacked
+                     (NodeMacPdu *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &node_mac_pdu__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   node_app_pdu__init
+                     (NodeAppPdu         *message)
+{
+  static const NodeAppPdu init_value = NODE_APP_PDU__INIT;
+  *message = init_value;
+}
+size_t node_app_pdu__get_packed_size
+                     (const NodeAppPdu *message)
+{
+  assert(message->base.descriptor == &node_app_pdu__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t node_app_pdu__pack
+                     (const NodeAppPdu *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &node_app_pdu__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t node_app_pdu__pack_to_buffer
+                     (const NodeAppPdu *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &node_app_pdu__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+NodeAppPdu *
+       node_app_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (NodeAppPdu *)
+     protobuf_c_message_unpack (&node_app_pdu__descriptor,
+                                allocator, len, data);
+}
+void   node_app_pdu__free_unpacked
+                     (NodeAppPdu *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &node_app_pdu__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+static const ProtobufCFieldDescriptor lora_cover_operation__field_descriptors[3] =
 {
   {
     "operation",
@@ -1248,15 +1518,28 @@ static const ProtobufCFieldDescriptor lora_cover_operation__field_descriptors[2]
     PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "cmd_id",
+    3,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(LoraCoverOperation, cmd_id),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned lora_cover_operation__field_indices_by_name[] = {
+  2,   /* field[2] = cmd_id */
   0,   /* field[0] = operation */
   1,   /* field[1] = position */
 };
 static const ProtobufCIntRange lora_cover_operation__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 2 }
+  { 0, 3 }
 };
 const ProtobufCMessageDescriptor lora_cover_operation__descriptor =
 {
@@ -1266,7 +1549,7 @@ const ProtobufCMessageDescriptor lora_cover_operation__descriptor =
   "LoraCoverOperation",
   "",
   sizeof(LoraCoverOperation),
-  2,
+  3,
   lora_cover_operation__field_descriptors,
   lora_cover_operation__field_indices_by_name,
   1,  lora_cover_operation__number_ranges,
@@ -2307,12 +2590,12 @@ static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[22] =
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "prevBeaconMsgId",
+    "prevBeaconFcnt",
     27,
     PROTOBUF_C_LABEL_NONE,
     PROTOBUF_C_TYPE_UINT32,
     0,   /* quantifier_offset */
-    offsetof(NodeWakeBeacon, prevbeaconmsgid),
+    offsetof(NodeWakeBeacon, prevbeaconfcnt),
     NULL,
     NULL,
     0,             /* flags */
@@ -2424,7 +2707,7 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
   2,   /* field[2] = nodeEpoch */
   12,   /* field[12] = phase */
   5,   /* field[5] = position */
-  13,   /* field[13] = prevBeaconMsgId */
+  13,   /* field[13] = prevBeaconFcnt */
   14,   /* field[14] = prevBeaconT0Ticks */
   21,   /* field[21] = prevSleepAppliedUs */
   20,   /* field[20] = prevSleepRequestedUs */
@@ -4802,6 +5085,474 @@ const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
   lora_client_response_message__field_indices_by_name,
   4,  lora_client_response_message__number_ranges,
   (ProtobufCMessageInit) lora_client_response_message__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor hub_mac_pdu__field_descriptors[6] =
+{
+  {
+    "drifttest",
+    18,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubMacPdu, pdu_case),
+    offsetof(HubMacPdu, drifttest),
+    &drift_test__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "maccontrol",
+    20,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubMacPdu, pdu_case),
+    offsetof(HubMacPdu, maccontrol),
+    &mac_control__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "gridsync",
+    21,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubMacPdu, pdu_case),
+    offsetof(HubMacPdu, gridsync),
+    &grid_sync__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "modetest",
+    22,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubMacPdu, pdu_case),
+    offsetof(HubMacPdu, modetest),
+    &mode_test__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "gridbeacon",
+    23,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubMacPdu, pdu_case),
+    offsetof(HubMacPdu, gridbeacon),
+    &grid_beacon__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "griddemote",
+    24,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubMacPdu, pdu_case),
+    offsetof(HubMacPdu, griddemote),
+    &grid_demote__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned hub_mac_pdu__field_indices_by_name[] = {
+  0,   /* field[0] = drifttest */
+  4,   /* field[4] = gridbeacon */
+  5,   /* field[5] = griddemote */
+  2,   /* field[2] = gridsync */
+  1,   /* field[1] = maccontrol */
+  3,   /* field[3] = modetest */
+};
+static const ProtobufCIntRange hub_mac_pdu__number_ranges[2 + 1] =
+{
+  { 18, 0 },
+  { 20, 1 },
+  { 0, 6 }
+};
+const ProtobufCMessageDescriptor hub_mac_pdu__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "HubMacPdu",
+  "HubMacPdu",
+  "HubMacPdu",
+  "",
+  sizeof(HubMacPdu),
+  6,
+  hub_mac_pdu__field_descriptors,
+  hub_mac_pdu__field_indices_by_name,
+  2,  hub_mac_pdu__number_ranges,
+  (ProtobufCMessageInit) hub_mac_pdu__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor sysop_cmd__field_descriptors[2] =
+{
+  {
+    "op",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(SysopCmd, op),
+    &client_operation__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "cmd_id",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(SysopCmd, cmd_id),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned sysop_cmd__field_indices_by_name[] = {
+  1,   /* field[1] = cmd_id */
+  0,   /* field[0] = op */
+};
+static const ProtobufCIntRange sysop_cmd__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 2 }
+};
+const ProtobufCMessageDescriptor sysop_cmd__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "SysopCmd",
+  "SysopCmd",
+  "SysopCmd",
+  "",
+  sizeof(SysopCmd),
+  2,
+  sysop_cmd__field_descriptors,
+  sysop_cmd__field_indices_by_name,
+  1,  sysop_cmd__number_ranges,
+  (ProtobufCMessageInit) sysop_cmd__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor hub_app_pdu__field_descriptors[6] =
+{
+  {
+    "operation",
+    10,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubAppPdu, pdu_case),
+    offsetof(HubAppPdu, operation),
+    &lora_cover_operation__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "sysop",
+    11,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubAppPdu, pdu_case),
+    offsetof(HubAppPdu, sysop),
+    &sysop_cmd__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "clientconfig",
+    12,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubAppPdu, pdu_case),
+    offsetof(HubAppPdu, clientconfig),
+    &client_config__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "coverconfig",
+    13,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubAppPdu, pdu_case),
+    offsetof(HubAppPdu, coverconfig),
+    &cover_config__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "timesync",
+    16,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubAppPdu, pdu_case),
+    offsetof(HubAppPdu, timesync),
+    &time_sync__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "schedule",
+    17,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(HubAppPdu, pdu_case),
+    offsetof(HubAppPdu, schedule),
+    &schedule_config__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned hub_app_pdu__field_indices_by_name[] = {
+  2,   /* field[2] = clientconfig */
+  3,   /* field[3] = coverconfig */
+  0,   /* field[0] = operation */
+  5,   /* field[5] = schedule */
+  1,   /* field[1] = sysop */
+  4,   /* field[4] = timesync */
+};
+static const ProtobufCIntRange hub_app_pdu__number_ranges[2 + 1] =
+{
+  { 10, 0 },
+  { 16, 4 },
+  { 0, 6 }
+};
+const ProtobufCMessageDescriptor hub_app_pdu__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "HubAppPdu",
+  "HubAppPdu",
+  "HubAppPdu",
+  "",
+  sizeof(HubAppPdu),
+  6,
+  hub_app_pdu__field_descriptors,
+  hub_app_pdu__field_indices_by_name,
+  2,  hub_app_pdu__number_ranges,
+  (ProtobufCMessageInit) hub_app_pdu__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor mac_ack__field_descriptors[2] =
+{
+  {
+    "status",
+    1,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_ENUM,
+    0,   /* quantifier_offset */
+    offsetof(MacAck, status),
+    &ack_status__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "phase",
+    2,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    0,   /* quantifier_offset */
+    offsetof(MacAck, phase),
+    &phase_report__descriptor,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned mac_ack__field_indices_by_name[] = {
+  1,   /* field[1] = phase */
+  0,   /* field[0] = status */
+};
+static const ProtobufCIntRange mac_ack__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 2 }
+};
+const ProtobufCMessageDescriptor mac_ack__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "MacAck",
+  "MacAck",
+  "MacAck",
+  "",
+  sizeof(MacAck),
+  2,
+  mac_ack__field_descriptors,
+  mac_ack__field_indices_by_name,
+  1,  mac_ack__number_ranges,
+  (ProtobufCMessageInit) mac_ack__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor node_mac_pdu__field_descriptors[4] =
+{
+  {
+    "ack",
+    15,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(NodeMacPdu, pdu_case),
+    offsetof(NodeMacPdu, ack),
+    &mac_ack__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "maccontrol",
+    20,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(NodeMacPdu, pdu_case),
+    offsetof(NodeMacPdu, maccontrol),
+    &mac_control__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "modetestreport",
+    22,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(NodeMacPdu, pdu_case),
+    offsetof(NodeMacPdu, modetestreport),
+    &mode_test_report__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "gridsyncrequest",
+    23,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(NodeMacPdu, pdu_case),
+    offsetof(NodeMacPdu, gridsyncrequest),
+    &grid_sync_request__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned node_mac_pdu__field_indices_by_name[] = {
+  0,   /* field[0] = ack */
+  3,   /* field[3] = gridsyncrequest */
+  1,   /* field[1] = maccontrol */
+  2,   /* field[2] = modetestreport */
+};
+static const ProtobufCIntRange node_mac_pdu__number_ranges[3 + 1] =
+{
+  { 15, 0 },
+  { 20, 1 },
+  { 22, 2 },
+  { 0, 4 }
+};
+const ProtobufCMessageDescriptor node_mac_pdu__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "NodeMacPdu",
+  "NodeMacPdu",
+  "NodeMacPdu",
+  "",
+  sizeof(NodeMacPdu),
+  4,
+  node_mac_pdu__field_descriptors,
+  node_mac_pdu__field_indices_by_name,
+  3,  node_mac_pdu__number_ranges,
+  (ProtobufCMessageInit) node_mac_pdu__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor node_app_pdu__field_descriptors[4] =
+{
+  {
+    "avail",
+    10,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(NodeAppPdu, pdu_case),
+    offsetof(NodeAppPdu, avail),
+    &client_available__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "state",
+    12,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(NodeAppPdu, pdu_case),
+    offsetof(NodeAppPdu, state),
+    &client_battery__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "position",
+    13,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(NodeAppPdu, pdu_case),
+    offsetof(NodeAppPdu, position),
+    &cover_position__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "beacon",
+    16,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_MESSAGE,
+    offsetof(NodeAppPdu, pdu_case),
+    offsetof(NodeAppPdu, beacon),
+    &node_wake_beacon__descriptor,
+    NULL,
+    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned node_app_pdu__field_indices_by_name[] = {
+  0,   /* field[0] = avail */
+  3,   /* field[3] = beacon */
+  2,   /* field[2] = position */
+  1,   /* field[1] = state */
+};
+static const ProtobufCIntRange node_app_pdu__number_ranges[3 + 1] =
+{
+  { 10, 0 },
+  { 12, 1 },
+  { 16, 3 },
+  { 0, 4 }
+};
+const ProtobufCMessageDescriptor node_app_pdu__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "NodeAppPdu",
+  "NodeAppPdu",
+  "NodeAppPdu",
+  "",
+  sizeof(NodeAppPdu),
+  4,
+  node_app_pdu__field_descriptors,
+  node_app_pdu__field_indices_by_name,
+  3,  node_app_pdu__number_ranges,
+  (ProtobufCMessageInit) node_app_pdu__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
 static const ProtobufCEnumValue cov_operation__enum_values_by_number[3] =

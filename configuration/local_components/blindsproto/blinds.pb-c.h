@@ -42,6 +42,12 @@ typedef struct ClientBattery ClientBattery;
 typedef struct CoverPosition CoverPosition;
 typedef struct GridSyncRequest GridSyncRequest;
 typedef struct LoraClientResponseMessage LoraClientResponseMessage;
+typedef struct HubMacPdu HubMacPdu;
+typedef struct SysopCmd SysopCmd;
+typedef struct HubAppPdu HubAppPdu;
+typedef struct MacAck MacAck;
+typedef struct NodeMacPdu NodeMacPdu;
+typedef struct NodeAppPdu NodeAppPdu;
 
 
 /* --- enums --- */
@@ -212,6 +218,12 @@ typedef enum {
 struct  LoraCoverOperation
 {
   ProtobufCMessage base;
+  /*
+   * MAC wire v1 (S8, docs/mac-wire-format.md section 7): the command's identity,
+   * allocated per Home Assistant command by the hub's Control channel and kept
+   * across retries and re-packs. 0 = not set (v0 frames never set it).
+   */
+  uint32_t cmd_id;
   LoraCoverOperation__CovopCase covop_case;
   union {
     float position;
@@ -220,7 +232,7 @@ struct  LoraCoverOperation
 };
 #define LORA_COVER_OPERATION__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_cover_operation__descriptor) \
-    , LORA_COVER_OPERATION__COVOP__NOT_SET, {0} }
+    , 0, LORA_COVER_OPERATION__COVOP__NOT_SET, {0} }
 
 
 struct  ClientConfig
@@ -291,6 +303,7 @@ struct  LoginMsg
    * LOGIN before any state change (rate limit, resetCounters()) —
    * previously plaintext and accepted on a bare 5 s rate limit, letting a
    * forged/replayed LOGIN force real, key-free GCM IV reuse.
+   * MAC wire v1 (S8): replaced by the frame's K_AUTH tag; reserved in W5.
    */
   ProtobufCBinaryData mic;
   /*
@@ -398,6 +411,10 @@ struct  PhaseReport
     , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
+/*
+ * MAC wire v1 (S8): replaced by MacAck in the body + FLAGS.ACK / ACKED_FCNT in
+ * the header; deleted in W5.
+ */
 struct  CommandAck
 {
   ProtobufCMessage base;
@@ -649,8 +666,10 @@ struct  NodeWakeBeacon
    * and the hub pairs it with its own receive stamp of that beacon, matched by
    * msgId. Hub us against ticks x nominal period is the wake clock's rate.
    * 0 / 0 = no previous beacon since power-on.
+   * MAC wire v1 (S8): renamed from prevBeaconMsgId -- same number, type and
+   * values; the paired beacon is identified by its FCNT (= the v0 msgId).
    */
-  uint32_t prevbeaconmsgid;
+  uint32_t prevbeaconfcnt;
   uint64_t prevbeacont0ticks;
   /*
    * The node's measured crystal period (Q19 us per tick), for the report: the
@@ -915,6 +934,7 @@ struct  GridBeacon
   /*
    * AES-CMAC over framecrypto::buildBeaconMacInput(), truncated to 8 bytes to
    * match the AEAD tag budget already on this link.
+   * MAC wire v1 (S8): replaced by the frame's FLEET tag; reserved in W5.
    */
   ProtobufCBinaryData mac;
 };
@@ -1372,6 +1392,7 @@ struct  ClientRegister
    * REGISTER previously had no authentication at all and was processed
    * before any address/msgid filter — a forged plaintext REGISTER could
    * drop an existing session outright.
+   * MAC wire v1 (S8): replaced by the frame's K_AUTH tag; reserved in W5.
    */
   ProtobufCBinaryData mic;
 };
@@ -1524,6 +1545,157 @@ struct  LoraClientResponseMessage
 #define LORA_CLIENT_RESPONSE_MESSAGE__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&lora_client_response_message__descriptor) \
     , NULL, LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET, {0} }
+
+
+typedef enum {
+  HUB_MAC_PDU__PDU__NOT_SET = 0,
+  HUB_MAC_PDU__PDU_DRIFTTEST = 18,
+  HUB_MAC_PDU__PDU_MACCONTROL = 20,
+  HUB_MAC_PDU__PDU_GRIDSYNC = 21,
+  HUB_MAC_PDU__PDU_MODETEST = 22,
+  HUB_MAC_PDU__PDU_GRIDBEACON = 23,
+  HUB_MAC_PDU__PDU_GRIDDEMOTE = 24
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(HUB_MAC_PDU__PDU__CASE)
+} HubMacPdu__PduCase;
+
+/*
+ * hub -> node, PORT 0: MAC management.
+ */
+struct  HubMacPdu
+{
+  ProtobufCMessage base;
+  HubMacPdu__PduCase pdu_case;
+  union {
+    DriftTest *drifttest;
+    GridBeacon *gridbeacon;
+    GridDemote *griddemote;
+    GridSync *gridsync;
+    MacControl *maccontrol;
+    ModeTest *modetest;
+  };
+};
+#define HUB_MAC_PDU__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&hub_mac_pdu__descriptor) \
+    , HUB_MAC_PDU__PDU__NOT_SET, {0} }
+
+
+/*
+ * A sysop with its command identity (section 7): ClientOperation was a bare
+ * enum in the v0 envelope, so it gains a wrapper to carry cmd_id.
+ */
+struct  SysopCmd
+{
+  ProtobufCMessage base;
+  ClientOperation op;
+  uint32_t cmd_id;
+};
+#define SYSOP_CMD__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&sysop_cmd__descriptor) \
+    , CLIENT_OPERATION__CMD_ENABLE_WIFI, 0 }
+
+
+typedef enum {
+  HUB_APP_PDU__PDU__NOT_SET = 0,
+  HUB_APP_PDU__PDU_OPERATION = 10,
+  HUB_APP_PDU__PDU_SYSOP = 11,
+  HUB_APP_PDU__PDU_CLIENTCONFIG = 12,
+  HUB_APP_PDU__PDU_COVERCONFIG = 13,
+  HUB_APP_PDU__PDU_TIMESYNC = 16,
+  HUB_APP_PDU__PDU_SCHEDULE = 17
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(HUB_APP_PDU__PDU__CASE)
+} HubAppPdu__PduCase;
+
+/*
+ * hub -> node, PORT 2: application.
+ */
+struct  HubAppPdu
+{
+  ProtobufCMessage base;
+  HubAppPdu__PduCase pdu_case;
+  union {
+    ClientConfig *clientconfig;
+    CoverConfig *coverconfig;
+    LoraCoverOperation *operation;
+    ScheduleConfig *schedule;
+    SysopCmd *sysop;
+    TimeSync *timesync;
+  };
+};
+#define HUB_APP_PDU__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&hub_app_pdu__descriptor) \
+    , HUB_APP_PDU__PDU__NOT_SET, {0} }
+
+
+/*
+ * node -> hub, PORT 0: the MAC ACK's body. The acknowledged FCNT travels in the
+ * header (FLAGS.ACK + ACKED_FCNT); status still means "executed", and the phase
+ * report is still section 4.6's evidence (CommandAck minus ack_msg_id).
+ */
+struct  MacAck
+{
+  ProtobufCMessage base;
+  AckStatus status;
+  PhaseReport *phase;
+};
+#define MAC_ACK__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&mac_ack__descriptor) \
+    , ACK_STATUS__ACK_OK, NULL }
+
+
+typedef enum {
+  NODE_MAC_PDU__PDU__NOT_SET = 0,
+  NODE_MAC_PDU__PDU_ACK = 15,
+  NODE_MAC_PDU__PDU_MACCONTROL = 20,
+  NODE_MAC_PDU__PDU_MODETESTREPORT = 22,
+  NODE_MAC_PDU__PDU_GRIDSYNCREQUEST = 23
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(NODE_MAC_PDU__PDU__CASE)
+} NodeMacPdu__PduCase;
+
+/*
+ * node -> hub, PORT 0: MAC management.
+ */
+struct  NodeMacPdu
+{
+  ProtobufCMessage base;
+  NodeMacPdu__PduCase pdu_case;
+  union {
+    MacAck *ack;
+    GridSyncRequest *gridsyncrequest;
+    MacControl *maccontrol;
+    ModeTestReport *modetestreport;
+  };
+};
+#define NODE_MAC_PDU__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&node_mac_pdu__descriptor) \
+    , NODE_MAC_PDU__PDU__NOT_SET, {0} }
+
+
+typedef enum {
+  NODE_APP_PDU__PDU__NOT_SET = 0,
+  NODE_APP_PDU__PDU_AVAIL = 10,
+  NODE_APP_PDU__PDU_STATE = 12,
+  NODE_APP_PDU__PDU_POSITION = 13,
+  NODE_APP_PDU__PDU_BEACON = 16
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(NODE_APP_PDU__PDU__CASE)
+} NodeAppPdu__PduCase;
+
+/*
+ * node -> hub, PORT 2: application.
+ */
+struct  NodeAppPdu
+{
+  ProtobufCMessage base;
+  NodeAppPdu__PduCase pdu_case;
+  union {
+    ClientAvailable *avail;
+    NodeWakeBeacon *beacon;
+    CoverPosition *position;
+    ClientBattery *state;
+  };
+};
+#define NODE_APP_PDU__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&node_app_pdu__descriptor) \
+    , NODE_APP_PDU__PDU__NOT_SET, {0} }
 
 
 /* LoraCoverOperation methods */
@@ -2039,6 +2211,120 @@ LoraClientResponseMessage *
 void   lora_client_response_message__free_unpacked
                      (LoraClientResponseMessage *message,
                       ProtobufCAllocator *allocator);
+/* HubMacPdu methods */
+void   hub_mac_pdu__init
+                     (HubMacPdu         *message);
+size_t hub_mac_pdu__get_packed_size
+                     (const HubMacPdu   *message);
+size_t hub_mac_pdu__pack
+                     (const HubMacPdu   *message,
+                      uint8_t             *out);
+size_t hub_mac_pdu__pack_to_buffer
+                     (const HubMacPdu   *message,
+                      ProtobufCBuffer     *buffer);
+HubMacPdu *
+       hub_mac_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   hub_mac_pdu__free_unpacked
+                     (HubMacPdu *message,
+                      ProtobufCAllocator *allocator);
+/* SysopCmd methods */
+void   sysop_cmd__init
+                     (SysopCmd         *message);
+size_t sysop_cmd__get_packed_size
+                     (const SysopCmd   *message);
+size_t sysop_cmd__pack
+                     (const SysopCmd   *message,
+                      uint8_t             *out);
+size_t sysop_cmd__pack_to_buffer
+                     (const SysopCmd   *message,
+                      ProtobufCBuffer     *buffer);
+SysopCmd *
+       sysop_cmd__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   sysop_cmd__free_unpacked
+                     (SysopCmd *message,
+                      ProtobufCAllocator *allocator);
+/* HubAppPdu methods */
+void   hub_app_pdu__init
+                     (HubAppPdu         *message);
+size_t hub_app_pdu__get_packed_size
+                     (const HubAppPdu   *message);
+size_t hub_app_pdu__pack
+                     (const HubAppPdu   *message,
+                      uint8_t             *out);
+size_t hub_app_pdu__pack_to_buffer
+                     (const HubAppPdu   *message,
+                      ProtobufCBuffer     *buffer);
+HubAppPdu *
+       hub_app_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   hub_app_pdu__free_unpacked
+                     (HubAppPdu *message,
+                      ProtobufCAllocator *allocator);
+/* MacAck methods */
+void   mac_ack__init
+                     (MacAck         *message);
+size_t mac_ack__get_packed_size
+                     (const MacAck   *message);
+size_t mac_ack__pack
+                     (const MacAck   *message,
+                      uint8_t             *out);
+size_t mac_ack__pack_to_buffer
+                     (const MacAck   *message,
+                      ProtobufCBuffer     *buffer);
+MacAck *
+       mac_ack__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   mac_ack__free_unpacked
+                     (MacAck *message,
+                      ProtobufCAllocator *allocator);
+/* NodeMacPdu methods */
+void   node_mac_pdu__init
+                     (NodeMacPdu         *message);
+size_t node_mac_pdu__get_packed_size
+                     (const NodeMacPdu   *message);
+size_t node_mac_pdu__pack
+                     (const NodeMacPdu   *message,
+                      uint8_t             *out);
+size_t node_mac_pdu__pack_to_buffer
+                     (const NodeMacPdu   *message,
+                      ProtobufCBuffer     *buffer);
+NodeMacPdu *
+       node_mac_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   node_mac_pdu__free_unpacked
+                     (NodeMacPdu *message,
+                      ProtobufCAllocator *allocator);
+/* NodeAppPdu methods */
+void   node_app_pdu__init
+                     (NodeAppPdu         *message);
+size_t node_app_pdu__get_packed_size
+                     (const NodeAppPdu   *message);
+size_t node_app_pdu__pack
+                     (const NodeAppPdu   *message,
+                      uint8_t             *out);
+size_t node_app_pdu__pack_to_buffer
+                     (const NodeAppPdu   *message,
+                      ProtobufCBuffer     *buffer);
+NodeAppPdu *
+       node_app_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   node_app_pdu__free_unpacked
+                     (NodeAppPdu *message,
+                      ProtobufCAllocator *allocator);
 /* --- per-message closures --- */
 
 typedef void (*LoraCoverOperation_Closure)
@@ -2122,6 +2408,24 @@ typedef void (*GridSyncRequest_Closure)
 typedef void (*LoraClientResponseMessage_Closure)
                  (const LoraClientResponseMessage *message,
                   void *closure_data);
+typedef void (*HubMacPdu_Closure)
+                 (const HubMacPdu *message,
+                  void *closure_data);
+typedef void (*SysopCmd_Closure)
+                 (const SysopCmd *message,
+                  void *closure_data);
+typedef void (*HubAppPdu_Closure)
+                 (const HubAppPdu *message,
+                  void *closure_data);
+typedef void (*MacAck_Closure)
+                 (const MacAck *message,
+                  void *closure_data);
+typedef void (*NodeMacPdu_Closure)
+                 (const NodeMacPdu *message,
+                  void *closure_data);
+typedef void (*NodeAppPdu_Closure)
+                 (const NodeAppPdu *message,
+                  void *closure_data);
 
 /* --- services --- */
 
@@ -2164,6 +2468,12 @@ extern const ProtobufCMessageDescriptor client_battery__descriptor;
 extern const ProtobufCMessageDescriptor cover_position__descriptor;
 extern const ProtobufCMessageDescriptor grid_sync_request__descriptor;
 extern const ProtobufCMessageDescriptor lora_client_response_message__descriptor;
+extern const ProtobufCMessageDescriptor hub_mac_pdu__descriptor;
+extern const ProtobufCMessageDescriptor sysop_cmd__descriptor;
+extern const ProtobufCMessageDescriptor hub_app_pdu__descriptor;
+extern const ProtobufCMessageDescriptor mac_ack__descriptor;
+extern const ProtobufCMessageDescriptor node_mac_pdu__descriptor;
+extern const ProtobufCMessageDescriptor node_app_pdu__descriptor;
 
 PROTOBUF_C__END_DECLS
 
