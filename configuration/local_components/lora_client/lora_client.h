@@ -125,20 +125,58 @@ namespace esphome
     // send, what to do when it is acknowledged, what to do when it is given up.
     // The retry rules are the Policy (DeliveryPolicy.h); the callbacks are the
     // only part that knows what the frame is.
+    // ---- S7: the MAC-0 delivery service's contract with the application ----
+    //
+    // The service (deliver_ / dlv_* in lora_client.cpp, policy in DeliveryPolicy.h)
+    // owns everything ARQ: the msgid of every attempt, the header and the frame,
+    // the pack-once copy a Resend::SameBytes request re-sends byte for byte, the
+    // ack matching, the retry ladder and the timers. The application only says
+    // what an attempt carries (encode), where it goes on the air (place), and is
+    // told the outcome (on_delivered / on_fail / on_abandon).
+
+    // One framed attempt, as the service hands it to `place`. `msgid` is the
+    // frame's id; the application may print it, never keep or compare it.
+    struct DeliveryFrame
+    {
+      std::vector<uint8_t> bytes;
+      mac2::FrameSeal      seal{};    // sealed=false: plaintext
+      uint32_t             msgid{0};  // set even when packing failed (it was allocated)
+    };
+    struct DeliveryAttempt
+    {
+      bool     retry{false};          // a retry of the request (counted or a burst fallback)
+      bool     resent_stored{false};  // the stored first frame again (Resend::SameBytes)
+      uint32_t tag{0};                // what encode said the attempt stands for
+    };
+    // The node answered an attempt. `tag` is that attempt's tag; `log_id` the id
+    // the node acknowledged, for log lines only.
+    struct DeliveryConfirm
+    {
+      uint32_t tag{0};
+      uint32_t log_id{0};
+    };
+
     struct DeliveryRequest
     {
       const char *what{"request"};          // for the log
-      const char *resend_verb{"resending"}; // how a counted retry is logged; nullptr: build() logs it
+      const char *resend_verb{"resending"}; // how a counted retry is logged; nullptr: the service's SameBytes lines
+      // Resend::SameBytes only: "<label> sent (msgid=N) — awaiting ack" on the first attempt.
+      const char *sent_label{nullptr};
       deliverypolicy::Policy policy{};
-      // Send ONE attempt (the first, or a retry when `retry` is true) and return
-      // the msgid it went out under, 0 when it could not be packed. `*tag` is
-      // what the attempt stands for (a ScheduleConfig's version); it is handed
-      // back to on_ack for whichever attempt the node answers.
-      std::function<uint32_t(bool retry, uint32_t *tag)> build;
-      // The node answered an attempt carrying `tag`. True when that completes the
-      // request (false: it answered a superseded attempt and the newer one is
-      // still awaited).
-      std::function<bool(uint32_t tag)> on_ack;
+      // Say what ONE attempt carries: fill a message on YOUR stack (payload only)
+      // and hand it to `frame`, which adds the header and a fresh msgid, packs and
+      // seals it; return what `frame` returned (false: nothing was framed). `*tag`
+      // names what the attempt stands for (a ScheduleConfig's version) and comes
+      // back in on_delivered. Asked for every attempt, except that a
+      // Resend::SameBytes request's retries re-send its first frame unchanged.
+      using FrameFn = std::function<bool(::LoraClientOperationMessage *op)>;
+      std::function<bool(bool retry, uint32_t *tag, const FrameFn &frame)> encode;
+      // Put a framed attempt on the air (placement, shape, the bookkeeping that
+      // depends on where it went). Empty: framed but not transmitted.
+      std::function<void(const DeliveryFrame &f, const DeliveryAttempt &a)> place;
+      // The node answered an attempt. True when that completes the request
+      // (false: it answered a superseded attempt and the newer one is still awaited).
+      std::function<bool(const DeliveryConfirm &c)> on_delivered;
       // The ladder is spent.
       std::function<void()> on_fail;
       // The request has left its channel (acked, or given up). Runs last.
@@ -156,8 +194,8 @@ namespace esphome
       // Fill in the command (cmd_case and its payload); the header and the msgid
       // are the mechanism's. The payload must outlive the call (own it in a capture).
       std::function<void(::LoraClientOperationMessage *op)> fill;
-      // The frame is on the air (or queued for it), under `msgid`.
-      std::function<void(uint32_t msgid)> on_sent;
+      // The frame is on the air (or queued for it); `log_id` is its id, for log lines only.
+      std::function<void(uint32_t log_id)> on_sent;
     };
 
     // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
@@ -167,7 +205,7 @@ namespace esphome
     // behind it; Config: ScheduleConfig; Mac: GridSync).
     struct DeliverySlot
     {
-      // What tx_tracked_op_ rebuilds on each (re)transmission.
+      // What encode_ctl_ builds the command from.
       enum class Kind : uint8_t { COVER, SYSOP };
       Kind     kind{Kind::COVER};
       bool     awaiting_ack{false};
@@ -189,12 +227,12 @@ namespace esphome
       int32_t  operation{0};
       float    position{0.0f};
       int32_t  sysop{0};         // ClientOperation value when kind == SYSOP
-      // The exact bytes sent (pack once), and the msgid they carry.
-      std::vector<uint8_t> frame;
-      uint32_t             frame_msgid{0};
-      // Which keys `frame` was sealed under (S4): a retry hands the SAME binding
-      // to the tracker, so a frame sealed before a re-key is never re-tagged (F4).
-      mac2::FrameSeal      frame_seal{};
+      // Resend::SameBytes: the first attempt's frame (bytes, msgid, and the keys
+      // it was sealed under -- a retry hands the SAME binding to the tracker, so
+      // a frame sealed before a re-key is never re-tagged, F4), and its tag.
+      // Owned by the delivery service (S7).
+      DeliveryFrame        frame{};
+      uint32_t             frame_tag{0};
       // Security review finding 1: a cover op / sysop issued while
       // relogin_pending_ is true would otherwise pack plaintext (session not
       // confirmed yet) and get stored — then every retry is rejected by the
@@ -771,7 +809,7 @@ namespace esphome
       // place a sealed ciphertext is stored and re-sent later) is empty —
       // invariant I3 (a) needs this cleared on every fresh send_login()
       // challenge, see clearSessionKeys_().
-      bool     trackedOpFrameEmptyForTest() const { return this->ctl().frame.empty(); }
+      bool     trackedOpFrameEmptyForTest() const { return this->ctl().frame.bytes.empty(); }
       // The msgid of the latest ScheduleConfig attempt, 0 when none is on record
       // (acked, or never sent). Kept after the ladder is spent, so a late ack is
       // still recognised.
@@ -887,12 +925,7 @@ namespace esphome
 
       // ---- S4: the single MAC data path (docs/mac-separation-layering-plan.md)
       // One packed hub->node data frame, ready for MAC-0.
-      struct MacFrame
-      {
-        std::vector<uint8_t> bytes;
-        mac2::FrameSeal      seal{};    // sealed=false: plaintext
-        uint32_t             msgid{0};  // set even when packing failed (it was allocated)
-      };
+      using MacFrame = DeliveryFrame;
       // THE framing path for hub->node data frames: the header (this node, the
       // hub, the msgid), the pack and, under a confirmed session, the seal.
       // `op` carries the payload only. The first form allocates the msgid from
@@ -906,7 +939,6 @@ namespace esphome
 
       // B4: the exact bytes of the tracked op in flight, so a retry
       // retransmits them rather than re-packing from live state.
-      uint32_t retransmit_tracked_op_();
 
       void build_mac_ping_frame_();
       static void mac_ping_timer_cb_(void *arg);
@@ -1716,13 +1748,16 @@ namespace esphome
       void     dlv_forget_ids_();
       static const char *dlv_timer_(DeliveryChannel ch);
       // ScheduleConfig, as a request.
-      uint32_t tx_schedule_config_(bool retry, uint32_t *version);
+      bool     encode_schedule_(bool retry, uint32_t *version, const DeliveryRequest::FrameFn &frame);
+      void     place_schedule_(const MacFrame &f, const DeliveryAttempt &a);
       bool     on_schedule_acked_(uint32_t version);
       void     on_schedule_failed_();
       bool     sched_push_outstanding_() const;
       // GridSync (enable), as a request. send_grid_sync(false) is NOT: a withdrawal
       // is a plain burst, never awaited or re-published.
-      uint32_t tx_grid_sync_(bool retry, uint32_t *msgid);
+      bool     encode_grid_sync_(bool retry, const DeliveryRequest::FrameFn &frame);
+      void     place_grid_sync_(const MacFrame &f);
+      int64_t  gridsync_planned_t0_{0};   // encode_grid_sync_ -> place_grid_sync_
       bool     on_grid_sync_acked_(uint32_t msgid);
       void     on_grid_sync_failed_();
       void     withdraw_grid_sync_();
@@ -1750,7 +1785,8 @@ namespace esphome
       static constexpr uint32_t kOpRetryIntervalMs = 3000;
       static constexpr uint8_t  kOpMaxRetries      = 4;
 
-      uint32_t tx_tracked_op_();             // (re)pack + send the stored cover/sys op, returns msgid
+      bool     encode_ctl_(const DeliveryRequest::FrameFn &frame);   // the cover/sys op's payload
+      void     place_ctl_(const MacFrame &f, const DeliveryAttempt &a);
       // Send a tracked system operation (e.g. CMD_OTA) through the same
       // retransmit-until-acked path as cover ops.  sysop is a ClientOperation value.
       void     send_tracked_sysop_(int32_t sysop);
@@ -1773,7 +1809,10 @@ namespace esphome
       DeliveryRequest ctl_request_();
       // Send the slot's command now (a fresh one, or the one a relogin deferred).
       void     ctl_send_();
-      uint32_t tx_ctl_(bool retry, uint32_t *tag);
+      // S7: one attempt of a channel's request (re-send the stored frame, or
+      // encode + frame + place a new one) and the SameBytes attempt log lines.
+      uint32_t dlv_attempt_(DeliverySlot &s, bool retry, uint32_t *tag);
+      void     dlv_log_attempt_(const DeliverySlot &s, bool retry, uint32_t msgid);
       bool     on_ctl_acked_(uint32_t ack_msg_id);
       void     on_ctl_failed_();
       void     on_ctl_abandoned_();

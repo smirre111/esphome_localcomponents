@@ -1546,8 +1546,8 @@ namespace esphome
       // in-flight command is simply lost — the existing kOpMaxRetries/
       // awaiting_ack machinery already handles "no ack arrived" as a
       // user-visible failure, which is what this now also is.
-      this->ctl().frame.clear();
-      this->ctl().frame_msgid = 0;
+      this->ctl().frame     = MacFrame{};   // the delivery service's stored frame
+      this->ctl().frame_tag = 0;
     }
 
     uint32_t LORAListener::sessionGenerationForTest() const
@@ -1698,7 +1698,7 @@ namespace esphome
       const bool is_session_opening = hdr && hdr->sessionnonce != 0;
       up.needs_candidate =
           is_session_opening &&
-          (up.keys.enc == PSA_KEY_ID_NULL || s_keys().installedSessionId(self) != up.session_id);
+          (!up.keys.hasEnc() || s_keys().installedSessionId(self) != up.session_id);
       if (!up.needs_candidate)
         return true;
       if (!this->deriveSessionKeyCandidate_(up.session_id, hdr->sessionnonce, &up.candidate))
@@ -2558,8 +2558,11 @@ namespace esphome
       req.what        = "GridSync";
       req.resend_verb = "re-publishing";
       req.policy      = deliverypolicy::kGridSyncPolicy;
-      req.build       = [this](bool retry, uint32_t *msgid) { return this->tx_grid_sync_(retry, msgid); };
-      req.on_ack      = [this](uint32_t msgid) { return this->on_grid_sync_acked_(msgid); };
+      req.encode      = [this](bool retry, uint32_t *, const DeliveryRequest::FrameFn &frame) {
+        return this->encode_grid_sync_(retry, frame);
+      };
+      req.place        = [this](const MacFrame &f, const DeliveryAttempt &) { this->place_grid_sync_(f); };
+      req.on_delivered = [this](const DeliveryConfirm &c) { return this->on_grid_sync_acked_(c.log_id); };
       req.on_fail     = [this]() { this->on_grid_sync_failed_(); };
       this->deliver_(CH_MAC, std::move(req));
     }
@@ -2674,12 +2677,15 @@ namespace esphome
     // ONE attempt at publishing the grid, built from the grid's position NOW (a
     // re-publish re-declares the position it will actually occupy, so a stale one
     // cannot anchor the node wrong). Returns its msgid, 0 when it did not pack.
-    uint32_t LORAListener::tx_grid_sync_(bool retry, uint32_t *msgid_tag)
+    // One GridSync attempt's payload (S7: the delivery service frames, places
+    // through place_grid_sync_, matches the ack and runs the ladder).
+    bool LORAListener::encode_grid_sync_(bool retry, const DeliveryRequest::FrameFn &frame)
     {
       LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
 
       // Chosen BEFORE the frame is built, because the frame declares it.
       const int64_t planned_t0 = this->grid_sync_planned_t0_();
+      this->gridsync_planned_t0_ = planned_t0;   // place_grid_sync_ aims at it
       this->gridsync_republishes_ = retry ? (uint8_t) (this->gridsync_republishes_ + 1) : 0;
 
       GridSync gs = GRID_SYNC__INIT;
@@ -2688,12 +2694,17 @@ namespace esphome
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
       op_message.gridsync = &gs;
 
-      MacFrame f;
-      if (!this->mac_frame_(&op_message, &f))
+      if (!frame(&op_message))
       {
         ESP_LOGE(TAG, "[%s] failed to pack GridSync", this->get_name().c_str());
-        return 0;
+        return false;
       }
+      return true;
+    }
+
+    void LORAListener::place_grid_sync_(const MacFrame &f)
+    {
+      const int64_t planned_t0 = this->gridsync_planned_t0_;
       // PLACED, so the declaration above is true. Not through the bare send():
       // the node solves its anchor from where this frame ARRIVES, so an
       // unplaced GridSync displaces every mark the node will ever arm — by an
@@ -2721,9 +2732,6 @@ namespace esphome
       }
       ESP_LOGI(TAG, "[%s] GridSync PUBLISHED (slot %u)", this->get_name().c_str(),
                (unsigned) this->grid_slot_);
-      // The tag is the msgid itself: it is what the ack log names.
-      *msgid_tag = f.msgid;
-      return f.msgid;
     }
 
     // The node confirmed the grid (any of the published msgids): it is on the
@@ -3051,12 +3059,21 @@ namespace esphome
       return false;
     }
 
-    uint32_t LORAListener::tx_tracked_op_()
+    // The tracked command's payload (S7): built from the slot's command. The
+    // delivery service frames it under a fresh msgid, keeps the frame (pack once,
+    // Resend::SameBytes) and re-sends THOSE bytes on every retry.
+    //
+    // B4: PACK ONCE. Re-packing was two bugs at once. It minted a fresh msgid, so
+    // the node's replay filter admitted the retry and executed the command a
+    // SECOND time — a blind that moves twice. And re-reading the position at
+    // pack time meant a user moving the blind mid-retry produced different
+    // plaintext under a msgid-derived CTR counter block; with a reused msgid that
+    // is keystream reuse, and with a fresh one it is a duplicate command. Storing
+    // the frame removes both: same msgid, same ciphertext, and the node can
+    // recognise a duplicate and re-ack it.
+    bool LORAListener::encode_ctl_(const DeliveryRequest::FrameFn &frame)
     {
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-
-      // The tracked op is either a cover operation or a system operation; both are
-      // (re)built here with a fresh msgid so the retransmit path is identical.
       LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
       if (this->ctl().kind == TrackedOpKind::SYSOP)
       {
@@ -3078,44 +3095,33 @@ namespace esphome
         }
         op_message.operation = &covop;
       }
-
       // Encrypt the command in-session (CTR + CMAC) so the downlink op is
       // authenticated; falls back to plaintext only before a session exists.
-      MacFrame f;
-      if (this->mac_frame_(&op_message, &f))
-      {
-        // B4: PACK ONCE. Keep the exact bytes so a retry retransmits THESE,
-        // rather than re-packing from live state.
-        //
-        // Re-packing was two bugs at once. It minted a fresh msgid, so the
-        // node's replay filter admitted the retry and executed the command a
-        // SECOND time — a blind that moves twice. And tx_tracked_op_ re-reads
-        // position at pack time, so a user moving the blind mid-retry
-        // produced different plaintext under a msgid-derived CTR counter block; with
-        // a reused msgid that is keystream reuse, and with a fresh one it is a
-        // duplicate command. Storing the frame removes both: same msgid, same
-        // ciphertext, and the node can recognise a duplicate and re-ack it.
-        this->ctl().frame       = f.bytes;
-        this->ctl().frame_msgid = f.msgid;
-        this->ctl().frame_seal  = f.seal;
+      if (frame(&op_message))
+        return true;
+      this->ctl().mark_us = 0;
+      ESP_LOGE(TAG, "[%s] Failed to pack tracked operation", this->get_name().c_str());
+      return false;
+    }
 
-        // The tracked command downlink is the one B1's gate is about: with
-        // alignment on, this is the burst that must observably start on the
-        // grid. With it off (the default) behaviour is byte-for-byte as before.
-        this->send_aligned_(f.bytes.data(), f.bytes.size(), this->tracked_op_policy_(), f.seal);
-        // Rule 4's exposure is THIS command's, so the shape is recorded here
-        // rather than inside send_aligned_, where every other producer would
-        // overwrite it.
-        this->ctl().sent_single_shot = this->last_placed_single_shot_;
-        this->ctl().sent_optimistic  = this->last_placed_optimistic_;
-        this->ctl().mark_us          = this->last_placed_single_shot_ ? this->last_placed_t0_us_ : 0;
-      }
-      else
-      {
-        this->ctl().mark_us = 0;
-        ESP_LOGE(TAG, "[%s] Failed to pack tracked operation", this->get_name().c_str());
-      }
-      return f.msgid;
+    // Where the tracked command goes: aligned, under its supersession generation
+    // (a retransmission stays under the generation it belongs to, or a retry
+    // would supersede the frame it is a retry of).
+    void LORAListener::place_ctl_(const MacFrame &f, const DeliveryAttempt &a)
+    {
+      // The tracked command downlink is the one B1's gate is about: with
+      // alignment on, this is the burst that must observably start on the
+      // grid. With it off (the default) behaviour is byte-for-byte as before.
+      this->send_aligned_(f.bytes.data(), f.bytes.size(), this->tracked_op_policy_(), f.seal);
+      // Rule 4's exposure is THIS command's, so the shape is recorded here
+      // rather than inside send_aligned_, where every other producer would
+      // overwrite it.
+      this->ctl().sent_single_shot = this->last_placed_single_shot_;
+      this->ctl().sent_optimistic  = this->last_placed_optimistic_;
+      // The placed mark of a FRESH frame (the first, or a re-pack) times the
+      // first ack; a re-send of the stored frame leaves it alone.
+      if (!a.resent_stored)
+        this->ctl().mark_us = this->last_placed_single_shot_ ? this->last_placed_t0_us_ : 0;
     }
 
     // The Control channel's request: the command the slot describes, delivered by
@@ -3130,19 +3136,23 @@ namespace esphome
                     "the Control policies are the verified ladder");
       DeliveryRequest req;
       req.what        = "Tracked op";
-      req.resend_verb = nullptr;   // tx_ctl_ logs the retransmit itself, with the msgid
+      req.resend_verb = nullptr;   // the service's SameBytes lines log the retransmit, with the frame id
+      req.sent_label  = this->ctl().kind == TrackedOpKind::SYSOP ? "Sysop" : "Cover op";
       req.policy      = deliverypolicy::controlPolicy(
           this->ctl().kind == TrackedOpKind::COVER, this->ctl().sysop,
           CLIENT_OPERATION__CMD_SLEEP, CLIENT_OPERATION__CMD_OTA);
-      req.build   = [this](bool retry, uint32_t *tag) { return this->tx_ctl_(retry, tag); };
-      req.on_ack  = [this](uint32_t id) { return this->on_ctl_acked_(id); };
+      req.encode  = [this](bool, uint32_t *, const DeliveryRequest::FrameFn &frame) {
+        return this->encode_ctl_(frame);
+      };
+      req.place        = [this](const MacFrame &f, const DeliveryAttempt &a) { this->place_ctl_(f, a); };
+      req.on_delivered = [this](const DeliveryConfirm &c) { return this->on_ctl_acked_(c.log_id); };
       req.on_fail = [this]() { this->on_ctl_failed_(); };
       // An at-most-once command (OTA) whose stored frame is gone -- a relogin
       // clears it, and the session it was sealed under is dead -- must not be
       // re-packed: that would be a NEW command, and the node may have run the
       // first one already.
       req.resendable  = [this]() {
-        return !(this->ctl().req.policy.at_most_once && this->ctl().frame.empty());
+        return !(this->ctl().req.policy.at_most_once && this->ctl().frame.bytes.empty());
       };
       req.on_abandon  = [this]() { this->on_ctl_abandoned_(); };
       req.on_done     = [this]() { this->ctl_next_(); };
@@ -3160,31 +3170,6 @@ namespace esphome
       this->deliver_(CH_CONTROL, this->ctl_request_());
     }
 
-    // ONE attempt. The first packs and stores the frame; a retry re-sends the
-    // stored bytes under the SAME msgid (the node re-acks a duplicate instead of
-    // running it twice).
-    uint32_t LORAListener::tx_ctl_(bool retry, uint32_t *tag)
-    {
-      uint32_t msgid = 0;
-      if (!retry)
-      {
-        msgid = this->tx_tracked_op_();
-        ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
-                 this->ctl().kind == TrackedOpKind::SYSOP ? "Sysop" : "Cover op", (unsigned) msgid);
-      }
-      else
-      {
-        msgid = this->retransmit_tracked_op_();
-        if (this->ctl().short_wait_spent && this->ctl().retry_count == 0)
-          ESP_LOGW(TAG, "[%s] Tracked op burst fallback (msgid=%u)", this->get_name().c_str(),
-                   (unsigned) msgid);
-        else
-          ESP_LOGW(TAG, "[%s] Tracked op retransmit %u/%u (msgid=%u)", this->get_name().c_str(),
-                   (unsigned) this->ctl().retry_count, (unsigned) kOpMaxRetries, (unsigned) msgid);
-      }
-      *tag = msgid;
-      return msgid;
-    }
 
     bool LORAListener::on_ctl_acked_(uint32_t ack_msg_id)
     {
@@ -3332,10 +3317,6 @@ namespace esphome
       this->ctl_begin_(c, this->ctl_hold_for_wake_);
     }
 
-    // B4: retransmit the STORED frame, byte for byte.
-    //
-    // Returns the msgid actually transmitted, which for a retry is the ORIGINAL
-    // one — that is the point. A fresh msgid would be a new command to the node.
     TxPolicy LORAListener::tracked_op_policy_() const
     {
       TxPolicy p;
@@ -3344,37 +3325,6 @@ namespace esphome
       return p;
     }
 
-    uint32_t LORAListener::retransmit_tracked_op_()
-    {
-      if (this->ctl().frame.empty())
-      {
-        // Nothing stored (a retry whose session was cleared mid-flight, or a
-        // first send that failed to pack). Falling back to a fresh pack is
-        // correct: it is a new command, and the node will treat it as one —
-        // which per security review finding 1 means first_msgid/
-        // last_msgid must move to match. tx_tracked_op_() allocates a
-        // fresh msgid from a counter that was just reset by the relogin that
-        // cleared frame, so without this the old range (from before the
-        // reset) would reject the node's ack to this new attempt outright —
-        // handle_command_ack_ never seeing it, "command failed" even though
-        // the blind did move.
-        ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing",
-                 this->get_name().c_str());
-        const uint32_t msgid = this->tx_tracked_op_();
-        this->ctl().first_msgid = msgid;
-        this->ctl().last_msgid  = msgid;
-        return msgid;
-      }
-
-      // Under the SAME generation as the original: a retransmission is the same
-      // logical command, and giving it a fresh one would let a retry supersede
-      // the frame it is a retry of.
-      this->send_aligned_(this->ctl().frame.data(), this->ctl().frame.size(),
-                          this->tracked_op_policy_(), this->ctl().frame_seal);
-      this->ctl().sent_single_shot = this->last_placed_single_shot_;
-      this->ctl().sent_optimistic  = this->last_placed_optimistic_;
-      return this->ctl().frame_msgid;
-    }
 
     // ---- the generic delivery glue (step 3 of the unified MAC delivery refactor) ----
     //
@@ -3527,11 +3477,75 @@ namespace esphome
       return false;   // NotSendable: nothing to send
     }
 
+    // ONE attempt of the slot's request (S7). A Resend::SameBytes retry re-sends
+    // the stored first frame byte for byte under its ORIGINAL msgid -- that is the
+    // point, a fresh msgid would be a new command to the node. Every other attempt
+    // asks the application for the payload, frames it under a fresh msgid and
+    // places it. A SameBytes request whose stored frame is gone (a session change
+    // cleared it) is re-packed: a NEW command, so its id range moves with it
+    // (security review finding 1: the old range would reject the node's ack).
+    // Returns the msgid, 0 when nothing was framed.
+    uint32_t LORAListener::dlv_attempt_(DeliverySlot &s, bool retry, uint32_t *tag)
+    {
+      const bool same_bytes = s.req.policy.resend == deliverypolicy::Resend::SameBytes;
+      if (retry && same_bytes && !s.frame.bytes.empty())
+      {
+        *tag = s.frame_tag;
+        if (s.req.place)
+          s.req.place(s.frame, DeliveryAttempt{true, true, s.frame_tag});
+        return s.frame.msgid;
+      }
+      if (retry && same_bytes)
+        ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing", this->get_name().c_str());
+      MacFrame f;
+      bool framed = false;
+      const DeliveryRequest::FrameFn frame = [this, &f, &framed](LoraClientOperationMessage *op) {
+        framed = this->mac_frame_(op, &f);
+        return framed;
+      };
+      if (s.req.encode)
+        s.req.encode(retry, tag, frame);
+      if (framed && s.req.place)
+        s.req.place(f, DeliveryAttempt{retry, false, *tag});
+      if (same_bytes)
+      {
+        if (framed)
+        {
+          s.frame     = f;
+          s.frame_tag = *tag;
+        }
+        if (retry)
+          s.first_msgid = f.msgid;   // a re-pack is a new command: its range moves
+        return f.msgid;              // a SameBytes id is taken even when packing failed
+      }
+      return framed ? f.msgid : 0;
+    }
+
+    // The attempt lines of a Resend::SameBytes request (the Control channel).
+    void LORAListener::dlv_log_attempt_(const DeliverySlot &s, bool retry, uint32_t msgid)
+    {
+      if (s.req.policy.resend != deliverypolicy::Resend::SameBytes)
+        return;
+      if (!retry)
+      {
+        if (s.req.sent_label != nullptr)
+          ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
+                   s.req.sent_label, (unsigned) msgid);
+      }
+      else if (s.short_wait_spent && s.retry_count == 0)
+        ESP_LOGW(TAG, "[%s] %s burst fallback (msgid=%u)", this->get_name().c_str(), s.req.what,
+                 (unsigned) msgid);
+      else
+        ESP_LOGW(TAG, "[%s] %s retransmit %u/%u (msgid=%u)", this->get_name().c_str(), s.req.what,
+                 (unsigned) s.retry_count, (unsigned) s.req.policy.max_retries, (unsigned) msgid);
+    }
+
     bool LORAListener::dlv_tx_(DeliveryChannel ch, bool retry)
     {
       DeliverySlot &s = this->slots_[ch];
       uint32_t tag = 0;
-      const uint32_t msgid = s.req.build ? s.req.build(retry, &tag) : 0;
+      const uint32_t msgid = this->dlv_attempt_(s, retry, &tag);
+      this->dlv_log_attempt_(s, retry, msgid);
       if (msgid != 0)
       {
         s.acks.add(msgid, tag);
@@ -3723,7 +3737,7 @@ namespace esphome
         const int i = s.acks.find(ack_msg_id);
         if (i < 0)
           continue;
-        if (!s.req.on_ack || s.req.on_ack(s.acks.tag[i]))
+        if (!s.req.on_delivered || s.req.on_delivered(DeliveryConfirm{s.acks.tag[i], ack_msg_id}))
         {
           this->dlv_cancel_((DeliveryChannel) c);
           this->dlv_done_((DeliveryChannel) c);
@@ -5079,16 +5093,21 @@ namespace esphome
       DeliveryRequest req;
       req.what     = "ScheduleConfig";
       req.policy   = deliverypolicy::kSchedulePolicy;
-      req.build    = [this](bool retry, uint32_t *version) { return this->tx_schedule_config_(retry, version); };
-      req.on_ack   = [this](uint32_t version) { return this->on_schedule_acked_(version); };
+      req.encode   = [this](bool retry, uint32_t *version, const DeliveryRequest::FrameFn &frame) {
+        return this->encode_schedule_(retry, version, frame);
+      };
+      req.place        = [this](const MacFrame &f, const DeliveryAttempt &a) { this->place_schedule_(f, a); };
+      req.on_delivered = [this](const DeliveryConfirm &c) { return this->on_schedule_acked_(c.tag); };
       req.on_fail  = [this]() { this->on_schedule_failed_(); };
       this->deliver_(CH_CONFIG, std::move(req));
     }
 
     // ONE attempt at the push, built from the schedule as it is NOW (a resend
-    // carries the latest version). Returns its msgid, 0 when it did not pack.
-    uint32_t LORAListener::tx_schedule_config_(bool retry, uint32_t *version)
+    // carries the latest version). Its tag is the version it carries.
+    bool LORAListener::encode_schedule_(bool retry, uint32_t *version,
+                                        const DeliveryRequest::FrameFn &frame)
     {
+      (void) retry;
       LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
       // Single-shot, NOT bursted: a full 8-entry schedule is ~152 B, whose
       // ~95 ms airtime overruns the 88 ms burst slot. It is only ever sent in
@@ -5130,8 +5149,15 @@ namespace esphome
       op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
       op_message.schedule = &sc;
 
-      MacFrame f;
-      if (this->mac_frame_(&op_message, &f))
+      *version = sc.version;
+      if (frame(&op_message))
+        return true;
+      ESP_LOGE(TAG, "[%s] Failed to pack ScheduleConfig", this->get_name().c_str());
+      return false;
+    }
+
+    void LORAListener::place_schedule_(const MacFrame &f, const DeliveryAttempt &a)
+    {
       {
         // PLACED. It used to go out through the bare send(), so in Mode B it
         // left whenever the queue drained — into a window the node had stopped
@@ -5147,15 +5173,11 @@ namespace esphome
         // The retransmit is the delivery glue's: the node acks a schedule push
         // (unlike TimeSync), and that ack is what ends the ladder.
         ESP_LOGI(TAG, "[%s] ScheduleConfig %s (version=0x%08x mode=%s entries=%u %u B msgid=%u)",
-                 this->get_name().c_str(), retry ? "resent" : "sent", (unsigned) sc.version,
+                 this->get_name().c_str(), a.retry ? "resent" : "sent", (unsigned) a.tag,
                  this->auto_mode_ ? "AUTO" : "INTERACTIVE",
                  (unsigned) this->sched_entry_count_, (unsigned) f.bytes.size(),
                  (unsigned) f.msgid);
-        *version = sc.version;
-        return f.msgid;
       }
-      ESP_LOGE(TAG, "[%s] Failed to pack ScheduleConfig", this->get_name().c_str());
-      return 0;
     }
 
     // P2: a node announced a wake.  Everything here is observation — the beacon

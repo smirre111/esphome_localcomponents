@@ -88,6 +88,7 @@ struct KeyPair
     psa_key_id_t enc{PSA_KEY_ID_NULL};
     psa_key_id_t mac{PSA_KEY_ID_NULL};
     bool complete() const { return enc != PSA_KEY_ID_NULL && mac != PSA_KEY_ID_NULL; }
+    bool hasEnc() const { return enc != PSA_KEY_ID_NULL; }
 };
 
 // The single owner of every peer's MAC-2 session state. One per hub process

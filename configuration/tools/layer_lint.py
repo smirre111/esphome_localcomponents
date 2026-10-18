@@ -64,10 +64,16 @@ METRICS = {
     "client.psa_calls": ([CLIENT], r"\bpsa_\w+\s*\(",
                          "PSA crypto calls in lora_client.cpp"),
     # MAC-1 state outside the shared Sequencer (S3: mac1::Sequencer owns it).
-    "client.raw_frame_counter": ([CLIENT, CLIENT_H], r"frame_counter_|FrameCounter",
+    "client.raw_frame_counter": ([CLIENT, CLIENT_H], r"\bframe_counter_\b|\bFrameCounter\b",
                                  "hand-rolled frame counter state in the listener"),
+    # ARQ outside the delivery service (S7): the application building attempts
+    # by msgid, matching acks by msgid, or re-sending stored frames itself.
+    "client.app_arq_by_msgid": ([CLIENT, CLIENT_H],
+                                r"\breq\.build\b|\bon_ack\b|\btx_tracked_op_\b|\bretransmit_tracked_op_\b"
+                                r"|\btx_ctl_\b|\bframe_msgid\b|\btx_grid_sync_\b|\btx_schedule_config_\b",
+                                "application code doing ARQ by msgid"),
     # Key handles outside MAC-2 (S2: HubLinkSecurity's SessionKeyStore owns them).
-    "client.psa_key_handles": ([CLIENT, CLIENT_H], r"psa_key_id_t|PSA_KEY_ID_NULL",
+    "client.psa_key_handles": ([CLIENT, CLIENT_H], r"\bpsa_key_id_t\b|\bPSA_KEY_ID_NULL\b",
                                "PSA key handles in the listener"),
     # APP telemetry completing MAC-0 delivery (V7 / F3).
     "client.telemetry_completes_delivery": ([CLIENT], r"handle_command_ack_\s*\(\s*this->ctl\(\)",

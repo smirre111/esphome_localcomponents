@@ -351,7 +351,9 @@ struct AckProbe : LORAClient {
         s.req = {};
         s.req.what   = "ScheduleConfig";
         s.req.policy = deliverypolicy::kSchedulePolicy;
-        s.req.on_ack = [this](uint32_t v) { return this->on_schedule_acked_(v); };
+        s.req.on_delivered = [this](const esphome::lora_tracker::DeliveryConfirm &c) {
+            return this->on_schedule_acked_(c.tag);
+        };
         s.acks.clear();
         s.acks.add(id, tag);
         s.awaiting_ack = true;
@@ -365,7 +367,9 @@ struct AckProbe : LORAClient {
         s.req = {};
         s.req.what    = "GridSync";
         s.req.policy  = deliverypolicy::kGridSyncPolicy;
-        s.req.on_ack  = [this](uint32_t id) { return this->on_grid_sync_acked_(id); };
+        s.req.on_delivered = [this](const esphome::lora_tracker::DeliveryConfirm &c) {
+            return this->on_grid_sync_acked_(c.log_id);
+        };
         s.req.on_fail = [this]() { this->on_grid_sync_failed_(); };
         s.acks.clear();
         for (uint32_t id : ids) s.acks.add(id, id);
@@ -5633,7 +5637,7 @@ TEST(OptimisticShot, OnAndStaleSendsOneCopyAndRemembersTheGuessWasOptimistic) {
     EXPECT_EQ(h.tracker.last_copies, 1) << "one placed copy, not a 17-copy burst";
     EXPECT_TRUE(h.rol.op_sent_optimistic_for_test())
         << "the bypass was what made it a single shot";
-    EXPECT_LE(P(h).ctl().frame.size(), singleshotwait::kLargestTrackedOpBytes)
+    EXPECT_LE(P(h).ctl().frame.bytes.size(), singleshotwait::kLargestTrackedOpBytes)
         << "the tail budget assumes a tracked op this small";
     EXPECT_EQ((uint32_t) LORAClient::kUplinkOffsetUs, singleshotwait::kNodeReplyOffsetUs)
         << "SingleShotAckWait.h restates the node's reply offset";
@@ -8403,6 +8407,18 @@ struct GlueProbe : LORAClient {
 };
 }  // namespace
 
+namespace {
+// S7: a test request's payload, framed through the delivery service's FrameFn
+// (the service owns the header, the msgid and the pack).
+bool frameASchedule(const esphome::lora_tracker::DeliveryRequest::FrameFn &frame) {
+    ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
+    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+    op.schedule = &sc;
+    return frame(&op);
+}
+}  // namespace
+
 TEST(DeliveryGlue, AFailReloginRequestClearsTheSessionAndLogsInAgainWhereAFailKeepOneDoesNot) {
     using namespace real_helpers;
     for (const bool relogin : {false, true}) {
@@ -8416,7 +8432,11 @@ TEST(DeliveryGlue, AFailReloginRequestClearsTheSessionAndLogsInAgainWhereAFailKe
         req.policy.max_retries = 1;
         req.policy.give_up = relogin ? deliverypolicy::GiveUpAction::FailRelogin
                                      : deliverypolicy::GiveUpAction::FailKeep;
-        req.build   = [&](bool, uint32_t *tag) { *tag = 5; return (uint32_t) (100 + built++); };
+        req.encode  = [&](bool, uint32_t *tag, const esphome::lora_tracker::DeliveryRequest::FrameFn &frame) {
+            *tag = 5;
+            ++built;
+            return frameASchedule(frame);
+        };
         req.on_fail = [&]() { ++failed; };
         static_cast<GlueProbe &>(h.rol).deliver_(esphome::lora_tracker::CH_CONFIG, std::move(req));
         for (int i = 0; i < 8; ++i) h.clock.tick(kSchedStepMs);
@@ -8464,10 +8484,10 @@ TEST(DeliveryGlue, ARetryThatCannotBeBuiltStillRunsTheLadderToItsEnd) {
     req.what   = "test";
     req.policy = deliverypolicy::kSchedulePolicy;
     req.policy.max_retries = 2;
-    req.build   = [&](bool retry, uint32_t *tag) {
+    req.encode  = [&](bool retry, uint32_t *tag, const esphome::lora_tracker::DeliveryRequest::FrameFn &frame) {
         ++built;
         *tag = 1;
-        return retry ? (uint32_t) 0 : (uint32_t) 300;
+        return retry ? false : frameASchedule(frame);   // a retry that cannot be built
     };
     req.on_fail = [&]() { ++failed; };
     static_cast<GlueProbe &>(h.rol).deliver_(esphome::lora_tracker::CH_CONFIG, std::move(req));
@@ -8485,7 +8505,10 @@ TEST(DeliveryGlue, ARequestThatCannotBeBuiltStartsNothing) {
     esphome::lora_tracker::DeliveryRequest req;
     req.what   = "test";
     req.policy = deliverypolicy::kSchedulePolicy;
-    req.build  = [&](bool, uint32_t *) { ++built; return (uint32_t) 0; };
+    req.encode = [&](bool, uint32_t *, const esphome::lora_tracker::DeliveryRequest::FrameFn &) {
+        ++built;
+        return false;   // nothing framed
+    };
     static_cast<GlueProbe &>(h.rol).deliver_(esphome::lora_tracker::CH_CONFIG, std::move(req));
     EXPECT_FALSE(static_cast<GlueProbe &>(h.rol).cfg().awaiting_ack);
     for (int i = 0; i < 8; ++i) h.clock.tick(kSchedStepMs);
@@ -9547,13 +9570,13 @@ TEST(OtaRepack, AnOtaWhoseSessionChangedMidDeliveryIsFailedNotRepackedWithAFresh
     h.rol.registered_ = true;
     h.rol.triggerOTA();
     ASSERT_TRUE(h.rol.awaitingAck());
-    ASSERT_FALSE(DP(h).ctl().frame.empty()) << "pack-once: the frame is stored";
+    ASSERT_FALSE(DP(h).ctl().frame.bytes.empty()) << "pack-once: the frame is stored";
     const auto ota = sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA);
     ASSERT_EQ(ota.size(), 1u);
 
     // What handle_register_ does when the node reboots mid-delivery.
     DP(h).clearSessionKeys_();
-    ASSERT_TRUE(DP(h).ctl().frame.empty());
+    ASSERT_TRUE(DP(h).ctl().frame.bytes.empty());
     DP(h).relogin_pending_ = true;
     h.clock.tick(10'000);                              // retries defer, nothing is sent or charged
     EXPECT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 1u);
@@ -9625,7 +9648,7 @@ TEST(OtaRepack, ACoverOpWhoseStoredFrameWasClearedByAReloginIsRePackedAndItsNewM
     sendOpen(h);
     const uint32_t old_id = DP(h).ctl().last_msgid;
     DP(h).clearSessionKeys_();
-    ASSERT_TRUE(DP(h).ctl().frame.empty());
+    ASSERT_TRUE(DP(h).ctl().frame.bytes.empty());
     DP(h).relogin_pending_ = true;
     h.clock.tick(10'000);
     EXPECT_EQ(msgidsOf(h, OpCmd::Operation).size(), 1u) << "nothing is sent into a session being rebuilt";
@@ -10863,7 +10886,7 @@ TEST(FireDelivery, AFireFrameDoesNotFillTheSlotOfAnIdleChannel) {
         EXPECT_EQ(s->retry_count, 0);
         EXPECT_EQ(s->first_msgid, 0u);
         EXPECT_EQ(s->last_msgid, 0u);
-        EXPECT_EQ(s->req.build == nullptr, true) << "no request was left in the slot";
+        EXPECT_EQ(s->req.encode == nullptr, true) << "no request was left in the slot";
     }
     EXPECT_FALSE(FP(h).delivery_busy_());
 }
@@ -10963,7 +10986,11 @@ TEST(FireDelivery, AnAckedRequestWithNoChannelIsRefusedRatherThanIndexedOutOfThe
     esphome::lora_tracker::DeliveryRequest req;
     req.what   = "test";
     req.policy = deliverypolicy::kSchedulePolicy;
-    req.build  = [&](bool, uint32_t *tag) { *tag = 0; return (uint32_t) (500 + built++); };
+    req.encode = [&](bool, uint32_t *tag, const esphome::lora_tracker::DeliveryRequest::FrameFn &frame) {
+        *tag = 0;
+        ++built;
+        return frameASchedule(frame);
+    };
 
     FP(h).deliver_(esphome::lora_tracker::CH_NONE, std::move(req));
 
@@ -12292,4 +12319,26 @@ TEST(ArqS7, AStoredFrameLostToASessionChangeIsRepackedUnderAFreshId) {
     EXPECT_EQ(DP(h).ctl().first_msgid, fresh) << "the command's range moves with it";
     deliverAck(h.rol, fresh);
     EXPECT_FALSE(h.rol.awaitingAck());
+}
+
+// S7: a re-send of the STORED frame (here the burst fallback after a missed
+// optimistic single shot) keeps the first shot's placed mark, so the late ack is
+// still reported against that mark -- and, not being a clean sample, is not
+// recorded into the node's latency history.
+TEST(ArqS7, AnAckAfterTheBurstFallbackIsMeasuredFromTheFirstShotsMarkAndNotRecorded) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    staleButOtherwiseGood(h);
+    h.rol.enable_optimistic_single_shot(true);
+    sendOpen(h);
+    ASSERT_EQ(h.tracker.last_copies, 1);
+    const uint32_t wait_ms = expectedWaitMs(h);
+    h.clock.tick(wait_ms + 30);                          // the short wait runs out
+    ASSERT_TRUE(h.rol.op_short_wait_spent_for_test()) << "precondition: the burst fallback went out";
+    const uint32_t before = h.rol.ack_latency_for_test().count(nowMs());
+    testing::internal::CaptureStderr();
+    deliverAck(h.rol, P(h).ctl().first_msgid);
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(occurrences(log, "after a burst fallback or retry, not recorded"), 1) << log;
+    EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), before);
 }

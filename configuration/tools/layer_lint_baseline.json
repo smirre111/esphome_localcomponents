@@ -1,6 +1,7 @@
 {
   "children.sender_filter": 0,
   "children.wire_unpack": 0,
+  "client.app_arq_by_msgid": 0,
   "client.app_picks_encryption": 0,
   "client.msgid_alloc_sites": 3,
   "client.pack_sites": 1,
