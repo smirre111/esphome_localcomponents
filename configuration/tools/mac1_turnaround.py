@@ -8,6 +8,10 @@ import os, re, subprocess, sys, time
 sess = sys.argv[1]; hub_log = os.path.join(sess, "hub.log")
 os.makedirs(os.path.join(sess, "reports"), exist_ok=True)
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# Only the node under test may end a step: on 2026-10-18 node 1's Mode B
+# warm-up REPORT ended a node-2 step early. Override with BENCH_NODE_NAME.
+NODE = os.environ.get("BENCH_NODE_NAME", "RollladenWohnzimmer2")
+REPORT_TAG = f"[{NODE}] ModeTest REPORT"
 def ctl(*a): return subprocess.run([sys.executable, "tools/hubctl.py", *a], capture_output=True, text=True).stdout
 def note(m):
     subprocess.run([sys.executable, "tools/benchlog.py", "--note", m, "--dir", sess]); print(time.strftime("%H:%M:%S"), m, flush=True)
@@ -21,7 +25,7 @@ def run(step, test_button, timeout_s=1150):
     while time.time() - t0 < timeout_s:
         time.sleep(10)
         new = lines()[start:]
-        if any("ModeTest REPORT" in l for l in new):
+        if any(REPORT_TAG in l for l in new):
             time.sleep(15); new = lines()[start:]
             open(os.path.join(sess, "reports", f"{step}.txt"), "w", encoding="utf-8").write("\n".join(new))
             note(f"REPORT captured for {step}"); return True

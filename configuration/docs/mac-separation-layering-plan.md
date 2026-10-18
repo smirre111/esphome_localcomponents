@@ -158,6 +158,28 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
       `\b` had become a backspace (client.psa_key_handles was really 1 after S2;
       now 0).
 
+## Checkpoint S0-S7 on hardware (2026-10-18, hub e0a1fdb, node 1.1.46)
+
+- Correctness and Mode A turnaround clean (7.73/8.59 ms, 10.49/11.11 ms, MIC_FAIL 0).
+  The 900 s Mode B+crypto run was not clean: FER_link 10291 ppm, free TX buffers at 1.
+- Cause (pre-existing, NOT an S0-S7 regression): ModeTest mark lead ratchet in
+  `mode_test_timer_cb_`. Node 1's GridSync publish pushed two node-2 marks two
+  rounds out (`dt=4500`), and the "mark after the last" guard kept every later
+  mark that far ahead, so 4 of the 5 pool buffers stayed held; marks and beacons
+  were dropped (`No free buffers`), and each dropped mark was a seq gap. The 10-06
+  and 10-09 baselines show the same ratchet once (a TimeSync, free 3). Pool code
+  (send, drain, serviceTxQueue, return paths) and the mark code are textually
+  identical to 7a7d7de apart from three plain TxPolicy fields; listener-side
+  copies (DeliveryFrame, MacFrame, stored seals) never hold a pool slot.
+  Differential: the MarkLead tests produce byte-identical mark traces on
+  7a7d7de + node b6f2612 and on HEAD.
+- Fix: a tick whose last mark is already a whole round beyond the grid's next
+  mark is held (nothing sent, frame kept, no seq gap). Also bounds mode 4's
+  1093 ms sweep timer, which ran a round ahead every ~3.7 ticks (12 marks queued
+  after 40 ticks in the host test). Tests `MarkLead.*` (failed first), 5/5 mutants.
+- Tools: campaign scripts filter REPORTs by node; runbook: Mode A turnaround needs
+  the node's Timed Mode OFF.
+
 ## S8 Wire (explicit break)
 
 - [x] Spec: `docs/mac-wire-format.md` (byte layout, crypto inputs, restamp, msgId split,

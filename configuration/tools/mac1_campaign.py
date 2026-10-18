@@ -13,6 +13,10 @@ sess = sys.argv[1]
 hub_log = os.path.join(sess, "hub.log")
 os.makedirs(os.path.join(sess, "reports"), exist_ok=True)
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# Only the node under test may end a step: on 2026-10-18 node 1's Mode B
+# warm-up REPORT ended a node-2 step early. Override with BENCH_NODE_NAME.
+NODE = os.environ.get("BENCH_NODE_NAME", "RollladenWohnzimmer2")
+REPORT_TAG = f"[{NODE}] ModeTest REPORT"
 
 def ctl(*a):
     return subprocess.run([sys.executable, "tools/hubctl.py", *a], capture_output=True, text=True).stdout
@@ -32,7 +36,7 @@ def run(step, button, timeout_s=1150):
     while time.time() - t0 < timeout_s:
         time.sleep(10)
         new = [ANSI.sub("", l) for l in lines_now()[start:]]
-        rep = [l for l in new if "ModeTest REPORT" in l or "REPORT" in l and "mode" in l.lower()]
+        rep = [l for l in new if REPORT_TAG in l]
         if rep:
             time.sleep(15)   # the report is followed by more lines (oneShot, phase, ...)
             new = [ANSI.sub("", l) for l in lines_now()[start:]]
