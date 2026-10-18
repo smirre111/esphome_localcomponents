@@ -160,6 +160,10 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
 
 ## S8 Wire (explicit break)
 
+- [x] Spec: `docs/mac-wire-format.md` (byte layout, crypto inputs, restamp, msgId split,
+      proto/NVS impact, shared `MacWire.h`, W0-W5 order, cutover, decisions D1-D12).
+      User decisions: wire break approved, no backward compatibility / no dual stack.
+
 - [ ] Fixed header (version byte != 0x0A, hub dual-stack during the node-1 OTA),
       FCnt/cmdId split, MAC ACK bit, CMAC over raw header bytes, delete
       FrameCanon and the legacy GCM helpers. Node 2 by serial first, soak, then
