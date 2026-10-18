@@ -93,7 +93,6 @@ struct DispProbe : CmdDispatcher {
               portMUX_TYPE &mm, portMUX_TYPE &bm)
         : CmdDispatcher(m, s, l, mm, bm) {}
     using CmdDispatcher::mode_test_active_;
-    using CmdDispatcher::grid_;
 };
 
 struct Irq : public ::testing::Test {
@@ -490,7 +489,7 @@ TEST_F(Irq, DISABLED_ASweepsMisArmedWindowIsNeverRescuedByAnExtension) {
     // is exactly how this test first failed.
     lif.setCmdDispatcher(&disp);
     disp.mode_test_active_            = true;
-    disp.grid_.params.arm_offset_us   = 12'000;   // a sweep, arming late
+    disp.mac0ForTest().setArmOffsetUs(12'000);   // a sweep, arming late
 
     lif.armTimedRxWindow();
     disp.noteMarkArmed(lif.windowGeneration());

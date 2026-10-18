@@ -105,11 +105,7 @@ struct NodeProbe : CmdDispatcher {
     NodeProbe(MotorCtrl *m, SystemCtrl *s, LoraInterface *l,
               portMUX_TYPE &mm, portMUX_TYPE &bm)
         : CmdDispatcher(m, s, l, mm, bm) {}
-    using CmdDispatcher::last_rx_window_gen_;
     using CmdDispatcher::modeTestExpiredCb_;   // the node-owned deadline
-    using CmdDispatcher::rx_timing_trusted_;     // FrameCanon verdict for the last frame
-    using CmdDispatcher::noncanonical_frames_;
-    using CmdDispatcher::refused_since_fix_;     // samples the half-pitch rule refused
     using CmdDispatcher::mac_ping_seq_hw_;       // the MAC ping high-water mark
     // What the HUB was last told, as distinct from what the console last saw.
     // The flicker test has to assert the state the hub ends up believing, and
@@ -233,8 +229,8 @@ TEST_F(RealNodeFixture, CmdLoginResetsCountersAndStoresNonce) {
 
     // destAddress is set to the hub's senderaddress (=0xFF) by the
     // CMD_LOGIN handler at CmdDispatcher.cpp:1237.
-    EXPECT_EQ(disp.destAddress, kHubAddr);
-    EXPECT_EQ(disp.destSubnet, kSubnet);
+    EXPECT_EQ(disp.uplinkAddress(), kHubAddr);
+    EXPECT_EQ(disp.uplinkSubnet(), kSubnet);
 
     // The base nonce must be stored under the hub's address. We don't
     // have a public getter; use the friend-style invariant: a second
@@ -2350,7 +2346,7 @@ TEST(RealCmdDispatcherPersist, ASessionFromLoginSurvivesSaveAndLoad) {
     CmdDispatcher d2{&mot, &sys, &lif, mmux, bmux};
     d2.loadPersistentState();
 
-    EXPECT_EQ(d2.destAddress, static_cast<uint32_t>(kHubAddr))
+    EXPECT_EQ(d2.uplinkAddress(), static_cast<uint32_t>(kHubAddr))
         << "the restored session must point at the HUB — with the wrong peer "
            "key it restored hub=255 (broadcast)";
     EXPECT_TRUE(d2.hasValidPersistentState())
@@ -3440,7 +3436,7 @@ TEST_F(RealNodeFixture, ABroadcastFrameDoesNotBookAMarkHit) {
     // A host-injected frame carries no window generation, so without this the
     // sentinel rejects it first and this test passes whatever the unicast check
     // does — which is exactly how a mutant restoring `if (mine)` survived.
-    disp.last_rx_window_gen_ = kTestWindowGen;
+    disp.mac0ForTest().setRxWindowGen(kTestWindowGen);
 
     // Same frame shape, but addressed to everyone rather than to this node.
     auto bcast = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/782,
@@ -3456,7 +3452,7 @@ TEST_F(RealNodeFixture, ABroadcastFrameDoesNotBookAMarkHit) {
     // nothing in this fixture can ever book a hit — a negative that proves
     // nothing. A unicast frame in the mark's own window must close it.
     auto uni = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/783);
-    disp.last_rx_window_gen_ = kTestWindowGen;
+    disp.mac0ForTest().setRxWindowGen(kTestWindowGen);
     disp.onReceiveNew(uni.data(), static_cast<int>(uni.size()));
     EXPECT_FALSE(disp.markWindowOpen())
         << "a unicast frame in the mark's own window must still keep the mark";
@@ -3857,8 +3853,8 @@ std::vector<uint8_t> with_unknown_outer(std::vector<uint8_t> f) {
 TEST_F(RealNodeFixture, ACanonicalFrameIsTrustedForTiming) {
     auto op = pack_sysop_op(/*msgid=*/950, CLIENT_OPERATION__CMD_STATUS);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
-    EXPECT_TRUE(disp.rx_timing_trusted_);
-    EXPECT_EQ(disp.noncanonical_frames_, 0u) << "a same-version frame must never trip the check";
+    EXPECT_TRUE(disp.mac0().rxTimingTrusted());
+    EXPECT_EQ(disp.mac0().noncanonicalFrames(), 0u) << "a same-version frame must never trip the check";
     EXPECT_EQ(drain_acks(disp), 1);
 }
 
@@ -3883,8 +3879,8 @@ TEST_F(RealNodeFixture, APaddedFrameIsProcessedButCommitsNoPhaseSample) {
     const int64_t rx_pad = rxOnMark(disp, padded.size(), 1'040'000 + timedgrid::kRoundUs);
     disp.noteDriftSample(rx_pad);
     disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()), rx_pad);
-    EXPECT_FALSE(disp.rx_timing_trusted_);
-    EXPECT_EQ(disp.noncanonical_frames_, 1u);
+    EXPECT_FALSE(disp.mac0().rxTimingTrusted());
+    EXPECT_EQ(disp.mac0().noncanonicalFrames(), 1u);
     EXPECT_EQ(disp.phaseStats().n, 1u) << "a padded frame's length is not a T0 input: no new sample";
     EXPECT_EQ(drain_acks(disp), 1) << "demote, do not drop: the command is still processed";
 }
@@ -3902,7 +3898,7 @@ TEST_F(RealNodeFixture, AFrameWithAnUnknownFieldStillRunsButIsNotATimingSource) 
     const int64_t rx = rxOnMark(disp, fwd.size(), 1'040'000);
     disp.noteDriftSample(rx);
     disp.onReceiveNew(fwd.data(), static_cast<int>(fwd.size()), rx);
-    EXPECT_FALSE(disp.rx_timing_trusted_) << "unknown fields sit outside the CMAC: timing withheld";
+    EXPECT_FALSE(disp.mac0().rxTimingTrusted()) << "unknown fields sit outside the CMAC: timing withheld";
     EXPECT_EQ(disp.phaseStats().n, 0u);
     EXPECT_EQ(drain_acks(disp), 1) << "but the command it carries still runs";
 
@@ -3910,18 +3906,18 @@ TEST_F(RealNodeFixture, AFrameWithAnUnknownFieldStillRunsButIsNotATimingSource) 
     auto hdr_unk = splice_into_header(pack_sysop_op(972, CLIENT_OPERATION__CMD_STATUS),
                                       {0xF8, 0x06, 0x01});
     disp.onReceiveNew(hdr_unk.data(), static_cast<int>(hdr_unk.size()));
-    EXPECT_FALSE(disp.rx_timing_trusted_);
+    EXPECT_FALSE(disp.mac0().rxTimingTrusted());
     EXPECT_EQ(drain_acks(disp), 1);
 }
 
 TEST_F(RealNodeFixture, TheVerdictIsPerFrameNotSticky) {
     auto padded = dup_msgid(pack_sysop_op(980, CLIENT_OPERATION__CMD_STATUS), 980);
     disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()));
-    ASSERT_FALSE(disp.rx_timing_trusted_);
+    ASSERT_FALSE(disp.mac0().rxTimingTrusted());
     auto good = pack_sysop_op(981, CLIENT_OPERATION__CMD_STATUS);
     disp.onReceiveNew(good.data(), static_cast<int>(good.size()));
-    EXPECT_TRUE(disp.rx_timing_trusted_) << "a later canonical frame is trusted again";
-    EXPECT_EQ(disp.noncanonical_frames_, 1u);
+    EXPECT_TRUE(disp.mac0().rxTimingTrusted()) << "a later canonical frame is trusted again";
+    EXPECT_EQ(disp.mac0().noncanonicalFrames(), 1u);
 }
 
 TEST_F(RealNodeFixture, ANonCanonicalGridSyncIsNotAdoptedAndACanonicalCopyIs) {
@@ -4608,7 +4604,7 @@ TEST_F(RealNodeFixture, APlaintextMacConfigIsStillRefusedWhileATestIsArmed) {
     holdSessionAndArmTest(disp, /*counter_on=*/true);
     ASSERT_TRUE(disp.macSublayers().counter_enabled);
 
-    const auto before = disp.destAddress;
+    const auto before = disp.uplinkAddress();
     auto cfg = build_mac_config_plain(/*disable_counter=*/true, /*msgid=*/502, /*sender=*/77);
     disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
     EXPECT_TRUE(disp.macSublayers().counter_enabled)
@@ -4617,7 +4613,7 @@ TEST_F(RealNodeFixture, APlaintextMacConfigIsStillRefusedWhileATestIsArmed) {
     // let the frame through, so the sublayer state cannot show the gate working.
     // What only the gate protects: uplinks are aimed at the sender of the last
     // frame that passed EVERY gate.
-    EXPECT_EQ(disp.destAddress, before)
+    EXPECT_EQ(disp.uplinkAddress(), before)
         << "a refused frame must not retarget the node's uplinks";
 }
 
@@ -5022,14 +5018,14 @@ TEST_F(RealNodeFixture, ANonCanonicalBeaconDoesNotReAnchorButACanonicalOneDoes) 
     auto padded = dup_msgid(build_grid_beacon(/*round=*/50, before.params.beacon_slot, /*msgid=*/1), 1);
     disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()),
                       rx_for_beacon(before, 50, kDrift, (uint32_t) padded.size()));
-    EXPECT_FALSE(disp.rx_timing_trusted_);
+    EXPECT_FALSE(disp.mac0().rxTimingTrusted());
     EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us)
         << "a padded beacon's length is not a T0 input: the anchor must not move";
 
     auto good = build_grid_beacon(/*round=*/51, before.params.beacon_slot, /*msgid=*/2);
     disp.onReceiveNew(good.data(), static_cast<int>(good.size()),
                       rx_for_beacon(before, 51, kDrift, (uint32_t) good.size()));
-    EXPECT_TRUE(disp.rx_timing_trusted_);
+    EXPECT_TRUE(disp.mac0().rxTimingTrusted());
     EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us + kDrift)
         << "control: the canonical beacon re-anchors as before";
 }
@@ -7656,12 +7652,12 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionStillRefu
     // frame retargets the uplinks at its sender.
     auto f1 = admit_plain_sysop(/*dest=*/0, /*sender=*/33, kSubnet, /*msgid=*/1, false);
     disp.onReceiveNew(f1.data(), static_cast<int>(f1.size()));
-    ASSERT_EQ(disp.destAddress, 33u) << "control: a node without a session admits plaintext";
+    ASSERT_EQ(disp.uplinkAddress(), 33u) << "control: a node without a session admits plaintext";
 
     disp.setBaseNonceForTest(1, 0xABCDEF01);
     auto f2 = admit_plain_sysop(/*dest=*/0, /*sender=*/77, kSubnet, /*msgid=*/2, false);
     disp.onReceiveNew(f2.data(), static_cast<int>(f2.size()));
-    EXPECT_EQ(disp.destAddress, 33u)
+    EXPECT_EQ(disp.uplinkAddress(), 33u)
         << "only the provisioning frames are exempt, not every plaintext command a "
            "node with no address receives";
 }
@@ -7671,8 +7667,8 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionStillRefu
 TEST_F(RealNodeFixture, AdmitFrame_AnAdmittedFrameRetargetsUplinksAtItsSender) {
     auto f = admit_plain_sysop(kNodeAddr, /*sender=*/33, /*subnet=*/9, /*msgid=*/1, false);
     disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
-    EXPECT_EQ(disp.destAddress, 33u);
-    EXPECT_EQ(disp.destSubnet, 9u);
+    EXPECT_EQ(disp.uplinkAddress(), 33u);
+    EXPECT_EQ(disp.uplinkSubnet(), 9u);
 }
 
 // --- the ping exemption needs an armed test ---------------------------------
@@ -7697,14 +7693,14 @@ TEST_F(RealNodeFixture, AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsA
     }
     ASSERT_FALSE(disp.macSublayers().crypto_enabled) << "precondition: MAC-2 is off";
     ASSERT_FALSE(disp.modeTestActive()) << "precondition: and no test is armed";
-    ASSERT_EQ(disp.destAddress, kHubAddr);
+    ASSERT_EQ(disp.uplinkAddress(), kHubAddr);
 
     // No test armed: refused at the gate. The handler would count it regardless of
     // the test (it does not look at mode_test_active_), so the witness is the one
     // thing only ADMISSION does -- retarget the uplinks at the sender.
     auto p1 = admit_plain_ping(/*sender=*/77, /*seq=*/1, /*msgid=*/500);
     disp.onReceiveNew(p1.data(), static_cast<int>(p1.size()));
-    EXPECT_EQ(disp.destAddress, kHubAddr)
+    EXPECT_EQ(disp.uplinkAddress(), kHubAddr)
         << "a plaintext ping with no authenticated test armed is refused at the gate";
     EXPECT_EQ(disp.macCounters().ping_rx, 0u);
 
@@ -7713,14 +7709,14 @@ TEST_F(RealNodeFixture, AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsA
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_TRUE(disp.modeTestActive());
     ASSERT_FALSE(disp.macSublayers().crypto_enabled);
-    ASSERT_EQ(disp.destAddress, kHubAddr);
+    ASSERT_EQ(disp.uplinkAddress(), kHubAddr);
 
     auto p2 = admit_plain_ping(/*sender=*/77, /*seq=*/2, /*msgid=*/501);
     disp.onReceiveNew(p2.data(), static_cast<int>(p2.size()));
     // Admission is witnessed by ping_rx since node F1 (MAC review, node 5ba6900):
     // an unauthenticated frame no longer retargets the uplinks at its sender.
     EXPECT_EQ(disp.macCounters().ping_rx, 1u) << "control: the same ping IS admitted while a test is armed";
-    EXPECT_EQ(disp.destAddress, kHubAddr) << "but a plaintext frame never retargets the uplinks (F1)";
+    EXPECT_EQ(disp.uplinkAddress(), kHubAddr) << "but a plaintext frame never retargets the uplinks (F1)";
 }
 
 // --- the freshness query's inputs -------------------------------------------
@@ -8022,14 +8018,14 @@ TEST_F(RealNodeFixture, AdmitFrame_AFrameWithoutAnArrivalStampIsNotEvenAttempted
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/810);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
-    const uint32_t refused0 = disp.refused_since_fix_;
+    const uint32_t refused0 = disp.mac0().refusedSinceFix();
 
     // rx_us = 0: no ISR timestamp. A sample built from it would read as an error
     // of the node's whole uptime and be REFUSED -- which is observable as a count,
     // so the absence of the count proves the gate declined before measuring.
     auto placed = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, 811, true);
     disp.onReceiveNew(placed.data(), static_cast<int>(placed.size()), /*rx_us=*/0);
-    EXPECT_EQ(disp.refused_since_fix_, refused0);
+    EXPECT_EQ(disp.mac0().refusedSinceFix(), refused0);
     EXPECT_EQ(disp.phaseStats().n, 0u);
 }
 
@@ -8230,11 +8226,11 @@ TEST_F(RealNodeFixture, AdmitFrame_APingOnAnUnsequencedLinkIsUnsequencedWhatever
 
 TEST_F(RealNodeFixture, AdmitFrame_ANodeWithNoGridNeverAttemptsAPhaseSample) {
     ASSERT_FALSE(disp.gridState().active);
-    const uint32_t refused0 = disp.refused_since_fix_;
+    const uint32_t refused0 = disp.mac0().refusedSinceFix();
     auto f = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, /*msgid=*/850, /*on_mark=*/true);
     admit_deliver_on_mark(disp, f, 40'000'000);
     EXPECT_EQ(disp.phaseStats().n, 0u);
-    EXPECT_EQ(disp.refused_since_fix_, refused0)
+    EXPECT_EQ(disp.mac0().refusedSinceFix(), refused0)
         << "with no grid there is nothing to measure against: not even a refused attempt";
 }
 
@@ -8278,7 +8274,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ARecentreCountsAsAnAnchorFixAndClearsTheRefus
     const int64_t mark = gridstate::nextT0Us(disp.gridState(), t0 + (int64_t) timedgrid::kRoundUs);
     auto far = pack_sysop_op(/*msgid=*/871, CLIENT_OPERATION__CMD_STATUS);
     admit_deliver_on_mark(disp, far, mark + 463'000);
-    ASSERT_EQ(disp.refused_since_fix_, 1u) << "precondition: one refusal on the books";
+    ASSERT_EQ(disp.mac0().refusedSinceFix(), 1u) << "precondition: one refusal on the books";
 
     // Then the bench case: every frame 11 ms after the mark. The node re-centres.
     const int64_t anchor_before = disp.gridState().anchor_us;
@@ -8286,6 +8282,6 @@ TEST_F(RealNodeFixture, AdmitFrame_ARecentreCountsAsAnAnchorFixAndClearsTheRefus
                   timedmode::kPromotionPhaseSamples, 11'000, 880);
     ASSERT_NEAR((double) (disp.gridState().anchor_us - anchor_before), 11'000.0, 100.0)
         << "precondition: the anchor was re-centred";
-    EXPECT_EQ(disp.refused_since_fix_, 0u)
+    EXPECT_EQ(disp.mac0().refusedSinceFix(), 0u)
         << "a re-centre is an anchor fix: the refusals counted against the old anchor are history";
 }
