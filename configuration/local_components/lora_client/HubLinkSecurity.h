@@ -66,16 +66,23 @@ struct FrameSeal
     bool      sealed{false};   // false: a plaintext frame, no sealer
     mac::Addr peer{0};
     uint32_t  key_epoch{0};
+    // MAC wire v1 only: the frame's tag is a K_AUTH MIC (LOGIN), recomputed per
+    // copy because it covers the raw BURST_IDX/BURST_CNT bytes. Never set by v0.
+    bool      kauth{false};
     // The opaque 64-bit value MAC-0 stores with the frame and hands back to
-    // LinkSecurity::copySealer as its ctx (a pointer to it).
+    // LinkSecurity::copySealer as its ctx (a pointer to it). Bit 62 is the v1
+    // K_AUTH marker; a v0 binding never has it.
     uint64_t binding() const
     {
-        return sealed ? ((1ull << 63) | ((uint64_t) peer << 32) | key_epoch) : 0;
+        return sealed ? ((1ull << 63) | (kauth ? (1ull << 62) : 0ull) |
+                         ((uint64_t) peer << 32) | key_epoch)
+                      : 0;
     }
     static FrameSeal fromBinding(uint64_t b)
     {
         FrameSeal f;
         f.sealed    = (b >> 63) != 0;
+        f.kauth     = f.sealed && ((b >> 62) & 1u) != 0;
         f.peer      = static_cast<mac::Addr>((b >> 32) & 0xFF);
         f.key_epoch = static_cast<uint32_t>(b & 0xFFFFFFFFu);
         return f;
@@ -153,6 +160,14 @@ public:
     // Idempotent; derives K_auth from K_root on first use.
     bool initAuthKey();
     bool authKeyReady() const { return auth_key_ != PSA_KEY_ID_NULL; }
+    // Test seam (S8 shared vectors fix K_auth): swap the K_auth handle; returns
+    // the previous one so the test can restore it. No ownership transfer.
+    psa_key_id_t swapAuthKeyForTest(psa_key_id_t id)
+    {
+        const psa_key_id_t old = auth_key_;
+        auth_key_ = id;
+        return old;
+    }
     // CMAC-8 under K_auth over a MIC input built by framecrypto (LOGIN).
     bool authMic(const uint8_t *mic_input, size_t len, uint8_t tag[kTagBytes]);
     // Verify a received MIC under K_auth (REGISTER). The tag must be exactly
@@ -200,7 +215,36 @@ public:
     bool ctrEncryptForTest(mac::Addr peer, const uint8_t iv[16], const uint8_t *in, size_t len,
                            uint8_t *out);
 
+    // -- MAC wire v1 (S8, docs/mac-wire-format.md section 4) -------------------
+    // Every v1 tag is CMAC-8 over macwire::buildMacInputPrefix(dir, id) followed
+    // by frame[0 .. L-8): every transmitted byte except the tag. `frame` below is
+    // always a whole v1 frame whose header is already encoded; L includes the
+    // tag. Compiled in both configurations (only the wiring is switched).
+    //
+    // AUTH = SESSION downlink: CTR-encrypt the body in place under the dst's
+    // K_enc (CTR block: session id, dst, FCNT, as v0 with msgid -> FCNT), then
+    // tag under its K_mac. dst and FCNT are read from the encoded header.
+    Seal sealFrameV1(uint8_t *frame, size_t hdr_len, size_t body_len, FrameSeal *seal);
+    // AUTH = K_AUTH (LOGIN down, REGISTER up): the tag at L-8. sealFrame marks
+    // *seal as a K_AUTH frame so MAC-0 recomputes it per copy.
+    bool authFrameV1(bool downlink, uint8_t *frame, size_t len, FrameSeal *seal);
+    bool verifyAuthFrameV1(bool downlink, const uint8_t *frame, size_t len);
+    // AUTH = SESSION uplink: the tag BEFORE any decryption (decryptUplink then
+    // decrypts the body with hdr.src / hdr.fcnt, unchanged).
+    Verify verifyUplinkV1(uint32_t session_id, const KeyPair &keys, const uint8_t *frame,
+                          size_t len);
+    // One stamped burst copy's tag: `bytes` = the copy's frame[0 .. L-8).
+    Retag retagFrameV1(const FrameSeal &seal, const mac::MacHdr &copy, const uint8_t *bytes,
+                       size_t n, uint8_t tag[kTagBytes]);
+    // The mac::CopySealer MAC-0 calls per v1 copy (ct/ct_len = the copy's bytes
+    // before the tag). SESSION frames are epoch-bound as in v0; K_AUTH frames
+    // use K_auth.
+    static bool copySealerV1(void *ctx, const mac::MacHdr &copy, const uint8_t *bytes,
+                             size_t n, uint8_t tag[8]);
+    // (AUTH = FLEET, the GridBeacon tag, is the management unit's: mac_mgmt.cpp.)
+
 private:
+    bool authTagV1_(bool downlink, const uint8_t *bytes, size_t n, uint8_t (&tag)[kTagBytes]);
     Retag macUnderKeyLock_(const FrameSeal &seal, const uint8_t *in, size_t len,
                            uint8_t (&out)[kTagBytes]);
     SessionKeyStore store_;

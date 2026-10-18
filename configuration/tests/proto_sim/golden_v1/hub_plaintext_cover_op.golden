@@ -1,0 +1,4 @@
+raw 0 port=2 auth=0 len=18 dst=18 fcnt=1 burst=0/0 onmark=0 stamped=0 ackreq=1 copies=0 stride=0 earliest=0 onmark=0 reply=1 prio=1 sup=18/2 010412010200000001020000520408001802
+raw 1 port=2 auth=0 len=18 dst=18 fcnt=1 burst=0/0 onmark=0 stamped=0 ackreq=1 copies=0 stride=0 earliest=0 onmark=0 reply=1 prio=1 sup=18/2 010412010200000001020000520408001802
+air 0 port=2 auth=0 len=18 dst=18 fcnt=1 burst=0/1 onmark=0 stamped=0 ackreq=1 010412010200000001020001520408001802
+air 1 port=2 auth=0 len=18 dst=18 fcnt=1 burst=0/1 onmark=0 stamped=0 ackreq=1 010412010200000001020001520408001802

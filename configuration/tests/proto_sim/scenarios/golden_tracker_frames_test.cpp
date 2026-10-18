@@ -16,6 +16,7 @@
 #include "LoraTiming.h"
 #include "esp_timer.h"
 #include "blinds.pb-c.h"
+#include "MacWire.h"
 #include "sim/golden.h"
 
 #include <cstdlib>
@@ -33,6 +34,26 @@ struct GProbe : LORATracker {
     void init() { this->init_memory_pool(); }
 };
 
+#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
+// S8: the same plaintext cover op as a v1 frame (PORT 2, AUTH = NONE); these
+// scenarios then record into golden_v1/.
+std::vector<uint8_t> plaintextOperation() {
+    LoraCoverOperation op = LORA_COVER_OPERATION__INIT;
+    op.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
+    op.operation  = COV_OPERATION__CMD_OPEN;
+    HubAppPdu pdu = HUB_APP_PDU__INIT;
+    pdu.pdu_case  = HUB_APP_PDU__PDU_OPERATION;
+    pdu.operation = &op;
+    macwire::WireHdr h;
+    h.flags = macwire::kFlagAckReq;
+    h.dst = 18; h.src = 1; h.subnet = 2; h.fcnt = 42; h.port = macwire::kPortApp;
+    const size_t hlen = macwire::headerLen(h);
+    std::vector<uint8_t> buf(hlen + hub_app_pdu__get_packed_size(&pdu));
+    macwire::encodeHeader(h, buf.data(), buf.size());
+    hub_app_pdu__pack(&pdu, buf.data() + hlen);
+    return buf;
+}
+#else
 std::vector<uint8_t> plaintextOperation() {
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = 18;
@@ -50,6 +71,7 @@ std::vector<uint8_t> plaintextOperation() {
     lora_client_operation_message__pack(&msg, buf.data());
     return buf;
 }
+#endif
 
 std::string dumpRecorder() {
     std::ostringstream s;

@@ -186,6 +186,23 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
       proto/NVS impact, shared `MacWire.h`, W0-W5 order, cutover, decisions D1-D12).
       User decisions: wire break approved, no backward compatibility / no dual stack.
 
+- [x] W1 hub (`ff1b32f`): stubs regenerated (additive v1 PDUs), prevbeaconfcnt,
+      MacWire.h vendored + gated; all 22 vendored files re-verified, no drift.
+- [x] W3 hub: v1 behind `MAC_WIRE_V1` (default OFF, v0 untouched, v0 goldens
+      identical). `HubWire.{h,cpp}` (port table, HubMacPdu/HubAppPdu bodies,
+      cmd_id = the Control slot's generation, uplink decode + v0 view incl.
+      MacAck+ACKED_FCNT -> CommandAck), LinkSecurity v1 (sealFrameV1,
+      authFrameV1/verifyAuthFrameV1, verifyUplinkV1, retagFrameV1,
+      copySealerV1 over raw bytes, K_AUTH copies re-tagged per copy),
+      `mac0::WireBurstFrame` (byte writes + one CMAC per copy, STAMP inserted
+      once per burst; FLEET beacon verbatim), v1 beacon in mac_mgmt (FLEET tag),
+      listener wiring (mac_frame_, LOGIN, GridDemote, set_response, REGISTER,
+      encrypted pipeline, FrameCanon bypass). MacWireVectors.h (node 0ce60b6)
+      vendored + gated: the hub encodes every downlink vector byte for byte and
+      verifies/decodes every uplink vector. proto_sim OFF 1752 pass; ON 1359 pass
+      (409 v0-envelope tests listed in tests/proto_sim/mac_wire_v0_only_tests.txt,
+      for W4), ON goldens in golden_v1/; seam/e2e (real hub + real node W2, both
+      ON) 27/27.
 - [ ] Fixed header (version byte != 0x0A, hub dual-stack during the node-1 OTA),
       FCnt/cmdId split, MAC ACK bit, CMAC over raw header bytes, delete
       FrameCanon and the legacy GCM helpers. Node 2 by serial first, soak, then

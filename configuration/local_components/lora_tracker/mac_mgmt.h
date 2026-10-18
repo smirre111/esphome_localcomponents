@@ -23,6 +23,7 @@
 
 #include "esphome/components/lora_client/FrameCrypto.h"
 #include "esphome/components/lora_client/PendingShadow.h"
+#include "esphome/components/blindsproto/blinds.pb-c.h"
 
 namespace esphome
 {
@@ -75,8 +76,20 @@ public:
     // inputs as of now_us.
     BeaconBuild buildBeacon(uint32_t round, int64_t now_us, size_t max_len, BeaconFrame *out);
 
+    // MAC wire v1 (S8, docs/mac-wire-format.md 4.4): the AUTH = FLEET tag,
+    // CMAC-8 under the fleet key over macwire::buildMacInputPrefix(downlink,
+    // net_key_id) || bytes (= frame[0 .. L-8)). False without a key.
+    bool fleetTagV1(const uint8_t *bytes, size_t n, uint8_t tag[8]) const;
+    // The v1 beacon frame for `gb` (netkeyid filled here, no `mac` field):
+    // HubMacPdu.gridbeacon behind a FLEET header, broadcast, FCNT 0, burst 0/1,
+    // never stamped. Compiled in both configurations; buildBeacon uses it only
+    // under MAC_WIRE_V1.
+    BeaconBuild packBeaconV1(::GridBeacon *gb, size_t max_len, std::vector<uint8_t> *out) const;
+
     // Test seam: a hub that lost its key.
     uint8_t *netKeyForTest() { return this->net_key_; }
+    // Test seam: a fixed key id (the S8 shared vectors fix both).
+    void setNetKeyIdForTest(uint32_t id) { this->net_key_id_ = id; }
 
 private:
     void gatherShadow_(int64_t now_us, BeaconFrame *out) const;

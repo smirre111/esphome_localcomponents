@@ -24,6 +24,8 @@
 #include "esphome/components/lora_client/HubLinkSecurity.h"
 // MAC-1: the shared frame counter (node-owned, vendored, drift-gated; stage S3).
 #include "esphome/components/lora_client/Sequencer.h"
+// S8: the MAC wire v1 fixed header (vendored from the node).
+#include "esphome/components/lora_client/MacWire.h"
 #include "esphome/components/lora_client/PendingShadow.h"
 
 #include "esphome/core/automation.h"
@@ -1583,6 +1585,41 @@ namespace esphome
       void     uplink_drop_candidate_(EncUplink &up);
       void     forward_uplink_(::LoraClientResponseMessage *inner,
                                const ::LoraClientResponseMessage *outer);
+      // ---- MAC wire v1 (S8, docs/mac-wire-format.md) -------------------------
+      // Compiled in both configurations; called only under MAC_WIRE_V1 (the
+      // compile-time switch, default OFF, spec section 12). The OFF path is
+      // untouched.
+      //
+      // Downlink: the v1 frame for `op` under FCNT `fcnt` -- HubMacPdu or
+      // HubAppPdu behind the fixed header (hubwire::routeDownlink picks PORT and
+      // ACK_REQ), sealed (AUTH = SESSION) exactly when the v0 path would have
+      // encrypted it: encrypt && a session id exists for the node.
+      bool v1_frame_(::LoraClientOperationMessage *op, uint32_t fcnt, bool encrypt, MacFrame *out);
+      bool v1_seal_(MacFrame *f, size_t hdr_len, size_t body_len);
+      // The v1 LOGIN path of send_login (frame, send, log).
+      void send_login_v1_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base);
+      // The REGISTER's authentication: v1 = K_AUTH tag over the raw frame, v0 =
+      // the mic field over its field-by-field input.
+      bool register_authentic_(const ::LoraClientResponseMessage *rcv_message, const uint8_t *data,
+                               size_t len);
+      // The v0 unpack or the v1 shape check + envelope (set_response's first step).
+      ::LoraClientResponseMessage *unpack_uplink_(uint8_t *data, size_t len);
+      // uplink_verify_'s tag check, v0 (decoded header) or v1 (raw frame).
+      mac2::LinkSecurity::Verify uplink_tag_verdict_(EncUplink &up);
+      // LOGIN (PORT 1, AUTH = K_AUTH; the tag replaces LoginMsg.mic).
+      bool v1_login_frame_(const ::LoginMsg &login, uint32_t fcnt, MacFrame *out);
+      // GridDemote (broadcast, PORT 0, AUTH = NONE, FCNT 0).
+      bool v1_demote_frame_(MacFrame *out);
+      // Uplink: shape-check the frame and return the v0 envelope the rest of
+      // set_response walks (protobuf-c owned), or nullptr (dropped). Keeps the
+      // raw frame and its header for the verify/accept stages below.
+      ::LoraClientResponseMessage *v1_receive_(uint8_t *data, size_t len);
+      bool v1_verify_uplink_(EncUplink &up);
+      void v1_deliver_decrypted_(EncUplink &up, const uint8_t *pt, size_t len);
+      macwire::WireHdr v1_rx_hdr_{};
+      const uint8_t   *v1_rx_frame_{nullptr};
+      size_t           v1_rx_len_{0};
+
       // Two stages of set_response(): the length re-encode check, and the
       // plaintext-uplink gate (true = the frame may be acted on).
       void check_uplink_canonical_(const ::LoraClientResponseMessage *rcv_message, size_t len);

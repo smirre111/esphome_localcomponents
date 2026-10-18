@@ -260,4 +260,104 @@ aes_gcm_decrypt(const uint8_t iv[12], const uint8_t* aad, size_t aad_len,
     return plain;
 }
 
+// ---------------------------------------------------------------------------
+// MAC wire v1 (S8)
+// ---------------------------------------------------------------------------
+
+void v1_tag(const uint8_t key[16], bool downlink, uint32_t id, const uint8_t *bytes, size_t n,
+            uint8_t out[8]) {
+    // Written out byte by byte (not via MacWire.h's prefix helper): this is the
+    // second implementation the hub's is checked against.
+    std::vector<uint8_t> in(8 + n);
+    in[0] = 'B'; in[1] = 'W'; in[2] = '1';
+    in[3] = downlink ? 1 : 0;
+    u32_be(id, in.data() + 4);
+    if (n) std::memcpy(in.data() + 8, bytes, n);
+    uint8_t full[16];
+    cmac_full(key, in.data(), in.size(), full);
+    std::memcpy(out, full, 8);
+}
+
+void v1_ctr(const uint8_t key[16], uint32_t session_id, uint8_t node_addr, bool downlink,
+            uint32_t fcnt, const uint8_t *in, size_t n, uint8_t *out) {
+    uint8_t block[16];
+    u32_be(session_id, block);
+    u32_be(node_addr, block + 4);
+    u32_be((downlink ? 0x80000000u : 0u) | (fcnt & 0x7FFFFFFFu), block + 8);
+    u32_be(0, block + 12);
+    ctr_crypt(key, block, in, n, out);
+}
+
+void v1_session_keys(uint32_t session_id, uint32_t node_nonce, uint8_t hub_addr, uint8_t node_addr,
+                     uint8_t k_enc[16], uint8_t k_mac[16]) {
+    derive_session_key(0x01, session_id, node_nonce, hub_addr, node_addr, k_enc);
+    derive_session_key(0x02, session_id, node_nonce, hub_addr, node_addr, k_mac);
+}
+
+namespace {
+std::vector<uint8_t> v1_layout(const macwire::WireHdr &h, const std::vector<uint8_t> &body) {
+    const size_t hlen = macwire::headerLen(h);
+    std::vector<uint8_t> f(hlen + body.size() + macwire::tagLen(h.flags), 0);
+    macwire::encodeHeader(h, f.data(), f.size());
+    if (!body.empty()) std::memcpy(f.data() + hlen, body.data(), body.size());
+    return f;
+}
+}  // namespace
+
+std::vector<uint8_t> v1_session_frame(uint32_t session_id, uint32_t node_nonce, uint8_t hub_addr,
+                                      uint8_t node_addr, bool downlink, const macwire::WireHdr &h,
+                                      const std::vector<uint8_t> &body) {
+    uint8_t k_enc[16], k_mac[16];
+    v1_session_keys(session_id, node_nonce, hub_addr, node_addr, k_enc, k_mac);
+    std::vector<uint8_t> f = v1_layout(h, body);
+    const size_t hlen = macwire::headerLen(h);
+    v1_ctr(k_enc, session_id, node_addr, downlink, h.fcnt, body.data(), body.size(), f.data() + hlen);
+    v1_tag(k_mac, downlink, session_id, f.data(), f.size() - 8, f.data() + f.size() - 8);
+    return f;
+}
+
+std::vector<uint8_t> v1_kauth_frame(bool downlink, const macwire::WireHdr &h,
+                                    const std::vector<uint8_t> &body) {
+    std::vector<uint8_t> f = v1_layout(h, body);
+    v1_tag(k_auth_key(), downlink, 0, f.data(), f.size() - 8, f.data() + f.size() - 8);
+    return f;
+}
+
+std::vector<uint8_t> v1_plain_frame(const macwire::WireHdr &h, const std::vector<uint8_t> &body) {
+    return v1_layout(h, body);
+}
+
+std::optional<std::vector<uint8_t>> v1_open_session_frame(uint32_t session_id, uint32_t node_nonce,
+                                                          uint8_t hub_addr, uint8_t node_addr,
+                                                          bool downlink,
+                                                          const std::vector<uint8_t> &frame,
+                                                          macwire::WireHdr *hdr_out) {
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    if (!macwire::decode(frame.data(), frame.size(), &h, &off, &blen) ||
+        h.auth() != macwire::Auth::Session)
+        return std::nullopt;
+    uint8_t k_enc[16], k_mac[16];
+    v1_session_keys(session_id, node_nonce, hub_addr, node_addr, k_enc, k_mac);
+    uint8_t tag[8];
+    v1_tag(k_mac, downlink, session_id, frame.data(), frame.size() - 8, tag);
+    if (std::memcmp(tag, frame.data() + frame.size() - 8, 8) != 0)
+        return std::nullopt;
+    std::vector<uint8_t> plain(blen);
+    v1_ctr(k_enc, session_id, node_addr, downlink, h.fcnt, frame.data() + off, blen, plain.data());
+    if (hdr_out) *hdr_out = h;
+    return plain;
+}
+
+bool v1_verify_kauth_frame(bool downlink, const std::vector<uint8_t> &frame) {
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    if (!macwire::decode(frame.data(), frame.size(), &h, &off, &blen) ||
+        h.auth() != macwire::Auth::KAuth)
+        return false;
+    uint8_t tag[8];
+    v1_tag(k_auth_key(), downlink, 0, frame.data(), frame.size() - 8, tag);
+    return std::memcmp(tag, frame.data() + frame.size() - 8, 8) == 0;
+}
+
 } // namespace proto_sim

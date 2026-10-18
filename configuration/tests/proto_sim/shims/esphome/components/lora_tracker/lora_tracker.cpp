@@ -9,6 +9,9 @@
 #include "TimedGrid.h"
 #include "blinds.pb-c.h"
 #include "esphome/components/lora_client/MacHdrCodec.h"
+// S8: the production v1 burst frame, so the shim restamps/reseals a v1 copy
+// with exactly the code the real tracker uses.
+#include "../../../../../../local_components/lora_tracker/burst_frame.h"
 
 #include <cstring>
 #include <psa/crypto.h>
@@ -157,6 +160,27 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
                       : 1;
     for (int i = 0; i < n; ++i) {
         std::vector<uint8_t> bytes(data, data + len);
+
+#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
+        // v1: the real tracker's per-copy work (burst_frame.h), unstamped (the
+        // shim has no fire instants): ON_MARK / BURST_IDX / BURST_CNT, then the
+        // frame's own sealer over the raw bytes. A FLEET frame goes verbatim.
+        {
+            mac0::WireBurstFrame fr(data, len);
+            if (fr.ok()) {
+                fr.setBurst(n, policy.on_mark && policy.earliest_us > 0);
+                fr.setIndex(i);
+                uint64_t binding = policy.seal_binding;
+                if (fr.encrypted() && !fr.seal(policy.sealer, &binding))
+                    continue;   // drop this copy, matching production's skip_copy
+                bytes.resize(fr.packedSize());
+                fr.packInto(bytes.data());
+            }
+            proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode, bytes};
+            r->send(f);
+            continue;
+        }
+#endif
 
         // Production stamps LoraHeader.onMark, burstIndex/burstCount in
         // sendPacketBurst's per-copy re-stamp, THEN (Tier 3) retags an

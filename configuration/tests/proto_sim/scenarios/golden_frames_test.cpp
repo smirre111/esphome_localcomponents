@@ -27,6 +27,8 @@
 // drift-gated) is compiled in the hub's own include context.
 #include "MacSap.h"
 #include "sim/golden.h"
+#include "MacWire.h"
+#include "../../../local_components/lora_tracker/burst_frame.h"
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
 #include "sim/wire_codec.h"
@@ -52,7 +54,33 @@ constexpr uint32_t    kNodeNonce  = 0xACE55001u;
 constexpr std::time_t kEpoch      = 1787000000;   // 2026-08-17 (CEST)
 constexpr unsigned    kSeed       = 0x5EED0001u;
 
+#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
+// S8: with MAC_WIRE_V1 these scenarios record the v1 wire into golden_v1/ (the
+// v0 files in golden/ stay pinned by the OFF build). Same scenarios, same
+// pinned inputs; the node side of each exchange is the sim's v1 frames.
+constexpr bool kV1 = true;
+#else
+constexpr bool kV1 = false;
+#endif
+
+std::string describeV1(const std::vector<uint8_t> &b) {
+    std::ostringstream s;
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    if (!macwire::decode(b.data(), b.size(), &h, &off, &blen)) {
+        s << "v1=? len=" << b.size();
+        return s.str();
+    }
+    s << "port=" << (int) h.port << " auth=" << (int) h.auth() << " len=" << b.size()
+      << " dst=" << (int) h.dst << " fcnt=" << h.fcnt << " burst=" << (int) h.burst_idx << "/"
+      << (int) h.burst_cnt << " onmark=" << h.onMark() << " stamped=" << h.stamped()
+      << " ackreq=" << h.ackReq();
+    return s.str();
+}
+
 std::string describeOp(const std::vector<uint8_t> &b) {
+    if (kV1)
+        return describeV1(b);
     std::ostringstream s;
     ::LoraClientOperationMessage *m =
         lora_client_operation_message__unpack(nullptr, b.size(), b.data());
@@ -127,7 +155,66 @@ struct GoldenHub {
 
     // Answer the LOGIN addressed to this node with the session-opening
     // encrypted ClientAvailable, exactly as real_lora_client_test does.
+    // v1: the LOGIN is PORT 1 / K_AUTH; the answer is the SESSION_OPENING
+    // uplink sealed under the keys the sim derives from its nonce.
+    void attachLoginAckV1() {
+        radio.add_sink([this](const proto_sim::AirFrame &f) {
+            if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
+            macwire::WireHdr lh;
+            size_t off = 0, blen = 0;
+            if (!macwire::decode(f.bytes.data(), f.bytes.size(), &lh, &off, &blen)) return;
+            if (lh.port != macwire::kPortSession || lh.dst != kNode) return;
+            ::LoginMsg *lm = login_msg__unpack(nullptr, blen, f.bytes.data() + off);
+            if (lm == nullptr) return;
+            base_nonce = lm->nonce;
+            login_msg__free_unpacked(lm, nullptr);
+            ::ClientAvailable a = CLIENT_AVAILABLE__INIT;
+            a.available = true;
+            ::NodeAppPdu pdu = NODE_APP_PDU__INIT;
+            pdu.pdu_case = NODE_APP_PDU__PDU_AVAIL;
+            pdu.avail = &a;
+            std::vector<uint8_t> body(node_app_pdu__get_packed_size(&pdu));
+            node_app_pdu__pack(&pdu, body.data());
+            macwire::WireHdr h;
+            h.flags = macwire::withAuth(macwire::kFlagSessionOpening, macwire::Auth::Session);
+            h.dst = (uint8_t) esphome::lora_tracker::kHubAddress;
+            h.src = kNode; h.subnet = kSubnet; h.fcnt = 1; h.port = macwire::kPortApp;
+            h.node_nonce = kNodeNonce;
+            auto up = proto_sim::v1_session_frame(base_nonce, kNodeNonce,
+                                                  (uint8_t) esphome::lora_tracker::kHubAddress,
+                                                  kNode, false, h, body);
+            rol.set_response(up.data(), up.size());
+        });
+    }
+
+    void sendRegister() {
+        if (kV1) {
+            ::ClientRegister reg = CLIENT_REGISTER__INIT;
+            reg.mac_addr     = kMac;
+            reg.needs_config = true;
+            std::vector<uint8_t> body(client_register__get_packed_size(&reg));
+            client_register__pack(&reg, body.data());
+            macwire::WireHdr h;
+            h.flags = macwire::withAuth(0, macwire::Auth::KAuth);
+            h.dst = macwire::kBroadcast; h.src = kNode; h.subnet = kSubnet; h.fcnt = 1;
+            h.port = macwire::kPortSession;
+            auto b = proto_sim::v1_kauth_frame(false, h, body);
+            rol.set_response(b.data(), b.size());
+            return;
+        }
+        proto_sim::LoraClientResponseMessage reg;
+        reg.proto            = proto_sim::LoraClientResponseMessage::Proto::Register;
+        reg.reg.mac_addr     = kMac;
+        reg.reg.needs_config = true;
+        auto b = proto_sim::serialize_resp(reg);
+        rol.set_response(b.data(), b.size());
+    }
+
     void attachLoginAck() {
+        if (kV1) {
+            attachLoginAckV1();
+            return;
+        }
         radio.add_sink([this](const proto_sim::AirFrame &f) {
             if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
             auto m = proto_sim::as_op(f);
@@ -168,12 +255,7 @@ struct GoldenHub {
     // ack -> confirmed session, then the post-confirmation pushes.
     void session() {
         attachLoginAck();
-        proto_sim::LoraClientResponseMessage reg;
-        reg.proto            = proto_sim::LoraClientResponseMessage::Proto::Register;
-        reg.reg.mac_addr     = kMac;
-        reg.reg.needs_config = true;
-        auto b = proto_sim::serialize_resp(reg);
-        rol.set_response(b.data(), b.size());
+        sendRegister();
         tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
         tick(1000);
         ASSERT_NE(base_nonce, 0u) << "precondition: a LOGIN went out and was answered";
@@ -319,6 +401,39 @@ TEST(GoldenHubFrames, EncryptedBurstRetagEveryCopy) {
     EXPECT_TRUE(golden::matches("hub_encrypted_burst_retag", h.dump()));
 }
 
+#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
+// v1: the copy sealer over every raw header byte MAC-0 writes per copy (FLAGS
+// ON_MARK/STAMPED, BURST_IDX/CNT, the STAMP), through the real WireBurstFrame.
+TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
+    GoldenHub h;
+    h.session();
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    h.tick(10);
+    ASSERT_FALSE(h.tracker.sent_raw.empty());
+    const auto raw = h.tracker.sent_raw.back();
+    const auto pol = h.tracker.sent_policy.back();
+    ASSERT_NE(pol.sealer, nullptr);
+    std::ostringstream s;
+    const uint32_t cases[][6] = {
+        {0, 17, 0, 0, 0, 0}, {5, 17, 0, 0, 0, 0}, {5, 17, 1, 0, 0, 0},
+        {5, 17, 1, 1, 123, 4567}, {0, 1, 1, 1, 0xFFFFFF, 999999},
+    };
+    for (const auto &c : cases) {
+        mac0::WireBurstFrame fr(raw.data(), raw.size());
+        ASSERT_TRUE(fr.ok());
+        fr.setBurst((int) c[1], c[2] != 0);
+        fr.setIndex((int) c[0]);
+        fr.setFireStamp(c[3] != 0, c[4], c[5]);
+        uint64_t binding = pol.seal_binding;
+        ASSERT_TRUE(fr.seal(pol.sealer, &binding));
+        std::vector<uint8_t> out(fr.packedSize());
+        fr.packInto(out.data());
+        s << "retag " << c[0] << "/" << c[1] << " onmark=" << c[2] << " stamped=" << c[3]
+          << " round=" << c[4] << " off=" << c[5] << " " << golden::hex(out) << "\n";
+    }
+    EXPECT_TRUE(golden::matches("hub_retag_timing_fields", s.str()));
+}
+#else
 // The copy sealer over every timing field the CMAC prefix covers.
 TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
     GoldenHub h;
@@ -352,3 +467,4 @@ TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
     lora_client_operation_message__free_unpacked(m, nullptr);
     EXPECT_TRUE(golden::matches("hub_retag_timing_fields", s.str()));
 }
+#endif

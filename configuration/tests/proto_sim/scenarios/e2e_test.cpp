@@ -50,6 +50,7 @@
 #include "PendingData.h"
 #include "ModeTestPolicy.h"
 
+#include "sim/wire_view.h"
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
 
@@ -246,13 +247,11 @@ TEST_F(E2E, TheNodeAnswersTheChallengeWithARealUplink) {
     auto frames = lif.drain_tx_queue();
     ASSERT_FALSE(frames.empty()) << "the node must transmit a reply";
 
-    LoraClientResponseMessage *msg = lora_client_response_message__unpack(
-        nullptr, frames[0].size(), frames[0].data());
-    ASSERT_NE(msg, nullptr) << "and it must be a parseable response message";
-    ASSERT_NE(msg->header, nullptr);
-    EXPECT_EQ(msg->header->senderaddress, (uint32_t) kAddr);
-    EXPECT_EQ(msg->header->destaddress, (uint32_t) kHub);
-    lora_client_response_message__free_unpacked(msg, nullptr);
+    uint32_t src = 0, dst = 0;
+    ASSERT_TRUE(proto_sim::wire::addresses(frames[0], &src, &dst))
+        << "and it must be a parseable response message";
+    EXPECT_EQ(src, (uint32_t) kAddr);
+    EXPECT_EQ(dst, (uint32_t) kHub);
 }
 
 // ---------------------------------------------------------------------------
@@ -615,12 +614,9 @@ TEST_F(E2E, AReflashedHubAndAProvisionedNodeConvergeOnASession) {
     auto first = lif.drain_tx_queue();
     ASSERT_FALSE(first.empty());
     {
-        auto *r = lora_client_response_message__unpack(NULL, first.back().size(),
-                                                       first.back().data());
-        ASSERT_NE(r, nullptr);
-        ASSERT_EQ(r->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER);
-        rol.set_address(r->register_->mac_addr);
-        lora_client_response_message__free_unpacked(r, NULL);
+        uint64_t mac = 0;
+        ASSERT_TRUE(proto_sim::wire::registerMac(first.back(), &mac));
+        rol.set_address(mac);
     }
     rol.set_response(first.back().data(), first.back().size());
 
@@ -632,13 +628,8 @@ TEST_F(E2E, AReflashedHubAndAProvisionedNodeConvergeOnASession) {
         pumpDown();
         while (disp.runOneTxCommand()) {}
         for (auto &frame : lif.drain_tx_queue()) {
-            auto *r = lora_client_response_message__unpack(NULL, frame.size(),
-                                                           frame.data());
-            if (r != nullptr) {
-                if (r->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
-                    ++registers;
-                lora_client_response_message__free_unpacked(r, NULL);
-            }
+            if (proto_sim::wire::registerMac(frame))
+                ++registers;
             rol.set_response(frame.data(), frame.size());
         }
         if (rol.config_synced_) break;

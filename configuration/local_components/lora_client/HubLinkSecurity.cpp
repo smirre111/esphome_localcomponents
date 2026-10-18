@@ -2,6 +2,7 @@
 // rules this file must keep. Moved here from lora_client.cpp in stage S2
 // (byte-identical wire output, pinned by tests/proto_sim/golden/).
 #include "esphome/components/lora_client/HubLinkSecurity.h"
+#include "esphome/components/lora_client/MacWire.h"
 
 // LORA_FLEET_KEY comes from lora_tracker's `fleet_key` YAML option through
 // cg.add_define (defines.h), or from the test build.
@@ -462,6 +463,188 @@ bool LinkSecurity::copySealer(void *ctx, const mac::MacHdr &copy, const uint8_t 
         return false;
     const FrameSeal seal = FrameSeal::fromBinding(*static_cast<const uint64_t *>(ctx));
     return hub().retagCopy(seal, copy, ct, ct_len, tag) == Retag::Ok;
+}
+
+// ===========================================================================
+// MAC wire v1 (S8): the tag covers the raw transmitted bytes
+// ===========================================================================
+
+// prefix || bytes on the stack (<= 8 + 255). False when it would not fit.
+static bool s_v1_mac_input(bool downlink, uint32_t id, const uint8_t *bytes, size_t n,
+                           uint8_t (&in)[macwire::kMacInputPrefixBytes + kMaxCt], size_t *len)
+{
+    if (n > kMaxCt || (n > 0 && bytes == nullptr))
+        return false;
+    macwire::buildMacInputPrefix(in, downlink, id);
+    if (n)
+        memcpy(in + macwire::kMacInputPrefixBytes, bytes, n);
+    *len = macwire::kMacInputPrefixBytes + n;
+    return true;
+}
+
+static bool s_cmac8(psa_key_id_t key, const uint8_t *in, size_t len, uint8_t (&tag)[kTagBytes])
+{
+    size_t out_len = 0;
+    return key != PSA_KEY_ID_NULL &&
+           psa_mac_compute(key, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kTagBytes), in, len, tag,
+                           sizeof(tag), &out_len) == PSA_SUCCESS &&
+           out_len == sizeof(tag);
+}
+
+// A whole frame's header, read back: dst and FCNT are what the CTR block and
+// the epoch binding need.
+static bool s_v1_frame_ok(const uint8_t *frame, size_t len, macwire::WireHdr *h)
+{
+    size_t off = 0, body = 0;
+    return frame != nullptr && macwire::decode(frame, len, h, &off, &body);
+}
+
+// Encrypt the body in place and tag the whole frame under one peer's live keys.
+// The caller holds keys_mutex_ (the ids are read AND used inside it).
+static bool s_v1_seal_locked(const KeyPair &live, uint32_t session_id,
+                             const uint8_t (&ctr_block)[framecrypto::kCtrBlockBytes],
+                             uint8_t *frame, size_t hdr_len, size_t body_len)
+{
+    uint8_t ct[kMaxCt];
+    if (body_len && !s_ctr_pass(true, live.enc, ctr_block, frame + hdr_len, body_len, ct))
+        return false;
+    if (body_len)
+        memcpy(frame + hdr_len, ct, body_len);
+    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
+    size_t  in_len = 0;
+    uint8_t tag[kTagBytes];
+    if (!s_v1_mac_input(true, session_id, frame, hdr_len + body_len, in, &in_len) ||
+        !s_cmac8(live.mac, in, in_len, tag))
+        return false;
+    memcpy(frame + hdr_len + body_len, tag, sizeof(tag));
+    return true;
+}
+
+LinkSecurity::Seal LinkSecurity::sealFrameV1(uint8_t *frame, size_t hdr_len, size_t body_len,
+                                             FrameSeal *seal)
+{
+    macwire::WireHdr h;
+    if (body_len > kMaxCt || !s_v1_frame_ok(frame, hdr_len + body_len + kTagBytes, &h))
+        return Seal::Failed;
+    if (h.fcnt >= macwire::kFcntLimit)
+        return Seal::MsgidSpent;
+    uint32_t session_id = 0;
+    this->store_.sessionId(h.dst, &session_id);
+    if (session_id == 0)
+        return Seal::NoSession;
+    uint8_t ctr_block[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(session_id, h.dst, /*downlink=*/true, h.fcnt, 0, ctr_block);
+
+    std::lock_guard<std::mutex> lock(this->store_.keys_mutex_);
+    auto it = this->store_.keys_.find(h.dst);
+    if (it == this->store_.keys_.end() || !it->second.live.complete())
+        return Seal::NoKey;
+    if (!s_v1_seal_locked(it->second.live, session_id, ctr_block, frame, hdr_len, body_len))
+        return Seal::Failed;
+    seal->sealed    = true;
+    seal->kauth     = false;
+    seal->peer      = h.dst;
+    seal->key_epoch = it->second.key_epoch;
+    return Seal::Ok;
+}
+
+bool LinkSecurity::authTagV1_(bool downlink, const uint8_t *bytes, size_t n,
+                              uint8_t (&tag)[kTagBytes])
+{
+    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
+    size_t  in_len = 0;
+    return this->initAuthKey() && s_v1_mac_input(downlink, 0, bytes, n, in, &in_len) &&
+           s_cmac8(this->auth_key_, in, in_len, tag);
+}
+
+bool LinkSecurity::authFrameV1(bool downlink, uint8_t *frame, size_t len, FrameSeal *seal)
+{
+    macwire::WireHdr h;
+    uint8_t tag[kTagBytes];
+    if (!s_v1_frame_ok(frame, len, &h) || h.auth() != macwire::Auth::KAuth ||
+        !this->authTagV1_(downlink, frame, len - kTagBytes, tag))
+        return false;
+    memcpy(frame + len - kTagBytes, tag, sizeof(tag));
+    if (seal != nullptr)
+    {
+        *seal        = FrameSeal{};
+        seal->sealed = true;
+        seal->kauth  = true;
+        seal->peer   = h.dst;
+    }
+    return true;
+}
+
+bool LinkSecurity::verifyAuthFrameV1(bool downlink, const uint8_t *frame, size_t len)
+{
+    macwire::WireHdr h;
+    if (!s_v1_frame_ok(frame, len, &h) || h.auth() != macwire::Auth::KAuth)
+        return false;
+    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
+    size_t  in_len = 0;
+    return this->initAuthKey() && s_v1_mac_input(downlink, 0, frame, len - kTagBytes, in, &in_len) &&
+           psa_mac_verify(this->auth_key_, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kTagBytes), in,
+                          in_len, frame + len - kTagBytes, kTagBytes) == PSA_SUCCESS;
+}
+
+LinkSecurity::Verify LinkSecurity::verifyUplinkV1(uint32_t session_id, const KeyPair &keys,
+                                                  const uint8_t *frame, size_t len)
+{
+    if (!keys.complete())
+        return Verify::NoKeys;
+    macwire::WireHdr h;
+    if (!s_v1_frame_ok(frame, len, &h) || h.auth() != macwire::Auth::Session)
+        return Verify::BadTag;
+    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
+    size_t  in_len = 0;
+    if (!s_v1_mac_input(false, session_id, frame, len - kTagBytes, in, &in_len))
+        return Verify::BadTag;
+    return psa_mac_verify(keys.mac, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kTagBytes), in, in_len,
+                          frame + len - kTagBytes, kTagBytes) == PSA_SUCCESS
+               ? Verify::Ok
+               : Verify::BadTag;
+}
+
+// The v1 per-copy path (H-1): the input is built on the stack before the lock,
+// the lock covers one psa_mac_compute (macUnderKeyLock_), no heap, no logging.
+LinkSecurity::Retag LinkSecurity::retagFrameV1(const FrameSeal &seal, const mac::MacHdr &copy,
+                                               const uint8_t *bytes, size_t n,
+                                               uint8_t tag[kTagBytes])
+{
+    if (copy.fcnt >= macwire::kFcntLimit)
+        return Retag::MsgidSpent;
+    uint32_t session_id = 0;
+    if (!seal.sealed || !this->store_.sessionId(seal.peer, &session_id))
+        return Retag::NoSession;
+    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
+    size_t  in_len = 0;
+    if (!s_v1_mac_input(true, session_id, bytes, n, in, &in_len))
+        return Retag::Failed;
+    uint8_t   out[kTagBytes];
+    FrameSeal bound = seal;
+    if (copy.dst != seal.peer)
+        bound.key_epoch = ~seal.key_epoch;   // a copy for another node: never this frame's
+    const Retag verdict = this->macUnderKeyLock_(bound, in, in_len, out);
+    if (verdict == Retag::Ok)
+        memcpy(tag, out, sizeof(out));
+    return verdict;
+}
+
+bool LinkSecurity::copySealerV1(void *ctx, const mac::MacHdr &copy, const uint8_t *bytes, size_t n,
+                                uint8_t tag[8])
+{
+    if (ctx == nullptr)
+        return false;
+    const FrameSeal seal = FrameSeal::fromBinding(*static_cast<const uint64_t *>(ctx));
+    if (!seal.sealed)
+        return false;
+    if (!seal.kauth)
+        return hub().retagFrameV1(seal, copy, bytes, n, tag) == Retag::Ok;
+    uint8_t out[kTagBytes];
+    if (!hub().authTagV1_(/*downlink=*/true, bytes, n, out))
+        return false;
+    memcpy(tag, out, sizeof(out));
+    return true;
 }
 
 bool LinkSecurity::ctrEncryptForTest(mac::Addr peer, const uint8_t iv[16], const uint8_t *in,

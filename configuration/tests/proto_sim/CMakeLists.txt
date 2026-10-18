@@ -23,6 +23,38 @@ if(PROTO_SIM_COVERAGE)
     add_link_options(--coverage)
 endif()
 
+# S8 (docs/mac-wire-format.md section 12): the MAC wire v1 compile-time switch.
+# The suite builds and runs in BOTH configurations (two build directories);
+# ON records its golden frames in golden_v1/. A compile-time switch, not a
+# runtime dual stack: no image speaks both formats.
+option(PROTO_SIM_MAC_WIRE_V1 "Build hub and node with MAC_WIRE_V1=1 (wire format v1)" OFF)
+if(PROTO_SIM_MAC_WIRE_V1)
+    add_compile_definitions(MAC_WIRE_V1=1)
+endif()
+
+# In an ON build the tests listed in mac_wire_v0_only_tests.txt (they drive the
+# v0 envelope directly) are left out of discovery for their executable; see
+# that file. OFF builds discover everything.
+set(PROTO_SIM_V0_ONLY_FILE ${CMAKE_CURRENT_SOURCE_DIR}/mac_wire_v0_only_tests.txt)
+function(proto_sim_discover_tests target)
+    if(PROTO_SIM_MAC_WIRE_V1 AND EXISTS ${PROTO_SIM_V0_ONLY_FILE})
+        file(STRINGS ${PROTO_SIM_V0_ONLY_FILE} _lines REGEX "^${target} ")
+        set(_names "")
+        foreach(_l ${_lines})
+            string(REGEX REPLACE "^${target} " "" _n "${_l}")
+            list(APPEND _names "${_n}")
+        endforeach()
+        list(LENGTH _names _cnt)
+        if(_cnt GREATER 0)
+            list(JOIN _names ":" _f)
+            message(STATUS "MAC_WIRE_V1: ${_cnt} v0-envelope tests of ${target} not run (mac_wire_v0_only_tests.txt)")
+            gtest_discover_tests(${target} TEST_FILTER "-${_f}")
+            return()
+        endif()
+    endif()
+    gtest_discover_tests(${target})
+endfunction()
+
 # ----------------------------------------------------------------------------
 # Where the node repository (BlindsESP) lives.
 #
@@ -245,6 +277,8 @@ add_library(real_lora_client STATIC
     ${LORA_CLIENT_DIR}/lora_client.cpp
     # MAC-2 (stage S2): keys, KDF, Encrypt-then-CMAC, the session key store.
     ${LORA_CLIENT_DIR}/HubLinkSecurity.cpp
+    # S8: the hub's MAC wire v1 bodies (compiled in both configurations).
+    ${LORA_CLIENT_DIR}/HubWire.cpp
     # The hub predicts an auto-mode node's wake with the NODE'S own scheduler,
     # vendored rather than re-implemented — see Scheduler.h's banner.
     ${LORA_CLIENT_DIR}/Scheduler.cpp
@@ -282,7 +316,7 @@ add_executable(real_lora_client_test scenarios/real_lora_client_test.cpp)
 # a REAL child node (the deferred config push replays REGISTER into it) use it.
 target_link_libraries(real_lora_client_test
     PRIVATE real_lora_client real_lora_cover GTest::gtest GTest::gtest_main)
-gtest_discover_tests(real_lora_client_test)
+proto_sim_discover_tests(real_lora_client_test)
 
 # ----------------------------------------------------------------------------
 # Phase 3 hub-cover: compile the REAL LoraCoverComponent against shims so
@@ -412,7 +446,19 @@ gtest_discover_tests(real_lora_driver_test)
 add_executable(real_lora_tracker_test scenarios/real_lora_tracker_test.cpp)
 target_link_libraries(real_lora_tracker_test
     PRIVATE real_lora_tracker GTest::gtest GTest::gtest_main)
-gtest_discover_tests(real_lora_tracker_test)
+proto_sim_discover_tests(real_lora_tracker_test)
+
+# S8 / W3: the hub side of MAC wire v1 -- HubWire, the v1 MAC-2 calls, MAC-0's
+# WireBurstFrame, the node-owned shared vectors; end to end through the real
+# listener when built with PROTO_SIM_MAC_WIRE_V1=ON.
+add_executable(mac_wire_v1_test scenarios/mac_wire_v1_test.cpp)
+target_link_libraries(mac_wire_v1_test
+    PRIVATE real_lora_client real_lora_cover GTest::gtest GTest::gtest_main)
+gtest_discover_tests(mac_wire_v1_test)
+add_executable(mac_wire_v1_tracker_test scenarios/mac_wire_v1_tracker_test.cpp)
+target_link_libraries(mac_wire_v1_tracker_test
+    PRIVATE real_lora_tracker GTest::gtest GTest::gtest_main)
+gtest_discover_tests(mac_wire_v1_tracker_test)
 
 # ----------------------------------------------------------------------------
 # S0 golden frames (docs/mac-separation-layering-plan.md): byte-exact wire
@@ -420,6 +466,10 @@ gtest_discover_tests(real_lora_tracker_test)
 # Re-record ONLY on a deliberate wire change: PROTO_SIM_GOLDEN_RECORD=1.
 # ----------------------------------------------------------------------------
 set(PROTO_SIM_GOLDEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/golden)
+# S8: the v1 wire is pinned separately; golden/ (v0) stays untouched by an ON build.
+if(PROTO_SIM_MAC_WIRE_V1)
+    set(PROTO_SIM_GOLDEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/golden_v1)
+endif()
 add_executable(golden_frames_test scenarios/golden_frames_test.cpp)
 target_link_libraries(golden_frames_test
     PRIVATE real_lora_client real_lora_cover GTest::gtest GTest::gtest_main)
@@ -447,7 +497,7 @@ gtest_discover_tests(golden_tracker_frames_test)
 add_executable(real_lora_cover_test scenarios/real_lora_cover_test.cpp)
 target_link_libraries(real_lora_cover_test
     PRIVATE real_lora_cover GTest::gtest GTest::gtest_main)
-gtest_discover_tests(real_lora_cover_test)
+proto_sim_discover_tests(real_lora_cover_test)
 
 # ----------------------------------------------------------------------------
 # Phase 3 node side: compile the REAL production CmdDispatcher.cpp against
@@ -732,7 +782,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         ${NODE_SHIM_DIR}/host_clock.c)
     target_link_libraries(real_cmd_dispatcher_test
         PRIVATE real_cmd_dispatcher proto_sim GTest::gtest GTest::gtest_main)
-    gtest_discover_tests(real_cmd_dispatcher_test)
+    proto_sim_discover_tests(real_cmd_dispatcher_test)
 
     # Tier 3 (docs/mac-separation-implementation-plan.md section 2(b)):
     # comm_utils.c's Encrypt-then-CMAC primitives (CMAC compute/verify,
@@ -797,7 +847,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     target_link_libraries(seam_test
         PRIVATE real_cmd_dispatcher_seam real_lora_client proto_sim
                 GTest::gtest GTest::gtest_main)
-    gtest_discover_tests(seam_test)
+    proto_sim_discover_tests(seam_test)
 
     # ------------------------------------------------------------------
     # END TO END. The seam test asserts GEOMETRY — does the hub's frame land
@@ -821,7 +871,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     target_link_libraries(e2e_test
         PRIVATE real_cmd_dispatcher_seam real_lora_client proto_sim
                 GTest::gtest GTest::gtest_main)
-    gtest_discover_tests(e2e_test)
+    proto_sim_discover_tests(e2e_test)
 
     # ------------------------------------------------------------------
     # §11b's LAST STRUCTURAL GAP: LoraInterface.cpp compiled at all.
@@ -916,7 +966,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         ${NODE_SHIM_DIR})
     target_link_libraries(real_lora_interface_test
         PRIVATE real_lora_interface GTest::gtest GTest::gtest_main)
-    gtest_discover_tests(real_lora_interface_test)
+    proto_sim_discover_tests(real_lora_interface_test)
 else()
     message(STATUS "BlindsESP node source not found at ${BLINDS_ESP_MAIN} — "
                    "skipping real_cmd_dispatcher target")

@@ -15,9 +15,29 @@
 
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/lora_client/MacSap.h"
+#include "esphome/components/lora_client/MacWire.h"
 
 namespace machdr
 {
+
+// MAC wire v1 (S8): the fixed header, already decoded by macwire::decode. The
+// one function spec section 10 asks for; every field fits by construction.
+inline void fromWireHdr(const macwire::WireHdr &h, mac::MacHdr *out)
+{
+    *out               = mac::MacHdr{};
+    out->dst           = h.dst;
+    out->src           = h.src;
+    out->subnet        = h.subnet;
+    out->fcnt          = h.fcnt;
+    out->port          = static_cast<mac::Port>(h.port);
+    out->burst_idx     = h.burst_idx;
+    out->burst_cnt     = h.burst_cnt;
+    out->on_mark       = h.onMark();
+    out->stamped       = h.stamped();
+    out->fire_round    = h.fire_round;
+    out->fire_off_us   = h.fire_offset_us;
+    out->session_nonce = h.sessionOpening() ? h.node_nonce : 0;
+}
 
 inline bool fromLoraHeader(const ::LoraHeader *h, mac::MacHdr *out)
 {

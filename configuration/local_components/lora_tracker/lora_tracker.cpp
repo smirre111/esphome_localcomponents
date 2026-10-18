@@ -1047,7 +1047,7 @@ namespace esphome
       // reply into the clear window afterwards.  Unpack once; each copy is
       // re-packed with its own index.  On unpack failure (should not happen for
       // our own freshly-packed frames) fall back to sending the raw bytes.
-      mac0::BurstFrame frame(data, len);   // S5: the only schema access (burst_frame.h)
+      mac0::TxFrame frame(data, len);   // S5/S8: the only frame access (burst_frame.h)
       const bool canStamp  = frame.ok();
       // Sealed once at pack time; every copy needs its own tag (below).
       const bool encrypted = frame.encrypted();

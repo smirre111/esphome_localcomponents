@@ -40,6 +40,7 @@
 #include "GridState.h"
 #include "PendingData.h"
 
+#include "sim/wire_view.h"
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
 #include "sim/air_channel.h"
@@ -680,12 +681,9 @@ TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin
     // register and the test then fails for a setup reason that looks like the
     // defect.
     {
-        auto *r = lora_client_response_message__unpack(NULL, up.back().size(),
-                                                       up.back().data());
-        ASSERT_NE(r, nullptr);
-        ASSERT_EQ(r->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER);
-        rol.set_address(r->register_->mac_addr);
-        lora_client_response_message__free_unpacked(r, NULL);
+        uint64_t mac = 0;
+        ASSERT_TRUE(proto_sim::wire::registerMac(up.back(), &mac));
+        rol.set_address(mac);
     }
 
     rol.set_response(up.back().data(), up.back().size());
@@ -702,11 +700,9 @@ TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin
     const auto login = lastDownlink();
     ASSERT_FALSE(login.empty()) << "send_login must have emitted a LoginMsg";
 
-    auto *msg = lora_client_operation_message__unpack(NULL, login.size(), login.data());
-    ASSERT_NE(msg, nullptr) << "the LoginMsg goes out in the clear and must unpack";
-    ASSERT_EQ(msg->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN);
-    const bool asked_to_reregister = msg->login->request_register;
-    lora_client_operation_message__free_unpacked(msg, NULL);
+    bool asked_to_reregister = true;
+    ASSERT_TRUE(proto_sim::wire::loginRequestRegister(login, &asked_to_reregister))
+        << "the LoginMsg goes out in the clear and must unpack";
 
     EXPECT_FALSE(asked_to_reregister)
         << "while a config push is pending, the hub must ask for a LOGIN and "
@@ -730,11 +726,8 @@ TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin
     for (const auto &f : after) {
         // The node's REGISTER is a RESPONSE message, not an operation: it is
         // what set_response() on the hub consumes.
-        auto *m = lora_client_response_message__unpack(NULL, f.size(), f.data());
-        if (m == nullptr) continue;
-        if (m->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
+        if (proto_sim::wire::registerMac(f))
             sent_register = true;
-        lora_client_response_message__free_unpacked(m, NULL);
     }
     EXPECT_FALSE(sent_register)
         << "a second REGISTER here IS the loop: it returns the hub to "

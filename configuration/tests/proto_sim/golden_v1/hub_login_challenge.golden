@@ -1,0 +1,4 @@
+raw 0 port=1 auth=2 len=30 dst=18 fcnt=1 burst=0/0 onmark=0 stamped=0 ackreq=0 copies=0 stride=0 earliest=0 onmark=0 reply=1 prio=1 sup=0/0 014012010200000001010000089799fedf021001200183f0f96c2235c6c2
+raw 1 port=1 auth=2 len=30 dst=18 fcnt=1 burst=0/0 onmark=0 stamped=0 ackreq=0 copies=0 stride=0 earliest=0 onmark=0 reply=1 prio=1 sup=0/0 014012010200000001010000089799fedf021001200183f0f96c2235c6c2
+air 0 port=1 auth=2 len=30 dst=18 fcnt=1 burst=0/1 onmark=0 stamped=0 ackreq=0 014012010200000001010001089799fedf02100120012f941a2d0713fca2
+air 1 port=1 auth=2 len=30 dst=18 fcnt=1 burst=0/1 onmark=0 stamped=0 ackreq=0 014012010200000001010001089799fedf02100120012f941a2d0713fca2
