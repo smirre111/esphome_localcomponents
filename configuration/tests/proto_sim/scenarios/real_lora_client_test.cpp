@@ -12252,3 +12252,44 @@ TEST(AppChildrenS6, ThePortTableClassifiesEveryUplinkCase) {
     EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION), mac::Port::App);
     EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON), mac::Port::App);
 }
+
+// =============================================================================
+// S7 characterization: the Control channel's attempts as the operator sees them
+// in the log, and the re-pack fallback, pinned BEFORE the msgid handling moves
+// from the cover/sysop glue into the delivery service.
+// =============================================================================
+TEST(ArqS7, TheControlChannelLogsEveryAttemptAndTheAckWithTheFrameId) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    testing::internal::CaptureStderr();
+    sendOpen(h);
+    const uint32_t id = DP(h).ctl().last_msgid;
+    h.clock.tick(3050);                                  // retry 1: the stored bytes again
+    deliverAck(h.rol, id);
+    const std::string log = testing::internal::GetCapturedStderr();
+    const std::string sid = std::to_string(id);
+    EXPECT_EQ(occurrences(log, "[rol] Cover op sent (msgid=" + sid + ") \u2014 awaiting ack"), 1) << log;
+    EXPECT_EQ(occurrences(log, "[rol] Tracked op retransmit 1/4 (msgid=" + sid + ")"), 1) << log;
+    EXPECT_EQ(occurrences(log, "[rol] Tracked op acknowledged (ack_msg_id=" + sid + ")"), 1) << log;
+    EXPECT_FALSE(h.rol.awaitingAck());
+    EXPECT_EQ(DP(h).ctl().first_msgid, id) << "a retry keeps the command's id";
+}
+
+TEST(ArqS7, AStoredFrameLostToASessionChangeIsRepackedUnderAFreshId) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    sendOpen(h);
+    const uint32_t id = DP(h).ctl().last_msgid;
+    DP(h).clearSessionKeys_();                           // drops the stored frame
+    testing::internal::CaptureStderr();
+    h.clock.tick(3050);
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(occurrences(log, "no stored frame to retransmit \u2014 re-packing"), 1) << log;
+    const uint32_t fresh = DP(h).ctl().last_msgid;
+    EXPECT_EQ(fresh, id + 1) << "a NEW frame, a new id";
+    EXPECT_EQ(DP(h).ctl().first_msgid, fresh) << "the command's range moves with it";
+    deliverAck(h.rol, fresh);
+    EXPECT_FALSE(h.rol.awaitingAck());
+}
