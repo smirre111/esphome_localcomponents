@@ -3996,6 +3996,116 @@ TEST(GridAligned, AModeBTestMarkLandsOnTheNodesGridMark) {
     h.rol.stop_mode_test();
 }
 
+// ---------------------------------------------------------------------------
+// Mark lead: a placed ModeTest mark holds a tracker pool buffer (POOL_SIZE 5)
+// until its fire instant, so every round the marks run ahead of the grid costs
+// one buffer for the rest of the run.
+//
+// MEASURED 2026-10-18 (S0-S7 checkpoint, logs/20261018_082522_s0s7): node 1's
+// GridSync publish placed two frames into node 2's next marks; each pushed the
+// following mark two rounds out (`dt=4500`), and the guard below (t0 <= last
+// mark -> the mark after the last) kept every later mark that far ahead for
+// the remaining ~14 minutes. Free buffers sat at 1, beacons and marks were
+// dropped ("No free buffers"), and every dropped mark was a seq gap: FER_link
+// 10291 ppm. The 10-06 and 10-09 baselines show the same ratchet once
+// (a TimeSync, `dt=4500`, free 3 for the rest of the run).
+// ---------------------------------------------------------------------------
+namespace {
+size_t marksStillAhead(const LORATracker &t) {
+    size_t n = 0;
+    for (int64_t e : t.sent_earliest_us)
+        if (e > t.sim_now_us) ++n;
+    return n;
+}
+void markTickAt(real_helpers::RealHubHarness &h, int64_t now_us) {
+    h.tracker.sim_now_us = now_us;
+    proto_sim_timer_set_now_us(now_us);
+    h.rol.mode_test_tick_for_test();
+}
+} // namespace
+
+TEST(MarkLead, AForeignFrameDelaysOneMarkNotEveryMarkAfterIt) {
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    int64_t now = h.tracker.gridAnchorUs() + 1;
+    markTickAt(h, now);   // sets the clock for the START
+    h.rol.start_mode_test(900, 1500, /*mode=*/2, 1, true, true, true, true, 0);
+    h.tracker.sent_earliest_us.clear();
+
+    const int64_t R = (int64_t) timedgrid::kRoundUs;
+    for (int i = 0; i < 5; ++i, now += R) markTickAt(h, now);
+    ASSERT_LE(marksStillAhead(h.tracker), 1u) << "undisturbed: one mark in the queue at a time";
+
+    // Another node's frame occupies this node's next two marks for one tick.
+    h.tracker.busy_until_us = now + 2 * R;
+    markTickAt(h, now);
+    h.tracker.busy_until_us = 0;
+    now += R;
+
+    size_t worst = 0;
+    for (int i = 0; i < 20; ++i, now += R) {
+        markTickAt(h, now);
+        if (i >= 3) worst = std::max(worst, marksStillAhead(h.tracker));
+    }
+    EXPECT_LE(worst, 2u)
+        << "the push must not stay: every round the marks run ahead pins a pool buffer";
+    h.rol.stop_mode_test();
+}
+
+TEST(MarkLead, ASweepTimerFasterThanTheRoundDoesNotPileMarksUp) {
+    // Mode 4 keeps its incommensurate 1093 ms timer and relies on placement to
+    // collapse ticks onto ~one mark per round (see mode_test_timer_cb_). With
+    // the "mark after the last" guard each tick queued one more round ahead.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    int64_t now = h.tracker.gridAnchorUs() + 1;
+    markTickAt(h, now);
+    h.rol.start_mode_test(300, 1093, /*mode=*/4, 1, true, false, false, true, 0);
+    h.tracker.sent_earliest_us.clear();
+
+    size_t worst = 0;
+    for (int i = 0; i < 40; ++i, now += 1093000) {
+        markTickAt(h, now);
+        worst = std::max(worst, marksStillAhead(h.tracker));
+    }
+    EXPECT_LE(worst, 2u) << "a 1093 ms timer must not run the marks ahead of the grid";
+    h.rol.stop_mode_test();
+}
+
+TEST(MarkLead, ASkippedTickSendsNothingAndTheNextMarkIsTheFrameItHeld) {
+    // A tick that finds the marks already a round ahead sends nothing and does
+    // not rebuild: the frame built after the last send (with its seq) goes out
+    // on the next tick, so holding back is never a seq gap at the node.
+    using namespace real_helpers;
+    RealHubHarness h{2, kMacRol2};
+    h.tracker.startGrid();
+    h.rol.set_grid_aligned(true);
+    int64_t now = h.tracker.gridAnchorUs() + 1;
+    markTickAt(h, now);
+    h.rol.start_mode_test(900, 1500, 2, 1, true, false, false, true, 0);
+    const int64_t R = (int64_t) timedgrid::kRoundUs;
+    markTickAt(h, now);
+    now += R;
+    h.tracker.busy_until_us = now + 2 * R;
+    markTickAt(h, now);                       // pushed two rounds out
+    h.tracker.busy_until_us = 0;
+    now += R;
+    const size_t sends_before = h.tracker.sent_raw.size();
+    const std::vector<uint8_t> held = h.rol.mode_test_frame_for_test();
+    markTickAt(h, now);                       // a round ahead already: hold
+    EXPECT_EQ(h.tracker.sent_raw.size(), sends_before) << "nothing sent on a held tick";
+    EXPECT_EQ(h.rol.mode_test_frame_for_test(), held) << "and nothing rebuilt";
+    now += R;
+    markTickAt(h, now);
+    ASSERT_EQ(h.tracker.sent_raw.size(), sends_before + 1);
+    EXPECT_EQ(h.tracker.sent_raw.back(), held) << "the held frame is the next mark";
+    h.rol.stop_mode_test();
+}
+
 TEST(GridAligned, AModeATestMarkStaysUnplaced) {
     // The other half of D4, and deliberate: Mode A's swept 1093 ms period is
     // what lets a free-running window catch it at all. Placing it on the grid

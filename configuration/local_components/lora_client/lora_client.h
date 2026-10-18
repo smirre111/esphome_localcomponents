@@ -776,6 +776,9 @@ namespace esphome
       uint32_t ms_until_node_awake_for_test() const { return ms_until_node_awake_(); }
       // D4: fire one ModeTest mark exactly as the esp_timer would.
       void mode_test_tick_for_test() { mode_test_timer_cb_(this); }
+      std::vector<uint8_t> mode_test_frame_for_test() const {
+        return std::vector<uint8_t>(mt_frame_, mt_frame_ + mt_frame_len_);
+      }
       void send_aligned_for_test(const uint8_t *buf, size_t len) {
         this->send_aligned_(buf, len);
       }

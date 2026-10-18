@@ -4810,6 +4810,24 @@ namespace esphome
         // would otherwise be gone by the time it is printed.
         const int64_t prev_mark = self->mt_last_mark_t0_us_;
         // By interval: a mark before a queued beacon is clear (2026-09-15).
+        // HOLD a tick whose mark is already queued a whole round beyond the
+        // grid's next mark. MEASURED 2026-10-18 (S0-S7 checkpoint): another
+        // node's frame pushed one mark two rounds out, and the "mark after the
+        // last" guard below then kept EVERY later mark that far ahead, because
+        // the timer period is the round (mode 4's 1093 ms timer is worse: it
+        // runs ahead by a round every ~3.7 ticks). Each round of lead pins one
+        // tracker pool buffer until it fires; at 4 of 5 held, beacons and marks
+        // were dropped and each dropped mark was a seq gap at the node. The
+        // built frame is kept, so the next tick sends it: no seq gap.
+        const int64_t round_us = (int64_t) timedgrid::kRoundUs;
+        const int64_t grid_t0  = self->parent_->nextT0ForSlotUs(self->grid_slot_, now);
+        if (self->mt_last_mark_t0_us_ >= grid_t0 + round_us)
+        {
+          ESP_LOGI(TAG, "[%s] mark: mode %u held (last mark t0=%lld is a round ahead)",
+                   self->get_name().c_str(), (unsigned) self->mt_mode_,
+                   (long long) self->mt_last_mark_t0_us_);
+          return;
+        }
         const int copies = (int) self->mt_copies_;
         const size_t len = self->mt_frame_len_;
         int64_t t0 = self->parent_->nextClearT0ForSlotUs(self->grid_slot_, now, copies,
