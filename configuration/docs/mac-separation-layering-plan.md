@@ -147,8 +147,16 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
 
 ## S7 ARQ ownership
 
-- [ ] Delivery ladder and AckCache behind the MAC-0 delivery service; APP handlers
-      stop knowing msgid (ack still emitted on execution).
+- [ ] Node: AckCache behind the MAC-0 delivery service; APP handlers stop knowing
+      msgid (ack still emitted on execution) (node agent).
+- [x] Hub: the delivery service owns msgid, frame, pack-once copy, re-pack
+      fallback, attempt logs, ack matching, ladder and timers; the application
+      supplies encode (payload via a frame() continuation) and place, and gets
+      on_delivered(DeliveryConfirm{tag, log_id}) / on_fail / on_abandon.
+      Characterization `c558d53`, service `51a5967`. Lint: new
+      client.app_arq_by_msgid 31 -> 0. Also repaired three lint regexes whose
+      `\b` had become a backspace (client.psa_key_handles was really 1 after S2;
+      now 0).
 
 ## S8 Wire (explicit break)
 
