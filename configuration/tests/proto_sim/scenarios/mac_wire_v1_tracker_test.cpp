@@ -67,6 +67,45 @@ TEST(MacWireV1Beacon, NoKeyNoBeaconAndTooBigIsRefused) {
     EXPECT_EQ(0, std::memcmp(tag, out.data() + out.size() - 8, 8));
 }
 
+// ---------------------------------------------------------------------------
+// StackWatch (both configurations)
+// ---------------------------------------------------------------------------
+#include "StackWatch.h"
+
+TEST(StackWatch, FirstAtBootPlusAMinuteThenEveryFiveMinutes) {
+    int64_t last = 0;
+    EXPECT_FALSE(stackwatch::due(stackwatch::kFirstAfterUs - 1, &last));
+    EXPECT_TRUE(stackwatch::due(stackwatch::kFirstAfterUs, &last));
+    EXPECT_EQ(last, stackwatch::kFirstAfterUs);
+    EXPECT_FALSE(stackwatch::due(stackwatch::kFirstAfterUs + stackwatch::kEveryUs - 1, &last));
+    EXPECT_TRUE(stackwatch::due(stackwatch::kFirstAfterUs + stackwatch::kEveryUs, &last));
+    EXPECT_EQ(stackwatch::kFirstAfterUs, 60LL * 1000000);
+    EXPECT_EQ(stackwatch::kEveryUs, 300LL * 1000000);
+}
+
+// The H-1 max now says which sample it was (uptime, copy index).
+namespace {
+struct H1Probe : esphome::lora_tracker::LORATracker {
+    using LORATracker::noteTagWriteLatencyUs_;
+    using LORATracker::tag_latency_report_ready_;
+    using LORATracker::tag_latency_report_max_us_;
+    using LORATracker::tag_latency_report_max_at_us_;
+    using LORATracker::tag_latency_report_max_copy_;
+};
+}  // namespace
+
+TEST(H1Histogram, TheMaxSampleCarriesItsInstantAndCopy) {
+    H1Probe t;
+    for (int i = 0; i < 1999; ++i)
+        t.noteTagWriteLatencyUs_(i == 700 ? 13474u : 1500u, 1000000LL + i, i == 700 ? 4 : 0);
+    EXPECT_FALSE(t.tag_latency_report_ready_);
+    t.noteTagWriteLatencyUs_(1500u, 9999999LL, 1);
+    ASSERT_TRUE(t.tag_latency_report_ready_);
+    EXPECT_EQ(t.tag_latency_report_max_us_, 13474u);
+    EXPECT_EQ(t.tag_latency_report_max_at_us_, 1000700LL);
+    EXPECT_EQ(t.tag_latency_report_max_copy_, 4);
+}
+
 #if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 // ---------------------------------------------------------------------------
 // The REAL burst loop over v1 frames (spec section 5): per copy only byte
@@ -157,6 +196,45 @@ TEST(MacWireV1Burst, ARefusedCopyIsDroppedAndATaglessFrameNeverSealed) {
     EXPECT_EQ(g_log.calls, 0);
     ASSERT_EQ(lorahal::rec().packets.size(), 2u);
     EXPECT_EQ(lorahal::rec().packets[1][macwire::kOffBurstIdx], 1);
+}
+
+TEST(MacWireV1Burst, ASealedCopyLeavesAtItsStampedInstantWithItsTagAlreadyWritten) {
+    // 2026-10-19 bench: Mode B + crypto phaseErr p50 1.6 ms against 0.19 ms
+    // without crypto. The question: does the per-copy CMAC (~1.6 ms on the
+    // ESP32) push the copy past the instant stamped into it? The hub's order is
+    // stamp -> tag -> prepare -> busy-wait to the stamp -> fire, with the copy
+    // released kPrepareLeadUs early, so the tag must be finished and the fire
+    // must land ON the stamp. Here the sealer costs 1.6 ms of clock.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(3'000'000);
+    g_log = SealLog{};
+    LORATracker t;
+    t.startGrid();
+    const int64_t mark_t0 = t.nextT0ForSlotUs(18, 4'000'000);
+    const int64_t fire    = loratiming::fireInstantUs(mark_t0, 0);
+    proto_sim_timer_set_now_us(fire - LORATracker::kPrepareLeadUs);   // as popDue releases it
+    struct Slow {
+        static bool sealer(void *ctx, const mac::MacHdr &h, const uint8_t *b, size_t n, uint8_t tag[8]) {
+            proto_sim_timer_advance_us(1600);
+            g_log.binding = esp_timer_get_time();   // when the tag was finished
+            return fakeSealer(ctx, h, b, n, tag);
+        }
+    };
+    auto f = v1Frame(macwire::Auth::Session);
+    t.sendPacketBurst(f.data(), f.size(), 1, 0, fire, /*on_mark=*/true, &Slow::sealer, kBinding);
+    ASSERT_EQ(lorahal::rec().packets.size(), 1u);
+    const auto &p = lorahal::rec().packets[0];
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    ASSERT_TRUE(macwire::decode(p.data(), p.size(), &h, &off, &blen));
+    ASSERT_TRUE(h.stamped());
+    const int64_t stamped_t0 = t.gridAnchorUs() + (int64_t) h.fire_round * (int64_t) timedgrid::kRoundUs +
+                               (int64_t) h.fire_offset_us;
+    EXPECT_EQ(stamped_t0, mark_t0) << "the stamp declares the mark";
+    EXPECT_EQ(lorahal::rec().tx_us[0], fire) << "the copy fires ON its stamped instant";
+    EXPECT_LT((int64_t) g_log.binding, fire) << "and its tag was complete before it";
+    EXPECT_EQ(t.stampMisses(), 0u);
 }
 
 TEST(MacWireV1Burst, TheFleetBeaconGoesOutVerbatim) {

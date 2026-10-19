@@ -10,6 +10,8 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <new>
 
 namespace mac2
 {
@@ -499,22 +501,29 @@ static bool s_v1_frame_ok(const uint8_t *frame, size_t len, macwire::WireHdr *h)
     return frame != nullptr && macwire::decode(frame, len, h, &off, &body);
 }
 
+// Pack time, not the per-copy path: the work buffers live on the heap because
+// this also runs on the 3.5 KB esp_timer task (StackWatch.h). Allocated by the
+// caller BEFORE keys_mutex_ is taken.
+struct V1SealWork
+{
+    uint8_t ct[kMaxCt];
+    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
+};
+
 // Encrypt the body in place and tag the whole frame under one peer's live keys.
 // The caller holds keys_mutex_ (the ids are read AND used inside it).
 static bool s_v1_seal_locked(const KeyPair &live, uint32_t session_id,
                              const uint8_t (&ctr_block)[framecrypto::kCtrBlockBytes],
-                             uint8_t *frame, size_t hdr_len, size_t body_len)
+                             uint8_t *frame, size_t hdr_len, size_t body_len, V1SealWork &w)
 {
-    uint8_t ct[kMaxCt];
-    if (body_len && !s_ctr_pass(true, live.enc, ctr_block, frame + hdr_len, body_len, ct))
+    if (body_len && !s_ctr_pass(true, live.enc, ctr_block, frame + hdr_len, body_len, w.ct))
         return false;
     if (body_len)
-        memcpy(frame + hdr_len, ct, body_len);
-    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
+        memcpy(frame + hdr_len, w.ct, body_len);
     size_t  in_len = 0;
     uint8_t tag[kTagBytes];
-    if (!s_v1_mac_input(true, session_id, frame, hdr_len + body_len, in, &in_len) ||
-        !s_cmac8(live.mac, in, in_len, tag))
+    if (!s_v1_mac_input(true, session_id, frame, hdr_len + body_len, w.in, &in_len) ||
+        !s_cmac8(live.mac, w.in, in_len, tag))
         return false;
     memcpy(frame + hdr_len + body_len, tag, sizeof(tag));
     return true;
@@ -535,11 +544,14 @@ LinkSecurity::Seal LinkSecurity::sealFrameV1(uint8_t *frame, size_t hdr_len, siz
     uint8_t ctr_block[framecrypto::kCtrBlockBytes];
     framecrypto::buildCtrInitialBlock(session_id, h.dst, /*downlink=*/true, h.fcnt, 0, ctr_block);
 
+    std::unique_ptr<V1SealWork> work(new (std::nothrow) V1SealWork);
+    if (!work)
+        return Seal::Failed;
     std::lock_guard<std::mutex> lock(this->store_.keys_mutex_);
     auto it = this->store_.keys_.find(h.dst);
     if (it == this->store_.keys_.end() || !it->second.live.complete())
         return Seal::NoKey;
-    if (!s_v1_seal_locked(it->second.live, session_id, ctr_block, frame, hdr_len, body_len))
+    if (!s_v1_seal_locked(it->second.live, session_id, ctr_block, frame, hdr_len, body_len, *work))
         return Seal::Failed;
     seal->sealed    = true;
     seal->kauth     = false;

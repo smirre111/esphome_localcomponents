@@ -133,6 +133,9 @@ inline TickType_t xTaskGetTickCount() { return 0; }
 inline BaseType_t xTaskCreate(void(*)(void*), const char*, uint32_t,
                               void*, UBaseType_t, TaskHandle_t*) { return pdPASS; }
 inline void vTaskDelete(TaskHandle_t) {}
+// Stack high-water readout (the hub tracker's StackWatch): no real stacks here.
+inline UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t) { return 0; }
+inline TaskHandle_t xTaskGetHandle(const char *) { return nullptr; }
 // ESP-IDF extension. Like xTaskCreate above it reports success without
 // spawning anything: tests drive the task bodies directly.
 inline BaseType_t xTaskCreatePinnedToCore(void(*)(void*), const char*, uint32_t,

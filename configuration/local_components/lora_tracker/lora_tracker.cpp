@@ -44,6 +44,7 @@
 // S5: the one place the burst engine touches the app schema, and the MAC
 // management unit that builds the beacon.
 #include "burst_frame.h"
+#include "StackWatch.h"
 #include "mac_mgmt.h"
 
 #ifdef USE_OTA
@@ -97,6 +98,9 @@ namespace esphome
       vTaskDelete(NULL);
     }
 
+    // The send task, for its stack high-water mark (StackWatch.h).
+    static TaskHandle_t g_send_task_handle = nullptr;
+
     void spawn_send_task()
     {
       // xTaskCreatePinnedToCore(
@@ -115,7 +119,7 @@ namespace esphome
                                                4096,                 // This stack size can be checked & adjusted by reading the Stack Highwater
                                                NULL,
                                                1, // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
-                                               NULL,
+                                               &g_send_task_handle,
                                                1); // Pin task to core 1
       if (ret != pdPASS)
       {
@@ -195,6 +199,21 @@ namespace esphome
       this->setup_done_ = true;
     }
 
+    // Low rate (boot + 60 s, then every 5 min): the stack high-water marks of
+    // the send task (4 KB, holds a v1 frame per copy), this loop task, and the
+    // esp_timer task that builds and seals ModeTest / MAC ping / drift frames.
+    // ESP-IDF reports bytes never used. Logged here, never from the send path.
+    void LORATracker::logStackWatermarks_()
+    {
+      if (!stackwatch::due(esp_timer_get_time(), &this->stack_report_last_us_))
+        return;
+      TaskHandle_t timer_task = xTaskGetHandle("esp_timer");
+      ESP_LOGI(TAG, "stack high-water (bytes free): send task %u of 4096, loop %u, esp_timer %u",
+               (unsigned) (g_send_task_handle ? uxTaskGetStackHighWaterMark(g_send_task_handle) : 0),
+               (unsigned) uxTaskGetStackHighWaterMark(nullptr),
+               (unsigned) (timer_task ? uxTaskGetStackHighWaterMark(timer_task) : 0));
+    }
+
     void LORATracker::loop()
     {
       if (lora_tx_busy_ == false)
@@ -207,6 +226,7 @@ namespace esphome
       // noteTagWriteLatencyUs_() computed, deferred out of the burst retag
       // loop to here.
       this->drainTagLatencyReport_();
+      this->logStackWatermarks_();
       esphome::delay(10);
       // this->sendPacketBytes(txBuf, len);
 
@@ -1144,8 +1164,8 @@ namespace esphome
             // which is the overwhelming majority of samples.
             const int64_t seal_t0 = esp_timer_get_time();
             const bool sealed = frame.seal(sealer, &seal_binding);
-            this->noteTagWriteLatencyUs_(
-                (uint32_t) (esp_timer_get_time() - seal_t0));
+            const int64_t seal_t1 = esp_timer_get_time();
+            this->noteTagWriteLatencyUs_((uint32_t) (seal_t1 - seal_t0), seal_t1, cnt);
             if (!sealed)
             {
               ESP_LOGW(TAG, "Could not seal copy %d's tag (no session, or keys changed since the "
@@ -1249,7 +1269,7 @@ namespace esphome
     // sample is a few array writes, cheap and bounded; the synchronous
     // ESP_LOGW a full report used to do right here was not; it is now only
     // computed here and drained by loop() instead, off the hot path.
-    void LORATracker::noteTagWriteLatencyUs_(uint32_t us)
+    void LORATracker::noteTagWriteLatencyUs_(uint32_t us, int64_t at_us, int copy)
     {
       uint32_t bucket = us / kTagLatencyBucketUs;
       if (bucket > kTagLatencyBuckets)
@@ -1257,7 +1277,13 @@ namespace esphome
       this->tag_latency_hist_[bucket]++;
       this->tag_latency_n_++;
       if (us > this->tag_latency_max_us_)
-        this->tag_latency_max_us_ = us;
+      {
+        // Which sample it was, so a bench log can line the max up with what
+        // else ran then (2026-10-19: one 13.5 ms max, no way to place it).
+        this->tag_latency_max_us_   = us;
+        this->tag_latency_max_at_us_ = at_us;
+        this->tag_latency_max_copy_  = copy;
+      }
 
       if (this->tag_latency_n_ < kTagLatencyReportEvery)
         return;
@@ -1302,6 +1328,8 @@ namespace esphome
       this->tag_latency_report_p99_us_     = p99_us;
       this->tag_latency_report_p99_sat_    = p99_saturated;
       this->tag_latency_report_max_us_     = this->tag_latency_max_us_;
+      this->tag_latency_report_max_at_us_  = this->tag_latency_max_at_us_;
+      this->tag_latency_report_max_copy_   = this->tag_latency_max_copy_;
       this->tag_latency_report_ready_      = true;
 
       this->tag_latency_hist_.fill(0);
@@ -1316,11 +1344,13 @@ namespace esphome
       if (!this->tag_latency_report_ready_)
         return;
       this->tag_latency_report_ready_ = false;
-      ESP_LOGW(TAG, "H-1 tag-write latency: n=%u p50~%s%uus p99~%s%uus max=%uus",
+      ESP_LOGW(TAG, "H-1 tag-write latency: n=%u p50~%s%uus p99~%s%uus max=%uus "
+                    "(copy %d, at uptime %lld ms)",
                this->tag_latency_report_n_,
                this->tag_latency_report_p50_sat_ ? ">" : "", this->tag_latency_report_p50_us_,
                this->tag_latency_report_p99_sat_ ? ">" : "", this->tag_latency_report_p99_us_,
-               this->tag_latency_report_max_us_);
+               this->tag_latency_report_max_us_, this->tag_latency_report_max_copy_,
+               (long long) (this->tag_latency_report_max_at_us_ / 1000));
     }
 
     void LORATracker::sendPacketOnce(uint8_t *data, size_t len)

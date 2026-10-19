@@ -4250,10 +4250,12 @@ namespace esphome
       out->bytes.clear();
       out->seal = mac2::FrameSeal{};
       const hubwire::Route r = op ? hubwire::routeDownlink(op->cmd_case) : hubwire::Route{};
-      uint8_t body[macwire::kMaxFrameBytes];
+      // On the heap: this runs on the esp_timer task too (ModeTest / MAC ping
+      // frames), whose stack is 3.5 KB (StackWatch.h).
+      std::vector<uint8_t> body(macwire::kMaxFrameBytes);
       size_t  body_len = 0;
-      if (!r.ok || !hubwire::packDownlinkBody(op, s_v1_cmd_id(op, this->ctl().generation), body,
-                                              sizeof(body), &body_len))
+      if (!r.ok || !hubwire::packDownlinkBody(op, s_v1_cmd_id(op, this->ctl().generation), body.data(),
+                                              body.size(), &body_len))
       {
         ESP_LOGE(TAG, "[%s] no v1 body for command case %d", this->get_name().c_str(),
                  op ? (int) op->cmd_case : -1);
@@ -4271,7 +4273,7 @@ namespace esphome
       h.subnet = static_cast<uint8_t>(this->subnet_address_);
       h.fcnt   = fcnt;
       h.port   = r.port;
-      if (!hubwire::assemble(h, body, body_len, &out->bytes))
+      if (!hubwire::assemble(h, body.data(), body_len, &out->bytes))
       {
         ESP_LOGE(TAG, "[%s] v1 frame would not fit (%u B body)", this->get_name().c_str(),
                  (unsigned) body_len);
@@ -4306,11 +4308,11 @@ namespace esphome
       LoginMsg body_msg = login;
       body_msg.mic.data = nullptr;   // replaced by the frame's K_AUTH tag (spec 4.3)
       body_msg.mic.len  = 0;
-      uint8_t body[macwire::kMaxFrameBytes];
       const size_t body_len = login_msg__get_packed_size(&body_msg);
-      if (body_len > sizeof(body))
+      if (body_len > macwire::kMaxFrameBytes)
         return false;
-      login_msg__pack(&body_msg, body);
+      std::vector<uint8_t> body(body_len ? body_len : 1);
+      login_msg__pack(&body_msg, body.data());
       macwire::WireHdr h;
       h.flags  = macwire::withAuth(0, macwire::Auth::KAuth);
       h.dst    = static_cast<uint8_t>(this->short_address_);
@@ -4318,7 +4320,7 @@ namespace esphome
       h.subnet = static_cast<uint8_t>(this->subnet_address_);
       h.fcnt   = fcnt;
       h.port   = macwire::kPortSession;
-      return hubwire::assemble(h, body, body_len, &out->bytes) &&
+      return hubwire::assemble(h, body.data(), body_len, &out->bytes) &&
              s_sec().authFrameV1(/*downlink=*/true, out->bytes.data(), out->bytes.size(), &out->seal);
     }
 

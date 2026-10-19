@@ -598,6 +598,8 @@ namespace esphome
       std::array<uint32_t, kTagLatencyBuckets + 1> tag_latency_hist_{};
       uint32_t tag_latency_n_{0};
       uint32_t tag_latency_max_us_{0};
+      int64_t  tag_latency_max_at_us_{0};   // esp_timer instant of the max sample
+      int      tag_latency_max_copy_{-1};   // its copy index in the burst
       // Security review finding 8: the ESP_LOGW itself must not run inside
       // sendPacketBurst's retag loop (the very interval being measured) —
       // noteTagWriteLatencyUs_() only computes into these and sets the
@@ -612,12 +614,17 @@ namespace esphome
       uint32_t tag_latency_report_p99_us_{0};
       bool     tag_latency_report_p99_sat_{false};
       uint32_t tag_latency_report_max_us_{0};
+      int64_t  tag_latency_report_max_at_us_{0};
+      int      tag_latency_report_max_copy_{-1};
       // Computes a p50/p99/max/n summary every kTagLatencyReportEvery
       // samples into the report fields above, then resets the histogram —
       // so successive reports describe disjoint windows rather than a
       // single ever-growing one. Never logs itself; see drainTagLatencyReport_().
-      void noteTagWriteLatencyUs_(uint32_t us);
+      void noteTagWriteLatencyUs_(uint32_t us, int64_t at_us = 0, int copy = -1);
       void drainTagLatencyReport_();
+      // StackWatch.h: low-rate stack high-water readout from loop().
+      void    logStackWatermarks_();
+      int64_t stack_report_last_us_{0};
       // This T0 as the hub grid describes it: round since the anchor and the
       // offset into that round. False without a grid, or before the anchor.
       bool fireStampFor_(int64_t t0_us, uint32_t *round, uint32_t *offset_us) const;
