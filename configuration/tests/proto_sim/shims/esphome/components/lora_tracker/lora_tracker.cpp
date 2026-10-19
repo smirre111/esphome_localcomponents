@@ -6,6 +6,8 @@
 #include "esphome/components/lora_client/lora_client.h"
 #include "sim/messages.h"
 #include "sim/sim_radio.h"
+#include "sim/v1_bridge.h"
+#include "esphome/components/lora_client/HubLinkSecurity.h"
 #include "TimedGrid.h"
 #include "blinds.pb-c.h"
 #include "esphome/components/lora_client/MacHdrCodec.h"
@@ -15,6 +17,16 @@
 
 #include <cstring>
 #include <psa/crypto.h>
+
+namespace {
+// The bridge reads the hub's session id for a node (sim/v1_bridge.h).
+bool hubSessionId(uint8_t node, uint32_t *sid) {
+    return mac2::LinkSecurity::hub().store().sessionId(node, sid);
+}
+struct InstallBridge {
+    InstallBridge() { proto_sim::v1bridge::setSessionLookup(&hubSessionId); }
+} g_install_bridge;
+}  // namespace
 
 namespace esphome::lora_tracker {
 
@@ -141,7 +153,10 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     sent_supersede_gen.push_back(policy.supersede_gen);
     last_on_mark = policy.on_mark;
     last_expects_reply = policy.expects_reply;
-    sent_raw.emplace_back(data, data + len);
+    // S8 / W4: sent_raw is what a test INSPECTS -- the v0 view of a v1 frame
+    // (sim/v1_bridge.h); sent_wire is the exact bytes handed over.
+    sent_wire.emplace_back(data, data + len);
+    sent_raw.push_back(proto_sim::v1bridge::downlinkToV0(data, len));
     sent_policy.push_back(policy);
 
     // A simulated drop happens AFTER the policy is recorded and BEFORE anything

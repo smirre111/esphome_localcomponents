@@ -27,9 +27,13 @@ endif()
 # The suite builds and runs in BOTH configurations (two build directories);
 # ON records its golden frames in golden_v1/. A compile-time switch, not a
 # runtime dual stack: no image speaks both formats.
-option(PROTO_SIM_MAC_WIRE_V1 "Build hub and node with MAC_WIRE_V1=1 (wire format v1)" OFF)
+# W4: v1 is the default (MacWireConfig.h); OFF builds the v0 path that stays
+# until W5. Always defined explicitly so the node sources agree with the hub.
+option(PROTO_SIM_MAC_WIRE_V1 "Build hub and node with MAC_WIRE_V1=1 (wire format v1)" ON)
 if(PROTO_SIM_MAC_WIRE_V1)
     add_compile_definitions(MAC_WIRE_V1=1)
+else()
+    add_compile_definitions(MAC_WIRE_V1=0)
 endif()
 
 # In an ON build the tests listed in mac_wire_v0_only_tests.txt (they drive the
@@ -122,6 +126,7 @@ add_library(proto_sim STATIC
     sim/sim_clock.cpp
     sim/sim_radio.cpp
     sim/wire_codec.cpp
+    sim/v1_bridge.cpp          # S8/W4: v0 <-> v1 test translation
     sim/crypto.cpp
     sim/hub_model.cpp
     sim/node_model.cpp
@@ -465,10 +470,11 @@ gtest_discover_tests(mac_wire_v1_tracker_test)
 # output of every hub producer, captured before the MAC separation refactor.
 # Re-record ONLY on a deliberate wire change: PROTO_SIM_GOLDEN_RECORD=1.
 # ----------------------------------------------------------------------------
+# W4: golden/ pins the default (v1) wire; golden_v0/ pins the v0 path an OFF
+# build still produces (deleted with it in W5).
 set(PROTO_SIM_GOLDEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/golden)
-# S8: the v1 wire is pinned separately; golden/ (v0) stays untouched by an ON build.
-if(PROTO_SIM_MAC_WIRE_V1)
-    set(PROTO_SIM_GOLDEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/golden_v1)
+if(NOT PROTO_SIM_MAC_WIRE_V1)
+    set(PROTO_SIM_GOLDEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/golden_v0)
 endif()
 add_executable(golden_frames_test scenarios/golden_frames_test.cpp)
 target_link_libraries(golden_frames_test
@@ -782,7 +788,12 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         ${NODE_SHIM_DIR}/host_clock.c)
     target_link_libraries(real_cmd_dispatcher_test
         PRIVATE real_cmd_dispatcher proto_sim GTest::gtest GTest::gtest_main)
-    proto_sim_discover_tests(real_cmd_dispatcher_test)
+    # S8 / W4: a NODE harness driven with v0 frames; the node is built with the
+# v0 path here whatever the hub uses (the node repo covers its v1 path in
+# both configurations, seam_test / e2e_test cover hub + node over v1).
+    target_compile_options(real_cmd_dispatcher PRIVATE -UMAC_WIRE_V1 -DMAC_WIRE_V1=0)
+    target_compile_options(real_cmd_dispatcher_test PRIVATE -UMAC_WIRE_V1 -DMAC_WIRE_V1=0)
+    gtest_discover_tests(real_cmd_dispatcher_test)
 
     # Tier 3 (docs/mac-separation-implementation-plan.md section 2(b)):
     # comm_utils.c's Encrypt-then-CMAC primitives (CMAC compute/verify,
@@ -966,7 +977,12 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         ${NODE_SHIM_DIR})
     target_link_libraries(real_lora_interface_test
         PRIVATE real_lora_interface GTest::gtest GTest::gtest_main)
-    proto_sim_discover_tests(real_lora_interface_test)
+    # S8 / W4: a NODE harness driven with v0 frames; the node is built with the
+# v0 path here whatever the hub uses (the node repo covers its v1 path in
+# both configurations, seam_test / e2e_test cover hub + node over v1).
+    target_compile_options(real_lora_interface PRIVATE -UMAC_WIRE_V1 -DMAC_WIRE_V1=0)
+    target_compile_options(real_lora_interface_test PRIVATE -UMAC_WIRE_V1 -DMAC_WIRE_V1=0)
+    gtest_discover_tests(real_lora_interface_test)
 else()
     message(STATUS "BlindsESP node source not found at ${BLINDS_ESP_MAIN} — "
                    "skipping real_cmd_dispatcher target")

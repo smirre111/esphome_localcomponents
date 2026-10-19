@@ -33,11 +33,14 @@
 
 #include <gtest/gtest.h>
 #include <chrono>
+#include <memory>
 #include <algorithm>
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 
-using esphome::lora_tracker::LORAClient;
+#include "sim/v1_client.h"
+// S8 / W4: v0-built uplinks reach the hub as v1 (sim/v1_client.h).
+using LORAClient = proto_sim::TestClient;
 using esphome::lora_tracker::LORATracker;
 using esphome::time::RealTimeClock;
 
@@ -174,7 +177,7 @@ TEST(RealLoraClient, SendLoginReusesPendingNonceAcrossRetries) {
     // Every LoginMsg on the wire carries the same nonce.
     uint32_t observed = 0;
     int count = 0;
-    for (const auto& f : radio.hub_to_node_frames()) {
+    for (const auto& f : radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         if (!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Login) continue;
         if (count == 0) observed = m->login.nonce;
@@ -1093,7 +1096,7 @@ TEST(RealLoraClient, RegisterTriggersClientConfigAndLoginTimer) {
         << "REGISTER must flip registered_ true in real code.";
 
     int cfg_count = 0;
-    for (const auto& f : h.radio.hub_to_node_frames()) {
+    for (const auto& f : h.radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         if (!m) continue;
         if (m->cmd == proto_sim::LoraClientOperationMessage::Cmd::ClientConfig) {
@@ -1115,7 +1118,7 @@ TEST(RealLoraClient, EnterSleepEmitsSleepCmdAndArmsFallback) {
     h.rol.enterSleep();
 
     int sleep_msgs = 0;
-    for (const auto& f : h.radio.hub_to_node_frames()) {
+    for (const auto& f : h.radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Sysop &&
             m->sysop == proto_sim::ClientOperation::CMD_SLEEP) ++sleep_msgs;
@@ -1134,7 +1137,7 @@ TEST(RealLoraClient, TriggerOtaEmitsOtaSysop) {
     h.rol.triggerOTA();
 
     int ota = 0;
-    for (const auto& f : h.radio.hub_to_node_frames()) {
+    for (const auto& f : h.radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Sysop &&
             m->sysop == proto_sim::ClientOperation::CMD_OTA) ++ota;
@@ -1316,7 +1319,7 @@ TEST(RealLoraClient, WrongMacRegisterIgnored) {
 
     EXPECT_FALSE(h.rol.registered_)
         << "Real REGISTER handler must reject non-matching MAC.";
-    for (const auto& f : h.radio.hub_to_node_frames()) {
+    for (const auto& f : h.radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         EXPECT_TRUE(!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::ClientConfig)
             << "Real code must not emit ClientConfig for unknown MAC.";
@@ -1397,19 +1400,22 @@ proto_sim::EtmResult seal_uplink_like_node(uint32_t base_nonce,
 // Returns the base nonce the hub minted, so the caller can decrypt downlinks.
 uint32_t drive_session(proto_sim::SimClock& clock, proto_sim::SimRadio& radio,
                        LORAClient& listener) {
-    uint32_t captured_nonce = 0;
-    radio.add_sink([&captured_nonce](const proto_sim::AirFrame& f) {
+    // Shared, not a reference to this frame: the sink outlives the call (every
+    // later LOGIN, e.g. a relogin, runs it), and a captured local was written
+    // after return -- found by ASan, 2026-10-19.
+    auto captured_nonce = std::make_shared<uint32_t>(0);
+    radio.add_sink([captured_nonce](const proto_sim::AirFrame& f) {
         if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login)
-            captured_nonce = m->login.nonce;
+            *captured_nonce = m->login.nonce;
     });
     attach_encrypted_login_ack(radio, listener, /*node_addr=*/18, /*subnet=*/2);
 
     auto reg = real_helpers::serialize_register(kMacRol2);
     listener.set_response(reg.data(), reg.size());
     clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
-    return captured_nonce;
+    return *captured_nonce;
 }
 
 } // namespace
@@ -1566,7 +1572,7 @@ TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
 
     auto count_plaintext_config = [&]() {
         int n = 0;
-        for (const auto& f : radio.hub_to_node_frames()) {
+        for (const auto& f : radio.hub_to_node_views()) {
             auto m = proto_sim::as_op(f);
             if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::ClientConfig)
                 ++n;
@@ -1646,7 +1652,7 @@ TEST(RealLoraClient, AProvisionedNodesCoverConfigIsEncryptedToo) {
 
     int plaintext_cover_config = 0;
     int encrypted_cover_config = 0;
-    for (const auto& f : radio.hub_to_node_frames()) {
+    for (const auto& f : radio.hub_to_node_views()) {
         auto plain = proto_sim::as_op(f);
         if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::CoverConfig)
             ++plaintext_cover_config;
@@ -3425,13 +3431,13 @@ TEST(TrackedOpRetry, ARetransmitReusesTheMsgidAndTheExactBytes) {
 
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.5f);
     h.clock.tick(10);
-    const auto first = h.radio.hub_to_node_frames();
+    const auto first = h.radio.hub_to_node_views();
     ASSERT_FALSE(first.empty()) << "the command must go out at all";
     const auto original = first.back();
 
     // Let the retry timer fire without any ack.
     h.clock.tick(3000 + 50);   // kOpRetryIntervalMs
-    const auto after = h.radio.hub_to_node_frames();
+    const auto after = h.radio.hub_to_node_views();
     ASSERT_GT(after.size(), first.size()) << "a retry must be transmitted";
     const auto retry = after.back();
 
@@ -3451,11 +3457,11 @@ TEST(TrackedOpRetry, ANewCommandGetsANewMsgid) {
 
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
     h.clock.tick(10);
-    const auto first = h.radio.hub_to_node_frames().back();
+    const auto first = h.radio.hub_to_node_views().back();
 
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.90f);
     h.clock.tick(10);
-    const auto second = h.radio.hub_to_node_frames().back();
+    const auto second = h.radio.hub_to_node_views().back();
 
     EXPECT_NE(first.bytes, second.bytes)
         << "a new command is not a retransmission";
@@ -3761,12 +3767,12 @@ TEST(PlacedDownlinks, ATimeSyncCarriesTheHubsInSlotCountToTheNode) {
     ASSERT_EQ(h.rol.hubBelief().in_slot_acks, 3u)
         << "precondition: the hub has observed three in slot";
 
-    const size_t before = h.radio.hub_to_node_frames().size();
+    const size_t before = h.radio.hub_to_node_views().size();
     h.rol.send_timesync();
-    ASSERT_GT(h.radio.hub_to_node_frames().size(), before);
+    ASSERT_GT(h.radio.hub_to_node_views().size(), before);
 
     int seen = 0;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         LoraClientOperationMessage *m = lora_client_operation_message__unpack(
             nullptr, f.bytes.size(), f.bytes.data());
         if (m == nullptr) continue;
@@ -4094,15 +4100,15 @@ TEST(MarkLead, ASkippedTickSendsNothingAndTheNextMarkIsTheFrameItHeld) {
     markTickAt(h, now);                       // pushed two rounds out
     h.tracker.busy_until_us = 0;
     now += R;
-    const size_t sends_before = h.tracker.sent_raw.size();
+    const size_t sends_before = h.tracker.sent_wire.size();
     const std::vector<uint8_t> held = h.rol.mode_test_frame_for_test();
     markTickAt(h, now);                       // a round ahead already: hold
-    EXPECT_EQ(h.tracker.sent_raw.size(), sends_before) << "nothing sent on a held tick";
+    EXPECT_EQ(h.tracker.sent_wire.size(), sends_before) << "nothing sent on a held tick";
     EXPECT_EQ(h.rol.mode_test_frame_for_test(), held) << "and nothing rebuilt";
     now += R;
     markTickAt(h, now);
-    ASSERT_EQ(h.tracker.sent_raw.size(), sends_before + 1);
-    EXPECT_EQ(h.tracker.sent_raw.back(), held) << "the held frame is the next mark";
+    ASSERT_EQ(h.tracker.sent_wire.size(), sends_before + 1);
+    EXPECT_EQ(h.tracker.sent_wire.back(), held) << "the held frame is the next mark";
     h.rol.stop_mode_test();
 }
 
@@ -4203,7 +4209,7 @@ TEST(RealLoraClient, AHeardClassANodeIsAwakeOnlyThroughItsReceiveWindows) {
 namespace {
 constexpr int64_t kBacklogUs = 9'000'000;   // ~5 bursts queued ahead
 size_t frames_on_air(const real_helpers::RealHubHarness& h) {
-    return h.radio.hub_to_node_frames().size();
+    return h.radio.hub_to_node_views().size();
 }
 }  // namespace
 
@@ -4363,7 +4369,7 @@ struct TwoNodeHub {
 
     int loginsTo(uint32_t addr) const {
         int n = 0;
-        for (const auto& f : radio.hub_to_node_frames()) {
+        for (const auto& f : radio.hub_to_node_views()) {
             auto m = proto_sim::as_op(f);
             if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login &&
                 m->header.destAddress == addr) ++n;
@@ -4597,13 +4603,13 @@ TEST(SessionRebuild, HousekeepingPushesWaitForTheSessionInsteadOfGoingOutInTheCl
     // The node has rebooted: its REGISTER starts the hub's login, 4 s from now.
     auto reg = serialize_register(kMacRol2, /*needs_config=*/false);
     h.rol.set_response(reg.data(), reg.size());
-    const size_t baseline = h.radio.hub_to_node_frames().size();
+    const size_t baseline = h.radio.hub_to_node_views().size();
 
     // The pushes a beacon had queued, firing inside that window.
     h.rol.send_schedule_config();
     h.rol.send_timesync();
     h.rol.enable_timed_mode(true);
-    EXPECT_EQ(h.radio.hub_to_node_frames().size(), baseline)
+    EXPECT_EQ(h.radio.hub_to_node_views().size(), baseline)
         << "nothing may leave between the REGISTER and a confirmed session: the "
            "node just restarted, so an old-session frame cannot be decrypted and "
            "a plaintext one is refused. Each is a burst of airtime spent to be dropped";
@@ -4615,7 +4621,7 @@ TEST(SessionRebuild, HousekeepingPushesWaitForTheSessionInsteadOfGoingOutInTheCl
     h.clock.tick(4000);
 
     int plain_schedule = 0, plain_timesync = 0, enc_schedule = 0, enc_timesync = 0;
-    for (const auto& f : h.radio.hub_to_node_frames()) {
+    for (const auto& f : h.radio.hub_to_node_views()) {
         auto plain = proto_sim::as_op(f);
         if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::Schedule) ++plain_schedule;
         if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++plain_timesync;
@@ -4640,13 +4646,13 @@ TEST(SessionRebuild, ALoginTheHubStartsItselfHoldsThePushesBackToo) {
     h.rol.registered_ = true;
 
     h.rol.send_login();
-    const size_t baseline = h.radio.hub_to_node_frames().size();
+    const size_t baseline = h.radio.hub_to_node_views().size();
     ASSERT_GT(baseline, 0u) << "the login itself must have gone out";
 
     h.rol.send_schedule_config();
     h.rol.send_timesync();
     h.rol.enable_timed_mode(true);
-    EXPECT_EQ(h.radio.hub_to_node_frames().size(), baseline)
+    EXPECT_EQ(h.radio.hub_to_node_views().size(), baseline)
         << "pushes wait for the node to prove the new key";
 }
 
@@ -4662,10 +4668,10 @@ TEST(SessionRebuild, WithdrawingTheGridIsNotDeferredBecauseItIsTheSafeDirection)
 
     auto reg = serialize_register(kMacRol2, /*needs_config=*/false);
     h.rol.set_response(reg.data(), reg.size());
-    const size_t baseline = h.radio.hub_to_node_frames().size();
+    const size_t baseline = h.radio.hub_to_node_views().size();
 
     h.rol.enable_timed_mode(false);
-    EXPECT_GT(h.radio.hub_to_node_frames().size(), baseline)
+    EXPECT_GT(h.radio.hub_to_node_views().size(), baseline)
         << "a withdrawn grid must reach the node even while its session is rebuilt";
 }
 
@@ -4749,7 +4755,7 @@ TEST(MacPingCrypto, AnEncryptedPingReachesTheNodeAndCarriesItsOwnSeq) {
 
     int plaintext_pings = 0, encrypted_pings = 0;
     uint32_t seq_seen = 0;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         LoraClientOperationMessage *plain =
             lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
         if (plain != nullptr) {
@@ -4787,7 +4793,7 @@ TEST(MacPingCrypto, WithoutASessionCryptoFallsBackToPlaintextLikeEveryOtherDownl
     h.rol.mac_ping_tick_for_test();
 
     int plaintext_pings = 0;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         LoraClientOperationMessage *m =
             lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
         if (m != nullptr) {
@@ -4838,7 +4844,7 @@ TEST(MacPingCrypto, TheReservedMsgidRangeNeverCollidesWithAnOrdinaryCommand) {
     // header actually carries; only comparing it against the reservation
     // catches the wrong counter being used).
     int pings_decrypted = 0;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         uint32_t msgid = 0;
         LoraClientOperationMessage *inner = decrypt_downlink_real(f.bytes, base, &msgid);
         if (inner != nullptr) {
@@ -4871,14 +4877,14 @@ TEST(MacPingCrypto, EndingAnUnfinishedCryptoRunDoesNotLeakItsRangeIntoTheNextOne
     h.rol.mac_ping_tick_for_test();   // one of several reserved frames used
     h.rol.stop_mac_ping();
 
-    // hub_to_node_frames() returns BY VALUE: snapshot it once rather than
+    // hub_to_node_views() returns BY VALUE: snapshot it once rather than
     // indexing repeated calls, which would index into a fresh temporary each
     // time and read a dangling reference.
-    const size_t before = h.radio.hub_to_node_frames().size();
+    const size_t before = h.radio.hub_to_node_views().size();
     h.rol.start_mac_ping(/*duration_s=*/5, /*grid_ms=*/1000, /*want_echo=*/false,
                          /*pad_bytes=*/0, /*crypto=*/false);
     h.rol.mac_ping_tick_for_test();
-    const auto frames = h.radio.hub_to_node_frames();
+    const auto frames = h.radio.hub_to_node_views();
 
     int plaintext = 0, encrypted = 0;
     for (size_t i = before; i < frames.size(); ++i) {
@@ -4932,7 +4938,7 @@ TEST(RealLoraClient, AnAutomaticNodesTimeSyncIsThrottledToOnceAWeek) {
 
     auto count_timesync = [&]() {
         int n = 0;
-        for (const auto& f : radio.hub_to_node_frames()) {
+        for (const auto& f : radio.hub_to_node_views()) {
             auto inner = decrypt_downlink(f, base);
             if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++n;
         }
@@ -4981,7 +4987,7 @@ TEST(RealLoraClient, ModeBAndPlainInteractiveTimeSyncIsUnthrottled) {
 
     auto count_timesync = [&]() {
         int n = 0;
-        for (const auto& f : radio.hub_to_node_frames()) {
+        for (const auto& f : radio.hub_to_node_views()) {
             auto inner = decrypt_downlink(f, base);
             if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++n;
         }
@@ -7070,7 +7076,7 @@ TEST(ModeBListener, ARestoredSwitchSendsNothingUntilTheNodeHasASessionThenWarmsI
     EXPECT_TRUE(r.rol.timed_mode_enabled());
     EXPECT_TRUE(r.rol.grid_aligned());
     EXPECT_FALSE(r.rol.gridSyncAwaitingAck()) << "no plaintext GridSync into a radio that is not up";
-    EXPECT_EQ(r.radio.hub_to_node_frames().size(), 0u);
+    EXPECT_EQ(r.radio.hub_to_node_views().size(), 0u);
 
     r.rol.setup();      // sends the startup broadcast demote
     EXPECT_TRUE(r.rol.timed_mode_enabled()) << "setup() must not undo what the switch restored";
@@ -7134,11 +7140,11 @@ TEST(ModeBListener, ACoverOpIssuedDuringTheWarmupAbortsItAndIsStillSent) {
     r.secs(5);
     ASSERT_TRUE(r.rol.mode_test_active());
 
-    const size_t frames_before = r.radio.hub_to_node_frames().size();
+    const size_t frames_before = r.radio.hub_to_node_views().size();
     r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
     EXPECT_TRUE(op.ctl().awaiting_ack) << "the cover op went out as always";
-    EXPECT_GT(r.radio.hub_to_node_frames().size(), frames_before);
+    EXPECT_GT(r.radio.hub_to_node_views().size(), frames_before);
     EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stopped the moment the op was issued";
     EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
     EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
@@ -7344,14 +7350,14 @@ TEST(ModeBListener, TheWarmupAbortSendsNoStopFrameAheadOfTheCommandButOneAfterIt
     r.ackGrid();
     ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
     r.secs(5);
-    const size_t before = r.radio.hub_to_node_frames().size();
+    const size_t before = r.radio.hub_to_node_views().size();
     r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
-    const size_t after_op = r.radio.hub_to_node_frames().size();
+    const size_t after_op = r.radio.hub_to_node_views().size();
     EXPECT_EQ(after_op - before, 1u) << "only the command itself: the stop is not in front of it";
     deliverAck(r.rol, op.ctl().last_msgid);
     r.secs(5);
-    EXPECT_EQ(r.radio.hub_to_node_frames().size() - after_op, 1u)
+    EXPECT_EQ(r.radio.hub_to_node_views().size() - after_op, 1u)
         << "the node is told to end its test, after the command had its turn";
 }
 
@@ -7380,10 +7386,10 @@ TEST(ModeBListener, TheDelayedStopIsNotSentIntoAnOperatorsTest) {
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
     deliverAck(r.rol, op.ctl().last_msgid);
     r.rol.start_mode_test(900, 1500, 2, 1, true, true, false, true);   // the operator, at once
-    const size_t before = r.radio.hub_to_node_frames().size();
+    const size_t before = r.radio.hub_to_node_views().size();
     r.secs(5);
     EXPECT_TRUE(r.rol.mode_test_active()) << "the operator's test is untouched";
-    EXPECT_EQ(r.radio.hub_to_node_frames().size(), before) << "and no stop frame was aimed into it";
+    EXPECT_EQ(r.radio.hub_to_node_views().size(), before) << "and no stop frame was aimed into it";
 }
 
 // ANY node's cover op briefly holds off the NEXT warm-up grant.
@@ -7573,7 +7579,7 @@ SleepProbe &SP(LORAClient &c) { return static_cast<SleepProbe &>(c); }
 
 int countSleepFrames(real_helpers::RealHubHarness &h) {
     int n = 0;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Sysop &&
             m->sysop == proto_sim::ClientOperation::CMD_SLEEP) ++n;
@@ -7583,7 +7589,7 @@ int countSleepFrames(real_helpers::RealHubHarness &h) {
 
 int countLoginFrames(real_helpers::RealHubHarness &h) {
     int n = 0;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login) ++n;
     }
@@ -7848,11 +7854,11 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsDroppedAfterTheExpiryNotSentHo
     ModeBRig r;
     r.session();
     SP(r.rol).relogin_pending_ = true;            // the session is being rebuilt
-    const size_t frames = r.radio.hub_to_node_frames().size();
+    const size_t frames = r.radio.hub_to_node_views().size();
 
     r.rol.enterSleep();
     EXPECT_TRUE(SP(r.rol).ctl().deferred_until_login);
-    EXPECT_EQ(r.radio.hub_to_node_frames().size(), frames) << "nothing in the clear";
+    EXPECT_EQ(r.radio.hub_to_node_views().size(), frames) << "nothing in the clear";
 
     r.secs(170);
     EXPECT_TRUE(SP(r.rol).ctl().deferred_until_login) << "still within the expiry";
@@ -7862,7 +7868,7 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsDroppedAfterTheExpiryNotSentHo
     EXPECT_TRUE(r.rol.commandFailed());
 
     SP(r.rol).confirm_session_();                 // the node finally comes back
-    EXPECT_EQ(r.radio.hub_to_node_frames().size(), frames) << "the stale sleep is not sent";
+    EXPECT_EQ(r.radio.hub_to_node_views().size(), frames) << "the stale sleep is not sent";
     EXPECT_FALSE(r.rol.awaitingAck());
 }
 
@@ -8088,7 +8094,7 @@ using OpCmd = proto_sim::LoraClientOperationMessage::Cmd;
 // msgids of every plaintext hub->node frame of one kind, in air order.
 std::vector<uint32_t> msgidsOf(real_helpers::RealHubHarness &h, OpCmd cmd) {
     std::vector<uint32_t> ids;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == cmd) ids.push_back(m->header.msgId);
     }
@@ -8097,7 +8103,7 @@ std::vector<uint32_t> msgidsOf(real_helpers::RealHubHarness &h, OpCmd cmd) {
 
 std::vector<uint32_t> sysopMsgids(real_helpers::RealHubHarness &h, proto_sim::ClientOperation op) {
     std::vector<uint32_t> ids;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == OpCmd::Sysop && m->sysop == op) ids.push_back(m->header.msgId);
     }
@@ -8367,7 +8373,7 @@ TEST(SchedPush, TwoNodesPushingAtOnceDoNotShareState) {
     h.rol_2.node_sched_version_ = h.rol_2.schedule_version() ^ 1u;
     auto countTo = [&](uint32_t addr) {
         size_t n = 0;
-        for (const auto &f : h.radio.hub_to_node_frames()) {
+        for (const auto &f : h.radio.hub_to_node_views()) {
             auto m = proto_sim::as_op(f);
             if (m && m->cmd == OpCmd::Schedule && m->header.destAddress == addr) ++n;
         }
@@ -8455,11 +8461,11 @@ TEST(SchedPush, APushIssuedDuringAWarmUpStopsItAndIsStillSent) {
     ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
     r.secs(5);
     ASSERT_TRUE(r.rol.mode_test_active());
-    const size_t frames_before = r.radio.hub_to_node_frames().size();
+    const size_t frames_before = r.radio.hub_to_node_views().size();
 
     r.rol.send_schedule_config();
 
-    EXPECT_GT(r.radio.hub_to_node_frames().size(), frames_before) << "the push went out";
+    EXPECT_GT(r.radio.hub_to_node_views().size(), frames_before) << "the push went out";
     EXPECT_TRUE(AK(r.rol).cfg().awaiting_ack);
     EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stopped the moment the push was issued";
     EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
@@ -8698,7 +8704,7 @@ struct PublishedGrid { uint32_t msgid; uint32_t txround; uint32_t txslot; };
 // the frame declared itself.
 std::vector<PublishedGrid> publishedGrids(real_helpers::RealHubHarness &h) {
     std::vector<PublishedGrid> out;
-    for (const auto &f : h.radio.hub_to_node_frames()) {
+    for (const auto &f : h.radio.hub_to_node_views()) {
         LoraClientOperationMessage *m =
             lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
         if (m == nullptr) continue;
@@ -9098,7 +9104,7 @@ void sendOpenTo(LORAClient &rol) {
 std::vector<std::string> airOrder(proto_sim::SimRadio &radio, uint32_t dest = 0) {
     std::vector<std::string> out;
     std::vector<uint32_t> seen;
-    const auto frames = radio.hub_to_node_frames();   // by value: never iterate the temporary
+    const auto frames = radio.hub_to_node_views();   // by value: never iterate the temporary
     for (const auto &f : frames) {
         auto m = proto_sim::as_op(f);
         if (!m) continue;
@@ -9117,7 +9123,7 @@ using Order = std::vector<std::string>;
 // How many frames of one msgid went out (a retransmission repeats it).
 int copiesOf(proto_sim::SimRadio &radio, uint32_t msgid) {
     int n = 0;
-    const auto frames = radio.hub_to_node_frames();
+    const auto frames = radio.hub_to_node_views();
     for (const auto &f : frames) {
         auto m = proto_sim::as_op(f);
         if (m && (m->cmd == OpCmd::Operation || m->cmd == OpCmd::Sysop) && m->header.msgId == msgid) ++n;
@@ -9177,7 +9183,7 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
     ackSleep(r);
     ASSERT_TRUE(DP(r).ctl().deferred_until_login);
-    const size_t before = r.radio.hub_to_node_frames().size();
+    const size_t before = r.radio.hub_to_node_views().size();
 
     // The wake: the node is HEARD (every confirmation is preceded by the uplink that
     // proves it; a node heard after the sleep is awake, and a command issued to a
@@ -9190,7 +9196,7 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     EXPECT_FALSE(DP(r).ctl().deferred_until_login);
     EXPECT_TRUE(r.rol.awaitingAck()) << "sent from confirm_session_()";
     EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
-    EXPECT_GT(r.radio.hub_to_node_frames().size(), before);
+    EXPECT_GT(r.radio.hub_to_node_views().size(), before);
     ackInFlight(r);
     EXPECT_FALSE(r.rol.awaitingAck());
     EXPECT_FALSE(r.rol.commandFailed());
@@ -9838,9 +9844,9 @@ namespace {
 // The sleepOk bit of the TimeSync that send_timesync() just put on the air
 // (encrypted when the session is confirmed, plaintext otherwise); -1 when none.
 int sleepOkAfterTimesync(ModeBRig &r) {
-    const size_t n0 = r.radio.hub_to_node_frames().size();
+    const size_t n0 = r.radio.hub_to_node_views().size();
     r.rol.send_timesync();
-    const auto frames = r.radio.hub_to_node_frames();
+    const auto frames = r.radio.hub_to_node_views();
     for (size_t i = frames.size(); i-- > n0;) {
         ::LoraClientOperationMessage *m = decrypt_downlink_real(frames[i].bytes, r.base);
         if (m == nullptr)
@@ -9963,7 +9969,7 @@ void deliverArmRefusal(LORAClient &rol, uint32_t refusal) {
 // Encrypted GridSync PUBLISH frames (enable = true) on the air so far.
 size_t encryptedGridPublishes(ModeBRig &r) {
     size_t n = 0;
-    for (const auto &f : r.radio.hub_to_node_frames()) {
+    for (const auto &f : r.radio.hub_to_node_views()) {
         LoraClientOperationMessage *m = decrypt_downlink_real(f.bytes, r.base);
         if (m == nullptr) continue;
         if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC && m->gridsync != nullptr &&
@@ -10536,7 +10542,7 @@ struct Seen {
 // Every hub->node frame, in air order, decrypted when it is sealed under `base`.
 std::vector<Seen> airSeen(proto_sim::SimRadio &radio, uint32_t base = 0) {
     std::vector<Seen> out;
-    const auto frames = radio.hub_to_node_frames();   // by value: never iterate the temporary
+    const auto frames = radio.hub_to_node_views();   // by value: never iterate the temporary
     for (const auto &f : frames) {
         auto p = proto_sim::as_op(f);
         if (!p) continue;
@@ -10715,7 +10721,7 @@ TEST(FireDelivery, AClientConfigCarriesEveryFieldTheNodeIsProvisionedFrom) {
     h.rol.send_remote_config();
 
     int seen = 0;
-    const auto frames = h.radio.hub_to_node_frames();
+    const auto frames = h.radio.hub_to_node_views();
     for (const auto &f : frames) {
         auto m = proto_sim::as_op(f);
         if (!m || m->cmd != OpCmd::ClientConfig) continue;
@@ -11730,7 +11736,7 @@ std::vector<uint8_t> plaintextPositionFrom(uint8_t sender, uint32_t msgid, float
 // same packed frame, so it repeats the msgid).
 int coverFramesWithId(proto_sim::SimRadio &radio, uint32_t id) {
     int n = 0;
-    const auto frames = radio.hub_to_node_frames();
+    const auto frames = radio.hub_to_node_views();
     for (const auto &f : frames) {
         auto m = proto_sim::as_op(f);
         n += (m && m->cmd == OpCmd::Operation && m->header.msgId == id);
@@ -11925,7 +11931,7 @@ TEST(F4PerFrameSeal, AStoredFrameSealedBeforeAReKeyIsNeverTaggedAfterIt) {
     ASSERT_NE(id, 0u);
     auto copiesOf = [&](uint32_t msgid) {
         int n = 0;
-        const auto frames = f.radio.hub_to_node_frames();
+        const auto frames = f.radio.hub_to_node_views();
         for (const auto &fr : frames) {
             auto m = proto_sim::as_op(fr);
             n += (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Encrypted &&
@@ -11955,7 +11961,11 @@ TEST(F4PerFrameSeal, ASealedFrameCarriesItsOwnCopySealerAndAPlaintextOneNone) {
     f.rol.send_remote_config();
     ASSERT_FALSE(f.tracker.sent_policy.empty());
     const auto &sealed = f.tracker.sent_policy.back();
+#if MAC_WIRE_V1
+    EXPECT_EQ(sealed.sealer, &mac2::LinkSecurity::copySealerV1);   // over the raw copy (S8)
+#else
     EXPECT_EQ(sealed.sealer, &mac2::LinkSecurity::copySealer);
+#endif
     const mac2::FrameSeal b = mac2::FrameSeal::fromBinding(sealed.seal_binding);
     EXPECT_TRUE(b.sealed);
     EXPECT_EQ(b.peer, 18u);
@@ -12038,7 +12048,7 @@ TEST(F4PerFrameSeal, AStoredFramesRetryUnderTheSameKeysIsTaggedAndVerifies) {
     const uint32_t id = static_cast<AckProbe &>(f.rol).ctl().last_msgid;
     f.clock.tick(3050);                                  // the retry re-sends the stored frame
     int copies = 0, opened = 0;
-    const auto frames = f.radio.hub_to_node_frames();
+    const auto frames = f.radio.hub_to_node_views();
     for (const auto &fr : frames) {
         auto m = proto_sim::as_op(fr);
         if (!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Encrypted ||

@@ -18,6 +18,7 @@
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/lora_client/MacHdrCodec.h"
 #include "esphome/components/lora_client/MacSap.h"
+#include "esphome/components/lora_client/MacWireConfig.h"
 #include "esphome/components/lora_client/MacWire.h"
 
 namespace mac0

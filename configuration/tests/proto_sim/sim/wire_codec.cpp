@@ -7,6 +7,7 @@
 // codec layer instead of silently passing on hand-rolled structs.
 
 #include "sim/wire_codec.h"
+#include "sim/v1_bridge.h"
 #include "sim/crypto.h"
 
 extern "C" {
@@ -371,8 +372,10 @@ std::vector<uint8_t> serialize_resp_payload(const LoraClientResponseMessage& m) 
 // proto-c → struct
 // ---------------------------------------------------------------------------
 std::optional<LoraClientOperationMessage> deserialize_op(const uint8_t* data, size_t len) {
+    // S8 / W4: a hub v1 frame is read through its v0 view (sim/v1_bridge.h).
+    const std::vector<uint8_t> view = v1bridge::downlinkToV0(data, len);
     ::LoraClientOperationMessage* pb =
-        lora_client_operation_message__unpack(nullptr, len, data);
+        lora_client_operation_message__unpack(nullptr, view.size(), view.data());
     if (!pb) return std::nullopt;
 
     LoraClientOperationMessage out;

@@ -9,6 +9,8 @@
 
 #include "esphome/components/lora_tracker/lora_tracker.h"
 #include "lora_hal_recorder.h"
+#include "MacWire.h"
+#include "sim/v1_bridge.h"
 #include "TimedGrid.h"
 #include "LoraTiming.h"
 #include "esp_timer.h"
@@ -22,10 +24,41 @@ using esphome::lora_tracker::TxPolicy;
 
 namespace {
 
+// S8 / W4: with MAC_WIRE_V1 (the default) the tracker restamps v1 frames. The
+// frames below are built in the build's wire format, and what the radio got is
+// read through its v0 view (sim/v1_bridge.h): the same header fields, and for
+// an AUTH = SESSION copy (fake sealer, no keys) the raw ciphertext and tag.
+LoraClientOperationMessage *unpackView(const uint8_t *data, size_t len) {
+    const std::vector<uint8_t> v = proto_sim::v1bridge::downlinkToV0(data, len);
+    return lora_client_operation_message__unpack(NULL, v.size(), v.data());
+}
+
+#if MAC_WIRE_V1
+std::vector<uint8_t> v1Frame(uint8_t dst, uint8_t subnet, uint32_t fcnt, macwire::Auth a,
+                             const std::vector<uint8_t> &body) {
+    macwire::WireHdr h;
+    h.flags = macwire::withAuth(0, a);
+    h.dst = dst; h.src = 1; h.subnet = subnet; h.fcnt = fcnt; h.port = macwire::kPortApp;
+    std::vector<uint8_t> f(macwire::headerLen(h) + body.size() + macwire::tagLen(h.flags), 0);
+    macwire::encodeHeader(h, f.data(), f.size());
+    std::copy(body.begin(), body.end(), f.begin() + macwire::headerLen(h));
+    return f;
+}
+#endif
+
 // A real, packable operation frame. The burst loop only re-stamps copies it can
 // unpack; a buffer of zeroes fails to unpack, so a test that fed one would take
 // the raw-bytes fallback and never touch the indexing code at all.
 std::vector<uint8_t> packedOperationFrame() {
+#if MAC_WIRE_V1
+    LoraCoverOperation op1 = LORA_COVER_OPERATION__INIT;
+    HubAppPdu pdu = HUB_APP_PDU__INIT;
+    pdu.pdu_case  = HUB_APP_PDU__PDU_OPERATION;
+    pdu.operation = &op1;
+    std::vector<uint8_t> body(hub_app_pdu__get_packed_size(&pdu));
+    hub_app_pdu__pack(&pdu, body.data());
+    return v1Frame(7, 0, 42, macwire::Auth::None, body);
+#endif
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = 7;
     hdr.senderaddress = 1;
@@ -116,7 +149,7 @@ TEST(RealTracker, EachCopyIsStampedWithItsOwnBurstIndex) {
     for (size_t i = 0; i < lorahal::rec().packets.size(); ++i) {
         const auto& p = lorahal::rec().packets[i];
         LoraClientOperationMessage* m =
-            lora_client_operation_message__unpack(NULL, p.size(), p.data());
+            unpackView(p.data(), p.size());
         ASSERT_NE(m, nullptr) << "copy " << i << " did not unpack";
         ASSERT_NE(m->header, nullptr);
         EXPECT_EQ(m->header->burstcount, 5u) << "copy " << i;
@@ -138,7 +171,7 @@ TEST(RealTracker, ASingleCopyStillCarriesABurstCountOfOne) {
     ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
     const auto& p = lorahal::rec().packets.front();
     LoraClientOperationMessage* m =
-        lora_client_operation_message__unpack(NULL, p.size(), p.data());
+        unpackView(p.data(), p.size());
     ASSERT_NE(m, nullptr);
     ASSERT_NE(m->header, nullptr);
     EXPECT_EQ(m->header->burstcount, 1u);
@@ -517,7 +550,7 @@ TEST(RealTrackerTx, APlacedFrameThatMissedItsMarkIsCountedAndNotOnMark) {
     ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1) << "and still sent";
     const auto &p = lorahal::rec().packets[0];
     LoraClientOperationMessage *m =
-        lora_client_operation_message__unpack(NULL, p.size(), p.data());
+        unpackView(p.data(), p.size());
     ASSERT_NE(m, nullptr);
     EXPECT_FALSE((bool) m->header->onmark) << "a late frame does not claim the mark";
     lora_client_operation_message__free_unpacked(m, NULL);
@@ -547,7 +580,7 @@ TEST(RealTrackerTx, EveryCopyDeclaresTheInstantItActuallyLeft) {
     ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 3);
     for (size_t k = 0; k < 3; ++k) {
         const auto &p = lorahal::rec().packets[k];
-        LoraClientOperationMessage *m = lora_client_operation_message__unpack(NULL, p.size(), p.data());
+        LoraClientOperationMessage *m = unpackView(p.data(), p.size());
         ASSERT_NE(m, nullptr);
         ASSERT_TRUE((bool) m->header->firestamped) << "copy " << k;
         EXPECT_EQ(declaredT0(t, *m->header),
@@ -576,7 +609,7 @@ TEST(RealTrackerTx, APlacedFrameThatMissedItsMarkDeclaresWhenItReallyLeft) {
 
     ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
     const auto &p = lorahal::rec().packets[0];
-    LoraClientOperationMessage *m = lora_client_operation_message__unpack(NULL, p.size(), p.data());
+    LoraClientOperationMessage *m = unpackView(p.data(), p.size());
     ASSERT_NE(m, nullptr);
     ASSERT_TRUE((bool) m->header->firestamped);
     const int64_t declared = declaredT0(t, *m->header);
@@ -597,7 +630,7 @@ TEST(RealTrackerTx, WithoutAGridNothingIsStamped) {
 
     ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
     const auto &p = lorahal::rec().packets[0];
-    LoraClientOperationMessage *m = lora_client_operation_message__unpack(NULL, p.size(), p.data());
+    LoraClientOperationMessage *m = unpackView(p.data(), p.size());
     ASSERT_NE(m, nullptr);
     EXPECT_FALSE((bool) m->header->firestamped);
     lora_client_operation_message__free_unpacked(m, NULL);
@@ -627,7 +660,7 @@ TEST(RealTrackerTx, OnlyAFramePlacedOnAMarkSaysSoOnEveryCopy) {
         for (size_t i = 0; i < 2; ++i) {
             const auto &p = lorahal::rec().packets[i];
             LoraClientOperationMessage *m =
-                lora_client_operation_message__unpack(NULL, p.size(), p.data());
+                unpackView(p.data(), p.size());
             ASSERT_NE(m, nullptr);
             ASSERT_NE(m->header, nullptr);
             EXPECT_EQ((bool) m->header->onmark, c.expect) << c.what << ", copy " << i;
@@ -1139,8 +1172,7 @@ TEST(RealTrackerBeacon, ABeaconIsQueuedOnceAndPlacedOnItsOwnMark) {
         << "a beacon that slips its mark is a beacon nobody is listening for";
 
     const auto &bytes = lorahal::rec().packets.at(0);
-    LoraClientOperationMessage *msg = lora_client_operation_message__unpack(
-        nullptr, bytes.size(), bytes.data());
+    LoraClientOperationMessage *msg = unpackView(bytes.data(), bytes.size());
     ASSERT_NE(msg, nullptr);
     ASSERT_EQ(msg->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON);
     ASSERT_NE(msg->gridbeacon, nullptr);
@@ -1166,6 +1198,16 @@ TEST(RealTrackerBeacon, ABeaconIsQueuedOnceAndPlacedOnItsOwnMark) {
     // serviceBeacon sends none at all rather than one without a tag.
     EXPECT_EQ(msg->gridbeacon->netkeyid, t.netKeyId());
     EXPECT_NE(msg->gridbeacon->netkeyid, 0u);
+#if MAC_WIRE_V1
+    // v1 (spec 4.4): the frame's FLEET tag over every raw byte replaces the
+    // GridBeacon.mac field; it verifies under the hub's own fleet key.
+    EXPECT_EQ(msg->gridbeacon->mac.len, 0u) << "no mac field in v1";
+    {
+        uint8_t tag[8];
+        ASSERT_TRUE(t.mgmt().fleetTagV1(bytes.data(), bytes.size() - 8, tag));
+        EXPECT_EQ(memcmp(tag, bytes.data() + bytes.size() - 8, 8), 0);
+    }
+#else
     ASSERT_EQ(msg->gridbeacon->mac.len, framecrypto::kBeaconMacBytes);
 
     // And it verifies under the hub's own key. Recomputed here from the LAYOUT
@@ -1179,6 +1221,7 @@ TEST(RealTrackerBeacon, ABeaconIsQueuedOnceAndPlacedOnItsOwnMark) {
                             msg->header->burstindex,
                             expect, sizeof(expect)));
     EXPECT_EQ(memcmp(expect, msg->gridbeacon->mac.data, sizeof(expect)), 0);
+#endif
 
     // The frame still fits the slot geometry it was priced against. A beacon
     // that outgrew kBeaconPayloadBytes would need a second clear slot after it
@@ -1563,8 +1606,7 @@ TEST(RealTrackerBeaconShadow, TheShadowIsEvaluatedOncePerBeaconAndTheAirIsUnchan
     ASSERT_TRUE(t.serviceTxQueue(fire - LORATracker::kPrepareLeadUs));
     ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
     const auto &bytes = lorahal::rec().packets.at(0);
-    LoraClientOperationMessage *msg = lora_client_operation_message__unpack(
-        nullptr, bytes.size(), bytes.data());
+    LoraClientOperationMessage *msg = unpackView(bytes.data(), bytes.size());
     ASSERT_NE(msg, nullptr);
     ASSERT_EQ(msg->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON);
     EXPECT_TRUE(msg->gridbeacon->pendingmaskvalid) << "validity flag semantics unchanged";
@@ -1741,8 +1783,7 @@ TEST(RealTrackerBeacon, ALaterBeaconCarriesItsOwnRoundAndTheFullBroadcastHeader)
     while (t.serviceTxQueue(fire - LORATracker::kPrepareLeadUs)) {}
     ASSERT_GE(lorahal::rec().packets.size(), (size_t) 1);
     const auto &bytes = lorahal::rec().packets.back();
-    LoraClientOperationMessage *msg = lora_client_operation_message__unpack(
-        nullptr, bytes.size(), bytes.data());
+    LoraClientOperationMessage *msg = unpackView(bytes.data(), bytes.size());
     ASSERT_NE(msg, nullptr);
     ASSERT_EQ(msg->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON);
     const uint32_t want_round = t.beaconRoundForT0(second);
@@ -1754,11 +1795,19 @@ TEST(RealTrackerBeacon, ALaterBeaconCarriesItsOwnRoundAndTheFullBroadcastHeader)
     EXPECT_EQ(msg->header->msgid, 0u);
     EXPECT_EQ(msg->header->burstindex, 0u);
     EXPECT_EQ(msg->header->burstcount, 1u) << "one copy, not a burst";
+#if MAC_WIRE_V1
+    {
+        uint8_t tag[8];
+        ASSERT_TRUE(t.mgmt().fleetTagV1(bytes.data(), bytes.size() - 8, tag));
+        EXPECT_EQ(memcmp(tag, bytes.data() + bytes.size() - 8, 8), 0) << "FLEET tag (spec 4.4)";
+    }
+#else
     uint8_t expect[framecrypto::kBeaconMacBytes];
     ASSERT_TRUE(t.beaconMac(msg->gridbeacon->txround, msg->gridbeacon->txslot,
                             msg->gridbeacon->pendingmask, msg->gridbeacon->pendingmaskvalid,
                             msg->header->burstindex, expect, sizeof(expect)));
     EXPECT_EQ(memcmp(expect, msg->gridbeacon->mac.data, sizeof(expect)), 0);
+#endif
     EXPECT_EQ(t.postTxHoldMs(), 0u) << "a broadcast nobody answers: no hold after it";
     lora_client_operation_message__free_unpacked(msg, nullptr);
 }
@@ -1786,6 +1835,9 @@ bool fakeSealer(void *ctx, const mac::MacHdr &h, const uint8_t *ct, size_t len, 
     return g_seal.answer;
 }
 std::vector<uint8_t> encryptedFrame() {
+#if MAC_WIRE_V1
+    return v1Frame(18, 2, 42, macwire::Auth::Session, {1, 2, 3, 4});
+#endif
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress = 18; hdr.destsubnet = 2; hdr.senderaddress = 1; hdr.msgid = 42;
     uint8_t ct[4] = {1, 2, 3, 4};
@@ -1803,7 +1855,7 @@ std::vector<uint8_t> encryptedFrame() {
 }
 LoraClientOperationMessage *unpackPacket(size_t i) {
     const auto &p = lorahal::rec().packets.at(i);
-    return lora_client_operation_message__unpack(NULL, p.size(), p.data());
+    return unpackView(p.data(), p.size());
 }
 constexpr uint64_t kBinding = 0x8000001200000005ULL;
 }  // namespace

@@ -203,6 +203,17 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
       (409 v0-envelope tests listed in tests/proto_sim/mac_wire_v0_only_tests.txt,
       for W4), ON goldens in golden_v1/; seam/e2e (real hub + real node W2, both
       ON) 27/27.
+- [x] W4 hub: MAC_WIRE_V1 is the default (`MacWireConfig.h`; the production yml
+      needs no flag, `-DMAC_WIRE_V1=0` builds the v0 path until W5). Goldens:
+      `golden/` = v1, `golden_v0/` = v0 (OFF build). The 409 ON-excluded tests:
+      the listener/cover tests run through `sim/v1_bridge.h` (v0-built uplinks
+      become the v1 frames a node sends, hub downlinks are inspected through
+      their v0 view, tampered frames stay tampered), the tracker tests through
+      wire-aware builders, the node-harness targets build the node's v0 path in
+      both configurations; 3 tests that pin v0 envelope bytes stay OFF-only
+      (reasons in `mac_wire_v0_only_tests.txt`). Fixed on the way: a dangling
+      capture in the `drive_session` test helper (ASan). Reservation of a placed
+      v1 frame priced with its STAMP (`9286421`). proto_sim ON 1771 / OFF 1754.
 - [ ] Fixed header (version byte != 0x0A, hub dual-stack during the node-1 OTA),
       FCnt/cmdId split, MAC ACK bit, CMAC over raw header bytes, delete
       FrameCanon and the legacy GCM helpers. Node 2 by serial first, soak, then

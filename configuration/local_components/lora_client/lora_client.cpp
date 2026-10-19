@@ -11,6 +11,7 @@
 // S6: the one oneof -> mac::Port table.
 #include "esphome/components/lora_client/PortTable.h"
 // S8: MAC wire v1 -- the fixed header (shared) and the hub's bodies around it.
+#include "esphome/components/lora_client/MacWireConfig.h"
 #include "esphome/components/lora_client/MacWire.h"
 #include "esphome/components/lora_client/HubWire.h"
 

@@ -174,6 +174,8 @@ public:
     // and policy each producer handed to send(), BEFORE the shim's per-copy
     // re-stamp/retag. The radio transcript holds what went on the air after it.
     std::vector<std::vector<uint8_t>> sent_raw;
+    // The exact bytes handed to send() (sent_raw is their v0 view, S8/W4).
+    std::vector<std::vector<uint8_t>> sent_wire;
     std::vector<TxPolicy>             sent_policy;
 
     // Emit `copies` AirFrames instead of one, so node-side duplicate handling

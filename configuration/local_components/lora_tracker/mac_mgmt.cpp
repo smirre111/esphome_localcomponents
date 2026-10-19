@@ -8,6 +8,7 @@
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/lora_client/TimedGrid.h"
 #include "esphome/components/lora_client/PendingData.h"
+#include "esphome/components/lora_client/MacWireConfig.h"
 #include "esphome/components/lora_client/MacWire.h"
 
 #include <esp_random.h>

@@ -270,13 +270,13 @@ struct GoldenHub {
     // Everything sent so far, both streams.
     std::string dump() const {
         std::ostringstream s;
-        for (size_t i = 0; i < tracker.sent_raw.size(); ++i) {
+        for (size_t i = 0; i < tracker.sent_wire.size(); ++i) {
             const auto &p = tracker.sent_policy[i];
-            s << "raw " << i << " " << describeOp(tracker.sent_raw[i]) << " copies=" << p.copies
+            s << "raw " << i << " " << describeOp(tracker.sent_wire[i]) << " copies=" << p.copies
               << " stride=" << p.stride_ms << " earliest=" << p.earliest_us
               << " onmark=" << p.on_mark << " reply=" << p.expects_reply
               << " prio=" << (int) p.priority << " sup=" << p.supersede_key << "/"
-              << p.supersede_gen << " " << golden::hex(tracker.sent_raw[i]) << "\n";
+              << p.supersede_gen << " " << golden::hex(tracker.sent_wire[i]) << "\n";
         }
         size_t k = 0;
         for (const auto &f : radio.transcript()) {
@@ -409,8 +409,8 @@ TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
     h.session();
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     h.tick(10);
-    ASSERT_FALSE(h.tracker.sent_raw.empty());
-    const auto raw = h.tracker.sent_raw.back();
+    ASSERT_FALSE(h.tracker.sent_wire.empty());
+    const auto raw = h.tracker.sent_wire.back();
     const auto pol = h.tracker.sent_policy.back();
     ASSERT_NE(pol.sealer, nullptr);
     std::ostringstream s;
@@ -440,8 +440,8 @@ TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
     h.session();
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     h.tick(10);
-    ASSERT_FALSE(h.tracker.sent_raw.empty());
-    const auto raw = h.tracker.sent_raw.back();
+    ASSERT_FALSE(h.tracker.sent_wire.empty());
+    const auto raw = h.tracker.sent_wire.back();
     ::LoraClientOperationMessage *m =
         lora_client_operation_message__unpack(nullptr, raw.size(), raw.data());
     ASSERT_NE(m, nullptr);
