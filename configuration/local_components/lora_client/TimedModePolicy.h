@@ -496,7 +496,48 @@ enum class SyncRequestReason : uint8_t {
     None           = 0,
     AnchorStale    = 1,
     SamplesRefused = 2,
+    AnchorSuspect  = 3,   // a poisoned adoption: see anchorSuspect below
 };
+
+// 3. A POISONED ADOPTION. Measured 2026-10-19 (node 2, fw 1.1.48, bench log
+// 20261019_060630_s8_v1): the node adopted a GridSync copy whose T0 measured
+// 66 ms late (a transient during a motor run), and every later mark then read
+// -62..-67 ms. Every correction path refuses an error beyond half a slot pitch,
+// and the request above is limited to one per resyncMaxS (704 s), so the grid
+// stayed wrong for ~10 minutes. The signature: several consecutive DISTINCT
+// frames refused with the SAME sign and nearly the same error -- the anchor is
+// off, not the frames. Then the node asks again at once, rate-limited on its own
+// clock (one per kSuspectRequestMinIntervalS), not by resyncMaxS.
+static constexpr uint32_t kSuspectRefusedStreak       = 3;
+static constexpr uint32_t kSuspectSpreadUs            = 5000;
+static constexpr uint32_t kSuspectRequestMinIntervalS = 90;
+
+// Consecutive refused samples since the anchor was last set or corrected, or
+// since the last accepted sample: how many distinct frames, and the range of
+// their errors. A refusal of the other sign starts a new streak.
+struct RefusalStreak
+{
+    uint32_t n      = 0;
+    int32_t  min_us = 0;
+    int32_t  max_us = 0;
+};
+
+constexpr RefusalStreak noteRefusal(RefusalStreak s, int32_t err_us)
+{
+    const bool flips = s.n != 0 && ((err_us < 0) != (s.min_us < 0));
+    if (s.n == 0 || flips)
+        return RefusalStreak{1, err_us, err_us};
+    s.n      = (s.n < 0xFFFFFFFFu) ? s.n + 1 : s.n;
+    s.min_us = (err_us < s.min_us) ? err_us : s.min_us;
+    s.max_us = (err_us > s.max_us) ? err_us : s.max_us;
+    return s;
+}
+
+constexpr bool anchorSuspect(const RefusalStreak &s)
+{
+    return s.n >= kSuspectRefusedStreak &&
+           (int64_t) s.max_us - (int64_t) s.min_us <= (int64_t) kSuspectSpreadUs;
+}
 
 static constexpr uint32_t kRefusedSamplesForSyncRequest = 2;
 
@@ -514,12 +555,25 @@ struct SyncRequestState
     uint32_t s_since_anchor_fix = 0xFFFFFFFF;
     uint32_t refused_since_fix  = 0;
     uint32_t s_since_request    = 0xFFFFFFFF;   // 0xFFFFFFFF = never asked
+    // The poisoned-adoption signature (anchorSuspect) and its own rate limit.
+    bool     anchor_suspect          = false;
+    uint32_t s_since_suspect_request = 0xFFFFFFFF;
 };
+
+// The poisoned-adoption request is due: the signature, and its own interval.
+constexpr bool suspectRequestDue(const SyncRequestState &s)
+{
+    return s.anchor_suspect && s.s_since_suspect_request >= kSuspectRequestMinIntervalS;
+}
 
 constexpr SyncRequestReason syncRequestReason(const SyncRequestState &s)
 {
-    if (!s.timed_rx_enabled || !s.grid_active || s.in_mode_b)  return SyncRequestReason::None;
+    if (!s.timed_rx_enabled || !s.grid_active)                 return SyncRequestReason::None;
     if (!s.session)                                            return SyncRequestReason::None;
+    // A suspect anchor is asked about in Mode B too: the beacon refuses the
+    // same > half-pitch error and cannot repair it.
+    if (suspectRequestDue(s))                                  return SyncRequestReason::AnchorSuspect;
+    if (s.in_mode_b)                                           return SyncRequestReason::None;
     // Fail closed, as txRefusalFor does: no published interval, nothing to judge by.
     if (s.resync_max_s == 0)                                   return SyncRequestReason::None;
     // At most one request per resyncMaxS: a hub that does not answer is not
