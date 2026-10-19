@@ -237,6 +237,45 @@ TEST(MacWireV1Burst, ASealedCopyLeavesAtItsStampedInstantWithItsTagAlreadyWritte
     EXPECT_EQ(t.stampMisses(), 0u);
 }
 
+TEST(MacWireV1Burst, TheNodesT0FromTheFinalOnAirLengthIsTheStampedT0) {
+    // The node's T0 is SFD end: rxdone - t0ToRxDoneUs(on-air length). The hub
+    // fires at T0 - preamble (fireInstantUs), which does not depend on the
+    // length at all; the length only has to be the FINAL one at the node. So
+    // for every layout (AUTH NONE / SESSION, stamped or not, several bodies),
+    // a node receiving the copy actually sent derives exactly the stamped T0.
+    for (macwire::Auth a : {macwire::Auth::None, macwire::Auth::Session}) {
+        for (size_t body : {0u, 5u, 40u, 150u}) {
+            for (bool grid : {true, false}) {
+                lorahal::rec().reset();
+                proto_sim_timer_reset();
+                proto_sim_timer_set_now_us(3'000'000);
+                g_log = SealLog{};
+                LORATracker t;
+                if (grid) t.startGrid();
+                const int64_t mark_t0 = grid ? t.nextT0ForSlotUs(18, 4'000'000) : 4'000'000;
+                const int64_t fire    = loratiming::fireInstantUs(mark_t0, 0);
+                proto_sim_timer_set_now_us(fire - LORATracker::kPrepareLeadUs);
+                macwire::WireHdr h;
+                h.flags = macwire::withAuth(0, a);
+                h.dst = 0x12; h.src = 1; h.subnet = 2; h.fcnt = 7; h.port = macwire::kPortApp;
+                std::vector<uint8_t> f(macwire::headerLen(h) + body + macwire::tagLen(h.flags), 0x5A);
+                macwire::encodeHeader(h, f.data(), f.size());
+                t.sendPacketBurst(f.data(), f.size(), 1, 0, fire, true,
+                                  a == macwire::Auth::Session ? &fakeSealer : nullptr, kBinding);
+                ASSERT_EQ(lorahal::rec().packets.size(), 1u);
+                const auto &p = lorahal::rec().packets[0];
+                const int64_t tx_start = lorahal::rec().tx_us[0];
+                const int64_t rxdone   = tx_start + (int64_t) loratiming::kDownlinkPreambleToT0Us +
+                                         (int64_t) loratiming::t0ToRxDoneUs((uint32_t) p.size());
+                const int64_t node_t0  = loratiming::t0FromRxDoneUs(rxdone, (uint32_t) p.size());
+                EXPECT_EQ(node_t0, mark_t0) << "auth " << (int) a << " body " << body << " grid " << grid;
+                EXPECT_EQ(p.size(), f.size() + (grid ? macwire::kStampBytes : 0u))
+                    << "the stamp is part of the on-air length";
+            }
+        }
+    }
+}
+
 TEST(MacWireV1Burst, TheFleetBeaconGoesOutVerbatim) {
     lorahal::rec().reset();
     const mv::Vector &v = beaconVector();
