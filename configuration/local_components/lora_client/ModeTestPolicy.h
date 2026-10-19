@@ -470,4 +470,92 @@ struct SeqTracker {
     }
 };
 
+// ---- the phase error per on-air length (diagnostic, S8 bench 2026-10-19) ----
+//
+// Mode B with crypto measured p50 1597 us against 191 us without. The sealed
+// marks were 43 and 44 bytes, which straddle a symbol-block boundary of the
+// airtime model (13 vs 14 blocks of 2048 us), the unsealed ones (41/42) did
+// not. One run with this breakdown separates the lengths. Fixed size: rows for
+// the first kLenRows distinct lengths (later lengths are counted as unbinned),
+// and the first kLenRowSamples errors of each row kept for a median.
+static constexpr uint32_t kLenRows       = 8;
+static constexpr uint32_t kLenRowSamples = 32;
+
+struct LenRow
+{
+    uint32_t len{0};
+    uint32_t n{0};
+    int64_t  sum{0};
+    int32_t  min{0};
+    int32_t  max{0};
+    uint32_t kept{0};
+    int32_t  v[kLenRowSamples]{};
+};
+
+struct LenSummary
+{
+    uint32_t len{0};
+    uint32_t n{0};
+    int32_t  mean{0};
+    int32_t  p50{0};    // over the first kLenRowSamples
+    int32_t  min{0};
+    int32_t  max{0};
+};
+
+struct LenBreakdown
+{
+    LenRow   rows[kLenRows]{};
+    uint32_t used{0};
+    uint32_t unbinned{0};
+
+    void clear() { *this = LenBreakdown{}; }
+
+    // Cheap enough for the receive path: a scan of at most kLenRows rows.
+    void add(uint32_t len, int32_t err_us)
+    {
+        LenRow *r = nullptr;
+        for (uint32_t i = 0; i < used; ++i)
+            if (rows[i].len == len) { r = &rows[i]; break; }
+        if (r == nullptr)
+        {
+            if (used == kLenRows) { unbinned++; return; }
+            r = &rows[used++];
+            r->len = len;
+            r->min = err_us;
+            r->max = err_us;
+        }
+        r->n++;
+        r->sum += err_us;
+        if (err_us < r->min) r->min = err_us;
+        if (err_us > r->max) r->max = err_us;
+        if (r->kept < kLenRowSamples)
+            r->v[r->kept++] = err_us;
+    }
+
+    // Row i (in order of first appearance), for the report.
+    LenSummary summarise(uint32_t i) const
+    {
+        LenSummary s;
+        if (i >= used)
+            return s;
+        const LenRow &r = rows[i];
+        s.len  = r.len;
+        s.n    = r.n;
+        s.mean = r.n ? (int32_t) (r.sum / (int64_t) r.n) : 0;
+        s.min  = r.min;
+        s.max  = r.max;
+        int32_t t[kLenRowSamples];
+        for (uint32_t k = 0; k < r.kept; ++k) t[k] = r.v[k];
+        for (uint32_t k = 1; k < r.kept; ++k)   // insertion sort, <= 32
+        {
+            const int32_t key = t[k];
+            uint32_t j = k;
+            while (j > 0 && t[j - 1] > key) { t[j] = t[j - 1]; --j; }
+            t[j] = key;
+        }
+        s.p50 = r.kept ? t[Samples::percentileIndex(r.kept, 50)] : 0;
+        return s;
+    }
+};
+
 }  // namespace modetest
