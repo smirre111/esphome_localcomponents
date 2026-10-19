@@ -221,8 +221,10 @@ private:
 // switch, not a runtime dual stack).
 #if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 using TxFrame = WireBurstFrame;
+static constexpr bool kTxFrameInsertsStamp = true;    // +kStampBytes when stamped
 #else
 using TxFrame = BurstFrame;
+static constexpr bool kTxFrameInsertsStamp = false;
 #endif
 
 }  // namespace mac0

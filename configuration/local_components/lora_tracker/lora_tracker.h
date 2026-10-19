@@ -622,6 +622,7 @@ namespace esphome
       // single ever-growing one. Never logs itself; see drainTagLatencyReport_().
       void noteTagWriteLatencyUs_(uint32_t us, int64_t at_us = 0, int copy = -1);
       void drainTagLatencyReport_();
+      size_t  onAirLen_(size_t len, bool fire_stamp) const;
       // StackWatch.h: low-rate stack high-water readout from loop().
       void    logStackWatermarks_();
       int64_t stack_report_last_us_{0};

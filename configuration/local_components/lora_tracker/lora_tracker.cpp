@@ -829,6 +829,17 @@ namespace esphome
            + (expects_reply ? (int64_t) this->responseWindowMs * 1000 : 0);
     }
 
+    // The length a frame will have ON THE AIR. A v1 frame is packed unstamped
+    // and sendPacketBurst inserts the 6-byte STAMP when the grid runs and the
+    // frame is stamped (burst_frame.h), so its airtime must be priced with it;
+    // pricing the packed length ended its reservation up to a symbol block
+    // early. v0: unchanged (its stamp is varints inside the header).
+    size_t LORATracker::onAirLen_(size_t len, bool fire_stamp) const
+    {
+      return len + ((mac0::kTxFrameInsertsStamp && this->grid_started_ && fire_stamp)
+                        ? macwire::kStampBytes : 0);
+    }
+
     void LORATracker::reserve_(int64_t start_us, int64_t end_us)
     {
       std::lock_guard<std::mutex> lock(this->reservations_mutex_);
@@ -896,7 +907,7 @@ namespace esphome
         // The node listens from a guard before T0: another frame starting inside
         // that guard would be the one it receives.
         const int64_t start = fire - (int64_t) timedgrid::kGuardUs;
-        const int64_t end   = this->burstEndUs_(fire, copies, 0, len, expects_reply);
+        const int64_t end   = this->burstEndUs_(fire, copies, 0, this->onAirLen_(len, true), expects_reply);
         bool clear = true;
         for (const Reservation &r : this->reservations_)
         {
@@ -1006,7 +1017,8 @@ namespace esphome
           if (now_us > start_us)                     start_us = now_us;
           if (policy.earliest_us > start_us)         start_us = policy.earliest_us;
           this->queued_air_end_us_ = this->burstEndUs_(start_us, policy.copies, policy.stride_ms,
-                                                       copy_len, policy.expects_reply);
+                                                       this->onAirLen_(copy_len, policy.fire_stamp),
+                                                       policy.expects_reply);
         }
 
         // A PLACED frame reserves the channel from the moment it is accepted, so
@@ -1016,7 +1028,8 @@ namespace esphome
         if (policy.earliest_us > 0)
         {
           const int64_t end_us = this->burstEndUs_(policy.earliest_us, policy.copies,
-                                                   policy.stride_ms, copy_len,
+                                                   policy.stride_ms,
+                                                   this->onAirLen_(copy_len, policy.fire_stamp),
                                                    policy.expects_reply);
           if (end_us > this->placed_busy_until_us_)
             this->placed_busy_until_us_ = end_us;

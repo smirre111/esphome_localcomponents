@@ -276,6 +276,39 @@ TEST(MacWireV1Burst, TheNodesT0FromTheFinalOnAirLengthIsTheStampedT0) {
     }
 }
 
+namespace {
+struct PoolProbe : LORATracker {
+    void init() { this->init_memory_pool(); }
+};
+}  // namespace
+
+TEST(MacWireV1Burst, APlacedFramesReservationIsPricedWithTheStampItWillCarry) {
+    // The frame is packed unstamped; sendPacketBurst inserts the 6-byte STAMP.
+    // Its reservation must end where the STAMPED copy's airtime ends.
+    proto_sim_timer_reset();
+    proto_sim_timer_set_now_us(3'000'000);
+    PoolProbe t;
+    t.init();
+    t.startGrid();
+    const int64_t fire = loratiming::fireInstantUs(t.nextT0ForSlotUs(18, 4'000'000), 0);
+    // 40 B of body: 52 B packed -> 58 B on the air, across a symbol block.
+    macwire::WireHdr h;
+    h.flags = macwire::withAuth(0, macwire::Auth::None);
+    h.dst = 0x12; h.src = 1; h.subnet = 2; h.fcnt = 7; h.port = macwire::kPortApp;
+    for (size_t body : {40u, 41u, 42u, 43u, 44u}) {
+        std::vector<uint8_t> f(macwire::headerLen(h) + body, 0x5A);
+        macwire::encodeHeader(h, f.data(), f.size());
+        esphome::lora_tracker::TxPolicy p;
+        p.copies = 1;
+        p.earliest_us = fire;
+        p.expects_reply = false;
+        ASSERT_TRUE(t.send(f.data(), f.size(), p));
+        const int64_t want = fire + (int64_t) loratiming::kDownlinkPreambleToT0Us +
+                             (int64_t) loratiming::t0ToRxDoneUs((uint32_t) (f.size() + macwire::kStampBytes));
+        EXPECT_EQ(t.placedBusyUntilUs(), want) << "body " << body;
+    }
+}
+
 TEST(MacWireV1Burst, TheFleetBeaconGoesOutVerbatim) {
     lorahal::rec().reset();
     const mv::Vector &v = beaconVector();
