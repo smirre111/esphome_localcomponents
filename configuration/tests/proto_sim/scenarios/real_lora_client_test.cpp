@@ -38,15 +38,109 @@
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 
-#include "sim/v1_client.h"
-// S8 / W4: v0-built uplinks reach the hub as v1 (sim/v1_client.h).
-using LORAClient = proto_sim::TestClient;
+using esphome::lora_tracker::LORAClient;
 using esphome::lora_tracker::LORATracker;
 using esphome::time::RealTimeClock;
 
 namespace {
 
 constexpr uint64_t kMacRol2 = 0xE08CFE5F9EC4ULL;
+
+// A v1 uplink built by hand, AUTH = NONE: node `src` -> hub on `port`.
+std::vector<uint8_t> v1_uplink(uint32_t fcnt, uint8_t port, const std::vector<uint8_t> &body,
+                               uint8_t flags = 0, uint32_t acked_fcnt = 0, uint8_t src = 18,
+                               uint8_t subnet = 2) {
+    macwire::WireHdr h;
+    h.flags      = flags;
+    h.dst        = (uint8_t) esphome::lora_tracker::kHubAddress;
+    h.src        = src;
+    h.subnet     = subnet;
+    h.fcnt       = fcnt;
+    h.port       = port;
+    h.acked_fcnt = acked_fcnt;
+    return proto_sim::v1_plain_frame(h, body);
+}
+
+// A packed body PDU.
+std::vector<uint8_t> pack_pdu(const NodeMacPdu *p) {
+    std::vector<uint8_t> b(node_mac_pdu__get_packed_size(p));
+    node_mac_pdu__pack(p, b.data());
+    return b;
+}
+std::vector<uint8_t> pack_pdu(const NodeAppPdu *p) {
+    std::vector<uint8_t> b(node_app_pdu__get_packed_size(p));
+    node_app_pdu__pack(p, b.data());
+    return b;
+}
+
+// A hub downlink decoded natively from its v1 bytes: the fixed header and the
+// PORT's body (HubMacPdu / HubAppPdu / LoginMsg), with the command case named
+// as the hub names it (hubframes::DownCase). Owns the unpacked body.
+struct RealDown {
+    hubframes::Hdr      hdr{};
+    hubframes::Hdr     *header{&hdr};
+    hubframes::DownCase cmd_case{hubframes::DL_NOT_SET};
+    HubMacPdu   *mac{nullptr};
+    HubAppPdu   *app{nullptr};
+    LoginMsg    *login{nullptr};
+    MacControl  *maccontrol{nullptr};
+    GridSync    *gridsync{nullptr};
+    ModeTest    *modetest{nullptr};
+    TimeSync    *timesync{nullptr};
+    ~RealDown() {
+        if (mac) hub_mac_pdu__free_unpacked(mac, nullptr);
+        if (app) hub_app_pdu__free_unpacked(app, nullptr);
+        if (login) login_msg__free_unpacked(login, nullptr);
+    }
+};
+
+RealDown *real_down_body(const macwire::WireHdr &w, const uint8_t *body, size_t len) {
+    RealDown *d = new RealDown;
+    d->hdr.destaddress   = w.dst;
+    d->hdr.destsubnet    = w.subnet;
+    d->hdr.senderaddress = w.src;
+    d->hdr.msgid         = w.fcnt;
+    d->hdr.burstindex    = w.burst_idx;
+    d->hdr.burstcount    = w.burst_cnt;
+    d->hdr.onmark        = w.onMark();
+    if (w.port == macwire::kPortMac0Mgmt) {
+        d->mac = hub_mac_pdu__unpack(nullptr, len, body);
+        if (d->mac) {
+            d->cmd_case   = (hubframes::DownCase) d->mac->pdu_case;   // field numbers are the cases
+            d->maccontrol = d->mac->maccontrol;
+            d->gridsync   = d->mac->gridsync;
+            d->modetest   = d->mac->modetest;
+        }
+    } else if (w.port == macwire::kPortApp) {
+        d->app = hub_app_pdu__unpack(nullptr, len, body);
+        if (d->app) {
+            d->cmd_case = (hubframes::DownCase) d->app->pdu_case;
+            d->timesync = d->app->timesync;
+        }
+    } else if (w.port == macwire::kPortSession) {
+        d->login = login_msg__unpack(nullptr, len, body);
+        if (d->login) d->cmd_case = hubframes::DL_LOGIN;
+    }
+    if (!d->mac && !d->app && !d->login) { delete d; return nullptr; }
+    return d;
+}
+
+// A plaintext (AUTH = NONE) downlink; nullptr for a sealed or undecodable one.
+RealDown *real_down_plain(const std::vector<uint8_t> &f) {
+    macwire::WireHdr w;
+    size_t off = 0, blen = 0;
+    if (!macwire::decode(f.data(), f.size(), &w, &off, &blen) || w.auth() != macwire::Auth::None)
+        return nullptr;
+    return real_down_body(w, f.data() + off, blen);
+}
+
+// A plaintext MacControl uplink (PORT 0), as the node's MAC-0 emits it.
+std::vector<uint8_t> mac_control_uplink(MacControl &mc, uint32_t fcnt, uint8_t src) {
+    NodeMacPdu pdu = NODE_MAC_PDU__INIT;
+    pdu.pdu_case   = NODE_MAC_PDU__PDU_MACCONTROL;
+    pdu.maccontrol = &mc;
+    return v1_uplink(fcnt, macwire::kPortMac0Mgmt, pack_pdu(&pdu), 0, 0, src);
+}
 
 // Tier 3 (mac-separation-implementation-plan.md section 2(b)): the
 // deterministic node_nonce every session-establishing helper in this file
@@ -97,30 +191,9 @@ void attach_encrypted_login_ack(proto_sim::SimRadio& radio,
         inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Avail;
         inner.avail.available      = true;
 
-        // Payload-only plaintext (the inner header is stripped; the receiver
-        // uses the outer one). Encrypt-then-CMAC seals once (CTR) and tags
-        // over the outer header's fields (burst/fire fields all 0/false —
-        // uplinks never burst) plus the ciphertext.
-        auto plain = proto_sim::serialize_resp_payload(inner);
-        framecrypto::EtmHeaderFields fields{};
-        fields.downlink       = false;
-        fields.session_id     = base_nonce;
-        fields.dest_address   = inner.header.destAddress;
-        fields.dest_subnet    = inner.header.destSubnet;
-        fields.sender_address = inner.header.senderAddress;
-        fields.msgid          = inner.header.msgId;
-        auto enc = proto_sim::encrypt_then_cmac_seal(base_nonce, kTestNodeNonce,
-                                                     esphome::lora_tracker::kHubAddress, node_addr,
-                                                     /*downlink=*/false, fields,
-                                                     plain.data(), plain.size());
-
-        proto_sim::LoraClientResponseMessage outer;
-        outer.header               = inner.header;
-        outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-        outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-        outer.encrypted.ciphertext = enc.ciphertext;
-
-        auto ack_bytes = proto_sim::serialize_resp(outer);
+        // A v1 SESSION frame under the keys of (base_nonce, kTestNodeNonce),
+        // SESSION_OPENING carrying the node nonce, exactly as the node sends it.
+        auto ack_bytes = proto_sim::seal_resp(inner, base_nonce, kTestNodeNonce);
         listener.set_response(ack_bytes.data(), ack_bytes.size());
     });
 }
@@ -177,7 +250,7 @@ TEST(RealLoraClient, SendLoginReusesPendingNonceAcrossRetries) {
     // Every LoginMsg on the wire carries the same nonce.
     uint32_t observed = 0;
     int count = 0;
-    for (const auto& f : radio.hub_to_node_views()) {
+    for (const auto& f : radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Login) continue;
         if (count == 0) observed = m->login.nonce;
@@ -697,23 +770,15 @@ TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
            "never aimed at a window; counting it would inflate the denominator";
 }
 
-// Length re-encode check (FrameCanon.h), hub side. The hub's T0 stamp for an
-// uplink comes from its on-air length, which the CMAC does not cover, so a
-// non-canonical uplink is still PROCESSED (counter advanced, command run) but
-// must not become the node's Class A window origin ("no usable origin" -> burst).
-namespace {
-// Splice `extra` inside the header field (field 1, one-byte length) of a packed frame.
-}  // namespace
-
-TEST(RealLoraClient, ACanonicalUplinkBecomesTheClassAOriginAndTripsNothing) {
+// A v1 uplink's on-air length is a T0 input as it stands (fixed header, tag
+// over the raw bytes): an admitted uplink becomes the node's Class A origin.
+TEST(RealLoraClient, AnAdmittedUplinkBecomesTheClassAOrigin) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     h.tracker.last_rx_t0_us_v = 100'000;
     auto f = real_helpers::serialize_avail(18, 1);
     h.rol.set_response(f.data(), f.size());
-    EXPECT_TRUE(h.rol.rx_timing_trusted_);
-    EXPECT_EQ(h.rol.noncanonical_frames_, 0u) << "a same-version uplink must never trip the check";
     EXPECT_EQ(h.rol.last_uplink_t0_us_, 100'000);
 }
 
@@ -813,30 +878,18 @@ struct TrackedOpProbe : LORAClient {
 
 std::vector<uint8_t> plaintext_ack_frame(uint32_t msgid, uint32_t ack_msg_id,
                                          bool timed_rx_active) {
-    LoraHeader hdr       = LORA_HEADER__INIT;
-    hdr.destaddress      = esphome::lora_tracker::kHubAddress;
-    hdr.destsubnet       = 2;
-    hdr.senderaddress    = 18;
-    hdr.msgid            = msgid;
-
     PhaseReport pr       = PHASE_REPORT__INIT;
     pr.samples           = 12;
     pr.rtcslowsrc        = 2;          // crystal
     pr.timedrxactive     = timed_rx_active;
 
-    CommandAck ack       = COMMAND_ACK__INIT;
-    ack.ack_msg_id       = ack_msg_id;
+    MacAck ack           = MAC_ACK__INIT;
     ack.status           = ACK_STATUS__ACK_OK;
     ack.phase            = &pr;
-
-    LoraClientResponseMessage resp = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    resp.header          = &hdr;
-    resp.proto_case      = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK;
-    resp.ack             = &ack;
-
-    std::vector<uint8_t> out(lora_client_response_message__get_packed_size(&resp));
-    lora_client_response_message__pack(&resp, out.data());
-    return out;
+    NodeMacPdu pdu       = NODE_MAC_PDU__INIT;
+    pdu.pdu_case         = NODE_MAC_PDU__PDU_ACK;
+    pdu.ack              = &ack;
+    return v1_uplink(msgid, macwire::kPortMac0Mgmt, pack_pdu(&pdu), macwire::kFlagAck, ack_msg_id);
 }
 }  // namespace
 
@@ -892,43 +945,33 @@ TEST(RealLoraClient, PlaintextIsStillTheBootstrapBeforeASessionExists) {
 // reaches -- undecodable bytes, the never-legitimate plaintext LOGIN uplink,
 // and the fan-out of an admitted plaintext frame to the child nodes.
 namespace {
-// Records every application indication (S6) it is handed: the decoded outer
-// header, the payload re-packed (so a test can inspect it after the listener
-// freed the original), and the authentic flag; plus REGISTER notices.
+// Records every application indication (S6) it is handed: the decoded header,
+// the body case and the authentic flag; plus REGISTER notices.
 struct RecordingNode : esphome::lora_tracker::LORAClientNode {
     struct Got {
         mac::MacHdr hdr;
         int proto_case;
-        std::vector<uint8_t> payload;
         bool authentic;
+        uint64_t beacon_epoch;   // NodeWakeBeacon.nodeepoch, 0 for anything else
     };
     std::vector<Got> got;
     int registers{0};
     void on_app_indication(const esphome::lora_tracker::AppIndication &ind) override {
-        Got g{ind.hdr, (int) ind.msg->proto_case, {}, ind.authentic};
-        g.payload.resize(lora_client_response_message__get_packed_size(ind.msg));
-        lora_client_response_message__pack(ind.msg, g.payload.data());
-        got.push_back(std::move(g));
+        const bool beacon = ind.msg->proto_case == hubframes::UL_BEACON && ind.msg->beacon;
+        got.push_back(Got{ind.hdr, (int) ind.msg->proto_case, ind.authentic,
+                          beacon ? ind.msg->beacon->nodeepoch : 0});
     }
     void on_register() override { ++registers; }
     void send_remote_config() override {}
 };
 
+// A LoginMsg body on PORT 1 without K_AUTH: no node ever sends one.
 std::vector<uint8_t> plaintext_login_uplink(uint32_t msgid) {
-    LoraHeader hdr       = LORA_HEADER__INIT;
-    hdr.destaddress      = esphome::lora_tracker::kHubAddress;
-    hdr.destsubnet       = 2;
-    hdr.senderaddress    = 18;
-    hdr.msgid            = msgid;
     LoginMsg login       = LOGIN_MSG__INIT;
     login.nonce          = 0x1234;
-    LoraClientResponseMessage resp = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    resp.header          = &hdr;
-    resp.proto_case      = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN;
-    resp.login           = &login;
-    std::vector<uint8_t> out(lora_client_response_message__get_packed_size(&resp));
-    lora_client_response_message__pack(&resp, out.data());
-    return out;
+    std::vector<uint8_t> body(login_msg__get_packed_size(&login));
+    login_msg__pack(&login, body.data());
+    return v1_uplink(msgid, macwire::kPortSession, body);
 }
 }  // namespace
 
@@ -941,7 +984,6 @@ TEST(RealLoraClient, UndecodableBytesAreDroppedWithoutAnyEffect) {
     const size_t tx_before = h.radio.transcript().size();
     uint8_t garbage[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x02};
     h.rol.set_response(garbage, sizeof(garbage));
-    EXPECT_EQ(h.rol.nonCanonicalFrames(), 0u) << "never got as far as the length check";
     EXPECT_EQ(h.rol.seq_.rxId(), 0u);
     EXPECT_TRUE(node.got.empty());
     EXPECT_EQ(h.radio.transcript().size(), tx_before);
@@ -989,7 +1031,7 @@ TEST(RealLoraClient, AnAdmittedPlaintextFrameIsFannedOutDecodedToTheChildNodes) 
     ASSERT_EQ(a.got.size(), 1u);
     ASSERT_EQ(b.got.size(), 1u);
     for (const RecordingNode *n : {&a, &b}) {
-        EXPECT_EQ(n->got[0].proto_case, (int) LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION);
+        EXPECT_EQ(n->got[0].proto_case, (int) hubframes::UL_POSITION);
         EXPECT_EQ(n->got[0].hdr.src, 18u);
         EXPECT_EQ(n->got[0].hdr.fcnt, 5u);
         EXPECT_FALSE(n->got[0].authentic);
@@ -1031,7 +1073,7 @@ TEST(RealLoraClient, RegisterTriggersClientConfigAndLoginTimer) {
         << "REGISTER must flip registered_ true in real code.";
 
     int cfg_count = 0;
-    for (const auto& f : h.radio.hub_to_node_views()) {
+    for (const auto& f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (!m) continue;
         if (m->cmd == proto_sim::LoraClientOperationMessage::Cmd::ClientConfig) {
@@ -1053,7 +1095,7 @@ TEST(RealLoraClient, EnterSleepEmitsSleepCmdAndArmsFallback) {
     h.rol.enterSleep();
 
     int sleep_msgs = 0;
-    for (const auto& f : h.radio.hub_to_node_views()) {
+    for (const auto& f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Sysop &&
             m->sysop == proto_sim::ClientOperation::CMD_SLEEP) ++sleep_msgs;
@@ -1072,7 +1114,7 @@ TEST(RealLoraClient, TriggerOtaEmitsOtaSysop) {
     h.rol.triggerOTA();
 
     int ota = 0;
-    for (const auto& f : h.radio.hub_to_node_views()) {
+    for (const auto& f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Sysop &&
             m->sysop == proto_sim::ClientOperation::CMD_OTA) ++ota;
@@ -1254,7 +1296,7 @@ TEST(RealLoraClient, WrongMacRegisterIgnored) {
 
     EXPECT_FALSE(h.rol.registered_)
         << "Real REGISTER handler must reject non-matching MAC.";
-    for (const auto& f : h.radio.hub_to_node_views()) {
+    for (const auto& f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         EXPECT_TRUE(!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::ClientConfig)
             << "Real code must not emit ClientConfig for unknown MAC.";
@@ -1274,61 +1316,41 @@ namespace {
 // `base_nonce`, and return the inner (payload-only) operation message.
 std::optional<proto_sim::LoraClientOperationMessage>
 decrypt_downlink(const proto_sim::AirFrame& f, uint32_t base_nonce) {
-    auto outer = proto_sim::as_op(f);
-    if (!outer || outer->cmd != proto_sim::LoraClientOperationMessage::Cmd::Encrypted)
-        return std::nullopt;
-
-    // Tier 3: Encrypt-then-CMAC. node_addr is the destination (this is a
-    // downlink TO the node); node_nonce is the fixed value every
-    // session-establishing helper in this file used.
-    framecrypto::EtmHeaderFields fields{};
-    fields.downlink       = true;
-    fields.session_id     = base_nonce;
-    fields.dest_address   = outer->header.destAddress;
-    fields.dest_subnet    = outer->header.destSubnet;
-    fields.sender_address = outer->header.senderAddress;
-    fields.msgid          = outer->header.msgId;
-    fields.burst_index    = outer->header.burstIndex;
-    fields.burst_count    = outer->header.burstCount;
-    fields.on_mark        = outer->header.onMark;
-    fields.fire_stamped   = outer->header.fireStamped;
-    fields.fire_round     = outer->header.fireRound;
-    fields.fire_offset_us = outer->header.fireOffsetUs;
-
-    auto plain = proto_sim::encrypt_then_cmac_open(
-        base_nonce, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
-        static_cast<uint8_t>(outer->header.destAddress), /*downlink=*/true, fields,
-        outer->encrypted.ciphertext.data(), outer->encrypted.ciphertext.size(),
-        outer->encrypted.tag.data(), outer->encrypted.tag.size());
-    if (!plain) return std::nullopt;
-    return proto_sim::deserialize_op(plain->data(), plain->size());
+    if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return std::nullopt;
+    return proto_sim::open_op(f.bytes, base_nonce, kTestNodeNonce);
 }
 
-// Tier 3: seal an uplink the way the node would, post-session-establishment
-// (sessionNonce stays 0 — only the session-OPENING uplink carries it, and
-// every test using this has already gone through attach_encrypted_login_ack/
-// drive_session for that). Collects the boilerplate every "build a real
-// encrypted uplink by hand" test in this file repeats.
-proto_sim::EtmResult seal_uplink_like_node(uint32_t base_nonce,
-                                           const proto_sim::LoraHeader &header,
-                                           const std::vector<uint8_t> &plain) {
-    framecrypto::EtmHeaderFields fields{};
-    fields.downlink       = false;
-    fields.session_id     = base_nonce;
-    fields.dest_address   = header.destAddress;
-    fields.dest_subnet    = header.destSubnet;
-    fields.sender_address = header.senderAddress;
-    fields.msgid          = header.msgId;
-    fields.burst_index    = header.burstIndex;
-    fields.burst_count    = header.burstCount;
-    fields.on_mark        = header.onMark;
-    fields.fire_stamped   = header.fireStamped;
-    fields.fire_round     = header.fireRound;
-    fields.fire_offset_us = header.fireOffsetUs;
-    return proto_sim::encrypt_then_cmac_seal(
-        base_nonce, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
-        static_cast<uint8_t>(header.senderAddress), /*downlink=*/false, fields,
-        plain.data(), plain.size());
+// An uplink sealed the way the node seals it, post-session-establishment
+// (sessionNonce stays 0 -- only the session-OPENING uplink carries it, and
+// every test using this has already gone through attach_encrypted_login_ack /
+// drive_session for that). A test may flip a tag byte before payload().
+struct NodeSeal {
+    uint8_t tag[8]{};
+    std::vector<uint8_t> ciphertext;
+    proto_sim::EncryptedPayload sealed;
+    proto_sim::EncryptedPayload payload() const {
+        proto_sim::EncryptedPayload e = sealed;
+        e.tag.assign(tag, tag + sizeof(tag));
+        e.ciphertext = ciphertext;
+        return e;
+    }
+};
+NodeSeal node_seal(const proto_sim::EncryptedPayload &e) {
+    NodeSeal n;
+    n.sealed = e;
+    std::copy(e.tag.begin(), e.tag.end(), n.tag);
+    n.ciphertext = e.ciphertext;
+    return n;
+}
+// An application body (NodeAppPdu, PORT 2) under `header`.
+NodeSeal seal_uplink_like_node(uint32_t base_nonce, const proto_sim::LoraHeader &header,
+                               const std::vector<uint8_t> &plain) {
+    return node_seal(proto_sim::seal_resp_body(header, plain, macwire::kPortApp, base_nonce,
+                                               kTestNodeNonce));
+}
+// Any uplink message (its own PORT; a MacAck with FLAGS.ACK + ACKED_FCNT).
+NodeSeal seal_uplink_like_node(uint32_t base_nonce, const proto_sim::LoraClientResponseMessage &inner) {
+    return node_seal(proto_sim::seal_resp_payload(inner, base_nonce, kTestNodeNonce));
 }
 
 // Drive REGISTER -> login -> encrypted ACK, leaving the session confirmed.
@@ -1402,78 +1424,6 @@ TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
     esphome::shim_hooks::set_active_clock(nullptr);
 }
 
-// Invariant I3 (mac-separation-implementation-plan.md section 2(b)):
-// retagLikeLastFrameForTest() must refuse to retag a copy whose ciphertext was
-// sealed under a session that is no longer current — sealing it anyway
-// would pair an OLD ciphertext with a NEW tag, silently wasting the copy
-// (the node's CMAC check fails) rather than visibly dropping it here.
-//
-// The real queue/burst path retags synchronously inside the same call that
-// seals (both the shim and the real tracker), so there is no window to
-// inject a re-login between the two through the public send APIs. This
-// calls retagLikeLastFrameForTest() directly instead, after s_pack_operation_message
-// has snapshotted session #1's key id and a second LOGIN has moved the
-// listener on to session #2 — exactly the ordering a re-login mid-burst
-// would produce.
-TEST(RealLoraClient, StaleSessionCopyIsRefusedNotRetaggedUnderTheWrongKey) {
-    proto_sim::SimClock clock;
-    proto_sim::SimRadio radio;
-    esphome::shim_hooks::set_active_clock(&clock);
-    esphome::shim_hooks::reset_nvs();
-    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
-    ensure_psa_ready();
-
-    LORATracker tracker;
-    LORAClient  rol;
-    rol.set_name("rol");
-    rol.set_short_address(18);
-    rol.set_subnet_address(2);
-    rol.set_sleep_duration(21600);
-    rol.set_address(kMacRol2);
-    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
-    rol.set_time(&time);
-    tracker.register_client(&rol);
-
-    drive_session(clock, radio, rol);
-    ASSERT_EQ(rol.sessionGenerationForTest(), 1u);
-    rol.mark_session_confirmed_for_test();
-
-    // Seal a real frame under session #1 — this is what snapshots
-    // s_seal_key_id_map[18]. What happens to the packed bytes afterwards
-    // (the shim retags and "sends" them immediately) doesn't matter here.
-    rol.send_remote_config();
-
-    // A second session, moving the listener on to a brand-new K_enc/K_mac
-    // WITHOUT ever touching s_seal_key_id_map[18] — exactly like a real
-    // frame still sitting in the tracker's queue when a re-login lands.
-    // Via the test hook, not a real second LOGIN: the shim retags
-    // synchronously inside send(), so there is no window between seal and
-    // retag to drive a real re-login through anyway (see the banner above).
-    ASSERT_TRUE(rol.deriveSessionKeysForTest(/*session_id=*/0xDEADBEEFu, kTestNodeNonce));
-    ASSERT_EQ(rol.sessionGenerationForTest(), 2u)
-        << "precondition: the second session must have derived NEW keys";
-
-    LoraHeader hdr   = LORA_HEADER__INIT;
-    hdr.destaddress   = 18;
-    hdr.destsubnet    = 2;
-    hdr.senderaddress = esphome::lora_tracker::kHubAddress;
-    hdr.msgid         = 999;
-    uint8_t ciphertext[4] = {0, 0, 0, 0};
-    uint8_t tag[framecrypto::kSessionCmacTagBytes] = {0};
-    EncryptedPayload enc = ENCRYPTED_PAYLOAD__INIT;
-    enc.ciphertext.data = ciphertext;
-    enc.ciphertext.len  = sizeof(ciphertext);
-    enc.tag.data        = tag;
-    enc.tag.len         = sizeof(tag);
-
-    EXPECT_FALSE(rol.retagLikeLastFrameForTest(&enc, &hdr))
-        << "a copy sealed under session #1 must not be retagged under #2's key";
-    EXPECT_EQ(rol.staleSessionDropsForTest(), 1u);
-
-    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
-    esphome::shim_hooks::set_active_clock(nullptr);
-}
-
 TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
     // send_remote_config() packed raw, so ClientConfig ALWAYS went out in the
     // clear — including to a provisioned node, which refuses plaintext commands
@@ -1507,7 +1457,7 @@ TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
 
     auto count_plaintext_config = [&]() {
         int n = 0;
-        for (const auto& f : radio.hub_to_node_views()) {
+        for (const auto& f : radio.hub_to_node_frames()) {
             auto m = proto_sim::as_op(f);
             if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::ClientConfig)
                 ++n;
@@ -1587,7 +1537,7 @@ TEST(RealLoraClient, AProvisionedNodesCoverConfigIsEncryptedToo) {
 
     int plaintext_cover_config = 0;
     int encrypted_cover_config = 0;
-    for (const auto& f : radio.hub_to_node_views()) {
+    for (const auto& f : radio.hub_to_node_frames()) {
         auto plain = proto_sim::as_op(f);
         if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::CoverConfig)
             ++plaintext_cover_config;
@@ -1662,13 +1612,11 @@ TEST(RealLoraClient, ADecryptedBeaconIsWhatCarriesThePhaseReport) {
     inner.beacon.phase.outsideGuard = 0;
     inner.beacon.phase.timedRxActive = true;   // the node's own decision: in Mode B
 
-    auto plain = proto_sim::serialize_resp_payload(inner);
-    auto enc = seal_uplink_like_node(base, inner.header, plain);
+    auto enc = seal_uplink_like_node(base, inner);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-    outer.encrypted.ciphertext = enc.ciphertext;
+    outer.encrypted = enc.payload();
     auto frame = proto_sim::serialize_resp(outer);
     rol.set_response(frame.data(), frame.size());
 
@@ -1853,13 +1801,11 @@ TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
     inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Avail;
     inner.avail.available      = true;
 
-    auto plain = proto_sim::serialize_resp_payload(inner);
-    auto enc = seal_uplink_like_node(base, inner.header, plain);
+    auto enc = seal_uplink_like_node(base, inner);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-    outer.encrypted.ciphertext = enc.ciphertext;
+    outer.encrypted = enc.payload();
     auto real_frame = proto_sim::serialize_resp(outer);
     rol.set_response(real_frame.data(), real_frame.size());
 
@@ -2253,13 +2199,11 @@ TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
         bmsg.beacon.phase.rtcSlowSrc = 2;
         bmsg.beacon.phase.samples    = 0;      // nothing measured yet this wake
 
-        auto bplain = proto_sim::serialize_resp_payload(bmsg);
-        auto benc = seal_uplink_like_node(base, bmsg.header, bplain);
+        auto benc = seal_uplink_like_node(base, bmsg);
         proto_sim::LoraClientResponseMessage bouter;
         bouter.header               = bmsg.header;
         bouter.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-        bouter.encrypted.tag        = std::vector<uint8_t>(benc.tag, benc.tag + framecrypto::kSessionCmacTagBytes);
-        bouter.encrypted.ciphertext = benc.ciphertext;
+        bouter.encrypted = benc.payload();
         auto bframe = proto_sim::serialize_resp(bouter);
         rol.set_response(bframe.data(), bframe.size());
     }
@@ -2284,13 +2228,11 @@ TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
     inner.ack.phase.outsideGuard = 0;
     inner.ack.phase.timedRxActive = true;   // the node's own decision: in Mode B
 
-    auto plain = proto_sim::serialize_resp_payload(inner);
-    auto enc = seal_uplink_like_node(base, inner.header, plain);
+    auto enc = seal_uplink_like_node(base, inner);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-    outer.encrypted.ciphertext = enc.ciphertext;
+    outer.encrypted = enc.payload();
     auto frame = proto_sim::serialize_resp(outer);
     rol.set_response(frame.data(), frame.size());
 
@@ -2349,13 +2291,11 @@ TEST(RealLoraClient, AnAckWithNoPhaseReportLeavesTheBeliefAlone) {
     inner.ack.ack_msg_id       = 9;
     inner.ack.phasePresent     = false;
 
-    auto plain = proto_sim::serialize_resp_payload(inner);
-    auto enc = seal_uplink_like_node(base, inner.header, plain);
+    auto enc = seal_uplink_like_node(base, inner);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-    outer.encrypted.ciphertext = enc.ciphertext;
+    outer.encrypted = enc.payload();
     auto frame = proto_sim::serialize_resp(outer);
     rol.set_response(frame.data(), frame.size());
 
@@ -2538,14 +2478,12 @@ void send_encrypted_uplink(LORAClient& listener, uint32_t base_nonce,
     inner.header.senderAddress = node_addr;
     inner.header.msgId         = msgid;
 
-    auto plain = proto_sim::serialize_resp_payload(inner);
-    auto enc = seal_uplink_like_node(base_nonce, inner.header, plain);
+    auto enc = seal_uplink_like_node(base_nonce, inner);
 
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-    outer.encrypted.ciphertext = enc.ciphertext;
+    outer.encrypted = enc.payload();
 
     auto bytes = proto_sim::serialize_resp(outer);
     listener.set_response(bytes.data(), bytes.size());
@@ -2938,23 +2876,10 @@ TEST(MacPing, EchoIsCountedAndConsumedNotForwarded) {
     ASSERT_EQ(h.rol.mac_stats().echoes_rx, 0u);
 
     // Feed a plaintext MAC echo in, exactly as the node's MAC-0 emits it.
-    ::LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = 1;
-    hdr.destsubnet    = 2;
-    hdr.senderaddress = 2;
-    hdr.msgid         = 500;
-
     ::MacControl echo = MAC_CONTROL__INIT;
     echo.kind = MAC_CONTROL__KIND__MAC_ECHO;
     echo.seq  = 1;
-
-    ::LoraClientResponseMessage resp = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    resp.header     = &hdr;
-    resp.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
-    resp.maccontrol = &echo;
-
-    std::vector<uint8_t> bytes(lora_client_response_message__get_packed_size(&resp));
-    lora_client_response_message__pack(&resp, bytes.data());
+    std::vector<uint8_t> bytes = mac_control_uplink(echo, /*fcnt=*/500, /*src=*/2);
     h.rol.set_response(bytes.data(), bytes.size());
 
     EXPECT_EQ(h.rol.mac_stats().echoes_rx, 1u);
@@ -2970,18 +2895,10 @@ TEST(MacPing, MissingMarksAreCountedAsGapsBySeq) {
     h.rol.start_mac_ping(300, 1100);
 
     auto feed_echo = [&](uint32_t seq, uint32_t msgid) {
-        ::LoraHeader hdr = LORA_HEADER__INIT;
-        hdr.destaddress = 1; hdr.destsubnet = 2; hdr.senderaddress = 2;
-        hdr.msgid = msgid;
         ::MacControl e = MAC_CONTROL__INIT;
         e.kind = MAC_CONTROL__KIND__MAC_ECHO;
         e.seq  = seq;
-        ::LoraClientResponseMessage r = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-        r.header = &hdr;
-        r.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
-        r.maccontrol = &e;
-        std::vector<uint8_t> b(lora_client_response_message__get_packed_size(&r));
-        lora_client_response_message__pack(&r, b.data());
+        std::vector<uint8_t> b = mac_control_uplink(e, msgid, /*src=*/2);
         h.rol.set_response(b.data(), b.size());
     };
 
@@ -3004,17 +2921,10 @@ TEST(MacPing, FirstEchoIsNotAGapEvenIfItsSeqIsHigh) {
     h.rol.registered_ = true;
     h.rol.start_mac_ping(300, 1100);
 
-    ::LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress = 1; hdr.destsubnet = 2; hdr.senderaddress = 2; hdr.msgid = 700;
     ::MacControl e = MAC_CONTROL__INIT;
     e.kind = MAC_CONTROL__KIND__MAC_ECHO;
     e.seq  = 9;
-    ::LoraClientResponseMessage r = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    r.header = &hdr;
-    r.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
-    r.maccontrol = &e;
-    std::vector<uint8_t> b(lora_client_response_message__get_packed_size(&r));
-    lora_client_response_message__pack(&r, b.data());
+    std::vector<uint8_t> b = mac_control_uplink(e, /*fcnt=*/700, /*src=*/2);
     h.rol.set_response(b.data(), b.size());
 
     // Without the have_echo guard this would report eight phantom losses on the
@@ -3030,18 +2940,11 @@ TEST(MacPing, APingIsNeverAnsweredByTheHub) {
     ensure_psa_ready();
     h.rol.start_mac_ping(300, 1100);
 
-    ::LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress = 1; hdr.destsubnet = 2; hdr.senderaddress = 2; hdr.msgid = 800;
     ::MacControl ping = MAC_CONTROL__INIT;
     ping.kind = MAC_CONTROL__KIND__MAC_PING;   // wrong direction on purpose
     ping.seq = 1;
     ping.wantecho = true;
-    ::LoraClientResponseMessage r = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    r.header = &hdr;
-    r.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
-    r.maccontrol = &ping;
-    std::vector<uint8_t> b(lora_client_response_message__get_packed_size(&r));
-    lora_client_response_message__pack(&r, b.data());
+    std::vector<uint8_t> b = mac_control_uplink(ping, /*fcnt=*/800, /*src=*/2);
 
     const size_t before = h.tracker.sent_copies.size();
     h.rol.set_response(b.data(), b.size());
@@ -3366,13 +3269,13 @@ TEST(TrackedOpRetry, ARetransmitReusesTheMsgidAndTheExactBytes) {
 
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.5f);
     h.clock.tick(10);
-    const auto first = h.radio.hub_to_node_views();
+    const auto first = h.radio.hub_to_node_frames();
     ASSERT_FALSE(first.empty()) << "the command must go out at all";
     const auto original = first.back();
 
     // Let the retry timer fire without any ack.
     h.clock.tick(3000 + 50);   // kOpRetryIntervalMs
-    const auto after = h.radio.hub_to_node_views();
+    const auto after = h.radio.hub_to_node_frames();
     ASSERT_GT(after.size(), first.size()) << "a retry must be transmitted";
     const auto retry = after.back();
 
@@ -3392,11 +3295,11 @@ TEST(TrackedOpRetry, ANewCommandGetsANewMsgid) {
 
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
     h.clock.tick(10);
-    const auto first = h.radio.hub_to_node_views().back();
+    const auto first = h.radio.hub_to_node_frames().back();
 
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.90f);
     h.clock.tick(10);
-    const auto second = h.radio.hub_to_node_views().back();
+    const auto second = h.radio.hub_to_node_frames().back();
 
     EXPECT_NE(first.bytes, second.bytes)
         << "a new command is not a retransmission";
@@ -3536,19 +3439,10 @@ TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
     rep.residualppm      = 7;
     rep.residualsamples  = 41;
 
-    LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = esphome::lora_tracker::kHubAddress;
-    hdr.destsubnet    = 2;
-    hdr.senderaddress = 18;
-    hdr.msgid         = 1;
-
-    LoraClientResponseMessage msg = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    msg.header         = &hdr;
-    msg.proto_case     = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT;
-    msg.modetestreport = &rep;
-
-    std::vector<uint8_t> frame(lora_client_response_message__get_packed_size(&msg));
-    lora_client_response_message__pack(&msg, frame.data());
+    NodeMacPdu pdu     = NODE_MAC_PDU__INIT;
+    pdu.pdu_case       = NODE_MAC_PDU__PDU_MODETESTREPORT;
+    pdu.modetestreport = &rep;
+    std::vector<uint8_t> frame = v1_uplink(/*fcnt=*/1, macwire::kPortMac0Mgmt, pack_pdu(&pdu));
     rol.set_response(frame.data(), frame.size());
 
     const auto &s = rol.mode_test_summary();
@@ -3702,16 +3596,15 @@ TEST(PlacedDownlinks, ATimeSyncCarriesTheHubsInSlotCountToTheNode) {
     ASSERT_EQ(h.rol.hubBelief().in_slot_acks, 3u)
         << "precondition: the hub has observed three in slot";
 
-    const size_t before = h.radio.hub_to_node_views().size();
+    const size_t before = h.radio.hub_to_node_frames().size();
     h.rol.send_timesync();
-    ASSERT_GT(h.radio.hub_to_node_views().size(), before);
+    ASSERT_GT(h.radio.hub_to_node_frames().size(), before);
 
     int seen = 0;
-    for (const auto &f : h.radio.hub_to_node_views()) {
-        LoraClientOperationMessage *m = lora_client_operation_message__unpack(
-            nullptr, f.bytes.size(), f.bytes.data());
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        RealDown *m = real_down_plain(f.bytes);
         if (m == nullptr) continue;
-        if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC &&
+        if (m->cmd_case == hubframes::DL_TIMESYNC &&
             m->timesync != nullptr) {
             EXPECT_EQ(m->timesync->inslotuplinks, 3u)
                 << "the hub must tell the node what it has actually observed — "
@@ -3719,7 +3612,7 @@ TEST(PlacedDownlinks, ATimeSyncCarriesTheHubsInSlotCountToTheNode) {
                    "criterion can ever be satisfied";
             ++seen;
         }
-        lora_client_operation_message__free_unpacked(m, nullptr);
+        delete m;
     }
     EXPECT_EQ(seen, 1) << "exactly one TimeSync";
 }
@@ -4035,15 +3928,15 @@ TEST(MarkLead, ASkippedTickSendsNothingAndTheNextMarkIsTheFrameItHeld) {
     markTickAt(h, now);                       // pushed two rounds out
     h.tracker.busy_until_us = 0;
     now += R;
-    const size_t sends_before = h.tracker.sent_wire.size();
+    const size_t sends_before = h.tracker.sent_raw.size();
     const std::vector<uint8_t> held = h.rol.mode_test_frame_for_test();
     markTickAt(h, now);                       // a round ahead already: hold
-    EXPECT_EQ(h.tracker.sent_wire.size(), sends_before) << "nothing sent on a held tick";
+    EXPECT_EQ(h.tracker.sent_raw.size(), sends_before) << "nothing sent on a held tick";
     EXPECT_EQ(h.rol.mode_test_frame_for_test(), held) << "and nothing rebuilt";
     now += R;
     markTickAt(h, now);
-    ASSERT_EQ(h.tracker.sent_wire.size(), sends_before + 1);
-    EXPECT_EQ(h.tracker.sent_wire.back(), held) << "the held frame is the next mark";
+    ASSERT_EQ(h.tracker.sent_raw.size(), sends_before + 1);
+    EXPECT_EQ(h.tracker.sent_raw.back(), held) << "the held frame is the next mark";
     h.rol.stop_mode_test();
 }
 
@@ -4144,7 +4037,7 @@ TEST(RealLoraClient, AHeardClassANodeIsAwakeOnlyThroughItsReceiveWindows) {
 namespace {
 constexpr int64_t kBacklogUs = 9'000'000;   // ~5 bursts queued ahead
 size_t frames_on_air(const real_helpers::RealHubHarness& h) {
-    return h.radio.hub_to_node_views().size();
+    return h.radio.hub_to_node_frames().size();
 }
 }  // namespace
 
@@ -4304,7 +4197,7 @@ struct TwoNodeHub {
 
     int loginsTo(uint32_t addr) const {
         int n = 0;
-        for (const auto& f : radio.hub_to_node_views()) {
+        for (const auto& f : radio.hub_to_node_frames()) {
             auto m = proto_sim::as_op(f);
             if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login &&
                 m->header.destAddress == addr) ++n;
@@ -4538,13 +4431,13 @@ TEST(SessionRebuild, HousekeepingPushesWaitForTheSessionInsteadOfGoingOutInTheCl
     // The node has rebooted: its REGISTER starts the hub's login, 4 s from now.
     auto reg = serialize_register(kMacRol2, /*needs_config=*/false);
     h.rol.set_response(reg.data(), reg.size());
-    const size_t baseline = h.radio.hub_to_node_views().size();
+    const size_t baseline = h.radio.hub_to_node_frames().size();
 
     // The pushes a beacon had queued, firing inside that window.
     h.rol.send_schedule_config();
     h.rol.send_timesync();
     h.rol.enable_timed_mode(true);
-    EXPECT_EQ(h.radio.hub_to_node_views().size(), baseline)
+    EXPECT_EQ(h.radio.hub_to_node_frames().size(), baseline)
         << "nothing may leave between the REGISTER and a confirmed session: the "
            "node just restarted, so an old-session frame cannot be decrypted and "
            "a plaintext one is refused. Each is a burst of airtime spent to be dropped";
@@ -4556,7 +4449,7 @@ TEST(SessionRebuild, HousekeepingPushesWaitForTheSessionInsteadOfGoingOutInTheCl
     h.clock.tick(4000);
 
     int plain_schedule = 0, plain_timesync = 0, enc_schedule = 0, enc_timesync = 0;
-    for (const auto& f : h.radio.hub_to_node_views()) {
+    for (const auto& f : h.radio.hub_to_node_frames()) {
         auto plain = proto_sim::as_op(f);
         if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::Schedule) ++plain_schedule;
         if (plain && plain->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++plain_timesync;
@@ -4581,13 +4474,13 @@ TEST(SessionRebuild, ALoginTheHubStartsItselfHoldsThePushesBackToo) {
     h.rol.registered_ = true;
 
     h.rol.send_login();
-    const size_t baseline = h.radio.hub_to_node_views().size();
+    const size_t baseline = h.radio.hub_to_node_frames().size();
     ASSERT_GT(baseline, 0u) << "the login itself must have gone out";
 
     h.rol.send_schedule_config();
     h.rol.send_timesync();
     h.rol.enable_timed_mode(true);
-    EXPECT_EQ(h.radio.hub_to_node_views().size(), baseline)
+    EXPECT_EQ(h.radio.hub_to_node_frames().size(), baseline)
         << "pushes wait for the node to prove the new key";
 }
 
@@ -4603,10 +4496,10 @@ TEST(SessionRebuild, WithdrawingTheGridIsNotDeferredBecauseItIsTheSafeDirection)
 
     auto reg = serialize_register(kMacRol2, /*needs_config=*/false);
     h.rol.set_response(reg.data(), reg.size());
-    const size_t baseline = h.radio.hub_to_node_views().size();
+    const size_t baseline = h.radio.hub_to_node_frames().size();
 
     h.rol.enable_timed_mode(false);
-    EXPECT_GT(h.radio.hub_to_node_views().size(), baseline)
+    EXPECT_GT(h.radio.hub_to_node_frames().size(), baseline)
         << "a withdrawn grid must reach the node even while its session is rebuilt";
 }
 
@@ -4631,47 +4524,18 @@ struct TxIdProbe : LORAClient {
     uint32_t txId() const { return this->seq_.txId(); }
 };
 
-// Decrypt a hub->node frame with `base_nonce` and unpack it as the REAL
-// protobuf-c struct. Returns nullptr if the frame is not CMD_ENCRYPTED or the
-// tag does not verify. Caller frees with lora_client_operation_message__free_unpacked.
-LoraClientOperationMessage *decrypt_downlink_real(const std::vector<uint8_t> &bytes,
-                                                  uint32_t base_nonce,
-                                                  uint32_t *out_msgid = nullptr) {
-    LoraClientOperationMessage *outer =
-        lora_client_operation_message__unpack(nullptr, bytes.size(), bytes.data());
-    if (outer == nullptr) return nullptr;
-    if (outer->cmd_case != LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED || outer->encrypted == nullptr ||
-        outer->header == nullptr) {
-        lora_client_operation_message__free_unpacked(outer, nullptr);
-        return nullptr;
-    }
-    framecrypto::EtmHeaderFields fields{};
-    fields.downlink       = true;
-    fields.session_id     = base_nonce;
-    fields.dest_address   = outer->header->destaddress;
-    fields.dest_subnet    = outer->header->destsubnet;
-    fields.sender_address = outer->header->senderaddress;
-    fields.msgid          = outer->header->msgid;
-    fields.burst_index    = outer->header->burstindex;
-    fields.burst_count    = outer->header->burstcount;
-    fields.on_mark        = outer->header->onmark;
-    fields.fire_stamped   = outer->header->firestamped;
-    fields.fire_round     = outer->header->fireround;
-    fields.fire_offset_us = outer->header->fireoffsetus;
-    auto plain = proto_sim::encrypt_then_cmac_open(
-        base_nonce, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
-        static_cast<uint8_t>(outer->header->destaddress), /*downlink=*/true, fields,
-        outer->encrypted->ciphertext.data, outer->encrypted->ciphertext.len,
-        outer->encrypted->tag.data, outer->encrypted->tag.len);
-    if (out_msgid != nullptr)
-        *out_msgid = outer->header->msgid;
-    lora_client_operation_message__free_unpacked(outer, nullptr);
-    if (!plain) return nullptr;
-    LoraClientOperationMessage *inner =
-        lora_client_operation_message__unpack(nullptr, plain->size(), plain->data());
-    // The inner message carries no header (stripped at encrypt time); the caller
-    // reads the outer msgid via out_msgid where it matters.
-    return inner;
+// Open a hub->node SESSION frame with `base_nonce` (tag first) and decode it
+// natively. nullptr if the frame is not sealed or the tag does not verify.
+RealDown *decrypt_downlink_real(const std::vector<uint8_t> &bytes, uint32_t base_nonce,
+                                uint32_t *out_msgid = nullptr) {
+    macwire::WireHdr w;
+    auto pt = proto_sim::v1_open_session_frame(base_nonce, kTestNodeNonce,
+                                               esphome::lora_tracker::kHubAddress,
+                                               bytes.size() > 2 ? bytes[2] : 0, /*downlink=*/true,
+                                               bytes, &w);
+    if (!pt) return nullptr;
+    if (out_msgid != nullptr) *out_msgid = w.fcnt;
+    return real_down_body(w, pt->data(), pt->size());
 }
 }  // namespace
 
@@ -4690,22 +4554,21 @@ TEST(MacPingCrypto, AnEncryptedPingReachesTheNodeAndCarriesItsOwnSeq) {
 
     int plaintext_pings = 0, encrypted_pings = 0;
     uint32_t seq_seen = 0;
-    for (const auto &f : h.radio.hub_to_node_views()) {
-        LoraClientOperationMessage *plain =
-            lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        RealDown *plain = real_down_plain(f.bytes);
         if (plain != nullptr) {
-            if (plain->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL)
+            if (plain->cmd_case == hubframes::DL_MACCONTROL)
                 ++plaintext_pings;
-            lora_client_operation_message__free_unpacked(plain, nullptr);
+            delete plain;
         }
-        LoraClientOperationMessage *inner = decrypt_downlink_real(f.bytes, base);
+        RealDown *inner = decrypt_downlink_real(f.bytes, base);
         if (inner != nullptr) {
-            if (inner->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL &&
+            if (inner->cmd_case == hubframes::DL_MACCONTROL &&
                 inner->maccontrol != nullptr) {
                 ++encrypted_pings;
                 seq_seen = inner->maccontrol->seq;
             }
-            lora_client_operation_message__free_unpacked(inner, nullptr);
+            delete inner;
         }
     }
     EXPECT_EQ(plaintext_pings, 0) << "with crypto requested, the ping must not go out in the clear";
@@ -4728,13 +4591,12 @@ TEST(MacPingCrypto, WithoutASessionCryptoFallsBackToPlaintextLikeEveryOtherDownl
     h.rol.mac_ping_tick_for_test();
 
     int plaintext_pings = 0;
-    for (const auto &f : h.radio.hub_to_node_views()) {
-        LoraClientOperationMessage *m =
-            lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        RealDown *m = real_down_plain(f.bytes);
         if (m != nullptr) {
-            if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL)
+            if (m->cmd_case == hubframes::DL_MACCONTROL)
                 ++plaintext_pings;
-            lora_client_operation_message__free_unpacked(m, nullptr);
+            delete m;
         }
     }
     EXPECT_EQ(plaintext_pings, 1)
@@ -4779,18 +4641,18 @@ TEST(MacPingCrypto, TheReservedMsgidRangeNeverCollidesWithAnOrdinaryCommand) {
     // header actually carries; only comparing it against the reservation
     // catches the wrong counter being used).
     int pings_decrypted = 0;
-    for (const auto &f : h.radio.hub_to_node_views()) {
+    for (const auto &f : h.radio.hub_to_node_frames()) {
         uint32_t msgid = 0;
-        LoraClientOperationMessage *inner = decrypt_downlink_real(f.bytes, base, &msgid);
+        RealDown *inner = decrypt_downlink_real(f.bytes, base, &msgid);
         if (inner != nullptr) {
-            if (inner->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL) {
+            if (inner->cmd_case == hubframes::DL_MACCONTROL) {
                 ++pings_decrypted;
                 EXPECT_GT(msgid, txid_before_reserve)
                     << "an encrypted ping's msgid must come from the RESERVED block, "
                        "not the dedicated ping counter (which starts at 1 regardless)";
                 EXPECT_LE(msgid, txid_after_reserve);
             }
-            lora_client_operation_message__free_unpacked(inner, nullptr);
+            delete inner;
         }
     }
     EXPECT_EQ(pings_decrypted, 4) << "four distinct pings, all decrypting under the one base nonce";
@@ -4812,28 +4674,27 @@ TEST(MacPingCrypto, EndingAnUnfinishedCryptoRunDoesNotLeakItsRangeIntoTheNextOne
     h.rol.mac_ping_tick_for_test();   // one of several reserved frames used
     h.rol.stop_mac_ping();
 
-    // hub_to_node_views() returns BY VALUE: snapshot it once rather than
+    // hub_to_node_frames() returns BY VALUE: snapshot it once rather than
     // indexing repeated calls, which would index into a fresh temporary each
     // time and read a dangling reference.
-    const size_t before = h.radio.hub_to_node_views().size();
+    const size_t before = h.radio.hub_to_node_frames().size();
     h.rol.start_mac_ping(/*duration_s=*/5, /*grid_ms=*/1000, /*want_echo=*/false,
                          /*pad_bytes=*/0, /*crypto=*/false);
     h.rol.mac_ping_tick_for_test();
-    const auto frames = h.radio.hub_to_node_views();
+    const auto frames = h.radio.hub_to_node_frames();
 
     int plaintext = 0, encrypted = 0;
     for (size_t i = before; i < frames.size(); ++i) {
         const auto &f = frames[i];
-        LoraClientOperationMessage *m =
-            lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
+        RealDown *m = real_down_plain(f.bytes);
         if (m != nullptr) {
-            if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL) ++plaintext;
-            lora_client_operation_message__free_unpacked(m, nullptr);
+            if (m->cmd_case == hubframes::DL_MACCONTROL) ++plaintext;
+            delete m;
         }
-        LoraClientOperationMessage *inner = decrypt_downlink_real(f.bytes, base);
+        RealDown *inner = decrypt_downlink_real(f.bytes, base);
         if (inner != nullptr) {
-            if (inner->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL) ++encrypted;
-            lora_client_operation_message__free_unpacked(inner, nullptr);
+            if (inner->cmd_case == hubframes::DL_MACCONTROL) ++encrypted;
+            delete inner;
         }
     }
     EXPECT_EQ(plaintext, 1) << "the second run asked for plaintext";
@@ -4873,7 +4734,7 @@ TEST(RealLoraClient, AnAutomaticNodesTimeSyncIsThrottledToOnceAWeek) {
 
     auto count_timesync = [&]() {
         int n = 0;
-        for (const auto& f : radio.hub_to_node_views()) {
+        for (const auto& f : radio.hub_to_node_frames()) {
             auto inner = decrypt_downlink(f, base);
             if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++n;
         }
@@ -4922,7 +4783,7 @@ TEST(RealLoraClient, ModeBAndPlainInteractiveTimeSyncIsUnthrottled) {
 
     auto count_timesync = [&]() {
         int n = 0;
-        for (const auto& f : radio.hub_to_node_views()) {
+        for (const auto& f : radio.hub_to_node_frames()) {
             auto inner = decrypt_downlink(f, base);
             if (inner && inner->cmd == proto_sim::LoraClientOperationMessage::Cmd::TimeSync) ++n;
         }
@@ -5149,13 +5010,11 @@ std::vector<uint8_t> hand_sealed_uplink(uint32_t base, uint32_t msgid, bool corr
     inner.header.msgId         = msgid;
     inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Avail;
     inner.avail.available      = true;
-    auto plain = proto_sim::serialize_resp_payload(inner);
-    auto enc = seal_uplink_like_node(base, inner.header, plain);
+    auto enc = seal_uplink_like_node(base, inner);
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = inner.header;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-    outer.encrypted.ciphertext = enc.ciphertext;
+    outer.encrypted = enc.payload();
     if (corrupt_tag) outer.encrypted.tag[0] ^= 0x01;
     return proto_sim::serialize_resp(outer);
 }
@@ -5238,335 +5097,78 @@ TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     EXPECT_LT(f.rol.seq_.txId(), 0x100u) << "msgids start over";
 }
 
-TEST(MsgidGuard, TheSealPointRefusesAMsgidBeyondTheCtrSpaceAndAsksForARelogin) {
-    MsgidGuardFixture f;
-    ASSERT_TRUE(f.rol.session_confirmed_);
-
-    LoraClientOperationMessage op;
-    LoraHeader hdr;
-    TimeSync ts;
-    auto build = [&](uint32_t msgid) {
-        hdr = LORA_HEADER__INIT;
-        hdr.destaddress   = 18;
-        hdr.destsubnet    = 2;
-        hdr.senderaddress = esphome::lora_tracker::kHubAddress;
-        hdr.msgid         = msgid;
-        ts = TIME_SYNC__INIT;
-        ts.epoch = 1787000000;
-        op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-        op.header   = &hdr;
-        op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
-        op.timesync = &ts;
-    };
-
-    // CONTROL: an ordinary msgid seals.
-    uint8_t *buf = nullptr;
-    size_t len = 0;
-    build(5);
-    ASSERT_TRUE(f.rol.packOperationForTest(&op, true, &buf, &len)) << "control: an ordinary msgid seals";
-    free(buf);
-    ASSERT_FALSE(f.rol.msgidReloginPendingForTest());
-
-    // 2^31 + 5 would reuse msgid 5's keystream.
-    buf = nullptr;
-    len = 0;
-    build(0x80000005u);
-    EXPECT_FALSE(f.rol.packOperationForTest(&op, true, &buf, &len)) << "must not seal";
-    EXPECT_EQ(buf, nullptr);
-    EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
-
-    // The same msgid in the clear is not a CTR problem (no keystream): the
-    // guard applies to sealing only.
-    f.rol.clearMsgidReloginForTest();
-    buf = nullptr;
-    len = 0;
-    build(0x80000005u);
-    EXPECT_TRUE(f.rol.packOperationForTest(&op, /*encrypt=*/false, &buf, &len));
-    free(buf);
-    EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
-}
-
-TEST(MsgidGuard, TheRetagPointRefusesAMsgidBeyondTheCtrSpace) {
-    MsgidGuardFixture f;
-    f.rol.mark_session_confirmed_for_test();
-    f.rol.send_remote_config();   // snapshots the seal generation
-
-    LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = 18;
-    hdr.destsubnet    = 2;
-    hdr.senderaddress = esphome::lora_tracker::kHubAddress;
-    hdr.msgid         = 999;
-    uint8_t ciphertext[4] = {1, 2, 3, 4};
-    uint8_t tag[framecrypto::kSessionCmacTagBytes] = {0};
-    EncryptedPayload enc = ENCRYPTED_PAYLOAD__INIT;
-    enc.ciphertext.data = ciphertext;
-    enc.ciphertext.len  = sizeof(ciphertext);
-    enc.tag.data        = tag;
-    enc.tag.len         = sizeof(tag);
-
-    ASSERT_TRUE(f.rol.retagLikeLastFrameForTest(&enc, &hdr)) << "control: an ordinary msgid is retagged";
-
-    memset(tag, 0, sizeof(tag));
-    hdr.msgid = 0x80000000u + 999;
-    EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&enc, &hdr)) << "msgid beyond the CTR space is not tagged";
-    EXPECT_EQ(f.rol.staleSessionDropsForTest(), 0u) << "refused for the msgid, not as a stale session";
-    for (uint8_t b : tag) EXPECT_EQ(b, 0) << "the tag bytes must be untouched";
-}
-
-// Characterisation (CCN refactor of sealBurstCopyTag): the written tag is
-// EXACTLY the independent oracle's CMAC over the header fields and the
-// ciphertext, so every field the retag point must cover is shown to reach the
-// MAC input; and every refusal leaves the caller's tag bytes alone.
+// The seal-point / retag-point refusals of the v0 sealer (packOperationForTest,
+// retagLikeLastFrameForTest) are ported to MacWireV1Seal.* in mac_wire_v1_test
+// (S8 / W5). What stays here: a v1 copy of a sealed frame, built by hand, and
+// the frame's own copy sealer looked up from what the listener last handed the
+// tracker -- exactly what MAC-0 does per copy.
 namespace {
 struct RetagCase {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    hubframes::Hdr hdr{};
     uint8_t ct[5] = {9, 8, 7, 6, 5};
-    uint8_t tag[framecrypto::kSessionCmacTagBytes] = {0};
-    EncryptedPayload enc = ENCRYPTED_PAYLOAD__INIT;
+    size_t  ct_len = sizeof(ct);
+    uint8_t tag[8] = {0};
     RetagCase() {
         hdr.destaddress = 18; hdr.destsubnet = 2;
         hdr.senderaddress = esphome::lora_tracker::kHubAddress;
         hdr.msgid = 999; hdr.burstindex = 3; hdr.burstcount = 17;
         hdr.onmark = true; hdr.firestamped = true;
         hdr.fireround = 0x1234; hdr.fireoffsetus = 4567;
-        enc.ciphertext.data = ct; enc.ciphertext.len = sizeof(ct);
-        enc.tag.data = tag; enc.tag.len = sizeof(tag);
     }
-    void oracle(uint32_t session_id, uint8_t out[framecrypto::kSessionCmacTagBytes]) const {
-        framecrypto::EtmHeaderFields fx{};
-        fx.downlink = true; fx.session_id = session_id;
-        fx.dest_address = hdr.destaddress; fx.dest_subnet = hdr.destsubnet;
-        fx.sender_address = hdr.senderaddress; fx.msgid = hdr.msgid;
-        fx.burst_index = hdr.burstindex; fx.burst_count = hdr.burstcount;
-        fx.on_mark = hdr.onmark; fx.fire_stamped = hdr.firestamped;
-        fx.fire_round = hdr.fireround; fx.fire_offset_us = hdr.fireoffsetus;
-        proto_sim::encrypt_then_cmac_retag(session_id, kTestNodeNonce,
-                                           esphome::lora_tracker::kHubAddress, 18,
-                                           /*downlink=*/true, fx, ct, enc.ciphertext.len, out);
+    // The copy's bytes up to (not including) the tag.
+    std::vector<uint8_t> bytes() const {
+        macwire::WireHdr w;
+        uint8_t flags = 0;
+        if (hdr.onmark) flags |= macwire::kFlagOnMark;
+        if (hdr.firestamped) {
+            flags |= macwire::kFlagStamped;
+            w.fire_round = hdr.fireround;
+            w.fire_offset_us = hdr.fireoffsetus;
+        }
+        w.flags = macwire::withAuth(flags, macwire::Auth::Session);
+        w.dst = (uint8_t) hdr.destaddress; w.src = (uint8_t) hdr.senderaddress;
+        w.subnet = (uint8_t) hdr.destsubnet; w.fcnt = hdr.msgid; w.port = macwire::kPortApp;
+        w.burst_idx = (uint8_t) hdr.burstindex; w.burst_cnt = (uint8_t) hdr.burstcount;
+        std::vector<uint8_t> f(macwire::headerLen(w) + ct_len + macwire::kTagBytes);
+        macwire::encodeHeader(w, f.data(), f.size());
+        std::copy(ct, ct + ct_len, f.begin() + macwire::headerLen(w));
+        f.resize(f.size() - macwire::kTagBytes);
+        return f;
+    }
+    mac::MacHdr mac() const {
+        mac::MacHdr m;
+        m.dst = (uint8_t) hdr.destaddress;
+        m.fcnt = hdr.msgid;
+        m.burst_idx = (uint8_t) hdr.burstindex;
+        m.burst_cnt = (uint8_t) hdr.burstcount;
+        return m;
+    }
+    // The independent oracle: CMAC-8 under K_mac over "BW1" || dir || id || bytes.
+    void oracle(uint32_t session_id, uint8_t out[8]) const {
+        uint8_t k_enc[16], k_mac[16];
+        proto_sim::v1_session_keys(session_id, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
+                                   (uint8_t) hdr.destaddress, k_enc, k_mac);
+        const auto b = bytes();
+        proto_sim::v1_tag(k_mac, /*downlink=*/true, session_id, b.data(), b.size(), out);
     }
 };
+
+// The binding of the last sealed frame the listener for `peer` handed MAC-0.
+uint64_t lastBinding(const LORATracker &t, uint8_t peer) {
+    for (auto it = t.sent_policy.rbegin(); it != t.sent_policy.rend(); ++it) {
+        const mac2::FrameSeal b = mac2::FrameSeal::fromBinding(it->seal_binding);
+        if (b.sealed && b.peer == peer) return it->seal_binding;
+    }
+    return 0;
+}
+
+// MAC-0's per-copy call for a copy of that frame: the frame's own sealer.
+bool retagLikeLast(const LORATracker &t, uint8_t peer, RetagCase &c) {
+    uint64_t binding = lastBinding(t, peer);
+    const auto b = c.bytes();
+    return mac2::LinkSecurity::copySealerV1(&binding, c.mac(), b.data(), b.size(), c.tag);
+}
 }  // namespace
-
-// Characterisation (CCN refactor of s_pack_operation_message): the sealed frame
-// is what an independent opener recovers, and every refusal/plaintext branch.
-namespace {
-struct ClearKeysProbe : LORAClient {
-    using esphome::lora_tracker::LORAListener::clearSessionKeys_;
-};
-struct PackCase {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
-    TimeSync ts = TIME_SYNC__INIT;
-    explicit PackCase(uint32_t dest = 18, uint32_t msgid = 5) {
-        hdr.destaddress = dest; hdr.destsubnet = 2;
-        hdr.senderaddress = esphome::lora_tracker::kHubAddress;
-        hdr.msgid = msgid;
-        ts.epoch = 1787000000;
-        op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
-        op.timesync = &ts;
-    }
-};
-}  // namespace
-
-TEST(MsgidGuard, ASealedFrameOpensToExactlyThePayloadOnlyInnerMessage) {
-    MsgidGuardFixture f;
-    PackCase c(18, 77);
-    uint8_t *buf = nullptr; size_t len = 0;
-    ASSERT_TRUE(f.rol.packOperationForTest(&c.op, true, &buf, &len));
-    ASSERT_NE(buf, nullptr);
-    ASSERT_GT(len, 0u);
-    LoraClientOperationMessage *w = lora_client_operation_message__unpack(nullptr, len, buf);
-    ASSERT_NE(w, nullptr);
-    free(buf);
-    ASSERT_EQ(w->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED);
-    ASSERT_NE(w->header, nullptr);
-    EXPECT_EQ(w->header->destaddress, 18u);
-    EXPECT_EQ(w->header->destsubnet, 2u);
-    EXPECT_EQ(w->header->senderaddress, (uint32_t) esphome::lora_tracker::kHubAddress);
-    EXPECT_EQ(w->header->msgid, 77u);
-    EXPECT_EQ(w->header->burstindex, 0u);
-    EXPECT_EQ(w->header->burstcount, 0u);
-    ASSERT_NE(w->encrypted, nullptr);
-    ASSERT_EQ(w->encrypted->tag.len, (size_t) framecrypto::kSessionCmacTagBytes);
-    for (size_t i = 0; i < w->encrypted->tag.len; ++i)
-        EXPECT_EQ(w->encrypted->tag.data[i], 0) << "the pack-time tag is a zero placeholder";
-
-    // The payload-only plaintext the node must recover.
-    LoraClientOperationMessage inner = c.op;
-    inner.header = nullptr;
-    std::vector<uint8_t> want(lora_client_operation_message__get_packed_size(&inner));
-    lora_client_operation_message__pack(&inner, want.data());
-    ASSERT_EQ(w->encrypted->ciphertext.len, want.size());
-
-    framecrypto::EtmHeaderFields fx{};
-    fx.downlink = true; fx.session_id = f.base;
-    fx.dest_address = 18; fx.dest_subnet = 2;
-    fx.sender_address = esphome::lora_tracker::kHubAddress; fx.msgid = 77;
-    uint8_t tag[framecrypto::kSessionCmacTagBytes];
-    proto_sim::encrypt_then_cmac_retag(f.base, kTestNodeNonce, esphome::lora_tracker::kHubAddress,
-                                       18, true, fx, w->encrypted->ciphertext.data,
-                                       w->encrypted->ciphertext.len, tag);
-    auto opened = proto_sim::encrypt_then_cmac_open(
-        f.base, kTestNodeNonce, esphome::lora_tracker::kHubAddress, 18, true, fx,
-        w->encrypted->ciphertext.data, w->encrypted->ciphertext.len, tag, sizeof(tag));
-    ASSERT_TRUE(opened.has_value());
-    EXPECT_EQ(*opened, want) << "CTR block = (session, dest, downlink, msgid, block 0)";
-    lora_client_operation_message__free_unpacked(w, nullptr);
-
-    // A different msgid yields a different keystream.
-    PackCase c2(18, 78);
-    uint8_t *buf2 = nullptr; size_t len2 = 0;
-    ASSERT_TRUE(f.rol.packOperationForTest(&c2.op, true, &buf2, &len2));
-    LoraClientOperationMessage *w2 = lora_client_operation_message__unpack(nullptr, len2, buf2);
-    free(buf2);
-    ASSERT_NE(w2, nullptr);
-    std::vector<uint8_t> ct2(w2->encrypted->ciphertext.data,
-                             w2->encrypted->ciphertext.data + w2->encrypted->ciphertext.len);
-    EXPECT_NE(ct2, std::vector<uint8_t>(want)) << "ciphertext differs from plaintext";
-    lora_client_operation_message__free_unpacked(w2, nullptr);
-}
-
-TEST(MsgidGuard, PackRefusesBadArgumentsAndFallsBackToPlaintextWhenNotSealing) {
-    MsgidGuardFixture f;
-    PackCase c;
-    uint8_t *buf = nullptr; size_t len = 0;
-
-    EXPECT_FALSE(f.rol.packOperationForTest(nullptr, true, &buf, &len));
-    LoraClientOperationMessage nohdr = c.op; nohdr.header = nullptr;
-    EXPECT_FALSE(f.rol.packOperationForTest(&nohdr, true, &buf, &len));
-    EXPECT_FALSE(f.rol.packOperationForTest(&c.op, true, nullptr, &len));
-    EXPECT_FALSE(f.rol.packOperationForTest(&c.op, true, &buf, nullptr));
-    EXPECT_EQ(buf, nullptr);
-
-    // encrypt=false: the plain pack, byte for byte, even with a live session.
-    std::vector<uint8_t> plain(lora_client_operation_message__get_packed_size(&c.op));
-    lora_client_operation_message__pack(&c.op, plain.data());
-    ASSERT_TRUE(f.rol.packOperationForTest(&c.op, false, &buf, &len));
-    ASSERT_EQ(len, plain.size());
-    EXPECT_EQ(0, memcmp(buf, plain.data(), len));
-    free(buf); buf = nullptr;
-
-    // encrypt=true but the destination has no session at all: also plaintext.
-    PackCase stranger(77, 5);
-    std::vector<uint8_t> plain77(lora_client_operation_message__get_packed_size(&stranger.op));
-    lora_client_operation_message__pack(&stranger.op, plain77.data());
-    ASSERT_TRUE(f.rol.packOperationForTest(&stranger.op, true, &buf, &len));
-    ASSERT_EQ(len, plain77.size());
-    EXPECT_EQ(0, memcmp(buf, plain77.data(), len));
-    free(buf); buf = nullptr;
-}
-
-TEST(MsgidGuard, SealingWithoutDerivedKeysFailsAndLeavesNothingBehind) {
-    MsgidGuardFixture f;
-    static_cast<ClearKeysProbe &>(f.rol).clearSessionKeys_();   // the base nonce stays; the K_enc/K_mac are gone
-    PackCase c;
-    uint8_t *buf = nullptr; size_t len = 0;
-    EXPECT_FALSE(f.rol.packOperationForTest(&c.op, true, &buf, &len));
-    EXPECT_EQ(buf, nullptr);
-    EXPECT_FALSE(f.rol.msgidReloginPendingForTest()) << "not a msgid-space refusal";
-}
-
-TEST(MsgidGuard, ASessionIdOfZeroIsNotASessionToSealUnder) {
-    MsgidGuardFixture f;
-    ASSERT_TRUE(f.rol.deriveSessionKeysForTest(/*session_id=*/0u, kTestNodeNonce));
-    PackCase c;
-    uint8_t *buf = nullptr; size_t len = 0;
-    EXPECT_FALSE(f.rol.packOperationForTest(&c.op, true, &buf, &len))
-        << "an entry present but zero is 'found' for the plaintext decision, then refused";
-    EXPECT_EQ(buf, nullptr);
-}
-
-TEST(MsgidGuard, TheRetagIsExactlyTheCmacOverEveryBurstField) {
-    MsgidGuardFixture f;
-    f.rol.mark_session_confirmed_for_test();
-    f.rol.send_remote_config();   // snapshots the seal generation
-
-    auto expectMatches = [&](RetagCase &c, const char *what) {
-        memset(c.tag, 0xAA, sizeof(c.tag));
-        uint8_t want[framecrypto::kSessionCmacTagBytes];
-        c.oracle(f.base, want);
-        ASSERT_TRUE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << what;
-        EXPECT_EQ(0, memcmp(c.tag, want, sizeof(want))) << what;
-    };
-    RetagCase base;
-    expectMatches(base, "baseline");
-    uint8_t baseline_tag[framecrypto::kSessionCmacTagBytes];
-    memcpy(baseline_tag, base.tag, sizeof(baseline_tag));
-
-    // One field at a time: the tag follows it (oracle agrees) and moves.
-    auto vary = [&](const char *what, auto mutate) {
-        RetagCase c; mutate(c);
-        expectMatches(c, what);
-        EXPECT_NE(0, memcmp(c.tag, baseline_tag, sizeof(baseline_tag))) << what << " must change the tag";
-    };
-    vary("destsubnet",   [](RetagCase &c) { c.hdr.destsubnet = 3; });
-    vary("senderaddress",[](RetagCase &c) { c.hdr.senderaddress = 9; });
-    vary("msgid",        [](RetagCase &c) { c.hdr.msgid = 1000; });
-    vary("burstindex",   [](RetagCase &c) { c.hdr.burstindex = 4; });
-    vary("burstcount",   [](RetagCase &c) { c.hdr.burstcount = 16; });
-    vary("onmark",       [](RetagCase &c) { c.hdr.onmark = false; });
-    vary("firestamped",  [](RetagCase &c) { c.hdr.firestamped = false; });
-    vary("fireround",    [](RetagCase &c) { c.hdr.fireround = 0x1235; });
-    vary("fireoffsetus", [](RetagCase &c) { c.hdr.fireoffsetus = 4568; });
-    vary("ciphertext",   [](RetagCase &c) { c.ct[4] ^= 1; });
-    vary("ciphertext length", [](RetagCase &c) { c.enc.ciphertext.len = 4; });
-}
-
-TEST(MsgidGuard, EveryRetagRefusalLeavesTheTagBytesAlone) {
-    MsgidGuardFixture f;
-    f.rol.mark_session_confirmed_for_test();
-    f.rol.send_remote_config();
-
-    auto untouched = [](const RetagCase &c) {
-        for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
-    };
-    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      ASSERT_TRUE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "control"; }
-
-    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(nullptr, &c.hdr)); untouched(c); }
-    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, nullptr)); untouched(c); }
-    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.len = sizeof(c.tag) - 1;
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "wrong tag length"; untouched(c); }
-    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.len = sizeof(c.tag) + 1;
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "wrong tag length"; untouched(c); }
-    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.enc.tag.data = nullptr;
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "no tag buffer"; untouched(c); }
-    { RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.hdr.msgid = 0x80000000u;
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "beyond the CTR space"; untouched(c); }
-    { // a destination that was never sealed under: generation lookup misses -> stale
-      RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag)); c.hdr.destaddress = 77;
-      const uint32_t before = f.rol.staleSessionDropsForTest();
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr));
-      EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1) << "counted as a stale-session drop";
-      untouched(c); }
-    { // no MAC key installed: not stale, not tagged, not counted
-      RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      auto &st = mac2::LinkSecurity::hub().store();
-      const psa_key_id_t saved = st.liveKeys(18).mac;
-      const uint32_t before = f.rol.staleSessionDropsForTest();
-      st.setMacKeyForTest(18, PSA_KEY_ID_NULL);
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "no K_mac";
-      st.setMacKeyForTest(18, saved);
-      EXPECT_EQ(f.rol.staleSessionDropsForTest(), before);
-      untouched(c); }
-    { // a MAC key id PSA does not know: psa_mac_compute fails, nothing is written
-      RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      auto &st = mac2::LinkSecurity::hub().store();
-      const psa_key_id_t saved = st.liveKeys(18).mac;
-      const uint32_t before = f.rol.staleSessionDropsForTest();
-      st.setMacKeyForTest(18, static_cast<psa_key_id_t>(0x7FFFFFF0u));
-      EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "PSA rejects the key";
-      st.setMacKeyForTest(18, saved);
-      EXPECT_EQ(f.rol.staleSessionDropsForTest(), before);
-      untouched(c); }
-    { // a peer this hub has no session id for
-      LORAClient other; other.set_name("other"); other.set_short_address(77);
-      RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-      EXPECT_FALSE(other.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "no session id for the peer";
-      untouched(c); }
-}
 
 TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSession) {
     MsgidGuardFixture f;
@@ -6631,8 +6233,7 @@ std::vector<uint8_t> sealed_uplink_bytes(uint32_t base, uint32_t msgid,
     proto_sim::LoraClientResponseMessage outer;
     outer.header               = h;
     outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-    outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-    outer.encrypted.ciphertext = enc.ciphertext;
+    outer.encrypted = enc.payload();
     return proto_sim::serialize_resp(outer);
 }
 
@@ -6758,13 +6359,8 @@ TEST(EncUplink, AnAuthenticBeaconReachesTheChildNodesWithTheOuterHeaderDecoded) 
     EXPECT_EQ(node.got[0].hdr.dst, (uint32_t) esphome::lora_tracker::kHubAddress);
     EXPECT_EQ(node.got[0].hdr.fcnt, rx_before + 1);
     EXPECT_TRUE(node.got[0].authentic);
-    LoraClientResponseMessage *fwd = lora_client_response_message__unpack(
-        nullptr, node.got[0].payload.size(), node.got[0].payload.data());
-    ASSERT_NE(fwd, nullptr);
-    EXPECT_EQ(fwd->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON);
-    ASSERT_NE(fwd->beacon, nullptr);
-    EXPECT_EQ(fwd->beacon->nodeepoch, (uint64_t) (kHubEpoch + 7));
-    lora_client_response_message__free_unpacked(fwd, nullptr);
+    EXPECT_EQ(node.got[0].proto_case, (int) hubframes::UL_BEACON);
+    EXPECT_EQ(node.got[0].beacon_epoch, (uint64_t) (kHubEpoch + 7));
     // The hub itself also acted on the inner payload (dispatch_payload_).
     EXPECT_TRUE(f.rol.clock_offset_valid_);
     EXPECT_EQ(f.rol.clock_offset_s_, 7);
@@ -6818,8 +6414,7 @@ TEST(EncUplink, EveryTimingFieldOfTheOuterHeaderIsUnderTheUplinkCmac) {
         proto_sim::LoraClientResponseMessage outer;
         outer.header               = h;
         outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-        outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-        outer.encrypted.ciphertext = enc.ciphertext;
+        outer.encrypted = enc.payload();
         return proto_sim::serialize_resp(outer);
     };
     const uint32_t rx_before = f.rol.seq_.rxId();
@@ -7011,7 +6606,7 @@ TEST(ModeBListener, ARestoredSwitchSendsNothingUntilTheNodeHasASessionThenWarmsI
     EXPECT_TRUE(r.rol.timed_mode_enabled());
     EXPECT_TRUE(r.rol.grid_aligned());
     EXPECT_FALSE(r.rol.gridSyncAwaitingAck()) << "no plaintext GridSync into a radio that is not up";
-    EXPECT_EQ(r.radio.hub_to_node_views().size(), 0u);
+    EXPECT_EQ(r.radio.hub_to_node_frames().size(), 0u);
 
     r.rol.setup();      // sends the startup broadcast demote
     EXPECT_TRUE(r.rol.timed_mode_enabled()) << "setup() must not undo what the switch restored";
@@ -7075,11 +6670,11 @@ TEST(ModeBListener, ACoverOpIssuedDuringTheWarmupAbortsItAndIsStillSent) {
     r.secs(5);
     ASSERT_TRUE(r.rol.mode_test_active());
 
-    const size_t frames_before = r.radio.hub_to_node_views().size();
+    const size_t frames_before = r.radio.hub_to_node_frames().size();
     r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
     EXPECT_TRUE(op.ctl().awaiting_ack) << "the cover op went out as always";
-    EXPECT_GT(r.radio.hub_to_node_views().size(), frames_before);
+    EXPECT_GT(r.radio.hub_to_node_frames().size(), frames_before);
     EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stopped the moment the op was issued";
     EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
     EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
@@ -7285,14 +6880,14 @@ TEST(ModeBListener, TheWarmupAbortSendsNoStopFrameAheadOfTheCommandButOneAfterIt
     r.ackGrid();
     ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
     r.secs(5);
-    const size_t before = r.radio.hub_to_node_views().size();
+    const size_t before = r.radio.hub_to_node_frames().size();
     r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
-    const size_t after_op = r.radio.hub_to_node_views().size();
+    const size_t after_op = r.radio.hub_to_node_frames().size();
     EXPECT_EQ(after_op - before, 1u) << "only the command itself: the stop is not in front of it";
     deliverAck(r.rol, op.ctl().last_msgid);
     r.secs(5);
-    EXPECT_EQ(r.radio.hub_to_node_views().size() - after_op, 1u)
+    EXPECT_EQ(r.radio.hub_to_node_frames().size() - after_op, 1u)
         << "the node is told to end its test, after the command had its turn";
 }
 
@@ -7321,10 +6916,10 @@ TEST(ModeBListener, TheDelayedStopIsNotSentIntoAnOperatorsTest) {
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
     deliverAck(r.rol, op.ctl().last_msgid);
     r.rol.start_mode_test(900, 1500, 2, 1, true, true, false, true);   // the operator, at once
-    const size_t before = r.radio.hub_to_node_views().size();
+    const size_t before = r.radio.hub_to_node_frames().size();
     r.secs(5);
     EXPECT_TRUE(r.rol.mode_test_active()) << "the operator's test is untouched";
-    EXPECT_EQ(r.radio.hub_to_node_views().size(), before) << "and no stop frame was aimed into it";
+    EXPECT_EQ(r.radio.hub_to_node_frames().size(), before) << "and no stop frame was aimed into it";
 }
 
 // ANY node's cover op briefly holds off the NEXT warm-up grant.
@@ -7514,7 +7109,7 @@ SleepProbe &SP(LORAClient &c) { return static_cast<SleepProbe &>(c); }
 
 int countSleepFrames(real_helpers::RealHubHarness &h) {
     int n = 0;
-    for (const auto &f : h.radio.hub_to_node_views()) {
+    for (const auto &f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Sysop &&
             m->sysop == proto_sim::ClientOperation::CMD_SLEEP) ++n;
@@ -7524,7 +7119,7 @@ int countSleepFrames(real_helpers::RealHubHarness &h) {
 
 int countLoginFrames(real_helpers::RealHubHarness &h) {
     int n = 0;
-    for (const auto &f : h.radio.hub_to_node_views()) {
+    for (const auto &f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login) ++n;
     }
@@ -7789,11 +7384,11 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsDroppedAfterTheExpiryNotSentHo
     ModeBRig r;
     r.session();
     SP(r.rol).relogin_pending_ = true;            // the session is being rebuilt
-    const size_t frames = r.radio.hub_to_node_views().size();
+    const size_t frames = r.radio.hub_to_node_frames().size();
 
     r.rol.enterSleep();
     EXPECT_TRUE(SP(r.rol).ctl().deferred_until_login);
-    EXPECT_EQ(r.radio.hub_to_node_views().size(), frames) << "nothing in the clear";
+    EXPECT_EQ(r.radio.hub_to_node_frames().size(), frames) << "nothing in the clear";
 
     r.secs(170);
     EXPECT_TRUE(SP(r.rol).ctl().deferred_until_login) << "still within the expiry";
@@ -7803,7 +7398,7 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsDroppedAfterTheExpiryNotSentHo
     EXPECT_TRUE(r.rol.commandFailed());
 
     SP(r.rol).confirm_session_();                 // the node finally comes back
-    EXPECT_EQ(r.radio.hub_to_node_views().size(), frames) << "the stale sleep is not sent";
+    EXPECT_EQ(r.radio.hub_to_node_frames().size(), frames) << "the stale sleep is not sent";
     EXPECT_FALSE(r.rol.awaitingAck());
 }
 
@@ -8029,7 +7624,7 @@ using OpCmd = proto_sim::LoraClientOperationMessage::Cmd;
 // msgids of every plaintext hub->node frame of one kind, in air order.
 std::vector<uint32_t> msgidsOf(real_helpers::RealHubHarness &h, OpCmd cmd) {
     std::vector<uint32_t> ids;
-    for (const auto &f : h.radio.hub_to_node_views()) {
+    for (const auto &f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == cmd) ids.push_back(m->header.msgId);
     }
@@ -8038,7 +7633,7 @@ std::vector<uint32_t> msgidsOf(real_helpers::RealHubHarness &h, OpCmd cmd) {
 
 std::vector<uint32_t> sysopMsgids(real_helpers::RealHubHarness &h, proto_sim::ClientOperation op) {
     std::vector<uint32_t> ids;
-    for (const auto &f : h.radio.hub_to_node_views()) {
+    for (const auto &f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (m && m->cmd == OpCmd::Sysop && m->sysop == op) ids.push_back(m->header.msgId);
     }
@@ -8308,7 +7903,7 @@ TEST(SchedPush, TwoNodesPushingAtOnceDoNotShareState) {
     h.rol_2.node_sched_version_ = h.rol_2.schedule_version() ^ 1u;
     auto countTo = [&](uint32_t addr) {
         size_t n = 0;
-        for (const auto &f : h.radio.hub_to_node_views()) {
+        for (const auto &f : h.radio.hub_to_node_frames()) {
             auto m = proto_sim::as_op(f);
             if (m && m->cmd == OpCmd::Schedule && m->header.destAddress == addr) ++n;
         }
@@ -8396,11 +7991,11 @@ TEST(SchedPush, APushIssuedDuringAWarmUpStopsItAndIsStillSent) {
     ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
     r.secs(5);
     ASSERT_TRUE(r.rol.mode_test_active());
-    const size_t frames_before = r.radio.hub_to_node_views().size();
+    const size_t frames_before = r.radio.hub_to_node_frames().size();
 
     r.rol.send_schedule_config();
 
-    EXPECT_GT(r.radio.hub_to_node_views().size(), frames_before) << "the push went out";
+    EXPECT_GT(r.radio.hub_to_node_frames().size(), frames_before) << "the push went out";
     EXPECT_TRUE(AK(r.rol).cfg().awaiting_ack);
     EXPECT_FALSE(r.rol.mode_test_active()) << "the marks stopped the moment the push was issued";
     EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
@@ -8463,8 +8058,8 @@ namespace {
 // (the service owns the header, the msgid and the pack).
 bool frameASchedule(const esphome::lora_tracker::DeliveryRequest::FrameFn &frame) {
     ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+    hubframes::Down op{};
+    op.cmd_case = hubframes::DL_SCHEDULE;
     op.schedule = &sc;
     return frame(&op);
 }
@@ -8509,10 +8104,10 @@ TEST(DeliveryGlue, AFireRequestSendsOnceAndNeverWaitsForAnAck) {
     req.policy.mode = deliverypolicy::Mode::Fire;
     req.policy.shape = deliverypolicy::Shape::Bare;
     // A schedule-shaped payload: the mechanism owns header and msgid, the request the command.
-    req.fill   = [&](LoraClientOperationMessage *op) {
+    req.fill   = [&](hubframes::Down *op) {
         ++filled;
         static ScheduleConfig sc = SCHEDULE_CONFIG__INIT;
-        op->cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+        op->cmd_case = hubframes::DL_SCHEDULE;
         op->schedule = &sc;
     };
     req.on_sent = [&](uint32_t) { ++sent; };
@@ -8639,14 +8234,13 @@ struct PublishedGrid { uint32_t msgid; uint32_t txround; uint32_t txslot; };
 // the frame declared itself.
 std::vector<PublishedGrid> publishedGrids(real_helpers::RealHubHarness &h) {
     std::vector<PublishedGrid> out;
-    for (const auto &f : h.radio.hub_to_node_views()) {
-        LoraClientOperationMessage *m =
-            lora_client_operation_message__unpack(nullptr, f.bytes.size(), f.bytes.data());
+    for (const auto &f : h.radio.hub_to_node_frames()) {
+        RealDown *m = real_down_plain(f.bytes);
         if (m == nullptr) continue;
-        if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC &&
+        if (m->cmd_case == hubframes::DL_GRIDSYNC &&
             m->gridsync != nullptr && m->gridsync->enable)
             out.push_back({m->header->msgid, m->gridsync->txround, m->gridsync->txslot});
-        lora_client_operation_message__free_unpacked(m, nullptr);
+        delete m;
     }
     return out;
 }
@@ -9039,7 +8633,7 @@ void sendOpenTo(LORAClient &rol) {
 std::vector<std::string> airOrder(proto_sim::SimRadio &radio, uint32_t dest = 0) {
     std::vector<std::string> out;
     std::vector<uint32_t> seen;
-    const auto frames = radio.hub_to_node_views();   // by value: never iterate the temporary
+    const auto frames = radio.hub_to_node_frames();   // by value: never iterate the temporary
     for (const auto &f : frames) {
         auto m = proto_sim::as_op(f);
         if (!m) continue;
@@ -9058,7 +8652,7 @@ using Order = std::vector<std::string>;
 // How many frames of one msgid went out (a retransmission repeats it).
 int copiesOf(proto_sim::SimRadio &radio, uint32_t msgid) {
     int n = 0;
-    const auto frames = radio.hub_to_node_views();
+    const auto frames = radio.hub_to_node_frames();
     for (const auto &f : frames) {
         auto m = proto_sim::as_op(f);
         if (m && (m->cmd == OpCmd::Operation || m->cmd == OpCmd::Sysop) && m->header.msgId == msgid) ++n;
@@ -9118,7 +8712,7 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
     ackSleep(r);
     ASSERT_TRUE(DP(r).ctl().deferred_until_login);
-    const size_t before = r.radio.hub_to_node_views().size();
+    const size_t before = r.radio.hub_to_node_frames().size();
 
     // The wake: the node is HEARD (every confirmation is preceded by the uplink that
     // proves it; a node heard after the sleep is awake, and a command issued to a
@@ -9131,7 +8725,7 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     EXPECT_FALSE(DP(r).ctl().deferred_until_login);
     EXPECT_TRUE(r.rol.awaitingAck()) << "sent from confirm_session_()";
     EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
-    EXPECT_GT(r.radio.hub_to_node_views().size(), before);
+    EXPECT_GT(r.radio.hub_to_node_frames().size(), before);
     ackInFlight(r);
     EXPECT_FALSE(r.rol.awaitingAck());
     EXPECT_FALSE(r.rol.commandFailed());
@@ -9443,8 +9037,8 @@ TEST(ControlQueue, APositionReportConfirmsNeitherASysopNorACoverOp) {
     sleepReady(h);
     h.rol.enterSleep();
     ASSERT_TRUE(DP(h).sleep_op_in_flight_());
-    ::LoraClientResponseMessage pos = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    pos.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION;
+    hubframes::Up pos{};
+    pos.proto_case = hubframes::UL_POSITION;
 
     QP(h).dispatch_payload_(&pos);
 
@@ -9779,19 +9373,18 @@ namespace {
 // The sleepOk bit of the TimeSync that send_timesync() just put on the air
 // (encrypted when the session is confirmed, plaintext otherwise); -1 when none.
 int sleepOkAfterTimesync(ModeBRig &r) {
-    const size_t n0 = r.radio.hub_to_node_views().size();
+    const size_t n0 = r.radio.hub_to_node_frames().size();
     r.rol.send_timesync();
-    const auto frames = r.radio.hub_to_node_views();
+    const auto frames = r.radio.hub_to_node_frames();
     for (size_t i = frames.size(); i-- > n0;) {
-        ::LoraClientOperationMessage *m = decrypt_downlink_real(frames[i].bytes, r.base);
+        RealDown *m = decrypt_downlink_real(frames[i].bytes, r.base);
         if (m == nullptr)
-            m = lora_client_operation_message__unpack(nullptr, frames[i].bytes.size(),
-                                                      frames[i].bytes.data());
+            m = real_down_plain(frames[i].bytes);
         if (m == nullptr) continue;
         int v = -1;
-        if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC && m->timesync != nullptr)
+        if (m->cmd_case == hubframes::DL_TIMESYNC && m->timesync != nullptr)
             v = m->timesync->sleepok ? 1 : 0;
-        lora_client_operation_message__free_unpacked(m, nullptr);
+        delete m;
         if (v >= 0) return v;
     }
     return -1;
@@ -9895,8 +9488,8 @@ void deliverArmRefusal(LORAClient &rol, uint32_t refusal) {
     ModeTestReport rep = MODE_TEST_REPORT__INIT;
     rep.mode       = 0;
     rep.armrefusal = refusal;
-    LoraClientResponseMessage msg = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    msg.proto_case     = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT;
+    hubframes::Up msg{};
+    msg.proto_case     = hubframes::UL_MODETESTREPORT;
     msg.modetestreport = &rep;
     static_cast<RegridProbe &>(rol).dispatch_mac_payload_(&msg);
 }
@@ -9904,13 +9497,13 @@ void deliverArmRefusal(LORAClient &rol, uint32_t refusal) {
 // Encrypted GridSync PUBLISH frames (enable = true) on the air so far.
 size_t encryptedGridPublishes(ModeBRig &r) {
     size_t n = 0;
-    for (const auto &f : r.radio.hub_to_node_views()) {
-        LoraClientOperationMessage *m = decrypt_downlink_real(f.bytes, r.base);
+    for (const auto &f : r.radio.hub_to_node_frames()) {
+        RealDown *m = decrypt_downlink_real(f.bytes, r.base);
         if (m == nullptr) continue;
-        if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC && m->gridsync != nullptr &&
+        if (m->cmd_case == hubframes::DL_GRIDSYNC && m->gridsync != nullptr &&
             m->gridsync->enable)
             ++n;
-        lora_client_operation_message__free_unpacked(m, nullptr);
+        delete m;
     }
     return n;
 }
@@ -10477,7 +10070,7 @@ struct Seen {
 // Every hub->node frame, in air order, decrypted when it is sealed under `base`.
 std::vector<Seen> airSeen(proto_sim::SimRadio &radio, uint32_t base = 0) {
     std::vector<Seen> out;
-    const auto frames = radio.hub_to_node_views();   // by value: never iterate the temporary
+    const auto frames = radio.hub_to_node_frames();   // by value: never iterate the temporary
     for (const auto &f : frames) {
         auto p = proto_sim::as_op(f);
         if (!p) continue;
@@ -10528,9 +10121,9 @@ esphome::lora_tracker::DeliveryRequest probeFire(deliverypolicy::Shape shape, in
     req.what         = "probe";
     req.policy       = deliverypolicy::kConfigPushPolicy;
     req.policy.shape = shape;
-    req.fill         = [](LoraClientOperationMessage *op) {
+    req.fill         = [](hubframes::Down *op) {
         static TimeSync ts = TIME_SYNC__INIT;
-        op->cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+        op->cmd_case = hubframes::DL_TIMESYNC;
         op->timesync = &ts;
     };
     req.on_sent      = [sent](uint32_t) { ++*sent; };
@@ -10656,7 +10249,7 @@ TEST(FireDelivery, AClientConfigCarriesEveryFieldTheNodeIsProvisionedFrom) {
     h.rol.send_remote_config();
 
     int seen = 0;
-    const auto frames = h.radio.hub_to_node_views();
+    const auto frames = h.radio.hub_to_node_frames();
     for (const auto &f : frames) {
         auto m = proto_sim::as_op(f);
         if (!m || m->cmd != OpCmd::ClientConfig) continue;
@@ -11671,7 +11264,7 @@ std::vector<uint8_t> plaintextPositionFrom(uint8_t sender, uint32_t msgid, float
 // same packed frame, so it repeats the msgid).
 int coverFramesWithId(proto_sim::SimRadio &radio, uint32_t id) {
     int n = 0;
-    const auto frames = radio.hub_to_node_views();
+    const auto frames = radio.hub_to_node_frames();
     for (const auto &f : frames) {
         auto m = proto_sim::as_op(f);
         n += (m && m->cmd == OpCmd::Operation && m->header.msgId == id);
@@ -11719,8 +11312,8 @@ TEST(PositionIsNotAnAck, APositionAtTheDispatchSeamDoesNotCompleteACoverOp) {
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
     ASSERT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
-    ::LoraClientResponseMessage pos = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    pos.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION;
+    hubframes::Up pos{};
+    pos.proto_case = hubframes::UL_POSITION;
 
     QP(h).dispatch_payload_(&pos);
 
@@ -11762,12 +11355,12 @@ TEST(KeyStoreS2, AFrameSealedBeforeAClearIsNeverRetaggedAfterIt) {
     f.rol.send_remote_config();                          // seals: snapshots generation 1
     { RetagCase c; uint8_t want[framecrypto::kSessionCmacTagBytes];
       c.oracle(f.base, want);
-      ASSERT_TRUE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "control";
+      ASSERT_TRUE(retagLikeLast(f.tracker, 18, c)) << "control";
       EXPECT_EQ(0, memcmp(c.tag, want, sizeof(want))) << "the tag is the oracle's"; }
     KP(f.rol).clearSessionKeys_();
     const uint32_t before = f.rol.staleSessionDropsForTest();
     RetagCase c; memset(c.tag, 0xAA, sizeof(c.tag));
-    EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr));
+    EXPECT_FALSE(retagLikeLast(f.tracker, 18, c));
     EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1) << "counted as stale";
     for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
 }
@@ -11792,31 +11385,12 @@ TEST(KeyStoreS2, TwoNodesKeepIndependentGenerationsAndSealSnapshots) {
     EXPECT_EQ(other.sessionGenerationForTest(), 1u) << "node 17 is untouched";
 
     RetagCase c17; c17.hdr.destaddress = 17; memset(c17.tag, 0xAA, sizeof(c17.tag));
-    EXPECT_TRUE(other.retagLikeLastFrameForTest(&c17.enc, &c17.hdr)) << "node 17's copy still retags";
+    EXPECT_TRUE(retagLikeLast(f.tracker, 17, c17)) << "node 17's copy still retags";
     bool changed = false;
     for (uint8_t b : c17.tag) changed |= (b != 0xAA);
     EXPECT_TRUE(changed);
     RetagCase c18;
-    EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c18.enc, &c18.hdr)) << "node 18's old copy is stale";
-}
-
-// S2: MAC-2 works on mac::MacHdr, whose address, subnet and burst fields are one
-// byte wide. A wire header carrying a wider value is refused rather than
-// truncated: truncation would map two different wire headers onto one CMAC
-// input. Neither the hub nor a node ever sends such a header.
-namespace {
-}  // namespace
-
-
-TEST(KeyStoreS2, ACopyHeaderWiderThanTheMacHeaderIsNotRetagged) {
-    MsgidGuardFixture f;
-    f.rol.mark_session_confirmed_for_test();
-    f.rol.send_remote_config();
-    { RetagCase c; c.hdr.burstindex = 0xFF;
-      EXPECT_TRUE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr)) << "control: a byte-wide index retags"; }
-    RetagCase c; c.hdr.burstindex = 0x100; memset(c.tag, 0xAA, sizeof(c.tag));
-    EXPECT_FALSE(f.rol.retagLikeLastFrameForTest(&c.enc, &c.hdr));
-    for (uint8_t b : c.tag) EXPECT_EQ(b, 0xAA);
+    EXPECT_FALSE(retagLikeLast(f.tracker, 18, c18)) << "node 18's old copy is stale";
 }
 
 // =============================================================================
@@ -11836,7 +11410,7 @@ TEST(F4PerFrameSeal, AStoredFrameSealedBeforeAReKeyIsNeverTaggedAfterIt) {
     ASSERT_NE(id, 0u);
     auto copiesOf = [&](uint32_t msgid) {
         int n = 0;
-        const auto frames = f.radio.hub_to_node_views();
+        const auto frames = f.radio.hub_to_node_frames();
         for (const auto &fr : frames) {
             auto m = proto_sim::as_op(fr);
             n += (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Encrypted &&
@@ -11889,23 +11463,23 @@ TEST(F4PerFrameSeal, TheCopySealerRefusesAFrameAfterAClearAndAfterAReKey) {
     f.rol.send_remote_config();
     uint64_t binding = f.tracker.sent_policy.back().seal_binding;
     RetagCase c;
-    mac::MacHdr hdr;
-    ASSERT_TRUE(machdr::fromLoraHeader(&c.hdr, &hdr));
+    mac::MacHdr hdr = c.mac();
+    const std::vector<uint8_t> cb = c.bytes();
     uint8_t tag[8];
-    ASSERT_TRUE(mac2::LinkSecurity::copySealer(&binding, hdr, c.ct, sizeof(c.ct), tag)) << "control";
+    ASSERT_TRUE(mac2::LinkSecurity::copySealerV1(&binding, hdr, cb.data(), cb.size(), tag)) << "control";
     ASSERT_TRUE(f.rol.deriveSessionKeysForTest(0xDEADBEEFu, kTestNodeNonce));
     const uint32_t before = f.rol.staleSessionDropsForTest();
-    EXPECT_FALSE(mac2::LinkSecurity::copySealer(&binding, hdr, c.ct, sizeof(c.ct), tag))
+    EXPECT_FALSE(mac2::LinkSecurity::copySealerV1(&binding, hdr, cb.data(), cb.size(), tag))
         << "re-keyed since the frame was sealed";
     EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1);
     // A frame sealed under the NEW keys is fine...
     f.rol.send_remote_config();
     uint64_t fresh = f.tracker.sent_policy.back().seal_binding;
-    EXPECT_TRUE(mac2::LinkSecurity::copySealer(&fresh, hdr, c.ct, sizeof(c.ct), tag));
+    EXPECT_TRUE(mac2::LinkSecurity::copySealerV1(&fresh, hdr, cb.data(), cb.size(), tag));
     // ...until the keys are cleared (a fresh LOGIN challenge).
     KP(f.rol).clearSessionKeys_();
-    EXPECT_FALSE(mac2::LinkSecurity::copySealer(&fresh, hdr, c.ct, sizeof(c.ct), tag));
-    EXPECT_FALSE(mac2::LinkSecurity::copySealer(nullptr, hdr, c.ct, sizeof(c.ct), tag)) << "no binding";
+    EXPECT_FALSE(mac2::LinkSecurity::copySealerV1(&fresh, hdr, cb.data(), cb.size(), tag));
+    EXPECT_FALSE(mac2::LinkSecurity::copySealerV1(nullptr, hdr, cb.data(), cb.size(), tag)) << "no binding";
 }
 
 // H-1 host sanity (S4): the per-copy sealer on its hot path -- one stack-built
@@ -11919,8 +11493,8 @@ TEST(F4PerFrameSeal, TheCopySealerHotPathStaysCheapOnTheHost) {
     f.rol.send_remote_config();
     uint64_t binding = f.tracker.sent_policy.back().seal_binding;
     RetagCase c;
-    mac::MacHdr hdr;
-    ASSERT_TRUE(machdr::fromLoraHeader(&c.hdr, &hdr));
+    mac::MacHdr hdr = c.mac();
+    const std::vector<uint8_t> cb = c.bytes();
     uint8_t ct[120];
     for (size_t i = 0; i < sizeof(ct); ++i) ct[i] = (uint8_t) i;
     std::vector<int64_t> us;
@@ -11929,7 +11503,7 @@ TEST(F4PerFrameSeal, TheCopySealerHotPathStaysCheapOnTheHost) {
     for (int i = 0; i < 2000; ++i) {
         hdr.burst_idx = (uint8_t) (i % 17);
         const auto t0 = std::chrono::steady_clock::now();
-        const bool ok = mac2::LinkSecurity::copySealer(&binding, hdr, ct, sizeof(ct), tag);
+        const bool ok = mac2::LinkSecurity::copySealerV1(&binding, hdr, ct, sizeof(ct), tag);
         const auto t1 = std::chrono::steady_clock::now();
         ASSERT_TRUE(ok);
         us.push_back(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
@@ -11949,7 +11523,7 @@ TEST(F4PerFrameSeal, AStoredFramesRetryUnderTheSameKeysIsTaggedAndVerifies) {
     const uint32_t id = static_cast<AckProbe &>(f.rol).ctl().last_msgid;
     f.clock.tick(3050);                                  // the retry re-sends the stored frame
     int copies = 0, opened = 0;
-    const auto frames = f.radio.hub_to_node_views();
+    const auto frames = f.radio.hub_to_node_frames();
     for (const auto &fr : frames) {
         auto m = proto_sim::as_op(fr);
         if (!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Encrypted ||
@@ -12276,7 +11850,7 @@ TEST(AppChildrenS6, OnlyApplicationFramesReachAChildAndAREGISTERIsANotice) {
     auto pos = plainFrom(18, 2, positionMsg(0.4f, 11.0f, 1.0f));
     h.rol.set_response(pos.data(), pos.size());
     ASSERT_EQ(node.got.size(), 1u);
-    EXPECT_EQ(node.got[0].proto_case, (int) LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION);
+    EXPECT_EQ(node.got[0].proto_case, (int) hubframes::UL_POSITION);
     EXPECT_FALSE(node.got[0].authentic) << "the pre-session plaintext bootstrap";
     EXPECT_EQ(node.got[0].hdr.src, 18u);
     EXPECT_EQ(node.got[0].hdr.fcnt, 2u);
@@ -12289,16 +11863,15 @@ TEST(AppChildrenS6, OnlyApplicationFramesReachAChildAndAREGISTERIsANotice) {
 
 TEST(AppChildrenS6, ThePortTableClassifiesEveryUplinkCase) {
     using porttable::uplinkPort;
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER), mac::Port::Session);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN), mac::Port::Session);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK), mac::Port::Mac0Mgmt);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL), mac::Port::Mac0Mgmt);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT), mac::Port::Mac0Mgmt);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST), mac::Port::Mac0Mgmt);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL), mac::Port::App);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE), mac::Port::App);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION), mac::Port::App);
-    EXPECT_EQ(uplinkPort(LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON), mac::Port::App);
+    EXPECT_EQ(uplinkPort(hubframes::UL_REGISTER), mac::Port::Session);
+    EXPECT_EQ(uplinkPort(hubframes::UL_ACK), mac::Port::Mac0Mgmt);
+    EXPECT_EQ(uplinkPort(hubframes::UL_MACCONTROL), mac::Port::Mac0Mgmt);
+    EXPECT_EQ(uplinkPort(hubframes::UL_MODETESTREPORT), mac::Port::Mac0Mgmt);
+    EXPECT_EQ(uplinkPort(hubframes::UL_GRIDSYNCREQUEST), mac::Port::Mac0Mgmt);
+    EXPECT_EQ(uplinkPort(hubframes::UL_AVAIL), mac::Port::App);
+    EXPECT_EQ(uplinkPort(hubframes::UL_STATE), mac::Port::App);
+    EXPECT_EQ(uplinkPort(hubframes::UL_POSITION), mac::Port::App);
+    EXPECT_EQ(uplinkPort(hubframes::UL_BEACON), mac::Port::App);
 }
 
 // =============================================================================

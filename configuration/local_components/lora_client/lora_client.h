@@ -26,6 +26,10 @@
 #include "esphome/components/lora_client/Sequencer.h"
 // S8: the MAC wire v1 fixed header (vendored from the node).
 #include "esphome/components/lora_client/MacWire.h"
+// S8 / W5c: the internal frame types and the v1 body codec.
+#include "esphome/components/lora_client/HubFrames.h"
+#include "esphome/components/lora_client/HubWire.h"
+#include <memory>
 #include "esphome/components/lora_client/PendingShadow.h"
 
 #include "esphome/core/automation.h"
@@ -60,13 +64,9 @@ struct ModeTestReport;              // ModeTest results, taken by pointer
 struct GridSyncRequest;             // a node asking for its grid again, by pointer
 struct GridSync;                    // the grid being published, filled by fill_grid_sync_
 struct PhaseReport;                 // §4.6's promotion evidence, by pointer
-struct LoraClientResponseMessage;   // set_response phases take it by pointer
-struct LoraClientOperationMessage;  // a Fire request fills it; send_cover_config wraps one
 struct TimeSync;                    // filled by fill_timesync_
 struct ClientConfig;                // filled by fill_client_config_
 struct CoverConfig;                 // send_cover_config takes it by reference
-struct EncryptedPayload;            // retagLikeLastFrameForTest takes it by pointer
-struct LoraHeader;                  // retagLikeLastFrameForTest takes it by pointer
 
 namespace esphome
 {
@@ -171,7 +171,7 @@ namespace esphome
       // names what the attempt stands for (a ScheduleConfig's version) and comes
       // back in on_delivered. Asked for every attempt, except that a
       // Resend::SameBytes request's retries re-send its first frame unchanged.
-      using FrameFn = std::function<bool(::LoraClientOperationMessage *op)>;
+      using FrameFn = std::function<bool(hubframes::Down *op)>;
       std::function<bool(bool retry, uint32_t *tag, const FrameFn &frame)> encode;
       // Put a framed attempt on the air (placement, shape, the bookkeeping that
       // depends on where it went). Empty: framed but not transmitted.
@@ -195,7 +195,7 @@ namespace esphome
       std::function<bool()> admit;
       // Fill in the command (cmd_case and its payload); the header and the msgid
       // are the mechanism's. The payload must outlive the call (own it in a capture).
-      std::function<void(::LoraClientOperationMessage *op)> fill;
+      std::function<void(hubframes::Down *op)> fill;
       // The frame is on the air (or queued for it); `log_id` is its id, for log lines only.
       std::function<void(uint32_t log_id)> on_sent;
     };
@@ -485,10 +485,6 @@ namespace esphome
       bool msgidReloginPendingForTest() const { return this->msgid_relogin_pending_; }
       uint32_t msgidReloginRequestsForTest() const { return this->msgid_relogin_requests_; }
       void clearMsgidReloginForTest() { this->msgid_relogin_pending_ = false; }
-      bool packOperationForTest(::LoraClientOperationMessage *plain, bool encrypt,
-                                uint8_t **out, size_t *out_len) {
-        return this->pack_operation_(plain, encrypt, out, out_len);
-      }
       // For tests: encrypt a block under this listener's CURRENT K_enc with
       // CTR — the only way to prove the hub and node landed on bit-IDENTICAL
       // session keys, since opaque PSA key ids can't be compared directly.
@@ -655,8 +651,8 @@ namespace esphome
       // commit_rx_msgid_.
       // MAC-0 receive ticket (S5, mirrors the node's RxTicket/commitTiming): what
       // MAC-0 knows about the frame being processed -- the tracker's T0 stamp,
-      // its uncertainty, the on-air length and whether that length is a
-      // trustworthy T0 input (FrameCanon). Captured at admission (set_response),
+      // its uncertainty and the on-air length (always a trustworthy T0 input in
+      // v1). Captured at admission (set_response),
       // committed by MAC-1 only once the frame has earned it (commit_rx_msgid_).
       struct Mac0Rx
       {
@@ -669,7 +665,7 @@ namespace esphome
       void   mac0_commit_timing_(const Mac0Rx &rx);
       Mac0Rx rx_ticket_{};
       // §4.6's promotion evidence, taken from a DECRYPTED uplink — the wake
-      // beacon or, far more usefully, a CommandAck.
+      // beacon or, far more usefully, a MAC ACK.
       void notePhaseReport_(const ::PhaseReport *pr);
 
      public:
@@ -828,8 +824,6 @@ namespace esphome
       uint32_t gridSyncRequestsIgnored() const  { return this->gridsync_requests_ignored_; }
       // Plaintext uplinks refused because this node holds a confirmed session.
       uint32_t plaintextRefused() const { return this->plaintext_refused_; }
-      uint32_t nonCanonicalFrames() const { return this->noncanonical_frames_; }
-      bool     rxTimingTrusted() const { return this->rx_timing_trusted_; }
       uint32_t opRetryCount() const    { return this->ctl().retry_count; }
       // Why the node says it is NOT in Mode B, and whether it says it IS. Both
       // arrive in every decrypted beacon's PhaseReport and were stored in
@@ -936,8 +930,8 @@ namespace esphome
       // `op` carries the payload only. The first form allocates the msgid from
       // the session counter and encrypts iff the session is confirmed; the
       // second is the MAC ping's (reserved / dedicated msgids, its own choice).
-      bool mac_frame_(::LoraClientOperationMessage *op, MacFrame *out);
-      bool mac_frame_(::LoraClientOperationMessage *op, uint32_t msgid, bool encrypt, MacFrame *out);
+      bool mac_frame_(hubframes::Down *op, MacFrame *out);
+      bool mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt, MacFrame *out);
       // THE MAC-0 data request: every frame this listener puts on the air
       // passes here, with its copy sealer attached when it is sealed.
       bool mac0_send_(const uint8_t *buf, size_t len, TxPolicy policy, const mac2::FrameSeal &seal);
@@ -1211,9 +1205,9 @@ namespace esphome
       // 88 ms burst slot), so a lost one used to be lost for good: no schedule
       // means the node never enters auto mode, never sleeps, never wakes, never
       // beacons — and the beacon is what would have triggered a re-push.
-      // Retransmit until the node's CommandAck confirms delivery.
+      // Retransmit until the node's MAC ACK confirms delivery.
       // The push is the Config channel's request (slots_[CH_CONFIG], deliver_).
-      // A GridSync is re-published until the node's CommandAck names one of its
+      // A GridSync is re-published until the node's MAC ACK names one of its
       // msgids. Measured 2026-09-15 on node 2: the single GridSync sent after a
       // login was lost (the node spent the burst in CAD retries) and nothing
       // re-sent it — 13 minutes in Mode A with Timed Mode ON. Exact msgids, not a
@@ -1281,11 +1275,6 @@ namespace esphome
       uint32_t      gridsync_requests_answered_{0};
       uint32_t      gridsync_requests_ignored_{0};
       uint32_t      plaintext_refused_{0};
-      // FrameCanon.h verdict for the uplink being processed (set once per frame
-      // in set_response, carried in rx_ticket_ to mac0_commit_timing_). false = the frame's
-      // on-air length is not a trustworthy T0 input.
-      bool          rx_timing_trusted_{true};
-      uint32_t      noncanonical_frames_{0};
       static constexpr uint8_t  kSchedMaxRetries   = deliverypolicy::kSchedulePolicy.max_retries;
       static constexpr uint32_t kSchedRetryMs      = deliverypolicy::kSchedulePolicy.base_wait_ms;
       // The most an ack timer is stretched by the transmit backlog. A ceiling
@@ -1311,7 +1300,7 @@ namespace esphome
 
       // F-4: Send a cover operation with delivery tracking.  The operation is
       // stored so it can be retransmitted (with a fresh, incrementing msgid)
-      // until the node returns a CommandAck.  After kOpMaxRetries the command is
+      // until the node returns a MAC ACK.  After kOpMaxRetries the command is
       // marked failed and surfaced to Home Assistant via the optional binary
       // sensor.  covop_case / operation use the generated LoraCoverOperation /
       // CovOperation enum values; position is used only for the POSITION case.
@@ -1403,7 +1392,6 @@ namespace esphome
       // TxPolicy::sealer). Writes enc->tag in place; false = the copy is dropped
       // (no session, the keys changed since that frame was sealed, a copy for
       // another node, or a tag buffer of the wrong size).
-      bool retagLikeLastFrameForTest(::EncryptedPayload *enc, const ::LoraHeader *header);
       // For tests: how many burst copies of this node's frames were refused as
       // stale (sealed under keys the node no longer holds).
       uint32_t staleSessionDropsForTest() const;
@@ -1561,14 +1549,14 @@ namespace esphome
       // the hub mirror of the node's onReceiveNew (70 -> 15). The ORDER in
       // set_response is load-bearing: REGISTER must bypass the address and
       // replay filters, so it is tested before admit_frame_().
-      void handle_register_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
-      bool admit_frame_(::LoraClientResponseMessage *rcv_message);
-      void handle_encrypted_(::LoraClientResponseMessage *rcv_message, uint8_t *data, size_t len);
+      void handle_register_(hubframes::Up *rcv_message, uint8_t *data, size_t len);
+      bool admit_frame_(hubframes::Up *rcv_message);
+      void handle_encrypted_(hubframes::Up *rcv_message, uint8_t *data, size_t len);
       // Working state of one encrypted-uplink receive: the ordered stages of
       // handle_encrypted_ share it instead of a dozen locals.
       struct EncUplink
       {
-        ::LoraClientResponseMessage *msg{nullptr};
+        hubframes::Up *msg{nullptr};
         uint32_t     sender{0};
         uint32_t      session_id{0};
         mac2::KeyPair keys{};        // the keys this frame is tried under (live, or the candidate)
@@ -1583,37 +1571,30 @@ namespace esphome
       uint8_t *uplink_decrypt_(EncUplink &up);
       void     uplink_accept_(EncUplink &up, uint8_t *plaintext);
       void     uplink_drop_candidate_(EncUplink &up);
-      void     forward_uplink_(::LoraClientResponseMessage *inner,
-                               const ::LoraClientResponseMessage *outer);
       // ---- MAC wire v1 (S8, docs/mac-wire-format.md) -------------------------
-      // Compiled in both configurations; called only under MAC_WIRE_V1 (the
-      // compile-time switch, default OFF, spec section 12). The OFF path is
-      // untouched.
-      //
       // Downlink: the v1 frame for `op` under FCNT `fcnt` -- HubMacPdu or
       // HubAppPdu behind the fixed header (hubwire::routeDownlink picks PORT and
-      // ACK_REQ), sealed (AUTH = SESSION) exactly when the v0 path would have
-      // encrypted it: encrypt && a session id exists for the node.
-      bool v1_frame_(::LoraClientOperationMessage *op, uint32_t fcnt, bool encrypt, MacFrame *out);
+      // ACK_REQ), sealed (AUTH = SESSION) exactly when encrypt && a session id
+      // exists for the node.
+      bool v1_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt, MacFrame *out);
       bool v1_seal_(MacFrame *f, size_t hdr_len, size_t body_len);
       // The v1 LOGIN path of send_login (frame, send, log).
       void send_login_v1_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base);
-      // The REGISTER's authentication: v1 = K_AUTH tag over the raw frame, v0 =
-      // the mic field over its field-by-field input.
-      bool register_authentic_(const ::LoraClientResponseMessage *rcv_message, const uint8_t *data,
+      // The REGISTER's authentication: the K_AUTH tag over the raw frame.
+      bool register_authentic_(const hubframes::Up *rcv_message, const uint8_t *data,
                                size_t len);
-      // The v0 unpack or the v1 shape check + envelope (set_response's first step).
-      ::LoraClientResponseMessage *unpack_uplink_(uint8_t *data, size_t len);
-      // uplink_verify_'s tag check, v0 (decoded header) or v1 (raw frame).
+      // The v1 shape check + decoded view (set_response's first step).
+      std::unique_ptr<hubwire::Uplink> unpack_uplink_(uint8_t *data, size_t len);
+      // uplink_verify_'s tag check over the raw frame.
       mac2::LinkSecurity::Verify uplink_tag_verdict_(EncUplink &up);
       // LOGIN (PORT 1, AUTH = K_AUTH; the tag replaces LoginMsg.mic).
       bool v1_login_frame_(const ::LoginMsg &login, uint32_t fcnt, MacFrame *out);
       // GridDemote (broadcast, PORT 0, AUTH = NONE, FCNT 0).
       bool v1_demote_frame_(MacFrame *out);
-      // Uplink: shape-check the frame and return the v0 envelope the rest of
-      // set_response walks (protobuf-c owned), or nullptr (dropped). Keeps the
-      // raw frame and its header for the verify/accept stages below.
-      ::LoraClientResponseMessage *v1_receive_(uint8_t *data, size_t len);
+      // Uplink: shape-check the frame and return the decoded view the rest of
+      // set_response walks (hubframes::Up, owned), or nullptr (dropped). Keeps
+      // the raw frame and its header for the verify/accept stages below.
+      std::unique_ptr<hubwire::Uplink> v1_receive_(uint8_t *data, size_t len);
       bool v1_verify_uplink_(EncUplink &up);
       void v1_deliver_decrypted_(EncUplink &up, const uint8_t *pt, size_t len);
       macwire::WireHdr v1_rx_hdr_{};
@@ -1622,8 +1603,7 @@ namespace esphome
 
       // Two stages of set_response(): the length re-encode check, and the
       // plaintext-uplink gate (true = the frame may be acted on).
-      void check_uplink_canonical_(const ::LoraClientResponseMessage *rcv_message, size_t len);
-      bool accept_plaintext_uplink_(::LoraClientResponseMessage *rcv_message);
+      bool accept_plaintext_uplink_(hubframes::Up *rcv_message);
       // Tier 3: derive this listener's K_enc/K_mac from (K_root, session_id,
       // node_nonce, hub/node addresses) and install them immediately,
       // destroying whatever was there before only on success — mirrors
@@ -1655,13 +1635,13 @@ namespace esphome
       void clearSessionKeys_();
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
-      void commit_rx_msgid_(const ::LoraClientResponseMessage *rcv_message);
-      void dispatch_payload_(::LoraClientResponseMessage *msg);
-      void dispatch_mac_payload_(::LoraClientResponseMessage *msg);
+      void commit_rx_msgid_(const hubframes::Up *rcv_message);
+      void dispatch_payload_(hubframes::Up *msg);
+      void dispatch_mac_payload_(hubframes::Up *msg);
       // S6: the listener's own handling (dispatch_payload_, demultiplexed by
       // PortTable.h), then -- for a mac::Port::App frame only -- one decoded
       // AppIndication to each child. `outer` is the frame's (outer) header.
-      void deliver_uplink_(::LoraClientResponseMessage *msg, const ::LoraHeader *outer, bool authentic);
+      void deliver_uplink_(hubframes::Up *msg, const hubframes::Hdr *outer, bool authentic);
       void confirm_session_();
       void send_deferred_tracked_op_();
       void send_deferred_config_push_();
@@ -1718,14 +1698,9 @@ namespace esphome
 
       // Msgid / CTR-space guard (framecrypto::kMsgidCtrLimit). requestMsgidRelogin_
       // starts a fresh session ONCE per exhaustion (flag cleared in send_login(),
-      // where both counters restart); pack_operation_ is s_pack_operation_message
-      // plus that request when the seal was refused for the msgid alone.
+      // where both counters restart); v1_seal_ requests it when the seal was
+      // refused for the FCNT alone.
       void     requestMsgidRelogin_(const char *where);
-      bool     pack_operation_(::LoraClientOperationMessage *plain, bool encrypt,
-                               uint8_t **out, size_t *out_len, mac2::FrameSeal *seal = nullptr);
-      // The binding of the last frame this listener sealed (FrameSeal::binding),
-      // for retagLikeLastFrameForTest. Atomic: the MAC ping builds on the timer task.
-      std::atomic<uint64_t> last_seal_binding_{0};
       bool     msgid_relogin_pending_{false};
       uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       // Arm a ONE-SHOT login retry that re-arms itself, mirroring
@@ -1740,7 +1715,7 @@ namespace esphome
       // ---- F-4 / P1: command ACK / retransmit state (cover ops AND sysops) ----
       // One reusable tracked-delivery state machine backs BOTH cover operations
       // and one-shot system operations (OTA etc.): (re)transmit with a fresh
-      // incrementing msgid until the node returns a CommandAck, then mark failed
+      // incrementing msgid until the node returns a MAC ACK, then mark failed
       // + force re-login after kOpMaxRetries.  kind selects what tx_tracked_op_
       // rebuilds on each retransmission.
       using TrackedOpKind = DeliverySlot::Kind;
@@ -1765,8 +1740,8 @@ namespace esphome
       bool     fire_place_(deliverypolicy::Shape shape, const MacFrame &f, const char *what);
       bool     fire_class_a_(const MacFrame &f, const char *what);
       // TimeSync / ClientConfig, as Fire requests.
-      void     fill_timesync_(::LoraClientOperationMessage *op, ::TimeSync *ts);
-      void     fill_client_config_(::LoraClientOperationMessage *op, ::ClientConfig *cc);
+      void     fill_timesync_(hubframes::Down *op, ::TimeSync *ts);
+      void     fill_client_config_(hubframes::Down *op, ::ClientConfig *cc);
       // One attempt, and the ack wait that follows it. False: could not be built.
       bool     dlv_tx_(DeliveryChannel ch, bool retry);
       void     on_dlv_timeout_(DeliveryChannel ch, bool short_wait);

@@ -20,13 +20,10 @@ typedef struct ClientConfig ClientConfig;
 typedef struct CoverConfig CoverConfig;
 typedef struct LoginMsg LoginMsg;
 typedef struct PhaseReport PhaseReport;
-typedef struct CommandAck CommandAck;
-typedef struct EncryptedPayload EncryptedPayload;
 typedef struct TimeSync TimeSync;
 typedef struct ScheduleEntry ScheduleEntry;
 typedef struct ScheduleConfig ScheduleConfig;
 typedef struct NodeWakeBeacon NodeWakeBeacon;
-typedef struct LoraHeader LoraHeader;
 typedef struct DriftTest DriftTest;
 typedef struct MacControl MacControl;
 typedef struct GridBeacon GridBeacon;
@@ -35,13 +32,11 @@ typedef struct GridSync GridSync;
 typedef struct ModeTest ModeTest;
 typedef struct Hist Hist;
 typedef struct ModeTestReport ModeTestReport;
-typedef struct LoraClientOperationMessage LoraClientOperationMessage;
 typedef struct ClientRegister ClientRegister;
 typedef struct ClientAvailable ClientAvailable;
 typedef struct ClientBattery ClientBattery;
 typedef struct CoverPosition CoverPosition;
 typedef struct GridSyncRequest GridSyncRequest;
-typedef struct LoraClientResponseMessage LoraClientResponseMessage;
 typedef struct HubMacPdu HubMacPdu;
 typedef struct SysopCmd SysopCmd;
 typedef struct HubAppPdu HubAppPdu;
@@ -96,7 +91,7 @@ typedef enum _ClientOperation {
   CLIENT_OPERATION__CMD_SLEEP = 4,
   /*
    * Immediate mode transition for a node that is currently awake.  These ride
-   * the existing tracked/acked sysop path (retransmit until CommandAck), so a
+   * the existing tracked/acked sysop path (retransmit until the MAC ACK), so a
    * dropped toggle recovers.  The PERSISTED mode setting lives in
    * ScheduleConfig.mode — these two must be kept consistent by the hub.
    */
@@ -116,19 +111,6 @@ typedef enum _ClientOperation {
   CLIENT_OPERATION__CMD_DEBUG_TRACE_CAPTURE_ARM = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(CLIENT_OPERATION)
 } ClientOperation;
-/*
- * Encryption algorithm identifiers. LEGACY and UNUSED on the wire since the
- * Tier 3 Encrypt-then-CMAC cutover (nothing reads or writes it); the enum and
- * its numbers are retained only so the hub and node stubs stay identical.
- */
-typedef enum _EncryptionAlgo {
-  ENCRYPTION_ALGO__ENC_NONE = 0,
-  /*
-   * legacy: AES-GCM was replaced by Encrypt-then-CMAC
-   */
-  ENCRYPTION_ALGO__ENC_AES_GCM_128 = 1
-    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(ENCRYPTION_ALGO)
-} EncryptionAlgo;
 /*
  * Result of processing a command on the node.
  */
@@ -187,7 +169,7 @@ typedef enum _WakeReason {
    * NOT A WAKE AT ALL — the node's Mode B status changed, and it is telling
    * the hub unprompted.
    * The PhaseReport that says whether a node is in Mode B rides an UPLINK: a
-   * wake beacon or a CommandAck. An interactive node never sleeps, so it
+   * wake beacon or a MAC ACK. An interactive node never sleeps, so it
    * never wakes, so it never beacons; with no traffic it has nothing to ack.
    * So the hub's belief about a promoted, QUIET node is stale indefinitely,
    * and txRefusalFor can never clear NoPhaseReport for exactly the node that
@@ -219,9 +201,9 @@ struct  LoraCoverOperation
 {
   ProtobufCMessage base;
   /*
-   * MAC wire v1 (S8, docs/mac-wire-format.md section 7): the command's identity,
-   * allocated per Home Assistant command by the hub's Control channel and kept
-   * across retries and re-packs. 0 = not set (v0 frames never set it).
+   * The command's identity (docs/mac-wire-format.md section 7), allocated per
+   * Home Assistant command by the hub's Control channel and kept across
+   * retries and re-packs. 0 = not set.
    */
   uint32_t cmd_id;
   LoraCoverOperation__CovopCase covop_case;
@@ -285,7 +267,8 @@ struct  LoginMsg
   ProtobufCMessage base;
   /*
    * hub_nonce (mac-separation-implementation-plan.md section 2(b)): esp_random()
-   * on the hub. Mixed into the session-key derivation and covered by `mic`.
+   * on the hub. Mixed into the session-key derivation; covered by the frame's
+   * K_AUTH tag.
    */
   uint32_t nonce;
   /*
@@ -297,15 +280,6 @@ struct  LoginMsg
    * awake node without requiring it to reboot.  False on a normal login.
    */
   protobuf_c_boolean request_register;
-  /*
-   * Tier 3: CMAC(K_auth, "LG1" || dest || subnet || sender || msgid ||
-   * hub_nonce || request_register || hub_rebooted)[0:8]. Authenticates
-   * LOGIN before any state change (rate limit, resetCounters()) —
-   * previously plaintext and accepted on a bare 5 s rate limit, letting a
-   * forged/replayed LOGIN force real, key-free GCM IV reuse.
-   * MAC wire v1 (S8): replaced by the frame's K_AUTH tag; reserved in W5.
-   */
-  ProtobufCBinaryData mic;
   /*
    * Security review finding 7: true only when this is the hub's FIRST
    * LOGIN send for this node since the hub process itself started
@@ -321,13 +295,10 @@ struct  LoginMsg
 };
 #define LOGIN_MSG__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&login_msg__descriptor) \
-    , 0, 0, {0,NULL}, 0 }
+    , 0, 0, 0 }
 
 
 /*
- * Acknowledgement of a received command, sent node -> hub so the hub can
- * confirm delivery and stop retransmitting.  ack_msg_id echoes the
- * LoraHeader.msgId of the command being acknowledged.
  * ---------------------------------------------------------------------------
  * What the node has measured about this link's TIMING.
  * This is the evidence section 4.6 promotes single-shot on: a measurement of
@@ -409,55 +380,6 @@ struct  PhaseReport
 #define PHASE_REPORT__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&phase_report__descriptor) \
     , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-
-
-/*
- * MAC wire v1 (S8): replaced by MacAck in the body + FLAGS.ACK / ACKED_FCNT in
- * the header; deleted in W5.
- */
-struct  CommandAck
-{
-  ProtobufCMessage base;
-  uint32_t ack_msg_id;
-  AckStatus status;
-  /*
-   * The ack is the carrier that matters: it answers the very traffic
-   * single-shot is decided for, so the hub's belief is refreshed exactly
-   * when it is about to be used.
-   */
-  PhaseReport *phase;
-};
-#define COMMAND_ACK__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&command_ack__descriptor) \
-    , 0, ACK_STATUS__ACK_OK, NULL }
-
-
-/*
- * When a payload is encrypted, the structured protobuf messages are not
- * present; instead the envelope carries this EncryptedPayload which holds
- * algorithm metadata, IV, optional key identifier, auth tag and ciphertext.
- * Slim on-air Encrypt-then-CMAC envelope.  The scheme is fixed (AES-128-CTR
- * under K_enc, then AES-CMAC under K_mac truncated to 8 bytes), and the CTR
- * counter block and the CMAC prefix are reconstructed by the receiver from the
- * plaintext outer header — so only the tag and ciphertext are transmitted.  The
- * ciphertext is the payload-only inner message (its header is NOT re-encrypted;
- * the receiver uses the outer header).
- */
-struct  EncryptedPayload
-{
-  ProtobufCMessage base;
-  /*
-   * AES-CMAC (K_mac), truncated to 8 bytes
-   */
-  ProtobufCBinaryData tag;
-  /*
-   * AES-CTR (K_enc) encrypted payload-only inner protobuf
-   */
-  ProtobufCBinaryData ciphertext;
-};
-#define ENCRYPTED_PAYLOAD__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&encrypted_payload__descriptor) \
-    , {0,NULL}, {0,NULL} }
 
 
 /*
@@ -559,7 +481,7 @@ struct  ScheduleEntry
  * blob (~150 B on air with 8 entries, vs. the 255 B frame limit).  Idempotent:
  * the node replaces its stored schedule wholesale, so there is no partial-update
  * state to get out of sync.  Only ENABLED entries are sent.
- * Sent SINGLE-SHOT (LoraHeader.burstCount = 0), never bursted: at ~150 B its
+ * Sent SINGLE-SHOT (BURST_CNT = 0), never bursted: at ~150 B its
  * airtime (~95 ms at SF7/BW500/CR4/8) exceeds the 88 ms burst slot spacing.  It
  * is only ever sent in reply to a NodeWakeBeacon, so the node is provably
  * listening and the burst would be redundant anyway.
@@ -666,8 +588,8 @@ struct  NodeWakeBeacon
    * and the hub pairs it with its own receive stamp of that beacon, matched by
    * msgId. Hub us against ticks x nominal period is the wake clock's rate.
    * 0 / 0 = no previous beacon since power-on.
-   * MAC wire v1 (S8): renamed from prevBeaconMsgId -- same number, type and
-   * values; the paired beacon is identified by its FCNT (= the v0 msgId).
+   * The paired beacon, identified by its FCNT (renamed from prevBeaconMsgId
+   * in S8: same number, type and values).
    */
   uint32_t prevbeaconfcnt;
   uint64_t prevbeacont0ticks;
@@ -697,65 +619,6 @@ struct  NodeWakeBeacon
 #define NODE_WAKE_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
     , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-
-
-struct  LoraHeader
-{
-  ProtobufCMessage base;
-  uint32_t destaddress;
-  uint32_t destsubnet;
-  uint32_t senderaddress;
-  uint32_t msgid;
-  /*
-   * Burst scheduling (hub -> node): each copy of a TX burst carries its own
-   * 0-based index and the total count.  The node uses these to compute when
-   * the burst ends and defers its response until the channel is clear.
-   * burstCount == 0 means "not part of a burst" (single-shot) -> no deferral.
-   */
-  uint32_t burstindex;
-  uint32_t burstcount;
-  /*
-   * Copy 0 of this frame was PLACED on the destination node's grid mark
-   * (hub -> node). Only such a frame is a phase measurement: the node commits
-   * a phase sample for it and for nothing else. An unplaced frame — a Mode A
-   * burst, the ModeTest START, a Class A reply aimed at RX1/RX2 — lands
-   * anywhere in the round, and one sample from it latches outside_guard and
-   * keeps the node out of Mode B until its grid is re-adopted. Measured
-   * 2026-09-14: the ModeTest START landed 463 ms off the mark, and two 900 s
-   * Mode B runs armed no window at all.
-   * Stamped with burstIndex, after encryption, outside the AAD — the same
-   * standing as burstIndex. Flipping it on a genuine frame can only add a bad
-   * sample (which demotes) or withhold a good one; it cannot move the anchor.
-   */
-  protobuf_c_boolean onmark;
-  /*
-   * WHERE THIS COPY'S T0 ACTUALLY IS on the hub's grid (hub -> node), stamped
-   * at transmission: round index since the hub's grid anchor, and the offset
-   * into that round in microseconds. Every copy carries its own instant, so
-   * the node needs neither the burst index nor a placement to use it.
-   * It makes EVERY heard copy of EVERY hub frame a phase sample — a LOGIN or
-   * a Mode A burst as much as a placed mark — and it makes a late frame
-   * harmless, because a late frame declares the instant it really went out.
-   * Measured 2026-09-14 on node 2: a GridSync sent ~320 ms (and, in another
-   * run, ~10 ms) after the mark it was placed on moved the node's whole grid by
-   * that much, and promotion waited ~23 s per lucky mark catch.
-   * fireStamped says the two numbers mean something: proto3 zero is a real
-   * instant (round 0, offset 0). Outside the AAD, like burstIndex.
-   */
-  protobuf_c_boolean firestamped;
-  uint32_t fireround;
-  uint32_t fireoffsetus;
-  /*
-   * Tier 3 session establishment (mac-separation-implementation-plan.md
-   * section 2(b), step 3): the node's session-opening uplink carries its
-   * freshly generated node_nonce here, ONCE per session, covered by that
-   * frame's CMAC. Zero on every other frame.
-   */
-  uint32_t sessionnonce;
-};
-#define LORA_HEADER__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&lora_header__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*
@@ -931,16 +794,10 @@ struct  GridBeacon
    * frame — which is exactly the pre-beacon behaviour, and safe.
    */
   uint32_t netkeyid;
-  /*
-   * AES-CMAC over framecrypto::buildBeaconMacInput(), truncated to 8 bytes to
-   * match the AEAD tag budget already on this link.
-   * MAC wire v1 (S8): replaced by the frame's FLEET tag; reserved in W5.
-   */
-  ProtobufCBinaryData mac;
 };
 #define GRID_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&grid_beacon__descriptor) \
-    , 0, 0, 0, 0, 0, {0,NULL} }
+    , 0, 0, 0, 0, 0 }
 
 
 /*
@@ -1290,89 +1147,6 @@ struct  ModeTestReport
     , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
-typedef enum {
-  LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET = 0,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION = 10,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP = 11,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG = 12,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG = 13,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN = 14,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC = 16,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE = 17,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST = 18,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL = 20,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC = 21,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST = 22,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON = 23,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE = 24,
-  LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED = 9
-    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_OPERATION_MESSAGE__CMD__CASE)
-} LoraClientOperationMessage__CmdCase;
-
-struct  LoraClientOperationMessage
-{
-  ProtobufCMessage base;
-  LoraHeader *header;
-  LoraClientOperationMessage__CmdCase cmd_case;
-  union {
-    ClientConfig *clientconfig;
-    CoverConfig *coverconfig;
-    /*
-     * Bench-only drift test. A node that does not know this field ignores
-     * it (proto3 unknown-field behaviour), so it is safe to ship to a hub
-     * ahead of the nodes.
-     */
-    DriftTest *drifttest;
-    /*
-     * When this field is present the message is encrypted (AEAD blob); the
-     * structured fields above are absent.  Field 9 keeps a 1-byte tag.
-     */
-    EncryptedPayload *encrypted;
-    /*
-     * Section 4.4's periodic broadcast beacon. A node that does not know
-     * this field ignores it and simply keeps holding phase off ordinary
-     * traffic, which is the safe direction.
-     */
-    GridBeacon *gridbeacon;
-    /*
-     * The startup withdrawal. A node that does not know this field ignores
-     * it and falls back on its own demotion criteria, which is the safe
-     * direction and what happens today.
-     */
-    GridDemote *griddemote;
-    /*
-     * The timed-window grid (B3). A node that does not know this field
-     * ignores it and stays in Mode A, which is the safe direction.
-     */
-    GridSync *gridsync;
-    LoginMsg *login;
-    /*
-     * MAC-layer control frame. Terminates at the MAC; a node that does not
-     * know this field ignores it (proto3 unknown-field behaviour), so it is
-     * safe to ship to a hub ahead of the nodes.
-     */
-    MacControl *maccontrol;
-    /*
-     * Bench-only on-hardware validation mode. Like DriftTest, a node that
-     * does not know this field ignores it, so it is safe to ship to a hub
-     * ahead of the nodes.
-     */
-    ModeTest *modetest;
-    LoraCoverOperation *operation;
-    ScheduleConfig *schedule;
-    /*
-     * Automatic-mode additions (P0).  Fields >15 cost a 2-byte tag; both are
-     * low-rate messages so that is irrelevant here.
-     */
-    TimeSync *timesync;
-    ClientOperation sysop;
-  };
-};
-#define LORA_CLIENT_OPERATION_MESSAGE__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&lora_client_operation_message__descriptor) \
-    , NULL, LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET, {0} }
-
-
 struct  ClientRegister
 {
   ProtobufCMessage base;
@@ -1386,19 +1160,10 @@ struct  ClientRegister
    * so config changes flashed into the hub are always delivered.
    */
   protobuf_c_boolean needs_config;
-  /*
-   * Tier 3 (mac-separation-implementation-plan.md section 2(b), step 7):
-   * CMAC(K_auth, "RG1" || mac_addr || needs_config || header)[0:8].
-   * REGISTER previously had no authentication at all and was processed
-   * before any address/msgid filter — a forged plaintext REGISTER could
-   * drop an existing session outright.
-   * MAC wire v1 (S8): replaced by the frame's K_AUTH tag; reserved in W5.
-   */
-  ProtobufCBinaryData mic;
 };
 #define CLIENT_REGISTER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&client_register__descriptor) \
-    , 0, 0, {0,NULL} }
+    , 0, 0 }
 
 
 struct  ClientAvailable
@@ -1486,68 +1251,6 @@ struct  GridSyncRequest
 
 
 typedef enum {
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET = 0,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST = 23,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL = 10,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER = 11,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE = 12,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION = 13,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN = 14,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK = 15,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON = 16,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL = 20,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT = 22,
-  LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED = 9
-    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_CLIENT_RESPONSE_MESSAGE__PROTO__CASE)
-} LoraClientResponseMessage__ProtoCase;
-
-struct  LoraClientResponseMessage
-{
-  ProtobufCMessage base;
-  LoraHeader *header;
-  LoraClientResponseMessage__ProtoCase proto_case;
-  union {
-    CommandAck *ack;
-    ClientAvailable *avail;
-    /*
-     * Automatic-mode addition (P0).
-     */
-    NodeWakeBeacon *beacon;
-    /*
-     * When present the message is encrypted (AEAD blob); structured fields
-     * above are absent.  Field 9 keeps a 1-byte tag.
-     */
-    EncryptedPayload *encrypted;
-    /*
-     * The node asks for its grid again. See GridSyncRequest.
-     */
-    GridSyncRequest *gridsyncrequest;
-    LoginMsg *login;
-    /*
-     * MAC-layer echo. Emitted by MAC-0 in reply to a MacControl ping,
-     * WITHOUT any application round trip — that is what makes a measured
-     * turnaround mean RxDone -> TX fire and nothing else. Today the only
-     * way to get a reply is a command the application answers, so any
-     * turnaround measured that way silently includes application dispatch.
-     */
-    MacControl *maccontrol;
-    /*
-     * ModeTest results. Recomputed off-node from these raw counters rather
-     * than pretty-printed on it (I1), so the node never gets to decide what
-     * its own numbers mean.
-     */
-    ModeTestReport *modetestreport;
-    CoverPosition *position;
-    ClientRegister *register_;
-    ClientBattery *state;
-  };
-};
-#define LORA_CLIENT_RESPONSE_MESSAGE__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&lora_client_response_message__descriptor) \
-    , NULL, LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET, {0} }
-
-
-typedef enum {
   HUB_MAC_PDU__PDU__NOT_SET = 0,
   HUB_MAC_PDU__PDU_DRIFTTEST = 18,
   HUB_MAC_PDU__PDU_MACCONTROL = 20,
@@ -1628,8 +1331,8 @@ struct  HubAppPdu
 
 /*
  * node -> hub, PORT 0: the MAC ACK's body. The acknowledged FCNT travels in the
- * header (FLAGS.ACK + ACKED_FCNT); status still means "executed", and the phase
- * report is still section 4.6's evidence (CommandAck minus ack_msg_id).
+ * header (FLAGS.ACK + ACKED_FCNT); status means "executed", and the phase
+ * report is section 4.6's evidence.
  */
 struct  MacAck
 {
@@ -1793,44 +1496,6 @@ PhaseReport *
 void   phase_report__free_unpacked
                      (PhaseReport *message,
                       ProtobufCAllocator *allocator);
-/* CommandAck methods */
-void   command_ack__init
-                     (CommandAck         *message);
-size_t command_ack__get_packed_size
-                     (const CommandAck   *message);
-size_t command_ack__pack
-                     (const CommandAck   *message,
-                      uint8_t             *out);
-size_t command_ack__pack_to_buffer
-                     (const CommandAck   *message,
-                      ProtobufCBuffer     *buffer);
-CommandAck *
-       command_ack__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   command_ack__free_unpacked
-                     (CommandAck *message,
-                      ProtobufCAllocator *allocator);
-/* EncryptedPayload methods */
-void   encrypted_payload__init
-                     (EncryptedPayload         *message);
-size_t encrypted_payload__get_packed_size
-                     (const EncryptedPayload   *message);
-size_t encrypted_payload__pack
-                     (const EncryptedPayload   *message,
-                      uint8_t             *out);
-size_t encrypted_payload__pack_to_buffer
-                     (const EncryptedPayload   *message,
-                      ProtobufCBuffer     *buffer);
-EncryptedPayload *
-       encrypted_payload__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   encrypted_payload__free_unpacked
-                     (EncryptedPayload *message,
-                      ProtobufCAllocator *allocator);
 /* TimeSync methods */
 void   time_sync__init
                      (TimeSync         *message);
@@ -1906,25 +1571,6 @@ NodeWakeBeacon *
                       const uint8_t       *data);
 void   node_wake_beacon__free_unpacked
                      (NodeWakeBeacon *message,
-                      ProtobufCAllocator *allocator);
-/* LoraHeader methods */
-void   lora_header__init
-                     (LoraHeader         *message);
-size_t lora_header__get_packed_size
-                     (const LoraHeader   *message);
-size_t lora_header__pack
-                     (const LoraHeader   *message,
-                      uint8_t             *out);
-size_t lora_header__pack_to_buffer
-                     (const LoraHeader   *message,
-                      ProtobufCBuffer     *buffer);
-LoraHeader *
-       lora_header__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   lora_header__free_unpacked
-                     (LoraHeader *message,
                       ProtobufCAllocator *allocator);
 /* DriftTest methods */
 void   drift_test__init
@@ -2078,25 +1724,6 @@ ModeTestReport *
 void   mode_test_report__free_unpacked
                      (ModeTestReport *message,
                       ProtobufCAllocator *allocator);
-/* LoraClientOperationMessage methods */
-void   lora_client_operation_message__init
-                     (LoraClientOperationMessage         *message);
-size_t lora_client_operation_message__get_packed_size
-                     (const LoraClientOperationMessage   *message);
-size_t lora_client_operation_message__pack
-                     (const LoraClientOperationMessage   *message,
-                      uint8_t             *out);
-size_t lora_client_operation_message__pack_to_buffer
-                     (const LoraClientOperationMessage   *message,
-                      ProtobufCBuffer     *buffer);
-LoraClientOperationMessage *
-       lora_client_operation_message__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   lora_client_operation_message__free_unpacked
-                     (LoraClientOperationMessage *message,
-                      ProtobufCAllocator *allocator);
 /* ClientRegister methods */
 void   client_register__init
                      (ClientRegister         *message);
@@ -2191,25 +1818,6 @@ GridSyncRequest *
                       const uint8_t       *data);
 void   grid_sync_request__free_unpacked
                      (GridSyncRequest *message,
-                      ProtobufCAllocator *allocator);
-/* LoraClientResponseMessage methods */
-void   lora_client_response_message__init
-                     (LoraClientResponseMessage         *message);
-size_t lora_client_response_message__get_packed_size
-                     (const LoraClientResponseMessage   *message);
-size_t lora_client_response_message__pack
-                     (const LoraClientResponseMessage   *message,
-                      uint8_t             *out);
-size_t lora_client_response_message__pack_to_buffer
-                     (const LoraClientResponseMessage   *message,
-                      ProtobufCBuffer     *buffer);
-LoraClientResponseMessage *
-       lora_client_response_message__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   lora_client_response_message__free_unpacked
-                     (LoraClientResponseMessage *message,
                       ProtobufCAllocator *allocator);
 /* HubMacPdu methods */
 void   hub_mac_pdu__init
@@ -2342,12 +1950,6 @@ typedef void (*LoginMsg_Closure)
 typedef void (*PhaseReport_Closure)
                  (const PhaseReport *message,
                   void *closure_data);
-typedef void (*CommandAck_Closure)
-                 (const CommandAck *message,
-                  void *closure_data);
-typedef void (*EncryptedPayload_Closure)
-                 (const EncryptedPayload *message,
-                  void *closure_data);
 typedef void (*TimeSync_Closure)
                  (const TimeSync *message,
                   void *closure_data);
@@ -2359,9 +1961,6 @@ typedef void (*ScheduleConfig_Closure)
                   void *closure_data);
 typedef void (*NodeWakeBeacon_Closure)
                  (const NodeWakeBeacon *message,
-                  void *closure_data);
-typedef void (*LoraHeader_Closure)
-                 (const LoraHeader *message,
                   void *closure_data);
 typedef void (*DriftTest_Closure)
                  (const DriftTest *message,
@@ -2387,9 +1986,6 @@ typedef void (*Hist_Closure)
 typedef void (*ModeTestReport_Closure)
                  (const ModeTestReport *message,
                   void *closure_data);
-typedef void (*LoraClientOperationMessage_Closure)
-                 (const LoraClientOperationMessage *message,
-                  void *closure_data);
 typedef void (*ClientRegister_Closure)
                  (const ClientRegister *message,
                   void *closure_data);
@@ -2404,9 +2000,6 @@ typedef void (*CoverPosition_Closure)
                   void *closure_data);
 typedef void (*GridSyncRequest_Closure)
                  (const GridSyncRequest *message,
-                  void *closure_data);
-typedef void (*LoraClientResponseMessage_Closure)
-                 (const LoraClientResponseMessage *message,
                   void *closure_data);
 typedef void (*HubMacPdu_Closure)
                  (const HubMacPdu *message,
@@ -2434,7 +2027,6 @@ typedef void (*NodeAppPdu_Closure)
 
 extern const ProtobufCEnumDescriptor    cov_operation__descriptor;
 extern const ProtobufCEnumDescriptor    client_operation__descriptor;
-extern const ProtobufCEnumDescriptor    encryption_algo__descriptor;
 extern const ProtobufCEnumDescriptor    ack_status__descriptor;
 extern const ProtobufCEnumDescriptor    sched_action__descriptor;
 extern const ProtobufCEnumDescriptor    node_mode__descriptor;
@@ -2444,13 +2036,10 @@ extern const ProtobufCMessageDescriptor client_config__descriptor;
 extern const ProtobufCMessageDescriptor cover_config__descriptor;
 extern const ProtobufCMessageDescriptor login_msg__descriptor;
 extern const ProtobufCMessageDescriptor phase_report__descriptor;
-extern const ProtobufCMessageDescriptor command_ack__descriptor;
-extern const ProtobufCMessageDescriptor encrypted_payload__descriptor;
 extern const ProtobufCMessageDescriptor time_sync__descriptor;
 extern const ProtobufCMessageDescriptor schedule_entry__descriptor;
 extern const ProtobufCMessageDescriptor schedule_config__descriptor;
 extern const ProtobufCMessageDescriptor node_wake_beacon__descriptor;
-extern const ProtobufCMessageDescriptor lora_header__descriptor;
 extern const ProtobufCMessageDescriptor drift_test__descriptor;
 extern const ProtobufCMessageDescriptor mac_control__descriptor;
 extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
@@ -2461,13 +2050,11 @@ extern const ProtobufCMessageDescriptor mode_test__descriptor;
 extern const ProtobufCEnumDescriptor    mode_test__mode__descriptor;
 extern const ProtobufCMessageDescriptor hist__descriptor;
 extern const ProtobufCMessageDescriptor mode_test_report__descriptor;
-extern const ProtobufCMessageDescriptor lora_client_operation_message__descriptor;
 extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor client_available__descriptor;
 extern const ProtobufCMessageDescriptor client_battery__descriptor;
 extern const ProtobufCMessageDescriptor cover_position__descriptor;
 extern const ProtobufCMessageDescriptor grid_sync_request__descriptor;
-extern const ProtobufCMessageDescriptor lora_client_response_message__descriptor;
 extern const ProtobufCMessageDescriptor hub_mac_pdu__descriptor;
 extern const ProtobufCMessageDescriptor sysop_cmd__descriptor;
 extern const ProtobufCMessageDescriptor hub_app_pdu__descriptor;

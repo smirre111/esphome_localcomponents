@@ -4,7 +4,7 @@
   "client.app_arq_by_msgid": 0,
   "client.app_picks_encryption": 0,
   "client.msgid_alloc_sites": 3,
-  "client.pack_sites": 1,
+  "client.pack_sites": 0,
   "client.psa_calls": 0,
   "client.psa_key_handles": 0,
   "client.raw_bytes_to_children": 0,

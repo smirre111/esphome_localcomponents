@@ -1,11 +1,10 @@
 #pragma once
-// PortTable.h -- the hub's ONE table from an uplink's protobuf oneof case to its
-// mac::Port (stage S6, docs/mac-separation-layering-plan.md; review 5.1).
-//
-// Until the wire stage (S8) the port is not carried; it is COMPUTED from the
-// oneof case here, and nowhere else:
-//   Session  -- REGISTER, LOGIN: MAC-2 session lifecycle
-//   Mac0Mgmt -- CommandAck (ARQ + phase report), MAC control (ping echo),
+// PortTable.h -- the hub's ONE table from an uplink's case to its mac::Port
+// (stage S6, docs/mac-separation-layering-plan.md; review 5.1). With MAC wire v1
+// the port is on the wire (macwire PORT); this classifies the internal case the
+// body decoded to, and must agree with it:
+//   Session  -- REGISTER: MAC-2 session lifecycle
+//   Mac0Mgmt -- MAC ACK (ARQ + phase report), MAC control (ping echo),
 //               ModeTest report, GridSync request: consumed by the MAC
 //               handlers, never handed to an application child
 //   App      -- everything else (AVAIL, STATE, POSITION, BEACON): the
@@ -13,23 +12,22 @@
 //
 // Hub-only (the node classifies its downlinks with its own table).
 
-#include "esphome/components/blindsproto/blinds.pb-c.h"
+#include "esphome/components/lora_client/HubFrames.h"
 #include "esphome/components/lora_client/MacSap.h"
 
 namespace porttable
 {
 
-inline mac::Port uplinkPort(LoraClientResponseMessage__ProtoCase c)
+inline mac::Port uplinkPort(hubframes::UpCase c)
 {
     switch (c)
     {
-    case LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER:
-    case LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN:
+    case hubframes::UL_REGISTER:
         return mac::Port::Session;
-    case LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK:
-    case LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL:
-    case LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT:
-    case LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST:
+    case hubframes::UL_ACK:
+    case hubframes::UL_MACCONTROL:
+    case hubframes::UL_MODETESTREPORT:
+    case hubframes::UL_GRIDSYNCREQUEST:
         return mac::Port::Mac0Mgmt;
     default:
         return mac::Port::App;

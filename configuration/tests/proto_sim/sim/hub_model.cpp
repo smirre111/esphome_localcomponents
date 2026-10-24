@@ -281,7 +281,7 @@ void HubListener::on_frame(const AirFrame& f) {
                                      m.encrypted.tag.data(),
                                      m.encrypted.tag.size());
         if (!plain) return; // AEAD verify failed
-        auto inner = deserialize_resp(plain->data(), plain->size());
+        auto inner = deserialize_resp_payload(m.encrypted, plain->data(), plain->size());
         if (!inner) return;
         // The ciphertext is payload-only: the inner message carries no header,
         // so the plaintext OUTER header stays authoritative.

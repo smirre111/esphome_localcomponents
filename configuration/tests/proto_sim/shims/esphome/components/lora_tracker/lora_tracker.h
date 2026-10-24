@@ -139,9 +139,6 @@ public:
     // tracker; what this shim stands in for is the plumbing, not the entropy.
     const uint8_t *netKey() const   { return net_key_; }
     uint32_t       netKeyId() const { return net_key_id_; }
-    bool beaconMac(uint32_t tx_round, uint32_t tx_slot, uint32_t pending_mask,
-                   bool pending_mask_valid, uint32_t burst_index,
-                   uint8_t *out, size_t out_len) const;
     uint8_t  net_key_[framecrypto::kNetKeyBytes]{};
     uint32_t net_key_id_{0};
 
@@ -174,8 +171,6 @@ public:
     // and policy each producer handed to send(), BEFORE the shim's per-copy
     // re-stamp/retag. The radio transcript holds what went on the air after it.
     std::vector<std::vector<uint8_t>> sent_raw;
-    // The exact bytes handed to send() (sent_raw is their v0 view, S8/W4).
-    std::vector<std::vector<uint8_t>> sent_wire;
     std::vector<TxPolicy>             sent_policy;
 
     // Emit `copies` AirFrames instead of one, so node-side duplicate handling

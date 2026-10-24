@@ -2,11 +2,9 @@
 // Shared with the node firmware — the AEAD wire format now lives in exactly
 // one place. See the banner in FrameCrypto.h.
 #include "esphome/components/lora_client/FrameCrypto.h"
-// Is a frame's on-air length a trustworthy T0 input? See the banner in FrameCanon.h.
-#include "esphome/components/lora_client/FrameCanon.h"
 // MAC-2 (keys, KDF, Encrypt-then-CMAC, the session key store). See its banner.
 #include "esphome/components/lora_client/HubLinkSecurity.h"
-// LoraHeader -> mac::MacHdr, shared with the tracker's copy sealer call (S4).
+// hubframes::Hdr -> mac::MacHdr, shared with the tracker's copy sealer call (S4).
 #include "esphome/components/lora_client/MacHdrCodec.h"
 // S6: the one oneof -> mac::Port table.
 #include "esphome/components/lora_client/PortTable.h"
@@ -14,9 +12,6 @@
 #include "esphome/components/lora_client/MacWire.h"
 #include "esphome/components/lora_client/HubWire.h"
 
-// The compile-time wire switch (docs/mac-wire-format.md section 12): OFF keeps
-// every v0 path byte-identical (golden frames); ON sends and accepts only v1.
-static constexpr bool kMacWireV1 = true;
 // The funnel rate arithmetic, so a ModeTest report is recomputed on the hub
 // rather than trusted from the node (test-plan.md I1).
 #include "esphome/components/lora_client/MacFunnel.h"
@@ -45,183 +40,19 @@ static constexpr bool kMacWireV1 = true;
 // ---------------------------------------------------------------------------
 // MAC-2 lives in HubLinkSecurity.{h,cpp} since stage S2 (K_root/K_auth, the
 // session KDF, Encrypt-then-CMAC, and the SessionKeyStore that is the single
-// owner of every peer's session id, keys and generation). What stays here is
-// the protobuf framing around it: decode a LoraHeader into a mac::MacHdr, pack
-// the inner payload, wrap the ciphertext in the outer envelope.
+// owner of every peer's session id, keys and generation). The wire is MAC
+// wire v1 only (S8, docs/mac-wire-format.md): MacWire.h holds the header,
+// HubWire the bodies; the v0 envelope path was deleted in W5.
 // ---------------------------------------------------------------------------
 
 static mac2::LinkSecurity &s_sec() { return mac2::LinkSecurity::hub(); }
 static mac2::SessionKeyStore &s_keys() { return mac2::LinkSecurity::hub().store(); }
-
-// The plaintext pack: *out is malloc'd, the caller frees it.
-static bool s_pack_plaintext(const LoraClientOperationMessage *plain, uint8_t **out, size_t *out_len)
-{
-  *out_len = lora_client_operation_message__get_packed_size(plain);
-  *out     = static_cast<uint8_t *>(malloc(*out_len));
-  if (!*out)
-    return false;
-  lora_client_operation_message__pack(plain, *out);
-  return true;
-}
-
-// Encrypt the payload ONLY — the inner message's header is redundant (the node
-// uses the plaintext outer header), so strip it before packing. *inner is
-// malloc'd, the caller frees it.
-static bool s_pack_inner(const LoraClientOperationMessage *plain, uint8_t **inner, size_t *inner_len)
-{
-  LoraClientOperationMessage inner_msg = *plain;
-  inner_msg.header = nullptr;
-  *inner_len = lora_client_operation_message__get_packed_size(&inner_msg);
-  *inner     = static_cast<uint8_t *>(malloc(*inner_len));
-  if (!*inner)
-    return false;
-  lora_client_operation_message__pack(&inner_msg, *inner);
-  return true;
-}
-
-// Wrap the sealed ciphertext in the plaintext outer header and pack it.
-// The caller keeps ownership of `cipher`.
-static bool s_pack_sealed(const LoraClientOperationMessage *plain, uint8_t *cipher,
-                          size_t cipher_len, uint8_t **out, size_t *out_len)
-{
-  // Outer header mirrors the inner addressing + msgid. Encryption is
-  // signalled by the `encrypted` oneof case, not a header flag.
-  //
-  // The ciphertext is sealed ONCE (CTR under K_enc); the tag written here is
-  // only a PLACEHOLDER — the real tag, which DOES cover burstIndex/burstCount/
-  // onMark/fireStamped/fireRound/fireOffsetUs, is computed per copy by
-  // the frame's copy sealer (LinkSecurity::copySealer, travelling in TxPolicy)
-  // inside the tracker's send loop, once those
-  // fields are actually stamped.
-  LoraHeader outer      = LORA_HEADER__INIT;
-  outer.destaddress     = plain->header->destaddress;
-  outer.destsubnet      = plain->header->destsubnet;
-  outer.senderaddress   = plain->header->senderaddress;
-  outer.msgid           = plain->header->msgid;
-
-  // Placeholder tag — must be the right LENGTH (kSessionCmacTagBytes) since
-  // the copy sealer's tag is written over it in place, without resizing. The pack below
-  // copies these bytes into *out immediately, so this local's lifetime is fine.
-  uint8_t placeholder_tag[framecrypto::kSessionCmacTagBytes] = {0};
-
-  EncryptedPayload enc     = ENCRYPTED_PAYLOAD__INIT;
-  enc.tag.data             = placeholder_tag;
-  enc.tag.len              = sizeof(placeholder_tag);
-  enc.ciphertext.data      = cipher;
-  enc.ciphertext.len       = cipher_len;
-
-  LoraClientOperationMessage wrapped = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-  wrapped.header    = &outer;
-  wrapped.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
-  wrapped.encrypted = &enc;
-
-  *out_len = lora_client_operation_message__get_packed_size(&wrapped);
-  *out     = static_cast<uint8_t *>(malloc(*out_len));
-  if (!*out)
-    return false;
-  lora_client_operation_message__pack(&wrapped, *out);
-  return true;
-}
-
-// The encrypted branch of s_pack_operation_message: a session (base nonce)
-// exists for `dest` and the caller asked for encryption.
-static bool s_seal_downlink(const LoraClientOperationMessage *plain, uint32_t dest,
-                            uint8_t **out, size_t *out_len, bool *msgid_refused,
-                            mac2::FrameSeal *seal)
-{
-  mac::MacHdr hdr;
-  if (!machdr::fromLoraHeader(plain->header, &hdr))
-  {
-    ESP_LOGE("lora_client", "Refusing to seal a downlink whose header does not fit the MAC header");
-    return false;
-  }
-  // The CTR counter block holds 31 bits of msgid but the CMAC covers 32, so a
-  // msgid >= 2^31 would reuse the keystream of (msgid - 2^31). The allocator
-  // (incrTxMessageId) never hands one out; this is the seal-point backstop for
-  // ids that bypass it (a restored counter, a reserved block).
-  if (!framecrypto::msgidFitsCtr(hdr.fcnt))
-  {
-    ESP_LOGE("lora_client", "Refusing to seal msgid %u for peer %u: beyond the CTR space",
-             (unsigned) hdr.fcnt, (unsigned) dest);
-    if (msgid_refused) *msgid_refused = true;
-    return false;
-  }
-
-  uint8_t *inner     = nullptr;
-  size_t   inner_len = 0;
-  if (!s_pack_inner(plain, &inner, &inner_len))
-    return false;
-
-  uint8_t *cipher = static_cast<uint8_t *>(malloc(inner_len));
-  if (!cipher)
-  {
-    free(inner);
-    return false;
-  }
-
-  mac2::FrameSeal bound;
-  const mac2::LinkSecurity::Seal sealed = s_sec().sealDownlink(hdr, inner, inner_len, cipher, &bound);
-  free(inner);
-  if (sealed == mac2::LinkSecurity::Seal::NoSession || sealed == mac2::LinkSecurity::Seal::NoKey)
-    ESP_LOGE("lora_client", "No session keys derived yet for peer %u — dropping encrypted downlink", dest);
-  if (sealed != mac2::LinkSecurity::Seal::Ok)
-  {
-    free(cipher);
-    return false;
-  }
-
-  const bool packed = s_pack_sealed(plain, cipher, inner_len, out, out_len);
-  free(cipher);
-  if (packed)
-    *seal = bound;   // `seal` is never null: pack_operation_ always passes one
-  return packed;
-}
-
-// Pack a downlink operation, encrypting it into an EncryptedPayload-wrapped
-// LoraClientOperationMessage when a session (base nonce) exists for the dest
-// node.  Falls back to a plaintext pack otherwise (e.g. pre-login bootstrap:
-// LoginMsg / ClientConfig are sent via their own paths and
-// stay plaintext regardless).  Returns malloc'd wire bytes in *out/*out_len;
-// caller frees with free().
-//
-// *msgid_refused (optional) is set when the frame was refused ONLY because its
-// msgid lies outside the CTR space (framecrypto::msgidFitsCtr): the caller
-// must then ask for a fresh session, see LORAListener::pack_operation_().
-static bool s_pack_operation_message(LoraClientOperationMessage *plain, bool encrypt,
-                                     uint8_t **out, size_t *out_len,
-                                     bool *msgid_refused, mac2::FrameSeal *seal)
-{
-  *seal = mac2::FrameSeal{};   // never null (pack_operation_)
-  if (!plain || !plain->header || !out || !out_len)
-    return false;
-
-  const uint32_t dest = plain->header->destaddress;
-
-  // Send plaintext when the caller hasn't confirmed the session (encrypt==false)
-  // or no base nonce exists yet.  This keeps a node that never established
-  // encryption controllable and avoids emitting ciphertext it cannot decrypt.
-  uint32_t unused_session_id = 0;
-  const bool has_base_nonce = dest <= 0xFF && s_keys().sessionId(static_cast<mac::Addr>(dest), &unused_session_id);
-  if (!encrypt || !has_base_nonce)
-    return s_pack_plaintext(plain, out, out_len);
-
-  return s_seal_downlink(plain, dest, out, out_len, msgid_refused, seal);
-}
 
 namespace esphome
 {
   namespace lora_tracker
   {
     static const char *const TAG = "lora_client";
-
-    // Ownership of an unpacked uplink for the rest of set_response(). release()
-    // hands it to a callee that takes ownership (handle_register_).
-    struct OwnedResponse
-    {
-      LoraClientResponseMessage *p;
-      ~OwnedResponse() { if (p) lora_client_response_message__free_unpacked(p, NULL); }
-      LoraClientResponseMessage *release() { auto *t = p; p = nullptr; return t; }
-    };
 
     void LORAListener::dump_config()
     {
@@ -996,27 +827,15 @@ namespace esphome
     //
     // TAKES OWNERSHIP: it frees the message before dispatching the raw bytes
     // onward, because the child nodes re-parse those bytes independently.
-    // S8 / v1: the frame's K_AUTH tag over every raw byte (spec 4.3) replaces
-    // the mic field and its field-by-field input. v0: unchanged.
-    bool LORAListener::register_authentic_(const LoraClientResponseMessage *rcv_message,
+    // The frame's K_AUTH tag over every raw byte (spec 4.3).
+    bool LORAListener::register_authentic_(const hubframes::Up *rcv_message,
                                            const uint8_t *data, size_t len)
     {
-      if (kMacWireV1)
-        return s_sec().verifyAuthFrameV1(/*downlink=*/false, data, len);
-      const ClientRegister *reg = rcv_message->register_;
-      uint8_t mic_input[framecrypto::kRegisterMicInputBytes];
-      const uint32_t dest   = rcv_message->header ? rcv_message->header->destaddress   : 0;
-      const uint32_t subnet = rcv_message->header ? rcv_message->header->destsubnet    : 0;
-      const uint32_t sender = rcv_message->header ? rcv_message->header->senderaddress : 0;
-      const uint32_t msgid  = rcv_message->header ? rcv_message->header->msgid         : 0;
-      framecrypto::buildRegisterMicInput(reg->mac_addr, reg->needs_config,
-                                         dest, subnet, sender, msgid, mic_input);
-      // Lazy-derive, same reasoning as send_login().
-      s_sec().initAuthKey();
-      return s_sec().verifyAuthMic(mic_input, sizeof(mic_input), reg->mic.data, reg->mic.len);
+      (void) rcv_message;
+      return s_sec().verifyAuthFrameV1(/*downlink=*/false, data, len);
     }
 
-    void LORAListener::handle_register_(LoraClientResponseMessage *rcv_message,
+    void LORAListener::handle_register_(hubframes::Up *rcv_message,
                                         uint8_t *data, size_t len)
     {
         ClientRegister *reg = rcv_message->register_;
@@ -1028,7 +847,6 @@ namespace esphome
           // here. That is routing, not a fault, and at ERROR it read as one — it
           // was logged twice per handshake and hid the real errors around it.
           ESP_LOGD(TAG, "%s: REGISTER is for another node's MAC — ignoring", this->get_name().c_str());
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
         }
 
@@ -1040,7 +858,6 @@ namespace esphome
         if (!this->register_authentic_(rcv_message, data, len))
         {
           ESP_LOGW(TAG, "%s: REGISTER failed MIC verification — dropping", this->get_name().c_str());
-          lora_client_response_message__free_unpacked(rcv_message, NULL);
           return;
         }
 
@@ -1065,8 +882,7 @@ namespace esphome
             ESP_LOGW(TAG, "%s: REGISTER rate-limited (%lld ms after the last one) — dropping",
                      this->get_name().c_str(),
                      (long long) ((now_us - this->last_register_accepted_us_) / 1000));
-            lora_client_response_message__free_unpacked(rcv_message, NULL);
-            return;
+              return;
           }
           this->last_register_accepted_us_ = now_us;
         }
@@ -1102,7 +918,6 @@ namespace esphome
         const bool needs_cfg    = reg->needs_config;
         const bool push_config  = needs_cfg || !this->config_synced_;
 
-        lora_client_response_message__free_unpacked(rcv_message, NULL);
 
         // An unprovisioned node holds no session, so plaintext is the only way
         // to reach it and it accepts it — that is the bootstrap. A PROVISIONED
@@ -1178,7 +993,7 @@ namespace esphome
     //
     // Does NOT own the message: the caller's RAII holder frees it either way,
     // which is why the manual free at each rejection is gone.
-    bool LORAListener::admit_frame_(LoraClientResponseMessage *rcv_message)
+    bool LORAListener::admit_frame_(hubframes::Up *rcv_message)
     {
       if (rcv_message->header) {
         ESP_LOGI(TAG, "Received message with ID %d from address %d", rcv_message->header->msgid, rcv_message->header->senderaddress);
@@ -1205,7 +1020,7 @@ namespace esphome
       }
 
       // The message ID is checked only after login
-      if (rcv_message->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
+      if (rcv_message->proto_case != hubframes::UL_REGISTER)
       {
         // Accept only a forward jump within a bounded window (mac1::kForwardWindow,
         // 1024) — a huge msgid from a corrupt/spurious frame would otherwise
@@ -1272,7 +1087,9 @@ namespace esphome
     {
       Mac0Rx rx;
       rx.ticket.len            = static_cast<uint32_t>(len);
-      rx.ticket.timing_trusted = this->rx_timing_trusted_;
+      // Spec 4.2: the header has no varints and the tag covers the raw bytes,
+      // so the on-air length is always a trustworthy T0 input.
+      rx.ticket.timing_trusted = true;
       if (this->parent_ != nullptr)
       {
         rx.ticket.t0_us = this->parent_->last_rx_t0_us();
@@ -1285,16 +1102,6 @@ namespace esphome
     {
       if (this->parent_ == nullptr)
         return;
-      // A non-canonical frame's length is not a trustworthy T0 input
-      // (FrameCanon.h): record "no usable origin" (0) rather than a skewed one,
-      // so send_into_class_a_window_() answers NoUplinkStamp and falls back to
-      // the burst, and the wake-clock pairing is skipped.
-      if (!rx.ticket.timing_trusted)
-      {
-        this->last_uplink_t0_us_  = 0;
-        this->last_uplink_unc_us_ = 0;
-        return;
-      }
       this->last_uplink_t0_us_  = rx.ticket.t0_us;
       this->last_uplink_unc_us_ = rx.unc_us;
       // §4.6: the same stamp answers a second question — did this uplink land
@@ -1310,7 +1117,7 @@ namespace esphome
     // with and the counter is the only sequencing there is. A plaintext frame
     // arriving while the session IS confirmed is still processed exactly as
     // before — it just cannot ratchet the counter on its way through.
-    void LORAListener::commit_rx_msgid_(const LoraClientResponseMessage *m)
+    void LORAListener::commit_rx_msgid_(const hubframes::Up *m)
     {
       if (m && m->header)
       {
@@ -1585,26 +1392,6 @@ namespace esphome
       return this->deriveSessionKeys_(session_id, node_nonce);
     }
 
-    // For tests only (S4): the tracker no longer calls back into the listener --
-    // it retags each copy through the frame's own CopySealer (TxPolicy::sealer,
-    // LinkSecurity::copySealer). This drives that same sealer with the binding of
-    // the last frame this listener sealed, so a test can retag a hand-built copy
-    // exactly as the tracker would.
-    bool LORAListener::retagLikeLastFrameForTest(::EncryptedPayload *enc, const ::LoraHeader *header)
-    {
-      if (enc == nullptr || header == nullptr)
-        return false;
-      mac::MacHdr copy;
-      uint8_t tag[framecrypto::kSessionCmacTagBytes];
-      uint64_t binding = this->last_seal_binding_.load();
-      if (!machdr::fromLoraHeader(header, &copy) || enc->tag.data == nullptr ||
-          enc->tag.len != sizeof(tag) ||
-          !mac2::LinkSecurity::copySealer(&binding, copy, enc->ciphertext.data,
-                                          enc->ciphertext.len, tag))
-        return false;
-      memcpy(enc->tag.data, tag, sizeof(tag));
-      return true;
-    }
 
     uint32_t LORAListener::staleSessionDropsForTest() const
     {
@@ -1708,7 +1495,7 @@ namespace esphome
       s_keys().sessionId(static_cast<mac::Addr>(up.sender), &up.session_id);
       const mac::Addr self = static_cast<mac::Addr>(this->short_address_);
       up.keys = s_keys().liveKeys(self);
-      const ::LoraHeader *hdr = up.msg->header;
+      const hubframes::Hdr *hdr = up.msg->header;
       const bool is_session_opening = hdr && hdr->sessionnonce != 0;
       up.needs_candidate =
           is_session_opening &&
@@ -1724,22 +1511,11 @@ namespace esphome
       return true;
     }
 
-    // The tag check alone. v0: node uplinks never burst, so the per-copy timing
-    // fields are 0/false on this path in practice -- but the tag covers whatever
-    // the header carries, and a header that does not fit the MAC header cannot
-    // carry a genuine tag. S8 / v1: the tag covers the raw frame instead.
+    // The tag check alone: CMAC over the raw frame (spec 4.1).
     mac2::LinkSecurity::Verify LORAListener::uplink_tag_verdict_(EncUplink &up)
     {
-      if (kMacWireV1)
-        return this->v1_verify_uplink_(up) ? mac2::LinkSecurity::Verify::Ok
-                                           : mac2::LinkSecurity::Verify::BadTag;
-      const bool fits = machdr::fromLoraHeader(up.msg->header, &up.hdr);
-      up.hdr.src = static_cast<mac::Addr>(up.sender);
-      up.msgid   = up.hdr.fcnt;
-      const ::EncryptedPayload *enc = up.msg->encrypted;
-      return fits ? s_sec().verifyUplink(up.hdr, up.session_id, up.keys, enc->ciphertext.data,
-                                         enc->ciphertext.len, enc->tag.data, enc->tag.len)
-                  : mac2::LinkSecurity::Verify::BadTag;
+      return this->v1_verify_uplink_(up) ? mac2::LinkSecurity::Verify::Ok
+                                         : mac2::LinkSecurity::Verify::BadTag;
     }
 
     // Authenticate the frame: keys present, CMAC verifies, and the authentic
@@ -1788,7 +1564,7 @@ namespace esphome
     // nullptr (candidate destroyed) on failure.
     uint8_t *LORAListener::uplink_decrypt_(EncUplink &up)
     {
-      const ::EncryptedPayload *enc = up.msg->encrypted;
+      const hubframes::Sealed *enc = up.msg->encrypted;
       size_t cipher_len = enc->ciphertext.len;
 
       uint8_t *plaintext = static_cast<uint8_t *>(malloc(cipher_len));
@@ -1837,35 +1613,11 @@ namespace esphome
       this->note_node_heard_();
       this->confirm_session_();
 
-      // The inner is now payload-only (no header).  Unpack it, resolve the F-4
-      // ack/position state machine, then RE-ATTACH the plaintext outer header
-      // and re-pack before forwarding to nodes (loracover requires a header for
-      // addressing — the header is no longer carried inside the ciphertext).
-      if (kMacWireV1)
-      {
-        // S8: the body is the PDU (direction, PORT) names, not a v0 envelope.
-        this->v1_deliver_decrypted_(up, plaintext, up.msg->encrypted->ciphertext.len);
-        free(plaintext);
-        return;
-      }
-      LoraClientResponseMessage *inner =
-          lora_client_response_message__unpack(NULL, up.msg->encrypted->ciphertext.len, plaintext);
+      // The body is the PDU (direction, PORT) names (spec 3).
+      this->v1_deliver_decrypted_(up, plaintext, up.msg->encrypted->ciphertext.len);
       free(plaintext);
-      if (inner)
-        this->forward_uplink_(inner, up.msg);
     }
 
-    // Dispatch the decrypted payload on the hub, then forward it to the child
-    // nodes with the outer header borrowed from `outer`. Frees `inner`.
-    void LORAListener::forward_uplink_(LoraClientResponseMessage *inner,
-                                       const LoraClientResponseMessage *outer)
-    {
-      // The same chain as the plaintext path (deliver_uplink_), authentic.
-      // S6: the children get a decoded indication with the outer header; the
-      // inner message is no longer re-packed into wire bytes for them.
-      this->deliver_uplink_(inner, outer->header, /*authentic=*/true);
-      lora_client_response_message__free_unpacked(inner, NULL);
-    }
 
     // The encrypted uplink path: derive the IV, authenticate, unpack the inner
     // payload, confirm the session, then forward to the child nodes with the
@@ -1873,10 +1625,10 @@ namespace esphome
     // An ordered pipeline; each stage returns false when the frame is dropped.
     //
     // Does NOT own the message — see admit_frame_.
-    void LORAListener::handle_encrypted_(LoraClientResponseMessage *rcv_message,
+    void LORAListener::handle_encrypted_(hubframes::Up *rcv_message,
                                          uint8_t *data, size_t len)
     {
-      EncryptedPayload *enc = rcv_message->encrypted;
+      const hubframes::Sealed *enc = rcv_message->encrypted;
       ESP_LOGI(TAG, "Received encrypted payload ciphertext=%d bytes", (int)enc->ciphertext.len);
 
       // Use the header's msgid as the unified frame counter.  Replay protection
@@ -1922,7 +1674,7 @@ namespace esphome
     // -----------------------------------------------------------------------
     void LORAListener::build_mac_ping_frame_()
     {
-      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op_message = {};
       uint32_t msgid = 0;
 
       // MAC-2 OFF (the default): a DEDICATED counter, deliberately not
@@ -1939,7 +1691,7 @@ namespace esphome
       // main loop owns that backend — hundreds of writes per run, off-loop.
       //
       // MAC-2 ON: the OUTER header's msgid is what the CTR counter block and the
-      // CMAC prefix derive from (s_pack_operation_message), so it MUST come from the reserved
+      // CMAC derive from (v1_frame_), so it MUST come from the reserved
       // block start_mac_ping set aside — reusing the dedicated ping counter
       // here would let a ping's msgid collide with an ordinary command's under
       // the same base nonce, which is keystream reuse. See mac_ping_crypto_'s comment.
@@ -1974,7 +1726,7 @@ namespace esphome
         mc.pad.data = pad;
       }
 
-      op_message.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+      op_message.cmd_case   = hubframes::DL_MACCONTROL;
       op_message.maccontrol = &mc;
 
       MacFrame f;
@@ -2193,7 +1945,7 @@ namespace esphome
     // handlers; application frames to the listener's application handlers
     // (and, in deliver_uplink_, to the children); Session frames (REGISTER,
     // LOGIN) never reach this point.
-    void LORAListener::dispatch_payload_(LoraClientResponseMessage *msg)
+    void LORAListener::dispatch_payload_(hubframes::Up *msg)
     {
       if (porttable::uplinkPort(msg->proto_case) == mac::Port::Mac0Mgmt)
       {
@@ -2208,21 +1960,21 @@ namespace esphome
       // answering — so a command lost on the air while a schedule move happened
       // to end showed as delivered in Home Assistant and was never retried. The
       // rule dates from the first ack work (a657b03), before the node acked every
-      // cover op; today it does (CommandAck, plus an AckCache re-ack of a
+      // cover op; today it does (the MAC ACK, plus an AckCache re-ack of a
       // duplicate). The position itself still reaches the cover entity as an
       // application indication (deliver_uplink_).
-      if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON && msg->beacon)
+      if (msg->proto_case == hubframes::UL_BEACON && msg->beacon)
         this->handle_beacon_(msg->beacon);
     }
 
-    void LORAListener::deliver_uplink_(LoraClientResponseMessage *msg, const ::LoraHeader *outer,
+    void LORAListener::deliver_uplink_(hubframes::Up *msg, const hubframes::Hdr *outer,
                                        bool authentic)
     {
       this->dispatch_payload_(msg);
       if (porttable::uplinkPort(msg->proto_case) != mac::Port::App)
         return;
       AppIndication ind;
-      if (!machdr::fromLoraHeader(outer, &ind.hdr))
+      if (!machdr::fromHdr(outer, &ind.hdr))
         return;   // a header wider than the MAC header is never handed upward
       ind.msg       = msg;
       ind.authentic = authentic;
@@ -2232,9 +1984,9 @@ namespace esphome
 
     // The MAC-layer tail of dispatch_payload_ (moved out unchanged): consumed
     // here, never forwarded to a cover or a schedule.
-    void LORAListener::dispatch_mac_payload_(LoraClientResponseMessage *msg)
+    void LORAListener::dispatch_mac_payload_(hubframes::Up *msg)
     {
-      if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK && msg->ack)
+      if (msg->proto_case == hubframes::UL_ACK && msg->ack)
       {
         // §4.6's evidence, on the carrier that makes it useful. The ack answers
         // the very command single-shot is decided for, so the belief is
@@ -2244,18 +1996,18 @@ namespace esphome
         this->handle_command_ack_(msg->ack->ack_msg_id);
       }
       // MAC-0: consumed here, never forwarded to a cover or a schedule.
-      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL &&
+      else if (msg->proto_case == hubframes::UL_MACCONTROL &&
                msg->maccontrol)
         this->handle_mac_echo_(msg->maccontrol);
       // ModeTest results. Also MAC-layer: never forwarded to a cover.
-      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT &&
+      else if (msg->proto_case == hubframes::UL_MODETESTREPORT &&
                msg->modetestreport)
       {
         this->handle_mode_test_report_(msg->modetestreport);
         this->note_warmup_refusal_();
       }
       // The node asks for its grid again. Also MAC-layer: never forwarded.
-      else if (msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST &&
+      else if (msg->proto_case == hubframes::UL_GRIDSYNCREQUEST &&
                msg->gridsyncrequest)
         this->handle_grid_sync_request_(msg->gridsyncrequest);
     }
@@ -2425,37 +2177,30 @@ namespace esphome
       ESP_LOGW(TAG, "[%s] ModeTest REPORT: %s", this->get_name().c_str(), buf);
     }
 
-    // S8: a v1 frame is shape-checked and turned into the v0 envelope the rest
-    // of set_response walks; in a v1 build a v0 frame (first byte 0x0A) is dropped.
-    LoraClientResponseMessage *LORAListener::unpack_uplink_(uint8_t *data, size_t len)
+    // A v1 frame is shape-checked and turned into the envelope the rest of
+    // set_response walks; anything else (a frame whose VER is not 0x01) is dropped.
+    std::unique_ptr<hubwire::Uplink> LORAListener::unpack_uplink_(uint8_t *data, size_t len)
     {
-      if (kMacWireV1)
-        return this->v1_receive_(data, len);
-      return lora_client_response_message__unpack(NULL, len, data);
+      return this->v1_receive_(data, len);
     }
 
     void LORAListener::set_response(uint8_t *data, size_t len)
     {
-      LoraClientResponseMessage *rcv_message = this->unpack_uplink_(data, len);
-      if (rcv_message == NULL)
+      // The decoded frame, owned for the rest of the function (every exit).
+      std::unique_ptr<hubwire::Uplink> owned = this->unpack_uplink_(data, len);
+      if (!owned)
       {
         ESP_LOGE(TAG, "Could not read protobuf");
         return;
       }
+      hubframes::Up *rcv_message = owned->view();
 
-      this->check_uplink_canonical_(rcv_message, len);
       this->rx_ticket_ = this->mac0_ticket_(len);   // MAC-0: this frame's timing, held until MAC-1 commits
 
-      // Ownership for the rest of the function. Before this, every early exit
-      // freed by hand — a dozen sites, each one an edit away from a leak.
-      OwnedResponse owned{rcv_message};
-
       // REGISTER first: it must bypass the address and replay filters below, so
-      // the order of these two tests is load-bearing. handle_register_ takes
-      // ownership, hence the release().
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER)
+      // the order of these two tests is load-bearing.
+      if (rcv_message->proto_case == hubframes::UL_REGISTER)
       {
-        owned.release();
         this->handle_register_(rcv_message, data, len);
         return;
       }
@@ -2463,24 +2208,7 @@ namespace esphome
       if (!this->admit_frame_(rcv_message))
         return;
 
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_LOGIN)
-      {
-        // Dropped, not acted on. This used to unconditionally call
-        // send_login() — admit_frame_() only checks sender address and a
-        // forward-jump msgid window, neither of which authenticates
-        // anything, so ANY plaintext unicast frame with this proto_case
-        // could force a re-login (and, since send_login() now clears live
-        // session keys on a fresh challenge, tear down a working session)
-        // at will. The real node firmware never sends this proto_case on
-        // an uplink — grepped BlindsESP/main/CmdDispatcher.cpp, confirmed
-        // no caller ever sets LoraClientResponseMessage.proto to LOGIN —
-        // so there is no legitimate sender to accommodate here.
-        ESP_LOGW(TAG, "%s: ignoring unauthenticated PROTO_LOGIN uplink (no legitimate sender for it)",
-                 this->get_name().c_str());
-        return;
-      }
-
-      if (rcv_message->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED &&
+      if (rcv_message->proto_case == hubframes::UL_SEALED &&
           rcv_message->encrypted)
       {
         this->handle_encrypted_(rcv_message, data, len);
@@ -2496,34 +2224,6 @@ namespace esphome
       this->deliver_uplink_(rcv_message, rcv_message->header, /*authentic=*/false);
     }
 
-    // Length re-encode check (mac-separation-implementation-plan.md, receiver
-    // order step 1): the hub's T0 stamp for this uplink is derived from the
-    // on-air length, which the CMAC does not cover. DEMOTE, DO NOT DROP --
-    // see FrameCanon.h. The frame is processed as usual; only its use as a
-    // timing origin (mac0_commit_timing_) is withheld.
-    void LORAListener::check_uplink_canonical_(const LoraClientResponseMessage *rcv_message, size_t len)
-    {
-      // S8 (spec 4.2): a v1 header has no varints and the tag covers the raw
-      // bytes, so the on-air length is exact; FrameCanon has nothing to judge.
-      // The MAC-1/MAC-2 gates on timing use are unchanged.
-      if (kMacWireV1)
-      {
-        this->rx_timing_trusted_ = true;
-        return;
-      }
-      this->rx_timing_trusted_ = framecanon::timingTrusted(framecanon::classify(
-          {(uint32_t) len,
-           (uint32_t) lora_client_response_message__get_packed_size(rcv_message),
-           rcv_message->base.n_unknown_fields +
-               (rcv_message->header ? rcv_message->header->base.n_unknown_fields : 0u)}));
-      if (!this->rx_timing_trusted_)
-      {
-        this->noncanonical_frames_++;
-        ESP_LOGW(TAG, "%s: non-canonical uplink (len %u) -- processed, but its length is "
-                      "not used for timing (%u so far)",
-                 this->get_name().c_str(), (unsigned) len, (unsigned) this->noncanonical_frames_);
-      }
-    }
 
     // Plaintext path. Before the handshake there is nothing to authenticate
     // with and the msgid is the only sequencing the hub has, so the counter
@@ -2534,7 +2234,7 @@ namespace esphome
     // not inert and the msgid is plaintext in every header, so anyone in radio
     // range can pick one above the high-water mark and be acted on ONCE, which
     // is all it takes:
-    //   * a forged CommandAck naming a msgid in the tracked command's range
+    //   * a forged MAC ACK naming a msgid in the tracked command's range
     //     cancels its retransmissions and clears "command failed" — the command
     //     is lost while Home Assistant shows it delivered;
     //   * the same ack confirms a GridSync or a ScheduleConfig push;
@@ -2546,7 +2246,7 @@ namespace esphome
     // is the bootstrap, LOGIN carries the base nonce and is the recovery path.
     //
     // Returns true when the frame may be acted on.
-    bool LORAListener::accept_plaintext_uplink_(LoraClientResponseMessage *rcv_message)
+    bool LORAListener::accept_plaintext_uplink_(hubframes::Up *rcv_message)
     {
       if (!this->session_confirmed_)
       {
@@ -2597,7 +2297,7 @@ namespace esphome
         return;
       }
       // The publish is the Mac channel's request: re-published until the node's
-      // CommandAck names one of its msgids (the set), a re-publish is REBUILT, and
+      // MAC ACK names one of its msgids (the set), a re-publish is REBUILT, and
       // giving up only logs (the node stays in Mode A, the session is fine).
       DeliveryRequest req;
       req.what        = "GridSync";
@@ -2699,7 +2399,7 @@ namespace esphome
 
       // Section 4.4's fleet key, and the one condition on carrying it.
       //
-      // ONLY WHEN THIS FRAME WILL BE ENCRYPTED. s_pack_operation_message
+      // ONLY WHEN THIS FRAME WILL BE ENCRYPTED. v1_frame_
       // encrypts when a session exists and packs plaintext otherwise, so
       // assigning the key unconditionally would put it on the air in the
       // clear on exactly the path where no session had been established yet
@@ -2726,7 +2426,7 @@ namespace esphome
     // through place_grid_sync_, matches the ack and runs the ladder).
     bool LORAListener::encode_grid_sync_(bool retry, const DeliveryRequest::FrameFn &frame)
     {
-      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op_message = {};
 
       // Chosen BEFORE the frame is built, because the frame declares it.
       const int64_t planned_t0 = this->grid_sync_planned_t0_();
@@ -2736,7 +2436,7 @@ namespace esphome
       GridSync gs = GRID_SYNC__INIT;
       this->fill_grid_sync_(&gs, planned_t0);
 
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+      op_message.cmd_case = hubframes::DL_GRIDSYNC;
       op_message.gridsync = &gs;
 
       if (!frame(&op_message))
@@ -2816,10 +2516,10 @@ namespace esphome
       // A withdrawal takes the bound with it: no published interval means no
       // promotion, which is where a node that has just lost its grid belongs.
       this->published_resync_max_s_ = 0;
-      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op_message = {};
       GridSync gs = GRID_SYNC__INIT;
       gs.enable = false;
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+      op_message.cmd_case = hubframes::DL_GRIDSYNC;
       op_message.gridsync = &gs;
 
       MacFrame f;
@@ -2899,7 +2599,7 @@ namespace esphome
       //
       // GridDemote, not GridSync{enable=false}, and that was a real defect
       // rather than a tidy-up. This frame is sent on a FRESH BOOT, when no
-      // session exists, so s_pack_operation_message packed it in the clear —
+      // session exists, so v1_frame_ framed it in the clear —
       // and the node's plaintext gate refuses every non-LOGIN, non-beacon frame
       // while it holds a session resumed from NVS. The one frame that must not
       // be missed was dropped by exactly the nodes it was aimed at.
@@ -2919,40 +2619,15 @@ namespace esphome
       // exemption safe is that its only effect is to throw an anchor away:
       // Mode A is three windows per round against Mode B's one, so an
       // unauthenticated sender can only make a node listen MORE.
-      if (kMacWireV1)
-      {
-        MacFrame f;
-        if (this->v1_demote_frame_(&f))
-          this->mac0_send_(f.bytes.data(), f.bytes.size(), TxPolicy{}, mac2::FrameSeal{});
-        ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent (%u B)",
-                 this->get_name().c_str(), (unsigned) f.bytes.size());
-        return;
-      }
-      LoraClientOperationMessage op_message = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = LORATracker::broadcastAddressing;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      // A broadcast belongs to no per-node sequence, and the nodes exempt it
-      // from their replay filter for that reason — the same treatment the
-      // beacon gets, and for the same reason.
-      header.msgid         = 0;
-      op_message.header    = &header;
-
-      GridDemote demote = GRID_DEMOTE__INIT;
-      op_message.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE;
-      op_message.griddemote = &demote;
-
-      const size_t len = lora_client_operation_message__get_packed_size(&op_message);
-      std::vector<uint8_t> buf(len);
-      lora_client_operation_message__pack(&op_message, buf.data());
-
       // Unplaced, and as a burst: it is broadcast, and it is addressed to nodes
-      // whose anchor is by definition already wrong — so there is no mark to
-      // place it on that any of them would agree with.
-      this->mac0_send_(buf.data(), buf.size(), TxPolicy{}, mac2::FrameSeal{});   // an unsealed broadcast
+      // whose anchor is by definition already wrong -- so there is no mark to
+      // place it on that any of them would agree with. FCNT 0: a broadcast
+      // belongs to no per-node sequence (spec 2.4).
+      MacFrame f;
+      if (this->v1_demote_frame_(&f))
+        this->mac0_send_(f.bytes.data(), f.bytes.size(), TxPolicy{}, mac2::FrameSeal{});
       ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent (%u B)",
-               this->get_name().c_str(), (unsigned) len);
+               this->get_name().c_str(), (unsigned) f.bytes.size());
     }
 
     bool LORAListener::send_aligned_(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
@@ -3127,16 +2802,16 @@ namespace esphome
     // recognise a duplicate and re-ack it.
     bool LORAListener::encode_ctl_(const DeliveryRequest::FrameFn &frame)
     {
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op_message {};
       LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
       if (this->ctl().kind == TrackedOpKind::SYSOP)
       {
-        op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+        op_message.cmd_case = hubframes::DL_SYSOP;
         op_message.sysop    = static_cast<ClientOperation>(this->ctl().sysop);
       }
       else
       {
-        op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+        op_message.cmd_case = hubframes::DL_OPERATION;
         if (this->ctl().covop_case == LORA_COVER_OPERATION__COVOP_POSITION)
         {
           covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
@@ -3422,7 +3097,7 @@ namespace esphome
     // THE one transmission of a Fire request (step 6): TimeSync, ClientConfig,
     // CoverConfig. Everything that used to be repeated at each of those three call
     // sites lives here once -- the relogin deferral, the msgid, the header, the
-    // encryption decision (pack_operation_: sealed whenever a session is confirmed,
+    // encryption decision (v1_frame_: sealed whenever a session is confirmed,
     // plaintext only before one exists), the shape and the failure log. What the
     // frame SAYS, and when it is wanted at all, is the request's.
     bool LORAListener::dlv_fire_(DeliveryRequest &req)
@@ -3440,7 +3115,7 @@ namespace esphome
       if (req.admit && !req.admit())
         return false;
 
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op_message {};
       req.fill(&op_message);
 
       MacFrame f;
@@ -3553,7 +3228,7 @@ namespace esphome
         ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing", this->get_name().c_str());
       MacFrame f;
       bool framed = false;
-      const DeliveryRequest::FrameFn frame = [this, &f, &framed](LoraClientOperationMessage *op) {
+      const DeliveryRequest::FrameFn frame = [this, &f, &framed](hubframes::Down *op) {
         framed = this->mac_frame_(op, &f);
         return framed;
       };
@@ -4165,20 +3840,6 @@ namespace esphome
       this->set_timeout("msgid_relogin", 0, [this]() { this->do_login_and_arm_retry_(); });
     }
 
-    bool LORAListener::pack_operation_(LoraClientOperationMessage *plain, bool encrypt,
-                                       uint8_t **out, size_t *out_len, mac2::FrameSeal *seal)
-    {
-      bool refused = false;
-      mac2::FrameSeal bound;
-      const bool ok = s_pack_operation_message(plain, encrypt, out, out_len, &refused, &bound);
-      if (refused)
-        this->requestMsgidRelogin_("seal");
-      if (ok && bound.sealed)
-        this->last_seal_binding_.store(bound.binding());
-      if (seal)
-        *seal = bound;
-      return ok;
-    }
 
     // ---- S4: the single MAC data path ---------------------------------------
     //
@@ -4188,43 +3849,23 @@ namespace esphome
     // frames (MIC-authenticated / unsealed broadcast) but leave through
     // mac0_send_ too.
 
-    bool LORAListener::mac_frame_(LoraClientOperationMessage *op, MacFrame *out)
+    bool LORAListener::mac_frame_(hubframes::Down *op, MacFrame *out)
     {
       return this->mac_frame_(op, this->incrTxMessageId(), this->session_confirmed_, out);
     }
 
-    bool LORAListener::mac_frame_(LoraClientOperationMessage *op, uint32_t msgid, bool encrypt,
+    bool LORAListener::mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt,
                                   MacFrame *out)
     {
-      if (kMacWireV1)
-        return this->v1_frame_(op, msgid, encrypt, out);
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = msgid;
-      op->header           = &header;
-      out->msgid           = msgid;
-      out->bytes.clear();
-      uint8_t *buf = nullptr;
-      size_t   len = 0;
-      const bool ok = this->pack_operation_(op, encrypt, &buf, &len, &out->seal);
-      op->header = nullptr;   // the header is this frame's, and it is gone
-      if (!ok)
-        return false;
-      out->bytes.assign(buf, buf + len);
-      free(buf);
-      return true;
+      return this->v1_frame_(op, msgid, encrypt, out);
     }
 
     bool LORAListener::mac0_send_(const uint8_t *buf, size_t len, TxPolicy policy,
                                   const mac2::FrameSeal &seal)
     {
-      // S8: a v1 copy is sealed over its raw bytes (copySealerV1), never by
-      // decoding a header (spec section 5).
-      const mac::CopySealer sealer =
-          kMacWireV1 ? &mac2::LinkSecurity::copySealerV1 : &mac2::LinkSecurity::copySealer;
-      policy.sealer       = seal.sealed ? sealer : nullptr;
+      // A copy is sealed over its raw bytes (spec section 5), never by decoding
+      // a header.
+      policy.sealer       = seal.sealed ? &mac2::LinkSecurity::copySealerV1 : nullptr;
       policy.seal_binding = seal.binding();
       return this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
     }
@@ -4233,13 +3874,13 @@ namespace esphome
 
     // Section 7: a Control command carries its identity, the slot's generation
     // (per logical command, kept across retries and re-packs); nothing else does.
-    static uint32_t s_v1_cmd_id(const LoraClientOperationMessage *op, uint32_t generation)
+    static uint32_t s_v1_cmd_id(const hubframes::Down *op, uint32_t generation)
     {
-      return (op->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION ||
-              op->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP) ? generation : 0u;
+      return (op->cmd_case == hubframes::DL_OPERATION ||
+              op->cmd_case == hubframes::DL_SYSOP) ? generation : 0u;
     }
 
-    bool LORAListener::v1_frame_(LoraClientOperationMessage *op, uint32_t fcnt, bool encrypt,
+    bool LORAListener::v1_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt,
                                  MacFrame *out)
     {
       out->msgid = fcnt;
@@ -4257,7 +3898,7 @@ namespace esphome
                  op ? (int) op->cmd_case : -1);
         return false;
       }
-      // The v0 rule, unchanged: seal only in session and only with a session id.
+      // Seal only in session and only with a session id for the node.
       uint32_t unused_session_id = 0;
       const bool seal = encrypt && s_keys().sessionId(static_cast<mac::Addr>(this->short_address_),
                                                       &unused_session_id);
@@ -4293,7 +3934,6 @@ namespace esphome
         f->seal = mac2::FrameSeal{};
         return false;
       }
-      this->last_seal_binding_.store(f->seal.binding());
       return true;
     }
 
@@ -4301,14 +3941,11 @@ namespace esphome
     {
       out->msgid = fcnt;
       out->seal  = mac2::FrameSeal{};
-      LoginMsg body_msg = login;
-      body_msg.mic.data = nullptr;   // replaced by the frame's K_AUTH tag (spec 4.3)
-      body_msg.mic.len  = 0;
-      const size_t body_len = login_msg__get_packed_size(&body_msg);
+      const size_t body_len = login_msg__get_packed_size(&login);
       if (body_len > macwire::kMaxFrameBytes)
         return false;
       std::vector<uint8_t> body(body_len ? body_len : 1);
-      login_msg__pack(&body_msg, body.data());
+      login_msg__pack(&login, body.data());
       macwire::WireHdr h;
       h.flags  = macwire::withAuth(0, macwire::Auth::KAuth);
       h.dst    = static_cast<uint8_t>(this->short_address_);
@@ -4337,9 +3974,9 @@ namespace esphome
     {
       out->msgid = 0;
       out->seal  = mac2::FrameSeal{};
-      LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op = {};
       GridDemote demote = GRID_DEMOTE__INIT;
-      op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE;
+      op.cmd_case   = hubframes::DL_GRIDDEMOTE;
       op.griddemote = &demote;
       uint8_t body[16];
       size_t  body_len = 0;
@@ -4356,7 +3993,7 @@ namespace esphome
     // AUTH = SESSION walks the encrypted pipeline (verify over the raw frame,
     // then decrypt); K_AUTH is REGISTER (verified in handle_register_); NONE is
     // the plaintext bootstrap path. FLEET is never an uplink.
-    LoraClientResponseMessage *LORAListener::v1_receive_(uint8_t *data, size_t len)
+    std::unique_ptr<hubwire::Uplink> LORAListener::v1_receive_(uint8_t *data, size_t len)
     {
       size_t body_off = 0, body_len = 0;
       macwire::WireHdr h;
@@ -4370,13 +4007,18 @@ namespace esphome
       this->v1_rx_frame_ = data;
       this->v1_rx_len_   = len;
       const macwire::Auth a = h.auth();
+      std::unique_ptr<hubwire::Uplink> u(new hubwire::Uplink());
       if (a == macwire::Auth::Session)
-        return hubwire::sealedOuterV0(h, data + body_off, body_len, data + len - macwire::kTagBytes);
+      {
+        u->sealed(h, data + body_off, body_len, data + len - macwire::kTagBytes);
+        return u;
+      }
       const bool session_port = h.port == macwire::kPortSession;
       if (a == macwire::Auth::Fleet || (a == macwire::Auth::KAuth) != session_port)
         return nullptr;   // REGISTER is exactly K_AUTH on PORT 1
-      hubwire::Uplink u;
-      return u.parse(h, data + body_off, body_len) ? u.cloneV0() : nullptr;
+      if (!u->parse(h, data + body_off, body_len))
+        return nullptr;
+      return u;
     }
 
     bool LORAListener::v1_verify_uplink_(EncUplink &up)
@@ -4481,7 +4123,7 @@ namespace esphome
       this->dlv_forget_ids_();
       // New login challenge: the encrypted session is not confirmed until the
       // node proves it by sending a frame we can decrypt.  Until then the hub
-      // sends commands in plaintext (see s_pack_operation_message callers).
+      // sends commands in plaintext (see v1_frame_).
       this->session_confirmed_ = false;
       this->relogin_pending_   = true;
 
@@ -4491,14 +4133,7 @@ namespace esphome
         s_keys().setSessionId(static_cast<mac::Addr>(this->short_address_), base);
       }
 
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
-      LoraHeader header = LORA_HEADER__INIT;
-      header.destaddress   = this->short_address_;
-      header.destsubnet    = this->subnet_address_;
-      header.senderaddress = kHubAddress;
-      header.msgid         = this->incrTxMessageId();
-      op_message.header    = &header;
-      op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
+      const uint32_t fcnt = this->incrTxMessageId();
 
       LoginMsg login = LOGIN_MSG__INIT;
       // nonce carries the base-nonce (session id) for the CTR counter block.
@@ -4557,44 +4192,9 @@ namespace esphome
       // demote-on-LOGIN needs and did not have before.
       login.hub_rebooted = !this->login_acked_;
 
-      // S8 / v1: the frame's K_AUTH tag (over every raw byte, recomputed per
-      // burst copy) replaces the mic field; nothing below runs.
-      if (kMacWireV1)
-        return this->send_login_v1_(login, header.msgid, base);
-
-      // Tier 3: authenticate LOGIN so a forged/replayed one can no longer
-      // force the node to re-seal under a reused base nonce (U2/the LOGIN
-      // bug) — verified by the node BEFORE it touches its rate limit or
-      // resets its counters.
-      uint8_t mic_input[framecrypto::kLoginMicInputBytes];
-      uint8_t mic_tag[framecrypto::kSessionCmacTagBytes] = {0};
-      framecrypto::buildLoginMicInput(header.destaddress, header.destsubnet,
-                                      header.senderaddress, header.msgid,
-                                      base, login.request_register, login.hub_rebooted,
-                                      mic_input);
-      // Lazy-derive, as setup() does — this path
-      // can be reached without setup() ever having run (e.g. a test driving
-      // send_login() directly), and K_auth is needed right now, not later.
-      if (s_sec().initAuthKey() && !s_sec().authMic(mic_input, sizeof(mic_input), mic_tag))
-      {
-        ESP_LOGE(TAG, "LOGIN MIC computation failed — sending unauthenticated (node will reject)");
-      }
-      login.mic.data = mic_tag;
-      login.mic.len  = sizeof(mic_tag);
-      op_message.login = &login;
-
-      uint8_t *txBuf;
-      unsigned txLen;
-      txLen  = lora_client_operation_message__get_packed_size(&op_message);
-      txBuf  = new uint8_t[txLen];
-      lora_client_operation_message__pack(&op_message, txBuf);
-      this->mac0_send_(txBuf, txLen, TxPolicy{}, mac2::FrameSeal{});   // MIC-authenticated, unsealed
-      delete[] txBuf;
-
-      ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
-               this->get_name().c_str(), (unsigned)base,
-               (unsigned)this->seq_.txId(),
-               (int)login.request_register);
+      // The frame's K_AUTH tag (over every raw byte, recomputed per burst copy)
+      // authenticates LOGIN (spec 4.3).
+      this->send_login_v1_(login, fcnt, base);
     }
 
     // ------------------------------------------------------------------------
@@ -4939,7 +4539,7 @@ namespace esphome
     // missed the first one waiting for a repeat that never comes.
     void LORAListener::build_mode_test_frame_(bool enable)
     {
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op_message {};
 
       ModeTest mt = MODE_TEST__INIT;
       mt.enable           = enable;
@@ -4963,7 +4563,7 @@ namespace esphome
       // later sample.
       mt.seq              = this->mt_seq_++;
 
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+      op_message.cmd_case = hubframes::DL_MODETEST;
       op_message.modetest = &mt;
 
       // Encrypted, like every other command, and for the same two reasons the
@@ -5212,7 +4812,7 @@ namespace esphome
 
     void LORAListener::build_drift_frame_(bool enable)
     {
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op_message {};
       // msgid is the ruler mark (mac_frame_ allocates it). The node indexes
       // samples by it, so a frame lost to the air leaves a gap instead of
       // shifting every later sample.
@@ -5222,7 +4822,7 @@ namespace esphome
       dt.durations    = this->drift_test_duration_s_;
       dt.gridperiodms = this->drift_test_grid_ms_;
 
-      op_message.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST;
+      op_message.cmd_case  = hubframes::DL_DRIFTTEST;
       op_message.drifttest = &dt;
 
       MacFrame f;
@@ -5364,7 +4964,7 @@ namespace esphome
                                         const DeliveryRequest::FrameFn &frame)
     {
       (void) retry;
-      LoraClientOperationMessage op_message LORA_CLIENT_OPERATION_MESSAGE__INIT;
+      hubframes::Down op_message {};
       // Single-shot, NOT bursted: a full 8-entry schedule is ~152 B, whose
       // ~95 ms airtime overruns the 88 ms burst slot. It is only ever sent in
       // reply to a beacon, so the node is provably listening and the burst
@@ -5402,7 +5002,7 @@ namespace esphome
       sc.n_entries            = n;   // enabled slots only, not the table size
       sc.entries              = n ? entry_ptrs : nullptr;
 
-      op_message.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+      op_message.cmd_case = hubframes::DL_SCHEDULE;
       op_message.schedule = &sc;
 
       *version = sc.version;
@@ -6103,7 +5703,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       req.what    = "TimeSync";
       req.policy  = deliverypolicy::kTimeSyncPolicy;
       req.admit   = [this]() { return this->timesync_due_(); };
-      req.fill    = [this, ts](LoraClientOperationMessage *op) { this->fill_timesync_(op, ts.get()); };
+      req.fill    = [this, ts](hubframes::Down *op) { this->fill_timesync_(op, ts.get()); };
       req.on_sent = [this, ts](uint32_t msgid) {
         ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
                  this->get_name().c_str(), (unsigned long long) ts->epoch,
@@ -6112,7 +5712,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       this->deliver_(CH_NONE, std::move(req));
     }
 
-    void LORAListener::fill_timesync_(LoraClientOperationMessage *op, TimeSync *ts)
+    void LORAListener::fill_timesync_(hubframes::Down *op, TimeSync *ts)
     {
       const auto     now       = this->time->now();
       const uint64_t epoch     = static_cast<uint64_t>(now.timestamp);
@@ -6145,7 +5745,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // leaves sleepOk false, which is precisely today's behaviour. A false
       // negative costs one wake's power; a false POSITIVE drops a command.
       ts->sleepok = !this->more_traffic_owed_();
-      op->cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+      op->cmd_case = hubframes::DL_TIMESYNC;
       op->timesync = ts;
     }
 
@@ -6243,8 +5843,8 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       DeliveryRequest req;
       req.what    = "downlink";
       req.policy  = deliverypolicy::kConfigPushPolicy;
-      req.fill    = [payload = cc](LoraClientOperationMessage *op) mutable {
-        op->cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+      req.fill    = [payload = cc](hubframes::Down *op) mutable {
+        op->cmd_case    = hubframes::DL_COVERCONFIG;
         op->coverconfig = &payload;
       };
       req.on_sent = [&sent](uint32_t) { sent = true; };
@@ -6257,7 +5857,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       ESP_LOGI(TAG, "Sending remote config for device %s", this->address_str());
       ESP_LOGI(TAG, "Setting device name to: %s", this->get_name().c_str());
 
-      // Packed through pack_operation_ (by the mechanism) so it is ENCRYPTED whenever
+      // Framed through v1_frame_ (by the mechanism) so it is ENCRYPTED whenever
       // a session exists. This used to pack raw and therefore always went out in
       // the clear — and a provisioned node refuses a plaintext ClientConfig,
       // because ClientConfig sets its address, subnet, name and sleep duration
@@ -6268,13 +5868,13 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       DeliveryRequest req;
       req.what   = "ClientConfig";
       req.policy = deliverypolicy::kConfigPushPolicy;
-      req.fill   = [this, payload = initial](LoraClientOperationMessage *op) mutable {
+      req.fill   = [this, payload = initial](hubframes::Down *op) mutable {
         this->fill_client_config_(op, &payload);
       };
       this->deliver_(CH_NONE, std::move(req));
     }
 
-    void LORAListener::fill_client_config_(LoraClientOperationMessage *op, ClientConfig *cc)
+    void LORAListener::fill_client_config_(hubframes::Down *op, ClientConfig *cc)
     {
       cc->mac_addr = this->address_uint64_;
       cc->addr = this->short_address_;
@@ -6283,7 +5883,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       cc->name.len = strlen(this->get_name().c_str());
       cc->sleepduration = this->sleep_duration_;
       cc->batteryinterval = this->battery_update_interval_;
-      op->cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
+      op->cmd_case = hubframes::DL_CLIENTCONFIG;
       op->clientconfig = cc;
     }
 

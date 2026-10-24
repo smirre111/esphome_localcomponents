@@ -63,10 +63,6 @@ public:
     const uint8_t *netKey() const { return this->net_key_; }
     uint32_t       netKeyId() const { return this->net_key_id_; }
 
-    // AES-CMAC (8 B) over the beacon's fields under the fleet key.
-    bool beaconMac(uint32_t tx_round, uint32_t tx_slot, uint32_t pending_mask,
-                   bool pending_mask_valid, uint32_t burst_index, uint8_t *out,
-                   size_t out_len) const;
 
     // A listener whose state feeds the shadow pending mask.
     void   addShadowSource(esphome::lora_tracker::LORAListener *listener);
@@ -82,8 +78,7 @@ public:
     bool fleetTagV1(const uint8_t *bytes, size_t n, uint8_t tag[8]) const;
     // The v1 beacon frame for `gb` (netkeyid filled here, no `mac` field):
     // HubMacPdu.gridbeacon behind a FLEET header, broadcast, FCNT 0, burst 0/1,
-    // never stamped. Compiled in both configurations; buildBeacon uses it only
-    // under MAC_WIRE_V1.
+    // never stamped. buildBeacon's frame.
     BeaconBuild packBeaconV1(::GridBeacon *gb, size_t max_len, std::vector<uint8_t> *out) const;
 
     // Test seam: a hub that lost its key.

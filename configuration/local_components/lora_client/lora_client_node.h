@@ -6,7 +6,7 @@
 #include "esphome/core/helpers.h"
 
 #include "esphome/components/lora_client/lora_client.h"
-#include "esphome/components/blindsproto/blinds.pb-c.h"   // AppIndication carries a decoded uplink
+#include "esphome/components/lora_client/HubFrames.h"   // AppIndication carries a decoded uplink
 #include "esphome/components/lora_client/MacSap.h"
 
 #include <array>
@@ -29,7 +29,7 @@ namespace esphome
     struct AppIndication
     {
       mac::MacHdr                        hdr{};            // the outer header, decoded
-      const ::LoraClientResponseMessage *msg{nullptr};     // the decoded payload (msg->header may be null)
+      const hubframes::Up *msg{nullptr};     // the decoded payload (msg->header may be null)
       bool                               authentic{false}; // false only on the pre-session plaintext bootstrap
     };
 

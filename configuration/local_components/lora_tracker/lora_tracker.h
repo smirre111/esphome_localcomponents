@@ -131,7 +131,7 @@ namespace esphome
     uint32_t supersede_gen{0};
 
     // earliest_us is the destination node's GRID MARK, not merely some instant.
-    // Stamped into LoraHeader.onMark, which is the only thing that lets the node
+    // Stamped into FLAGS.ON_MARK, which is the only thing that lets the node
     // commit the frame's arrival as a phase sample. A Class A reply is placed
     // too, but on the node's uplink, not on its mark — it must leave this false.
     bool     on_mark{false};
@@ -263,17 +263,6 @@ namespace esphome
       // Owned by the MAC management unit since S5 (mac_mgmt.h); these delegate.
       const uint8_t *netKey() const   { return this->mgmt_.netKey(); }
       uint32_t       netKeyId() const { return this->mgmt_.netKeyId(); }
-      // The beacon's authenticator over the fields it carries. Returns false if
-      // no key has been minted or PSA refuses, and the caller then sends no
-      // beacon at all rather than an unsigned one: an unsigned beacon from a
-      // hub that HAS a key is indistinguishable on the air from a forgery.
-      bool      beaconMac(uint32_t tx_round, uint32_t tx_slot,
-                          uint32_t pending_mask, bool pending_mask_valid,
-                          uint32_t burst_index, uint8_t *out, size_t out_len) const
-      {
-        return this->mgmt_.beaconMac(tx_round, tx_slot, pending_mask, pending_mask_valid,
-                                     burst_index, out, out_len);
-      }
       // The MAC management unit (S5): fleet key, beacon build, shadow inputs.
       macmgmt::HubMacManagement       &mgmt()       { return this->mgmt_; }
       const macmgmt::HubMacManagement &mgmt() const { return this->mgmt_; }
@@ -406,7 +395,7 @@ namespace esphome
       static constexpr int64_t kMaxFireBusyWaitUs = 46875;
 
       // How far ahead of "now" a copy's fire instant is chosen when it is
-      // stamped (LoraHeader fireRound / fireOffsetUs). The stamp is packed into
+      // stamped (the STAMP extension: fire round / offset). The stamp is packed into
       // the copy BEFORE it is prepared, so it can only be true if the pack, the
       // radio mutex and the SPI prepare all fit in front of it; firePacket then
       // busy-waits to exactly this instant. Well under kMaxFireBusyWaitUs.

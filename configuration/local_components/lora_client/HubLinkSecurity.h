@@ -67,11 +67,11 @@ struct FrameSeal
     mac::Addr peer{0};
     uint32_t  key_epoch{0};
     // MAC wire v1 only: the frame's tag is a K_AUTH MIC (LOGIN), recomputed per
-    // copy because it covers the raw BURST_IDX/BURST_CNT bytes. Never set by v0.
+    // copy because it covers the raw BURST_IDX/BURST_CNT bytes.
     bool      kauth{false};
     // The opaque 64-bit value MAC-0 stores with the frame and hands back to
-    // LinkSecurity::copySealer as its ctx (a pointer to it). Bit 62 is the v1
-    // K_AUTH marker; a v0 binding never has it.
+    // LinkSecurity::copySealerV1 as its ctx (a pointer to it). Bit 62 is the
+    // K_AUTH marker.
     uint64_t binding() const
     {
         return sealed ? ((1ull << 63) | (kauth ? (1ull << 62) : 0ull) |
@@ -168,11 +168,6 @@ public:
         auth_key_ = id;
         return old;
     }
-    // CMAC-8 under K_auth over a MIC input built by framecrypto (LOGIN).
-    bool authMic(const uint8_t *mic_input, size_t len, uint8_t tag[kTagBytes]);
-    // Verify a received MIC under K_auth (REGISTER). The tag must be exactly
-    // kTagBytes long.
-    bool verifyAuthMic(const uint8_t *mic_input, size_t len, const uint8_t *tag, size_t tag_len);
 
     // -- session keys ----------------------------------------------------------
     // Derive (never install) K_enc/K_mac for (session_id, node_nonce, hub, node).
@@ -182,30 +177,12 @@ public:
 
     // -- downlink --------------------------------------------------------------
     enum class Seal : uint8_t { Ok, MsgidSpent, NoSession, NoKey, Failed };
-    // CTR-seal `pt` for hdr.dst under hdr.fcnt into `ct` (len bytes). On Ok,
-    // *seal says which keys the frame belongs to (invariant I3, F4).
-    Seal sealDownlink(const mac::MacHdr &hdr, const uint8_t *pt, size_t len, uint8_t *ct,
-                      FrameSeal *seal);
 
     enum class Retag : uint8_t { Ok, MsgidSpent, NoSession, Stale, Failed };
-    // The CMAC tag of one stamped burst copy of the frame `seal` describes: the
-    // copy must be addressed to seal.peer and the peer must still hold the keys
-    // the frame was sealed under (else Stale, counted). `tag` is written only on
-    // Ok. Stack only, no logging.
-    Retag retagCopy(const FrameSeal &seal, const mac::MacHdr &copy, const uint8_t *ct,
-                    size_t ct_len, uint8_t tag[kTagBytes]);
 
-    // The mac::CopySealer MAC-0 calls per copy: ctx points at the frame's
-    // FrameSeal::binding(), stored with the queued frame.
-    static bool copySealer(void *ctx, const mac::MacHdr &copy, const uint8_t *ct,
-                           size_t ct_len, uint8_t tag[8]);
 
     // -- uplink ----------------------------------------------------------------
     enum class Verify : uint8_t { Ok, NoKeys, NoMem, BadTag };
-    // CMAC check BEFORE any decryption. `keys` are the live keys or an
-    // unverified candidate; only their MAC key is used here.
-    Verify verifyUplink(const mac::MacHdr &hdr, uint32_t session_id, const KeyPair &keys,
-                        const uint8_t *ct, size_t ct_len, const uint8_t *tag, size_t tag_len);
     // CTR-decrypt a verified uplink into `pt` (ct_len bytes).
     bool decryptUplink(const mac::MacHdr &hdr, uint32_t session_id, const KeyPair &keys,
                        const uint8_t *ct, size_t ct_len, uint8_t *pt);
@@ -219,10 +196,10 @@ public:
     // Every v1 tag is CMAC-8 over macwire::buildMacInputPrefix(dir, id) followed
     // by frame[0 .. L-8): every transmitted byte except the tag. `frame` below is
     // always a whole v1 frame whose header is already encoded; L includes the
-    // tag. Compiled in both configurations (only the wiring is switched).
+    // tag.
     //
     // AUTH = SESSION downlink: CTR-encrypt the body in place under the dst's
-    // K_enc (CTR block: session id, dst, FCNT, as v0 with msgid -> FCNT), then
+    // K_enc (CTR block: session id, dst, FCNT, block 0), then
     // tag under its K_mac. dst and FCNT are read from the encoded header.
     Seal sealFrameV1(uint8_t *frame, size_t hdr_len, size_t body_len, FrameSeal *seal);
     // AUTH = K_AUTH (LOGIN down, REGISTER up): the tag at L-8. sealFrame marks
@@ -237,7 +214,7 @@ public:
     Retag retagFrameV1(const FrameSeal &seal, const mac::MacHdr &copy, const uint8_t *bytes,
                        size_t n, uint8_t tag[kTagBytes]);
     // The mac::CopySealer MAC-0 calls per v1 copy (ct/ct_len = the copy's bytes
-    // before the tag). SESSION frames are epoch-bound as in v0; K_AUTH frames
+    // before the tag). SESSION frames are bound to the key epoch they were sealed under; K_AUTH frames
     // use K_auth.
     static bool copySealerV1(void *ctx, const mac::MacHdr &copy, const uint8_t *bytes,
                              size_t n, uint8_t tag[8]);

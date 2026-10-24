@@ -23,12 +23,6 @@ if(PROTO_SIM_COVERAGE)
     add_link_options(--coverage)
 endif()
 
-# S8 / W5: MAC wire v1 is the only wire. The node sources still carry their
-# compile-time switch until node W5; build them as v1 like the hub. (The two
-# node-harness targets below override this while they still drive the node's
-# v0 path; they are retired when node W5 deletes it.)
-add_compile_definitions(MAC_WIRE_V1=1)
-
 # ----------------------------------------------------------------------------
 # Where the node repository (BlindsESP) lives.
 #
@@ -96,7 +90,6 @@ add_library(proto_sim STATIC
     sim/sim_clock.cpp
     sim/sim_radio.cpp
     sim/wire_codec.cpp
-    sim/v1_bridge.cpp          # S8/W4: v0 <-> v1 test translation
     sim/crypto.cpp
     sim/hub_model.cpp
     sim/node_model.cpp
@@ -545,7 +538,7 @@ endif()
 # Drift here is worse than a compile error, because there is none: both sides
 # build cleanly and disagree about WHEN, which surfaces on the air as a window
 # armed at the wrong microsecond and gets attributed to the radio.
-foreach(shared_hdr LoraTiming.h TimedGrid.h TimedModePolicy.h ClassAWindows.h MacFunnel.h MacSublayers.h PhaseTracker.h GridState.h SweepAnalysis.h TxQueue.h AckCache.h ModeTestPolicy.h PendingData.h FrameCanon.h Mac1Freshness.h MacSap.h Sequencer.h MacWire.h MacWireVectors.h)
+foreach(shared_hdr LoraTiming.h TimedGrid.h TimedModePolicy.h ClassAWindows.h MacFunnel.h MacSublayers.h PhaseTracker.h GridState.h SweepAnalysis.h TxQueue.h AckCache.h ModeTestPolicy.h PendingData.h Mac1Freshness.h MacSap.h Sequencer.h MacWire.h MacWireVectors.h)
     set(_src  ${BLINDS_ESP_MAIN}/include/${shared_hdr})
     set(_vend ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/${shared_hdr})
     if(EXISTS ${_src} AND EXISTS ${_vend})
@@ -753,11 +746,6 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         ${NODE_SHIM_DIR}/host_clock.c)
     target_link_libraries(real_cmd_dispatcher_test
         PRIVATE real_cmd_dispatcher proto_sim GTest::gtest GTest::gtest_main)
-    # S8 / W4: a NODE harness driven with v0 frames; the node is built with the
-# v0 path here whatever the hub uses (the node repo covers its v1 path in
-# both configurations, seam_test / e2e_test cover hub + node over v1).
-    target_compile_options(real_cmd_dispatcher PRIVATE -UMAC_WIRE_V1 -DMAC_WIRE_V1=0)
-    target_compile_options(real_cmd_dispatcher_test PRIVATE -UMAC_WIRE_V1 -DMAC_WIRE_V1=0)
     gtest_discover_tests(real_cmd_dispatcher_test)
 
     # Tier 3 (docs/mac-separation-implementation-plan.md section 2(b)):
@@ -942,11 +930,6 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         ${NODE_SHIM_DIR})
     target_link_libraries(real_lora_interface_test
         PRIVATE real_lora_interface GTest::gtest GTest::gtest_main)
-    # S8 / W4: a NODE harness driven with v0 frames; the node is built with the
-# v0 path here whatever the hub uses (the node repo covers its v1 path in
-# both configurations, seam_test / e2e_test cover hub + node over v1).
-    target_compile_options(real_lora_interface PRIVATE -UMAC_WIRE_V1 -DMAC_WIRE_V1=0)
-    target_compile_options(real_lora_interface_test PRIVATE -UMAC_WIRE_V1 -DMAC_WIRE_V1=0)
     gtest_discover_tests(real_lora_interface_test)
 else()
     message(STATUS "BlindsESP node source not found at ${BLINDS_ESP_MAIN} — "

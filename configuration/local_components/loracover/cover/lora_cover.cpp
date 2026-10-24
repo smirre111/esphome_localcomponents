@@ -73,7 +73,7 @@ namespace esphome
 
       if (call.get_stop())
       {
-        // F-4: tracked send — retransmits until the node returns a CommandAck.
+        // F-4: tracked send — retransmits until the node returns a MAC ACK.
         // A node the hub models as asleep IGNORES the command (user decision):
         // the entity is left exactly as it was and the unchanged state is
         // re-published so Home Assistant drops whatever the UI showed optimistically.
@@ -144,7 +144,7 @@ namespace esphome
     void LoraCoverComponent::on_app_indication(const esphome::lora_tracker::AppIndication &ind)
     {
       if (ind.msg == nullptr ||
-          ind.msg->proto_case != LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION ||
+          ind.msg->proto_case != hubframes::UL_POSITION ||
           ind.msg->position == nullptr)
         return;
       this->position = ind.msg->position->position;

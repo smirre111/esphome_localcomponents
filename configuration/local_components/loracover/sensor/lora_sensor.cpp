@@ -108,17 +108,17 @@ namespace esphome
     // AppIndication): no wire unpack, no own address filter.
     void LoraCover::on_app_indication(const esphome::lora_tracker::AppIndication &ind)
     {
-      const ::LoraClientResponseMessage *m = ind.msg;
+      const hubframes::Up *m = ind.msg;
       if (m == nullptr)
         return;
 
-      if (m->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE && m->state != nullptr)
+      if (m->proto_case == hubframes::UL_STATE && m->state != nullptr)
       {
         this->publish_battery_(m->state->voltage);
         this->publish_link_rssi_();
       }
 
-      if (m->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION && m->position != nullptr)
+      if (m->proto_case == hubframes::UL_POSITION && m->position != nullptr)
       {
         const CoverPosition *position = m->position;
         this->publish_battery_(position->voltage);

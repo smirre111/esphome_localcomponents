@@ -5,10 +5,14 @@
 #include <variant>
 #include <vector>
 
-// Plain-struct mirror of blinds.proto.
+// The tests' plain description of a frame (header + one message).
 // Field names match the .proto and the generated pb-c symbols so the diff
-// stays obvious.  wire_codec.{h,cpp} translates these <-> real protobuf-c
-// bytes, so the on-air format under test is byte-identical to production.
+// stays obvious.  wire_codec.{h,cpp} translates these <-> MAC wire v1 frames
+// (fixed header + the body PDU, real protobuf-c bytes), so the on-air format
+// under test is byte-identical to production. The envelope names
+// (LoraClientOperationMessage, LoraHeader, EncryptedPayload, CommandAck) are
+// this description layer's own: the v0 wire messages of that name are gone
+// from blinds.proto (S8 / W5c).
 //
 // KEEP IN SYNC WITH blinds.proto.  The schema_drift_* CTest gates catch a
 // stale .pb-c stub, but they cannot catch a stale mirror struct — if you add
@@ -189,13 +193,17 @@ struct LoginMsg {
     bool     hub_rebooted{false};
 };
 
-// Slim on-air AEAD envelope: algorithm is fixed and the IV/AAD are
-// reconstructed by the receiver from the plaintext outer header, so ONLY the
-// tag and ciphertext are transmitted.  (`algo`, `iv` and `aad` were removed
-// from the proto — do not reintroduce them here.)
+// An AUTH = SESSION frame's sealed body and tag (wire_codec puts them behind
+// the v1 header as they are).
 struct EncryptedPayload {
     std::vector<uint8_t> tag;
     std::vector<uint8_t> ciphertext;
+    // The v1 header fields the sealed body implies (the tag covers them): the
+    // PORT and, for a sealed MacAck, FLAGS.ACK + ACKED_FCNT. seal_resp_payload
+    // fills them from the inner message.
+    uint8_t  port{2};
+    bool     ack{false};
+    uint32_t ackedFcnt{0};
 };
 
 struct ClientRegister  { uint64_t mac_addr{0}; bool needs_config{false}; };

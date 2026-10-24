@@ -3,7 +3,7 @@
 // LoRa components run on (tracker send task, the loop task, the esp_timer task
 // that builds ModeTest / MAC ping / drift frames).
 //
-// Added 2026-10-19 (S8 bench): with MAC_WIRE_V1 the send task holds a 255-byte
+// Added 2026-10-19 (S8 bench): with MAC wire v1 the send task holds a 255-byte
 // v1 frame on its 4 KB stack and the esp_timer task (3.5 KB) frames and seals
 // a v1 frame per mark. A low-rate readout lets a bench session see the margin
 // instead of discovering it as a stack overflow.

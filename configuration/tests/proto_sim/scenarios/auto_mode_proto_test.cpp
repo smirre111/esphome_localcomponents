@@ -210,45 +210,38 @@ TEST(AutoModeProto, ModeSysopsRoundTrip) {
 // ---------------------------------------------------------------------------
 
 TEST(AutoModeProto, UnknownOneofFieldDecodesAsNotSetNotError) {
-    // Simulates an OLD peer receiving a NEW message: we encode a real
-    // ps::ScheduleConfig, then decode it as a RESPONSE message, whose oneof has no
-    // field 17 at all. protobuf-c must skip it as an unknown field and leave
-    // proto_case unset — NOT return nullptr (which production code logs as
-    // "Could not read protobuf" and would flood on every beacon).
+    // Simulates an OLD peer receiving a NEW body: a real ps::ScheduleConfig is
+    // encoded as the hub's HubAppPdu, then decoded as the node->hub NodeAppPdu,
+    // whose oneof has no field 17 at all. protobuf-c must skip it as an
+    // unknown field and leave pdu_case unset -- NOT return nullptr (which
+    // production code logs as "Could not read protobuf" and would flood on
+    // every beacon). The v1 header sits outside the body, so the replay check
+    // reads it whatever the body holds.
     ps::LoraClientOperationMessage m;
     m.header   = make_header();
     m.cmd      = ps::LoraClientOperationMessage::Cmd::Schedule;
     m.schedule = make_full_schedule();
-    auto bytes = ps::serialize_op(m);
+    const auto frame = ps::serialize_op(m);
+    const auto body  = ps::serialize_op_payload(m);
 
-    ::LoraClientResponseMessage* pb =
-        lora_client_response_message__unpack(nullptr, bytes.size(), bytes.data());
+    ::NodeAppPdu* pb = node_app_pdu__unpack(nullptr, body.size(), body.data());
     ASSERT_NE(pb, nullptr) << "unknown field must not fail the parse";
-    EXPECT_EQ(pb->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET);
-    // The header is a known field and must still decode — this is what lets an
-    // old hub run its msgid replay check on a message it cannot interpret.
-    ASSERT_NE(pb->header, nullptr);
-    EXPECT_EQ(pb->header->destaddress, 17u);
-    EXPECT_EQ(pb->header->msgid,       42u);
-    lora_client_response_message__free_unpacked(pb, nullptr);
+    EXPECT_EQ(pb->pdu_case, NODE_APP_PDU__PDU__NOT_SET);
+    node_app_pdu__free_unpacked(pb, nullptr);
+
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    ASSERT_TRUE(macwire::decode(frame.data(), frame.size(), &h, &off, &blen));
+    EXPECT_EQ(h.dst,  17u);
+    EXPECT_EQ(h.fcnt, 42u);
 }
 
 TEST(AutoModeProto, FutureFieldNumberDecodesAsNotSetKeepingHeaderReadable) {
-    // The concrete node-first case: a node running NEWER firmware sends a
-    // message whose oneof field number the OLD hub's stubs do not contain at
-    // all.  Hand-craft that rather than reusing an existing message, because
-    // every field number in this schema is deliberately reused across the two
-    // message types (field 10 is `operation` downlink and `avail` uplink, and
-    // so on) — direction picks the parser, so cross-parsing a real message
-    // would test a case that cannot occur on air.
-    //
-    // Frame = field 1 (header, submessage) + field 30 (unknown, length-delim).
-    //
-    // This used to use field 20, and field 20 became MacControl — at which
-    // point the test failed, correctly: it can only mean what it says while the
-    // number it picks is genuinely unassigned in BOTH message types. Whoever
-    // next claims 30 will get the same failure and should move it again rather
-    // than weaken the assertion.
+    // The concrete node-first case: a node running NEWER firmware sends an
+    // application body whose oneof field number the OLD hub's stubs do not
+    // contain at all. Hand-craft that rather than reusing an existing message:
+    // field 30 must be genuinely unassigned in NodeAppPdu. Whoever next claims
+    // 30 will get the failure and should move it rather than weaken the test.
     ps::LoraClientResponseMessage hdr_only;
     hdr_only.header = make_header();
     hdr_only.header.senderAddress = 17;
@@ -256,24 +249,26 @@ TEST(AutoModeProto, FutureFieldNumberDecodesAsNotSetKeepingHeaderReadable) {
     std::vector<uint8_t> bytes = ps::serialize_resp(hdr_only);
 
     // Append field 30, wire type 2 (length-delimited): tag = 30<<3 | 2 = 242,
-    // which is a two-byte varint (0xF2 0x01).
+    // which is a two-byte varint (0xF2 0x01). AUTH = NONE: the body runs to
+    // the end of the frame.
     const uint8_t unknown_payload[] = {0x08, 0x2A};   // arbitrary inner bytes
     bytes.push_back(0xF2);
     bytes.push_back(0x01);
     bytes.push_back(sizeof(unknown_payload));
     bytes.insert(bytes.end(), std::begin(unknown_payload), std::end(unknown_payload));
 
-    ::LoraClientResponseMessage* pb =
-        lora_client_response_message__unpack(nullptr, bytes.size(), bytes.data());
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    ASSERT_TRUE(macwire::decode(bytes.data(), bytes.size(), &h, &off, &blen));
+    // The header must still be readable -- this is what lets an old hub run
+    // its replay check and login bookkeeping on a body it cannot interpret.
+    EXPECT_EQ(h.src,  17u);
+    EXPECT_EQ(h.fcnt, 42u);
+    ASSERT_EQ(blen, 5u);
+    ::NodeAppPdu* pb = node_app_pdu__unpack(nullptr, blen, bytes.data() + off);
     ASSERT_NE(pb, nullptr) << "an unknown field number must not fail the parse";
-    EXPECT_EQ(pb->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET);
-    // The header must still be readable — this is what lets an old hub run its
-    // msgid replay check and login_acked_ bookkeeping on a message whose
-    // payload it cannot interpret.
-    ASSERT_NE(pb->header, nullptr);
-    EXPECT_EQ(pb->header->senderaddress, 17u);
-    EXPECT_EQ(pb->header->msgid,         42u);
-    lora_client_response_message__free_unpacked(pb, nullptr);
+    EXPECT_EQ(pb->pdu_case, NODE_APP_PDU__PDU__NOT_SET);
+    node_app_pdu__free_unpacked(pb, nullptr);
 }
 
 TEST(AutoModeProto, ExistingMessagesUnaffectedByNewFields) {

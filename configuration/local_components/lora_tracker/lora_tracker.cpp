@@ -833,7 +833,7 @@ namespace esphome
     // and sendPacketBurst inserts the 6-byte STAMP when the grid runs and the
     // frame is stamped (burst_frame.h), so its airtime must be priced with it;
     // pricing the packed length ended its reservation up to a symbol block
-    // early. v0: unchanged (its stamp is varints inside the header).
+    // early.
     size_t LORATracker::onAirLen_(size_t len, bool fire_stamp) const
     {
       return len + ((mac0::kTxFrameInsertsStamp && this->grid_started_ && fire_stamp)
@@ -1241,7 +1241,7 @@ namespace esphome
 
         // Release the radio to RX during the idle gap between copies.  Holding
         // it TX-busy for the whole 17-copy burst (~1.5 s) kept the hub deaf:
-        // it never opened an RX window to hear the node's CommandAck, and the
+        // it never opened an RX window to hear the node's MAC ACK, and the
         // node's CAD saw a permanently busy channel and could not transmit the
         // ACK either — so every cover op retransmitted to 4/4.  Clearing
         // lora_tx_busy_ here lets the main loop's receive() read any incoming

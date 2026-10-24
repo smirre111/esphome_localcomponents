@@ -41,6 +41,8 @@ extern "C" {
 #include <vector>
 #include "GridState.h"
 #include "NodeClock.h"   // settledFlagForTest: the boot-minute anchor tests
+#include "NodeFrames.h"  // DownlinkView: the command a test frame carries
+#include "MacWire.h"
 
 namespace {
 
@@ -57,8 +59,131 @@ constexpr uint8_t kNodeAddr = 18;
 constexpr uint8_t kSubnet = 2;
 constexpr uint64_t kNodeMac = 0xE08CFE5F9EC4ULL;
 
-// Serialise a hub-sent operation message into the byte buffer that
-// onReceiveNew() expects.
+
+// ---------------------------------------------------------------------------
+// MAC wire v1 is the only wire (S8 / W5). A test describes a hub downlink as
+// the node's own DownlinkView (one command) plus its MacFrameHdr (DlHdr), and
+// these builders put it on the air as v1: AUTH =
+// NONE, a LOGIN under K_AUTH, or sealed under the node's CURRENT session keys
+// (the node minted the node nonce, so only it can derive K_enc / K_mac).
+// ---------------------------------------------------------------------------
+using DlHdr = MacFrameHdr;
+struct DlMsg : DownlinkView {
+    DlHdr *header{nullptr};
+};
+
+uint8_t dl_port(DownlinkCase c) {
+    switch (c) {
+    case DL_LOGIN:
+        return macwire::kPortSession;
+    case DL_DRIFTTEST: case DL_MACCONTROL: case DL_GRIDSYNC: case DL_MODETEST:
+    case DL_GRIDBEACON: case DL_GRIDDEMOTE:
+        return macwire::kPortMac0Mgmt;
+    default:
+        return macwire::kPortApp;
+    }
+}
+
+// The hub asks for a MAC ACK on exactly these (spec 2.5, HubWire's route table).
+bool dl_ack_req(DownlinkCase c) {
+    return c == DL_OPERATION || c == DL_SYSOP || c == DL_SCHEDULE || c == DL_GRIDSYNC;
+}
+
+// The body PDU the PORT names, packed. A sysop carries cmd_id 0 ("none").
+std::vector<uint8_t> dl_body(const DownlinkView &op) {
+    std::vector<uint8_t> out;
+    auto pack = [&](const ProtobufCMessage *m) {
+        out.resize(protobuf_c_message_get_packed_size(m));
+        protobuf_c_message_pack(m, out.data());
+    };
+    const uint8_t port = dl_port(op.cmd_case);
+    if (port == macwire::kPortSession) {
+        if (op.login) pack(&op.login->base);
+        return out;
+    }
+    if (port == macwire::kPortMac0Mgmt) {
+        HubMacPdu p = HUB_MAC_PDU__INIT;
+        GridDemote empty = GRID_DEMOTE__INIT;
+        p.pdu_case = (HubMacPdu__PduCase) op.cmd_case;
+        switch (op.cmd_case) {
+        case DL_DRIFTTEST:  p.drifttest  = op.drifttest;  break;
+        case DL_MACCONTROL: p.maccontrol = op.maccontrol; break;
+        case DL_GRIDSYNC:   p.gridsync   = op.gridsync;   break;
+        case DL_MODETEST:   p.modetest   = op.modetest;   break;
+        case DL_GRIDBEACON: p.gridbeacon = op.gridbeacon; break;
+        case DL_GRIDDEMOTE: p.griddemote = op.griddemote ? op.griddemote : &empty; break;
+        default: break;
+        }
+        pack(&p.base);
+        return out;
+    }
+    HubAppPdu p = HUB_APP_PDU__INIT;
+    SysopCmd sc = SYSOP_CMD__INIT;
+    p.pdu_case = (HubAppPdu__PduCase) op.cmd_case;
+    switch (op.cmd_case) {
+    case DL_OPERATION:    p.operation    = op.operation;    break;
+    case DL_CLIENTCONFIG: p.clientconfig = op.clientconfig; break;
+    case DL_COVERCONFIG:  p.coverconfig  = op.coverconfig;  break;
+    case DL_TIMESYNC:     p.timesync     = op.timesync;     break;
+    case DL_SCHEDULE:     p.schedule     = op.schedule;     break;
+    case DL_SYSOP:        sc.op = op.sysop; p.sysop = &sc; break;
+    default: break;
+    }
+    pack(&p.base);
+    return out;
+}
+
+macwire::WireHdr dl_wire_hdr(const DlHdr &h, DownlinkCase c, macwire::Auth a) {
+    macwire::WireHdr w;
+    uint8_t flags = dl_ack_req(c) ? macwire::kFlagAckReq : 0;
+    if (h.onmark) flags |= macwire::kFlagOnMark;
+    if (h.firestamped) {
+        flags |= macwire::kFlagStamped;
+        w.fire_round     = h.fireround & macwire::kU24Max;
+        w.fire_offset_us = h.fireoffsetus & macwire::kU24Max;
+    }
+    w.flags     = macwire::withAuth(flags, a);
+    w.dst       = (uint8_t) h.destaddress;
+    w.src       = (uint8_t) h.senderaddress;
+    w.subnet    = (uint8_t) h.destsubnet;
+    w.fcnt      = h.msgid;
+    w.port      = dl_port(c);
+    w.burst_idx = (uint8_t) h.burstindex;
+    w.burst_cnt = (uint8_t) h.burstcount;
+    return w;
+}
+
+// A plaintext downlink (AUTH = NONE), or a LOGIN under K_AUTH.
+std::vector<uint8_t> pack_op(const DlMsg &op) {
+    static const DlHdr none{};
+    const DlHdr &h = op.header ? *op.header : none;
+    if (op.cmd_case == DL_LOGIN)
+        return proto_sim::v1_kauth_frame(/*downlink=*/true, dl_wire_hdr(h, DL_LOGIN, macwire::Auth::KAuth),
+                                         dl_body(op));
+    return proto_sim::v1_plain_frame(dl_wire_hdr(h, op.cmd_case, macwire::Auth::None), dl_body(op));
+}
+
+// `inner` sealed (AUTH = SESSION) under the node's current session keys, as
+// the hub seals it for session id `nonce` (the LOGIN's hub_nonce).
+std::vector<uint8_t> seal_op(CmdDispatcher &disp, const DownlinkView &inner, const DlHdr &h,
+                             uint32_t nonce) {
+    const macwire::WireHdr w = dl_wire_hdr(h, inner.cmd_case, macwire::Auth::Session);
+    const std::vector<uint8_t> body = dl_body(inner);
+    std::vector<uint8_t> f = proto_sim::v1_plain_frame(w, body);   // header || body || tag room
+    const size_t hlen = macwire::headerLen(w);
+    uint8_t iv[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(nonce, (uint8_t) h.destaddress, /*downlink=*/true, h.msgid, 0, iv);
+    if (!body.empty() && !disp.ctrEncryptForTest(iv, body.data(), body.size(), f.data() + hlen))
+        ADD_FAILURE() << "seal_op: no session keys on disp (missing/mismatched LOGIN?)";
+    std::vector<uint8_t> mi(macwire::kMacInputPrefixBytes);
+    macwire::buildMacInputPrefix(mi.data(), /*downlink=*/true, nonce);
+    mi.insert(mi.end(), f.begin(), f.end() - macwire::kTagBytes);
+    if (!disp.cmacComputeForTest(mi.data(), mi.size(), f.data() + f.size() - macwire::kTagBytes,
+                                 macwire::kTagBytes))
+        ADD_FAILURE() << "seal_op: no session keys on disp (missing/mismatched LOGIN?)";
+    return f;
+}
+
 // A mark belongs to the window it was armed for (review finding 5), and these tests
 // exercise the counter and the demotion ladder rather than the windows: one constant
 // generation says "the same window each time", which is what they mean.
@@ -66,8 +191,8 @@ constexpr uint8_t kTestWindowGen = 1;
 
 std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce,
                                    bool hub_rebooted = false) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr               = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -77,21 +202,12 @@ std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce,
     LoginMsg login     = LOGIN_MSG__INIT;
     login.nonce        = nonce;
     login.hub_rebooted = hub_rebooted;
-    // Tier 3 (mac-separation-implementation-plan.md section 2(b)): LOGIN is
-    // MIC-authenticated now — compute it so the real node's handleLogin
-    // actually accepts this frame instead of dropping it unverified.
-    uint8_t mic[framecrypto::kSessionCmacTagBytes];
-    proto_sim::compute_login_mic(hdr.destaddress, hdr.destsubnet, hdr.senderaddress,
-                                 hdr.msgid, nonce, /*request_register=*/false,
-                                 hub_rebooted, mic);
-    login.mic.data = mic;
-    login.mic.len  = sizeof(mic);
-    op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
+    // LOGIN is authenticated by the frame's K_AUTH tag (spec 4.3), which
+    // pack_op computes over every byte, so the real handleLogin accepts it.
+    op.cmd_case    = DL_LOGIN;
     op.login       = &login;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> out(len);
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
@@ -119,7 +235,7 @@ struct NodeProbe : CmdDispatcher {
     // announced on every wake and then sent its check-in beacon as well —
     // two uplinks for one fact, measured on fw 1.1.2 and again on 1.1.3.
     using CmdDispatcher::simulateWakeForTest;
-    using CmdDispatcher::pack_response_message;   // the seal point, for the msgid guard
+    using CmdDispatcher::packUplinkFrame_;   // the v1 seal point, for the msgid guard
 };
 
 struct RealNodeFixture : public ::testing::Test {
@@ -268,51 +384,19 @@ TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
     // one the way encrypt_op() does, under the node's own CURRENT session
     // keys (ctrEncryptForTest/cmacComputeForTest), since only the node knows
     // the node_nonce handleLogin generated.
-    LoraClientOperationMessage inner_op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg inner_op;
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
     covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
     covop.operation  = COV_OPERATION__CMD_STOP;
-    inner_op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+    inner_op.cmd_case  = DL_OPERATION;
     inner_op.operation = &covop;
-    std::vector<uint8_t> plain(lora_client_operation_message__get_packed_size(&inner_op));
-    lora_client_operation_message__pack(&inner_op, plain.data());
-
     constexpr uint32_t kOpMsgId = 5;
-    uint8_t ctr_iv[framecrypto::kCtrBlockBytes];
-    framecrypto::buildCtrInitialBlock(kHubNonce, kNodeAddr, /*downlink=*/true, kOpMsgId,
-                                      /*block_idx=*/0, ctr_iv);
-    std::vector<uint8_t> ciphertext(plain.size());
-    ASSERT_TRUE(disp.ctrEncryptForTest(ctr_iv, plain.data(), plain.size(), ciphertext.data()));
-    framecrypto::EtmHeaderFields fields{};
-    fields.downlink       = true;
-    fields.session_id     = kHubNonce;
-    fields.dest_address   = kNodeAddr;
-    fields.dest_subnet    = kSubnet;
-    fields.sender_address = kHubAddr;
-    fields.msgid          = kOpMsgId;
-    uint8_t prefix[framecrypto::kEtmPrefixBytes];
-    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(ciphertext.size()), prefix);
-    std::vector<uint8_t> mac_input(prefix, prefix + sizeof(prefix));
-    mac_input.insert(mac_input.end(), ciphertext.begin(), ciphertext.end());
-    uint8_t tag[framecrypto::kSessionCmacTagBytes];
-    ASSERT_TRUE(disp.cmacComputeForTest(mac_input.data(), mac_input.size(), tag, sizeof(tag)));
-
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader op_hdr = LORA_HEADER__INIT;
+    DlHdr op_hdr;
     op_hdr.destaddress   = kNodeAddr;
     op_hdr.destsubnet    = kSubnet;
     op_hdr.senderaddress = kHubAddr;
     op_hdr.msgid         = kOpMsgId;
-    op.header      = &op_hdr;
-    EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
-    ep.tag.data        = tag;
-    ep.tag.len         = sizeof(tag);
-    ep.ciphertext.data = ciphertext.data();
-    ep.ciphertext.len  = ciphertext.size();
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
-    op.encrypted  = &ep;
-    std::vector<uint8_t> op_bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, op_bytes.data());
+    std::vector<uint8_t> op_bytes = seal_op(disp, inner_op, op_hdr, kHubNonce);
     disp.onReceiveNew(op_bytes.data(), static_cast<int>(op_bytes.size()));
     ASSERT_EQ(disp.rxMsgIdForTest(), 5u) << "precondition: msgid 5 was accepted";
     CmdDispatcher::tx_command_t rx_drain{};
@@ -341,8 +425,8 @@ TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
 
 TEST_F(RealNodeFixture, CmdOperationReplayRejected) {
     // CMD_OPEN with msgid=1, then again with msgid=1.
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr;
     hdr.destsubnet = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -352,12 +436,10 @@ TEST_F(RealNodeFixture, CmdOperationReplayRejected) {
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
     covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
     covop.operation  = COV_OPERATION__CMD_OPEN;
-    op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+    op.cmd_case  = DL_OPERATION;
     op.operation = &covop;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> bytes(len);
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     // First delivery: motor command queued.
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
@@ -382,8 +464,8 @@ TEST_F(RealNodeFixture, CmdLoginDestinedForDifferentNodeIsIgnored) {
     const uint32_t kHubNonce = 0xC0DEFEEDu;
 
     // Hub sends LoginMsg with destAddress=17 (NOT us — we are 18).
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr               = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = 17;             // ← addressed to a DIFFERENT node
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -392,12 +474,10 @@ TEST_F(RealNodeFixture, CmdLoginDestinedForDifferentNodeIsIgnored) {
 
     LoginMsg login = LOGIN_MSG__INIT;
     login.nonce    = kHubNonce;
-    op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
+    op.cmd_case    = DL_LOGIN;
     op.login       = &login;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> bytes(len);
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 0u);
 
@@ -414,8 +494,8 @@ TEST_F(RealNodeFixture, CmdLoginDestinedForDifferentNodeIsIgnored) {
 // roll-geometry state (only when all three floats are non-zero —
 // production CmdDispatcher.cpp:1291).
 TEST_F(RealNodeFixture, CmdCoverConfigAppliesGeometry) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr               = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -428,12 +508,10 @@ TEST_F(RealNodeFixture, CmdCoverConfigAppliesGeometry) {
     cc.blindheightmm     = 2000.0f;
     cc.axlediametermm    = 60.0f;
     cc.blindthicknessmm  = 8.0f;
-    op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+    op.cmd_case    = DL_COVERCONFIG;
     op.coverconfig = &cc;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> bytes(len);
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
@@ -454,8 +532,8 @@ TEST_F(RealNodeFixture, CmdCoverConfigAppliesGeometry) {
 // (atomic guard — production CmdDispatcher.cpp:1291 requires all three
 // non-zero). Documents the "partial = unset" production behaviour.
 TEST_F(RealNodeFixture, CmdCoverConfigRejectsPartialGeometry) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr               = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr;
     hdr.senderaddress = kHubAddr;
     hdr.msgid = 1;
@@ -467,12 +545,10 @@ TEST_F(RealNodeFixture, CmdCoverConfigRejectsPartialGeometry) {
     cc.blindheightmm    = 2000.0f;
     cc.axlediametermm   = 60.0f;
     cc.blindthicknessmm = 0.0f;   // ← one field zero (proto3 unset)
-    op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+    op.cmd_case    = DL_COVERCONFIG;
     op.coverconfig = &cc;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> bytes(len);
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
@@ -503,8 +579,8 @@ TEST_F(RealNodeFixture, CmdCoverConfigRejectsPartialGeometry) {
 // ---------------------------------------------------------------------------
 TEST_F(RealNodeFixture, CmdCoverConfigRefusesZeroTravelDurations) {
     auto send = [&](uint32_t open_s, uint32_t close_s, uint32_t msgid) {
-        LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-        LoraHeader hdr               = LORA_HEADER__INIT;
+        DlMsg op;
+        DlHdr hdr;
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
@@ -517,12 +593,10 @@ TEST_F(RealNodeFixture, CmdCoverConfigRefusesZeroTravelDurations) {
         cc.blindheightmm    = 2000.0f;
         cc.axlediametermm   = 60.0f;
         cc.blindthicknessmm = 8.0f;
-        op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+        op.cmd_case    = DL_COVERCONFIG;
         op.coverconfig = &cc;
 
-        size_t len = lora_client_operation_message__get_packed_size(&op);
-        std::vector<uint8_t> bytes(len);
-        lora_client_operation_message__pack(&op, bytes.data());
+        std::vector<uint8_t> bytes = pack_op(op);
         disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
     };
 
@@ -557,8 +631,8 @@ TEST_F(RealNodeFixture, CmdCoverConfigStillAppliesRealTravelDurations) {
     // recalibration must still reach the node, and one zero must not drag its
     // non-zero partner down with it.
     auto send = [&](uint32_t open_s, uint32_t close_s, uint32_t msgid) {
-        LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-        LoraHeader hdr               = LORA_HEADER__INIT;
+        DlMsg op;
+        DlHdr hdr;
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
@@ -571,12 +645,10 @@ TEST_F(RealNodeFixture, CmdCoverConfigStillAppliesRealTravelDurations) {
         cc.blindheightmm    = 2000.0f;
         cc.axlediametermm   = 60.0f;
         cc.blindthicknessmm = 8.0f;
-        op.cmd_case    = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+        op.cmd_case    = DL_COVERCONFIG;
         op.coverconfig = &cc;
 
-        size_t len = lora_client_operation_message__get_packed_size(&op);
-        std::vector<uint8_t> bytes(len);
-        lora_client_operation_message__pack(&op, bytes.data());
+        std::vector<uint8_t> bytes = pack_op(op);
         disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
     };
 
@@ -597,8 +669,8 @@ TEST_F(RealNodeFixture, CmdCoverConfigStillAppliesRealTravelDurations) {
 
 namespace {
 std::vector<uint8_t> plaintextClientConfigFor(uint64_t mac, uint32_t addr, uint32_t msgid) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr               = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = 18;
     hdr.senderaddress = 1;
     hdr.msgid         = msgid;
@@ -607,10 +679,9 @@ std::vector<uint8_t> plaintextClientConfigFor(uint64_t mac, uint32_t addr, uint3
     cc.mac_addr = mac;
     cc.addr     = addr;
     cc.subnt    = 2;
-    op.cmd_case     = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
+    op.cmd_case     = DL_CLIENTCONFIG;
     op.clientconfig = &cc;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
     return bytes;
 }
 void pinFactoryMac(uint64_t mac) {
@@ -677,8 +748,8 @@ TEST(RealCmdDispatcherFresh, FreshNodeAcceptsClientConfigByMac) {
 
     ASSERT_EQ(sys.getConfigAddress(), 0u) << "Sanity: starting unconfigured";
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr               = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = 18;      // hub-intended address (node has cfgAddress=0)
     hdr.senderaddress = 0xFF;
     hdr.msgid         = 1;
@@ -688,12 +759,10 @@ TEST(RealCmdDispatcherFresh, FreshNodeAcceptsClientConfigByMac) {
     cc.mac_addr = kFreshMac;
     cc.addr     = 18;
     cc.subnt    = 2;
-    op.cmd_case     = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
+    op.cmd_case     = DL_CLIENTCONFIG;
     op.clientconfig = &cc;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> bytes(len);
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
@@ -706,8 +775,8 @@ TEST(RealCmdDispatcherFresh, FreshNodeAcceptsClientConfigByMac) {
 
 TEST_F(RealNodeFixture, CmdClientConfigAppliesAddressOnlyForMatchingMac) {
     // CLIENTCONFIG addressed to a DIFFERENT MAC — node must NOT apply.
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = 17;          // CLIENTCONFIG bypasses destaddr check
     hdr.senderaddress = kHubAddr;
     hdr.msgid = 1;
@@ -717,12 +786,10 @@ TEST_F(RealNodeFixture, CmdClientConfigAppliesAddressOnlyForMatchingMac) {
     cfg.mac_addr = 0xAABBCCDDEEFFULL;   // wrong MAC
     cfg.addr     = 42;
     cfg.subnt    = 9;
-    op.cmd_case     = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
+    op.cmd_case     = DL_CLIENTCONFIG;
     op.clientconfig = &cfg;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> bytes(len);
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     const uint8_t addr_before = sys.getConfigAddress();
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
@@ -752,8 +819,8 @@ namespace {
 // nested message — see blinds.proto field 11.
 std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what,
                                    uint32_t burst_index = 0, bool on_mark = true) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr               = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -768,20 +835,18 @@ std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what,
     hdr.onmark        = on_mark;
     op.header         = &hdr;
 
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.cmd_case = DL_SYSOP;
     op.sysop    = what;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> out(len);
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
 std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
                                       int32_t utcoffset, uint64_t dstnext = 0,
                                       uint32_t in_slot_uplinks = 0) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr               = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -796,12 +861,10 @@ std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
     // what keeps the node in Mode A — so every existing caller keeps the
     // conservative reading without saying anything.
     ts.inslotuplinks = in_slot_uplinks;
-    op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+    op.cmd_case  = DL_TIMESYNC;
     op.timesync  = &ts;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> out(len);
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
@@ -1060,57 +1123,21 @@ TEST_F(RealNodeFixture, DecryptedDownlinkProvesSessionEndToEnd) {
     TimeSync ts  = TIME_SYNC__INIT;
     ts.epoch     = 1787000000ULL;
     ts.utcoffset = 7200;
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+    DlMsg inner;
+    inner.cmd_case = DL_TIMESYNC;
     inner.timesync = &ts;
-    size_t plain_len = lora_client_operation_message__get_packed_size(&inner);
-    std::vector<uint8_t> plain(plain_len);
-    lora_client_operation_message__pack(&inner, plain.data());
 
-    // Tier 3: this test drives a REAL LOGIN into the real node above, so the
-    // node derived its own node_nonce via esp_random() — unobservable from
-    // here. Ask the node to seal under its own CURRENT session keys instead
-    // of trying to re-derive them (ctrEncryptForTest/cmacComputeForTest);
+    // This test drives a REAL LOGIN into the real node above, so the node
+    // derived its own node_nonce via esp_random() -- unobservable from here.
+    // seal_op asks the node to seal under its own CURRENT session keys;
     // session_id is the hub_nonce the LOGIN above carried (kNonce).
     constexpr uint32_t kMsgId = 2;
-    uint8_t ctr_iv[framecrypto::kCtrBlockBytes];
-    framecrypto::buildCtrInitialBlock(kNonce, kNodeAddr, /*downlink=*/true, kMsgId,
-                                      /*block_idx=*/0, ctr_iv);
-    std::vector<uint8_t> ciphertext(plain.size());
-    ASSERT_TRUE(disp.ctrEncryptForTest(ctr_iv, plain.data(), plain.size(), ciphertext.data()));
-
-    framecrypto::EtmHeaderFields fields{};
-    fields.downlink       = true;
-    fields.session_id     = kNonce;
-    fields.dest_address   = kNodeAddr;
-    fields.dest_subnet    = kSubnet;
-    fields.sender_address = kHubAddr;
-    fields.msgid          = kMsgId;
-    uint8_t prefix[framecrypto::kEtmPrefixBytes];
-    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(ciphertext.size()), prefix);
-    std::vector<uint8_t> mac_input(prefix, prefix + sizeof(prefix));
-    mac_input.insert(mac_input.end(), ciphertext.begin(), ciphertext.end());
-    uint8_t tag[framecrypto::kSessionCmacTagBytes];
-    ASSERT_TRUE(disp.cmacComputeForTest(mac_input.data(), mac_input.size(), tag, sizeof(tag)));
-
-    LoraClientOperationMessage outer = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = kMsgId;
-    outer.header      = &hdr;
-    EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
-    ep.tag.data        = tag;
-    ep.tag.len         = sizeof(tag);
-    ep.ciphertext.data = ciphertext.data();
-    ep.ciphertext.len  = ciphertext.size();
-    outer.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
-    outer.encrypted = &ep;
-
-    size_t frame_len = lora_client_operation_message__get_packed_size(&outer);
-    std::vector<uint8_t> frame(frame_len);
-    lora_client_operation_message__pack(&outer, frame.data());
+    std::vector<uint8_t> frame = seal_op(disp, inner, hdr, kNonce);
 
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
 
@@ -1261,19 +1288,17 @@ TEST_F(RealNodeFixture, ScheduleConfigIsAppliedAndAcked) {
     sc.n_entries            = 1;
     sc.entries              = entries;
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = 300;
     op.header   = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+    op.cmd_case = DL_SCHEDULE;
     op.schedule = &sc;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> frame(len);
-    lora_client_operation_message__pack(&op, frame.data());
+    std::vector<uint8_t> frame = pack_op(op);
 
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
 
@@ -1530,20 +1555,18 @@ TEST_F(RealNodeFixture, ApplyingAScheduleDoesNotSleepImmediately) {
     sc.n_entries = 1;
     sc.entries   = entries;
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = 501;   // must differ from the TimeSync above, or the
                                // replay filter drops it and the test lies
     op.header   = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+    op.cmd_case = DL_SCHEDULE;
     op.schedule = &sc;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> frame(len);
-    lora_client_operation_message__pack(&op, frame.data());
+    std::vector<uint8_t> frame = pack_op(op);
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
 
     ASSERT_TRUE(sys.getAutoMode()) << "the schedule should still have been applied";
@@ -1765,19 +1788,17 @@ std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t
     sc.n_entries = 1;
     sc.entries   = entries;
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
     hdr.msgid         = msgid;
     op.header   = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE;
+    op.cmd_case = DL_SCHEDULE;
     op.schedule = &sc;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> out(len);
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
@@ -2430,8 +2451,8 @@ TEST_F(RealNodeFixture, ForeignClientConfigDoesNotWedgeOurLink) {
     give_clock(disp, /*msgid=*/50, 1787000000ULL, 0);
 
     // A ClientConfig for a different node, carrying a much higher msgid.
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = 17;              // not us
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -2442,12 +2463,10 @@ TEST_F(RealNodeFixture, ForeignClientConfigDoesNotWedgeOurLink) {
     cfg.mac_addr = 0xAABBCCDDEEFFULL;    // not our MAC either
     cfg.addr     = 17;
     cfg.subnt    = kSubnet;
-    op.cmd_case     = LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG;
+    op.cmd_case     = DL_CLIENTCONFIG;
     op.clientconfig = &cfg;
 
-    size_t len = lora_client_operation_message__get_packed_size(&op);
-    std::vector<uint8_t> bytes(len);
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
     EXPECT_EQ(sys.getConfigAddress(), kNodeAddr)
@@ -2682,15 +2701,15 @@ TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
     SystemCtrl::applyPowerProfile(false);
     ASSERT_FALSE(SystemCtrl::measuringProfile());
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
     hdr.senderaddress = kHubAddr; hdr.msgid = 1;
     op.header = &hdr;
 
     DriftTest dt = DRIFT_TEST__INIT;
     dt.enable = true; dt.durations = 60; dt.gridperiodms = 1093;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST;
+    op.cmd_case = DL_DRIFTTEST;
     op.drifttest = &dt;
 
     disp.handleDriftTest(&op, &hdr);
@@ -2723,12 +2742,12 @@ TEST_F(RealNodeFixture, ModeSysopsSwitchTheNodeMode) {
     // for a node AWAKE and not beaconing -- exactly what this sysop is for.
     // Observed on hardware: hub switch ON and acked, node still interactive 27
     // minutes later.
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
     hdr.senderaddress = kHubAddr; hdr.msgid = 1;
     op.header = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.cmd_case = DL_SYSOP;
 
     sys.setAutoMode(false);
     ASSERT_FALSE(sys.getAutoMode());
@@ -2749,12 +2768,12 @@ TEST_F(RealNodeFixture, AModeSysopDoesNotLeakIntoTheSystemCommandQueue) {
     // returns 0 for it. Falling through to the normal dispatch would hand that
     // 0 to setSystemCommand() -- a command that means nothing, executed for
     // every mode change.
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
     hdr.senderaddress = kHubAddr; hdr.msgid = 2;
     op.header = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.cmd_case = DL_SYSOP;
     op.sysop = CLIENT_OPERATION__CMD_MODE_AUTO;
 
     disp.handleSysop(&op, &hdr);
@@ -2778,7 +2797,7 @@ namespace {
 
 std::vector<uint8_t> build_mac_ping(uint32_t seq, bool want_echo,
                                     uint32_t msgid, size_t pad_bytes = 0) {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;          // the hub
@@ -2793,13 +2812,12 @@ std::vector<uint8_t> build_mac_ping(uint32_t seq, bool want_echo,
     std::vector<uint8_t> pad(pad_bytes, 0xAB);
     if (pad_bytes) { mc.pad.len = pad.size(); mc.pad.data = pad.data(); }
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header     = &hdr;
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.cmd_case   = DL_MACCONTROL;
     op.maccontrol = &mc;
 
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
@@ -2856,7 +2874,7 @@ TEST_F(RealNodeFixture, MacEchoFromAPeerIsIgnored) {
     // Only a PING is actionable. An echo arriving at a node is either our own
     // frame looped back or a peer misbehaving; if the node answered it, two
     // nodes could echo each other indefinitely.
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr;
     hdr.destsubnet  = kSubnet;
     hdr.senderaddress = 1;
@@ -2867,13 +2885,12 @@ TEST_F(RealNodeFixture, MacEchoFromAPeerIsIgnored) {
     mc.seq      = 3;
     mc.wantecho = true;                 // even so: no reply
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.cmd_case = DL_MACCONTROL;
     op.maccontrol = &mc;
 
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
     EXPECT_EQ(disp.macCounters().ping_rx, 0u);
@@ -2957,7 +2974,7 @@ namespace {
 // Negative sense on the wire, so a zeroed message is the SAFE one.
 std::vector<uint8_t> build_mac_config(bool disable_counter, bool disable_crypto,
                                       uint32_t duration_s, uint32_t msgid) {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
@@ -2969,13 +2986,12 @@ std::vector<uint8_t> build_mac_config(bool disable_counter, bool disable_crypto,
     mc.disablecrypto  = disable_crypto;
     mc.durations     = duration_s;
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header     = &hdr;
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.cmd_case   = DL_MACCONTROL;
     op.maccontrol = &mc;
 
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
@@ -3040,7 +3056,7 @@ TEST_F(RealNodeFixture, AddressedIsCountedOnBothOutcomes) {
 }
 
 TEST_F(RealNodeFixture, ForeignPlaintextFramesAreCountedNotIgnored) {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr + 7;   // someone else's
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
@@ -3048,12 +3064,11 @@ TEST_F(RealNodeFixture, ForeignPlaintextFramesAreCountedNotIgnored) {
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
     mc.seq  = 1;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.cmd_case = DL_MACCONTROL;
     op.maccontrol = &mc;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     const uint32_t before = disp.macFunnel().foreign;
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
@@ -3085,7 +3100,7 @@ TEST_F(RealNodeFixture, AForeignFrameCommitsNoPhaseSample) {
 
     // Addressed to a different node — exactly the traffic a node hears most of
     // the time on a shared channel.
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr + 5;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
@@ -3093,12 +3108,11 @@ TEST_F(RealNodeFixture, AForeignFrameCommitsNoPhaseSample) {
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
     mc.seq  = 1;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.cmd_case = DL_MACCONTROL;
     op.maccontrol = &mc;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     // A real timestamp, so what rejects this sample is the ADDRESS FILTER and
     // not the missing-timestamp guard. Without this the test passed either way.
@@ -3131,7 +3145,7 @@ std::vector<uint8_t> build_grid_sync(bool enable, uint32_t slot, uint32_t msgid,
                                      // BROADCAST frame finding 13 turns on:
                                      // GridBeacon and GridDemote go to 0xFF.
                                      uint32_t dest_address = kNodeAddr) {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = dest_address;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
@@ -3154,13 +3168,12 @@ std::vector<uint8_t> build_grid_sync(bool enable, uint32_t slot, uint32_t msgid,
     gs.resyncmaxs        = 350;
     gs.uloffsetus        = 60000;
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header   = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+    op.cmd_case = DL_GRIDSYNC;
     op.gridsync = &gs;
 
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
@@ -3811,129 +3824,11 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
     EXPECT_EQ(disp.phaseStats().n, 1u);
 }
 
-// ---------------------------------------------------------------------------
-// Length re-encode check (FrameCanon.h): a frame whose on-air length is not what
-// the decoded message re-encodes to must still be PROCESSED, but never used as a
-// T0 source. Padding changes n_sym(len) and so T0, on content the CMAC still
-// verifies; an unknown field keeps the lengths equal but sits outside the CMAC.
-// ---------------------------------------------------------------------------
-namespace {
-// Rebuild a packed frame with `extra` spliced INSIDE its header (field 1, one-byte
-// length). Used for both the duplicated-field case (same value, longer wire) and
-// the unknown-field case.
-std::vector<uint8_t> splice_into_header(const std::vector<uint8_t> &f,
-                                        const std::vector<uint8_t> &extra) {
-    EXPECT_EQ(f[0], 0x0A);
-    const size_t hlen = f[1];
-    EXPECT_LT(hlen + extra.size(), 128u);
-    std::vector<uint8_t> out;
-    out.push_back(0x0A);
-    out.push_back((uint8_t)(hlen + extra.size()));
-    out.insert(out.end(), f.begin() + 2, f.begin() + 2 + hlen);
-    out.insert(out.end(), extra.begin(), extra.end());
-    out.insert(out.end(), f.begin() + 2 + hlen, f.end());
-    return out;
-}
-// msgId (field 4) a second time with the SAME value: identical decoded content,
-// longer on the air.
-std::vector<uint8_t> dup_msgid(const std::vector<uint8_t> &f, uint32_t msgid) {
-    std::vector<uint8_t> extra{0x20};
-    uint32_t v = msgid;
-    while (v >= 0x80) { extra.push_back((uint8_t)(v | 0x80)); v >>= 7; }
-    extra.push_back((uint8_t) v);
-    return splice_into_header(f, extra);
-}
-// An unknown outer field (number 111, varint 1) -- what a NEWER peer's extra field is.
-std::vector<uint8_t> with_unknown_outer(std::vector<uint8_t> f) {
-    f.push_back(0xF8); f.push_back(0x06); f.push_back(0x01);
-    return f;
-}
-}  // namespace
-
-TEST_F(RealNodeFixture, ACanonicalFrameIsTrustedForTiming) {
-    auto op = pack_sysop_op(/*msgid=*/950, CLIENT_OPERATION__CMD_STATUS);
-    disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
-    EXPECT_TRUE(disp.mac0().rxTimingTrusted());
-    EXPECT_EQ(disp.mac0().noncanonicalFrames(), 0u) << "a same-version frame must never trip the check";
-    EXPECT_EQ(drain_acks(disp), 1);
-}
-
-TEST_F(RealNodeFixture, APaddedFrameIsProcessedButCommitsNoPhaseSample) {
-    auto gs = build_grid_sync(/*enable=*/true, /*slot=*/0, /*msgid=*/960);
-    disp.noteDriftSample(1'000'000);
-    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 1'000'000);
-    ASSERT_TRUE(disp.gridState().active);
-    disp.resetPhaseStats();
-    drain_acks(disp);
-
-    // Control: the canonical frame, on its mark, commits a sample.
-    auto good = pack_sysop_op(/*msgid=*/961, CLIENT_OPERATION__CMD_STATUS);
-    const int64_t rx_good = rxOnMark(disp, good.size(), 1'040'000);
-    disp.noteDriftSample(rx_good);
-    disp.onReceiveNew(good.data(), static_cast<int>(good.size()), rx_good);
-    ASSERT_EQ(disp.phaseStats().n, 1u) << "control: canonical frame must commit a sample";
-    ASSERT_EQ(drain_acks(disp), 1);
-
-    // The same content duplicated-field padded, ALSO landing on a mark.
-    auto padded = dup_msgid(pack_sysop_op(962, CLIENT_OPERATION__CMD_STATUS), 962);
-    const int64_t rx_pad = rxOnMark(disp, padded.size(), 1'040'000 + timedgrid::kRoundUs);
-    disp.noteDriftSample(rx_pad);
-    disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()), rx_pad);
-    EXPECT_FALSE(disp.mac0().rxTimingTrusted());
-    EXPECT_EQ(disp.mac0().noncanonicalFrames(), 1u);
-    EXPECT_EQ(disp.phaseStats().n, 1u) << "a padded frame's length is not a T0 input: no new sample";
-    EXPECT_EQ(drain_acks(disp), 1) << "demote, do not drop: the command is still processed";
-}
-
-TEST_F(RealNodeFixture, AFrameWithAnUnknownFieldStillRunsButIsNotATimingSource) {
-    // Forward compatibility: a NEWER peer's extra field must not break its command.
-    auto gs = build_grid_sync(true, 0, 970);
-    disp.noteDriftSample(1'000'000);
-    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 1'000'000);
-    ASSERT_TRUE(disp.gridState().active);
-    disp.resetPhaseStats();
-    drain_acks(disp);
-
-    auto fwd = with_unknown_outer(pack_sysop_op(971, CLIENT_OPERATION__CMD_STATUS));
-    const int64_t rx = rxOnMark(disp, fwd.size(), 1'040'000);
-    disp.noteDriftSample(rx);
-    disp.onReceiveNew(fwd.data(), static_cast<int>(fwd.size()), rx);
-    EXPECT_FALSE(disp.mac0().rxTimingTrusted()) << "unknown fields sit outside the CMAC: timing withheld";
-    EXPECT_EQ(disp.phaseStats().n, 0u);
-    EXPECT_EQ(drain_acks(disp), 1) << "but the command it carries still runs";
-
-    // Same for an unknown field inside the header.
-    auto hdr_unk = splice_into_header(pack_sysop_op(972, CLIENT_OPERATION__CMD_STATUS),
-                                      {0xF8, 0x06, 0x01});
-    disp.onReceiveNew(hdr_unk.data(), static_cast<int>(hdr_unk.size()));
-    EXPECT_FALSE(disp.mac0().rxTimingTrusted());
-    EXPECT_EQ(drain_acks(disp), 1);
-}
-
-TEST_F(RealNodeFixture, TheVerdictIsPerFrameNotSticky) {
-    auto padded = dup_msgid(pack_sysop_op(980, CLIENT_OPERATION__CMD_STATUS), 980);
-    disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()));
-    ASSERT_FALSE(disp.mac0().rxTimingTrusted());
-    auto good = pack_sysop_op(981, CLIENT_OPERATION__CMD_STATUS);
-    disp.onReceiveNew(good.data(), static_cast<int>(good.size()));
-    EXPECT_TRUE(disp.mac0().rxTimingTrusted()) << "a later canonical frame is trusted again";
-    EXPECT_EQ(disp.mac0().noncanonicalFrames(), 1u);
-}
-
-TEST_F(RealNodeFixture, ANonCanonicalGridSyncIsNotAdoptedAndACanonicalCopyIs) {
-    auto padded = dup_msgid(build_grid_sync(true, 4, 990), 990);
-    disp.noteDriftSample(2'000'000);
-    disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()), 2'000'000);
-    EXPECT_FALSE(disp.gridState().active)
-        << "the anchor would be solved from a skewed T0: not adopted from a padded copy";
-    EXPECT_EQ(disp.expectedT0Us(), 0);
-
-    auto good = build_grid_sync(true, 4, 991, timedgrid::kSlotCount, timedgrid::kSlotPitchUs,
-                                /*burst_index=*/1);
-    disp.noteDriftSample(2'100'000);
-    disp.onReceiveNew(good.data(), static_cast<int>(good.size()), 2'100'000);
-    EXPECT_TRUE(disp.gridState().active) << "the next canonical copy of the burst adopts as normal";
-}
+// (The v0 length re-encode check, FrameCanon.h, and its five tests went with
+// the v0 envelope in S8 / W5: v1's header is fixed-layout and the tag covers
+// every raw byte, so a padded or unknown-field frame no longer verifies at all;
+// the node dropped the check and its counters. Its v1 framing is pinned in the
+// node repo's test/unit_mac_wire_test.cpp.)
 
 // ---------------------------------------------------------------------------
 // Once a session exists, every command must be encrypted
@@ -4215,34 +4110,19 @@ const uint8_t kFleetKey[framecrypto::kNetKeyBytes] = {
     0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF};
 constexpr uint32_t kFleetKeyId = 0x5EED0001u;
 
-std::array<uint8_t, framecrypto::kBeaconMacBytes>
-beacon_mac(uint32_t key_id, uint32_t round, uint32_t slot, uint32_t mask,
-           bool mask_valid, const uint8_t *key = kFleetKey, uint32_t burst_index = 0) {
-    uint8_t input[framecrypto::kBeaconMacInputBytes];
-    framecrypto::buildBeaconMacInput(key_id, round, slot, mask, mask_valid, burst_index, input);
-
-    psa_crypto_init();
-    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE);
-    psa_set_key_algorithm(&attrs, PSA_ALG_CMAC);
-    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-    psa_set_key_bits(&attrs, framecrypto::kNetKeyBytes * 8);
-    psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
-
-    psa_key_id_t kid = PSA_KEY_ID_NULL;
-    EXPECT_EQ(psa_import_key(&attrs, key, framecrypto::kNetKeyBytes, &kid),
-              PSA_SUCCESS);
-    uint8_t full[16];
-    size_t  full_len = 0;
-    EXPECT_EQ(psa_mac_compute(kid, PSA_ALG_CMAC, input, sizeof(input), full,
-                              sizeof(full), &full_len), PSA_SUCCESS);
-    psa_destroy_key(kid);
-
-    std::array<uint8_t, framecrypto::kBeaconMacBytes> out{};
-    memcpy(out.data(), full, out.size());
-    return out;
+// What a beacon's FLEET tag is computed over (spec 4.4): the beacon as the
+// SIGNER built it. build_grid_beacon writes that tag onto the frame it puts on
+// the air, so a signature over different field values is a forgery the node
+// must catch -- the substitution the tag exists for.
+struct BeaconSig {
+    const uint8_t *key;
+    uint32_t key_id, round, slot, mask;
+    bool mask_valid;
+};
+BeaconSig beacon_mac(uint32_t key_id, uint32_t round, uint32_t slot, uint32_t mask,
+                     bool mask_valid, const uint8_t *key = kFleetKey) {
+    return BeaconSig{key, key_id, round, slot, mask, mask_valid};
 }
-
 
 // Wrap an operation message as an encrypted downlink from the hub. Same
 // construction as DecryptedDownlinkProvesSessionEndToEnd, hoisted so more than
@@ -4253,62 +4133,17 @@ beacon_mac(uint32_t key_id, uint32_t round, uint32_t slot, uint32_t mask,
 // its own CURRENT session keys instead of re-deriving them — same trick as
 // DecryptedDownlinkProvesSessionEndToEnd above. `disp` must already hold a
 // session from a LOGIN carrying hub_nonce == `nonce`.
-std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, LoraClientOperationMessage &inner,
+std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, DownlinkView &inner,
                                 uint32_t msgid, uint32_t nonce = kMtNonce,
                                 uint32_t burst_index = 0, bool on_mark = true) {
-    size_t plain_len = lora_client_operation_message__get_packed_size(&inner);
-    std::vector<uint8_t> plain(plain_len);
-    lora_client_operation_message__pack(&inner, plain.data());
-
-    uint8_t ctr_iv[framecrypto::kCtrBlockBytes];
-    framecrypto::buildCtrInitialBlock(nonce, kNodeAddr, /*downlink=*/true, msgid,
-                                      /*block_idx=*/0, ctr_iv);
-    std::vector<uint8_t> ciphertext(plain.size());
-    if (!disp.ctrEncryptForTest(ctr_iv, plain.data(), plain.size(), ciphertext.data())) {
-        ADD_FAILURE() << "encrypt_op: no session keys on disp (missing/mismatched LOGIN?)";
-    }
-
-    framecrypto::EtmHeaderFields fields{};
-    fields.downlink       = true;
-    fields.session_id     = nonce;
-    fields.dest_address   = kNodeAddr;
-    fields.dest_subnet    = kSubnet;
-    fields.sender_address = kHubAddr;
-    fields.msgid          = msgid;
-    fields.burst_index    = burst_index;
-    fields.on_mark        = on_mark;   // placed, as the hub places a session downlink
-    uint8_t prefix[framecrypto::kEtmPrefixBytes];
-    framecrypto::buildEtmCmacPrefix(fields, static_cast<uint16_t>(ciphertext.size()), prefix);
-    std::vector<uint8_t> mac_input(prefix, prefix + sizeof(prefix));
-    mac_input.insert(mac_input.end(), ciphertext.begin(), ciphertext.end());
-    uint8_t tag[framecrypto::kSessionCmacTagBytes];
-    if (!disp.cmacComputeForTest(mac_input.data(), mac_input.size(), tag, sizeof(tag))) {
-        ADD_FAILURE() << "encrypt_op: no session keys on disp (missing/mismatched LOGIN?)";
-    }
-
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = msgid;
     hdr.burstindex    = burst_index;
     hdr.onmark        = on_mark;   // placed, as the hub places a session downlink
-
-    EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
-    ep.tag.data        = tag;
-    ep.tag.len         = sizeof(tag);
-    ep.ciphertext.data = ciphertext.data();
-    ep.ciphertext.len  = ciphertext.size();
-
-    LoraClientOperationMessage outer = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    outer.header    = &hdr;
-    outer.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
-    outer.encrypted = &ep;
-
-    size_t frame_len = lora_client_operation_message__get_packed_size(&outer);
-    std::vector<uint8_t> frame(frame_len);
-    lora_client_operation_message__pack(&outer, frame.data());
-    return frame;
+    return seal_op(disp, inner, hdr, nonce);
 }
 
 // Encrypted CMD_SYSOP with caller-controlled burstIndex/onMark, for tests
@@ -4317,8 +4152,8 @@ std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, LoraClientOperationMessage 
 std::vector<uint8_t> encrypted_sysop(CmdDispatcher &disp, uint32_t msgid, ClientOperation what,
                                      uint32_t burst_index = 0, bool on_mark = true,
                                      uint32_t nonce = kMtNonce) {
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    DlMsg inner;
+    inner.cmd_case = DL_SYSOP;
     inner.sysop    = what;
     return encrypt_op(disp, inner, msgid, nonce, burst_index, on_mark);
 }
@@ -4348,8 +4183,8 @@ std::vector<uint8_t> encrypted_mode_test(CmdDispatcher &disp, ModeTest__Mode mod
     mt.macecho          = mac_echo;   // the hub always sets it; a test that wants the echo says so
     mt.enablecrypto     = crypto;
 
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+    DlMsg inner;
+    inner.cmd_case = DL_MODETEST;
     inner.modetest = &mt;
     return encrypt_op(disp, inner, msgid);
 }
@@ -4366,8 +4201,8 @@ std::vector<uint8_t> encrypted_mode_test_default_profile(CmdDispatcher &disp, ui
     mt.gridperiodms = 1093;
     mt.copies       = 1;
     // droppowerprofile deliberately NOT set.
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+    DlMsg inner;
+    inner.cmd_case = DL_MODETEST;
     inner.modetest = &mt;
     return encrypt_op(disp, inner, msgid);
 }
@@ -4376,8 +4211,8 @@ std::vector<uint8_t> encrypted_mode_test_default_profile(CmdDispatcher &disp, ui
 std::vector<uint8_t> encrypted_mode_test_off(CmdDispatcher &disp, uint32_t msgid) {
     ModeTest mt = MODE_TEST__INIT;
     mt.enable = false;
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+    DlMsg inner;
+    inner.cmd_case = DL_MODETEST;
     inner.modetest = &mt;
     return encrypt_op(disp, inner, msgid);
 }
@@ -4405,8 +4240,8 @@ std::vector<uint8_t> encrypted_grid_sync(CmdDispatcher &disp, uint32_t slot, uin
         gs.netkeyid    = kFleetKeyId;
     }
 
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+    DlMsg inner;
+    inner.cmd_case = DL_GRIDSYNC;
     inner.gridsync = &gs;
     return encrypt_op(disp, inner, msgid, nonce);
 }
@@ -4464,7 +4299,7 @@ namespace {
 
 std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid,
                                             uint32_t sender = 1) {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
@@ -4475,13 +4310,12 @@ std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid
     mc.disablecounter = disable_counter;
     mc.durations      = 60;
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header     = &hdr;
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.cmd_case   = DL_MACCONTROL;
     op.maccontrol = &mc;
 
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
@@ -4507,8 +4341,8 @@ std::vector<uint8_t> build_mac_ping_encrypted(CmdDispatcher &disp, uint32_t seq,
     mc.seq      = seq;
     mc.wantecho = want_echo;
 
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    DlMsg inner;
+    inner.cmd_case   = DL_MACCONTROL;
     inner.maccontrol = &mc;
     return encrypt_op(disp, inner, msgid, nonce);
 }
@@ -4825,8 +4659,8 @@ TEST_F(RealNodeFixture, ModeTestBIsRefusedWithNoGridRatherThanMislabelled) {
     TimeSync ts  = TIME_SYNC__INIT;
     ts.epoch     = 1787000000ULL;
     ts.utcoffset = 0;
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+    DlMsg inner;
+    inner.cmd_case = DL_TIMESYNC;
     inner.timesync = &ts;
     auto tsf = encrypt_op(disp, inner, /*msgid=*/2);
     disp.onReceiveNew(tsf.data(), static_cast<int>(tsf.size()));
@@ -4935,37 +4769,44 @@ TEST_F(RealNodeFixture, ReAnchoringClearsWhatThePhaseReportWouldClaim) {
 // ---------------------------------------------------------------------------
 namespace {
 
-std::vector<uint8_t> build_grid_beacon(uint32_t round, uint32_t slot,
-                                       uint32_t msgid, uint32_t mask = 0,
-                                       bool mask_valid = false,
-                                       const uint8_t *mac = nullptr,
-                                       uint32_t key_id = 0) {
-    LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = 0xFF;          // broadcast: one frame for the fleet
-    hdr.destsubnet    = kSubnet;
-    hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
-    hdr.burstindex    = 0;
-    hdr.burstcount    = 1;
-
+// The beacon frame: broadcast, PORT 0, one copy; FLEET-tagged when signed.
+std::vector<uint8_t> grid_beacon_frame(uint32_t round, uint32_t slot, uint32_t msgid, uint32_t mask,
+                                       bool mask_valid, uint32_t key_id, bool fleet) {
     GridBeacon gb = GRID_BEACON__INIT;
     gb.txround          = round;
     gb.txslot           = slot;
     gb.pendingmask      = mask;
     gb.pendingmaskvalid = mask_valid;
-    if (mac != nullptr) {
-        gb.netkeyid = key_id;
-        gb.mac.data = const_cast<uint8_t *>(mac);
-        gb.mac.len  = framecrypto::kBeaconMacBytes;
-    }
+    gb.netkeyid         = key_id;
+    HubMacPdu pdu = HUB_MAC_PDU__INIT;
+    pdu.pdu_case   = HUB_MAC_PDU__PDU_GRIDBEACON;
+    pdu.gridbeacon = &gb;
+    std::vector<uint8_t> body(hub_mac_pdu__get_packed_size(&pdu));
+    hub_mac_pdu__pack(&pdu, body.data());
+    macwire::WireHdr w;
+    w.flags     = macwire::withAuth(0, fleet ? macwire::Auth::Fleet : macwire::Auth::None);
+    w.dst       = 0xFF;          // broadcast: one frame for the fleet
+    w.src       = kHubAddr;
+    w.subnet    = kSubnet;
+    w.fcnt      = msgid;
+    w.port      = macwire::kPortMac0Mgmt;
+    w.burst_idx = 0;
+    w.burst_cnt = 1;
+    return proto_sim::v1_plain_frame(w, body);   // tag room at the end when FLEET
+}
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header     = &hdr;
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON;
-    op.gridbeacon = &gb;
-
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+std::vector<uint8_t> build_grid_beacon(uint32_t round, uint32_t slot,
+                                       uint32_t msgid, uint32_t mask = 0,
+                                       bool mask_valid = false,
+                                       const BeaconSig *sig = nullptr,
+                                       uint32_t key_id = 0) {
+    if (sig == nullptr)
+        return grid_beacon_frame(round, slot, msgid, mask, mask_valid, 0, /*fleet=*/false);
+    std::vector<uint8_t> out = grid_beacon_frame(round, slot, msgid, mask, mask_valid, key_id, true);
+    const std::vector<uint8_t> as_signed =
+        grid_beacon_frame(sig->round, sig->slot, msgid, sig->mask, sig->mask_valid, key_id, true);
+    proto_sim::v1_tag(sig->key, /*downlink=*/true, sig->key_id, as_signed.data(),
+                      as_signed.size() - macwire::kTagBytes, out.data() + out.size() - macwire::kTagBytes);
     return out;
 }
 
@@ -5005,29 +4846,21 @@ TEST_F(RealNodeFixture, ABeaconCorrectsDriftWithoutTouchingTheGeometry) {
     EXPECT_GE(disp.phaseStats().n, 1u);
 }
 
-// Length re-encode check: a beacon whose length is not canonical must not be the
-// T0 source for a re-anchor (its n_sym, and so its T0, is skewed), while a canonical
-// beacon in the same position moves the anchor as normal.
-TEST_F(RealNodeFixture, ANonCanonicalBeaconDoesNotReAnchorButACanonicalOneDoes) {
+// A beacon is a T0 source: its own on-air length gives n_sym, so a beacon that
+// lands kDrift late moves the anchor by exactly that. (The v0 half of this test,
+// a padded beacon that must NOT re-anchor, cannot be built in v1: see above.)
+TEST_F(RealNodeFixture, ABeaconReAnchorsByItsOwnLengthsT0) {
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/1000);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
     const gridstate::State before = disp.gridState();
     constexpr int64_t kDrift = 900;
 
-    auto padded = dup_msgid(build_grid_beacon(/*round=*/50, before.params.beacon_slot, /*msgid=*/1), 1);
-    disp.onReceiveNew(padded.data(), static_cast<int>(padded.size()),
-                      rx_for_beacon(before, 50, kDrift, (uint32_t) padded.size()));
-    EXPECT_FALSE(disp.mac0().rxTimingTrusted());
-    EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us)
-        << "a padded beacon's length is not a T0 input: the anchor must not move";
-
     auto good = build_grid_beacon(/*round=*/51, before.params.beacon_slot, /*msgid=*/2);
     disp.onReceiveNew(good.data(), static_cast<int>(good.size()),
                       rx_for_beacon(before, 51, kDrift, (uint32_t) good.size()));
-    EXPECT_TRUE(disp.mac0().rxTimingTrusted());
     EXPECT_EQ(disp.gridState().anchor_us, before.anchor_us + kDrift)
-        << "control: the canonical beacon re-anchors as before";
+        << "the beacon re-anchors by its own T0";
 }
 
 // Security review finding 5: burst_index's MAC coverage stops a replay of
@@ -5329,20 +5162,19 @@ TEST_F(RealNodeFixture, AWithdrawnGridKeepsTheFleetKey) {
 
 namespace {
 std::vector<uint8_t> build_grid_demote(uint32_t dest = 0xFF) {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = dest;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = 0;     // a broadcast belongs to no per-node sequence
 
     GridDemote gd = GRID_DEMOTE__INIT;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header     = &hdr;
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE;
+    op.cmd_case   = DL_GRIDDEMOTE;
     op.griddemote = &gd;
 
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 }  // namespace
@@ -5568,8 +5400,8 @@ TEST_F(RealNodeFixture, AForgedLoginCannotHoldOffSyncStaleOrFeedPhaseTracking) {
     // review names), a BAD mic. handleLogin() must drop this on its MIC
     // check — this test is about what happens BEFORE that, in admitFrame()'s
     // own freshness classification.
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -5581,13 +5413,10 @@ TEST_F(RealNodeFixture, AForgedLoginCannotHoldOffSyncStaleOrFeedPhaseTracking) {
     op.header         = &hdr;
     LoginMsg forged = LOGIN_MSG__INIT;
     forged.nonce     = 0xDEADBEEFu;
-    uint8_t bad_mic[framecrypto::kSessionCmacTagBytes] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    forged.mic.data  = bad_mic;
-    forged.mic.len   = sizeof(bad_mic);
-    op.cmd_case      = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
+    op.cmd_case      = DL_LOGIN;
     op.login         = &forged;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
+    std::fill(bytes.end() - macwire::kTagBytes, bytes.end(), 0xFF);   // a K_AUTH tag that does not verify
 
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
@@ -5615,7 +5444,7 @@ TEST_F(RealNodeFixture, AKeyedNodeAdoptsTheMaskFromASignedBeacon) {
     const uint32_t mask = pending::allListening();
     const auto mac = beacon_mac(kFleetKeyId, 90, st.params.beacon_slot, mask, true);
     auto b = build_grid_beacon(90, st.params.beacon_slot, /*msgid=*/1, mask,
-                               /*mask_valid=*/true, mac.data(), kFleetKeyId);
+                               /*mask_valid=*/true, &mac, kFleetKeyId);
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
                       rx_for_beacon(st, 90, 0, (uint32_t) b.size()));
 
@@ -5646,7 +5475,7 @@ TEST_F(RealNodeFixture, ASignedBeaconCanFinallyLetANodeSkipItsWindow) {
                                             st.params.slot_index, false);
     const auto mac = beacon_mac(kFleetKeyId, 98, st.params.beacon_slot, mask, true);
     auto b = build_grid_beacon(98, st.params.beacon_slot, /*msgid=*/1, mask,
-                               /*mask_valid=*/true, mac.data(), kFleetKeyId);
+                               /*mask_valid=*/true, &mac, kFleetKeyId);
     const int64_t rx = rx_for_beacon(st, 98, 0, (uint32_t) b.size());
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
 
@@ -5676,7 +5505,7 @@ TEST_F(RealNodeFixture, AForgedBeaconIsIgnoredEntirelyNotMerelyDistrusted) {
     auto mac = beacon_mac(kFleetKeyId, 95, before.params.beacon_slot,
                           pending::allListening(), true);
     auto b = build_grid_beacon(95, before.params.beacon_slot, /*msgid=*/1,
-                               /*mask=*/0u, /*mask_valid=*/true, mac.data(),
+                               /*mask=*/0u, /*mask_valid=*/true, &mac,
                                kFleetKeyId);
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
                       rx_for_beacon(before, 95, kDrift, (uint32_t) b.size()));
@@ -5700,7 +5529,7 @@ TEST_F(RealNodeFixture, ABeaconUnderAnUnknownKeyIdIsRefused) {
     const uint32_t other_id = kFleetKeyId + 1;
     auto mac = beacon_mac(other_id, 96, before.params.beacon_slot, 0u, false);
     auto b = build_grid_beacon(96, before.params.beacon_slot, 1, 0u, false,
-                               mac.data(), other_id);
+                               &mac, other_id);
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()),
                       rx_for_beacon(before, 96, 500, (uint32_t) b.size()));
 
@@ -5766,8 +5595,8 @@ TEST_F(RealNodeFixture, DroppingThePowerProfileIsAnExplicitAct) {
     mt.gridperiodms     = 1093;
     mt.copies           = 1;
     mt.droppowerprofile = true;
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST;
+    DlMsg inner;
+    inner.cmd_case = DL_MODETEST;
     inner.modetest = &mt;
     auto frame = encrypt_op(disp, inner, /*msgid=*/2);
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
@@ -5860,8 +5689,8 @@ namespace {
 // on no mark at all.
 std::vector<uint8_t> pack_stamped_sysop(uint32_t msgid, uint32_t fire_round,
                                         uint32_t fire_offset_us, uint32_t burst_index = 0) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
@@ -5873,10 +5702,9 @@ std::vector<uint8_t> pack_stamped_sysop(uint32_t msgid, uint32_t fire_round,
     hdr.fireround     = fire_round;
     hdr.fireoffsetus  = fire_offset_us;
     op.header   = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.cmd_case = DL_SYSOP;
     op.sysop    = CLIENT_OPERATION__CMD_STATUS;
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
@@ -5933,7 +5761,7 @@ TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
     constexpr int64_t  kLate  = 320'000;
     constexpr int64_t  kTrueAnchor = 90'000'000;   // where the hub grid really is
 
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
     hdr.msgid = 750; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped  = true;
@@ -5945,10 +5773,9 @@ TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
     g.txround = 0; g.txslot = kSlot;                 // where it was PLACED
     g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
     g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    DlMsg op;
+    op.header = &hdr; op.cmd_case = DL_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes = pack_op(op);
 
     const int64_t actual_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kLate;
     const int64_t rx = actual_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
@@ -5973,7 +5800,7 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
 
     nodeclock::setSettledForTest(false);
 
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
     hdr.msgid = 790; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
@@ -5984,10 +5811,9 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
     g.txround = 0; g.txslot = kSlot;
     g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
     g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    DlMsg op;
+    op.header = &hdr; op.cmd_case = DL_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes = pack_op(op);
 
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
@@ -6036,7 +5862,7 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
 
     nodeclock::setSettledForTest(false);
 
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
     hdr.msgid = 790; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
@@ -6047,10 +5873,9 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
     g.txround = 0; g.txslot = kSlot;
     g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
     g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    DlMsg op;
+    op.header = &hdr; op.cmd_case = DL_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes = pack_op(op);
 
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
@@ -6894,8 +6719,8 @@ TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
     {
         // Rebuild with sleepOk set. The builder does not take it, so this is
         // the one place the frame is assembled by hand.
-        LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-        LoraHeader hdr               = LORA_HEADER__INIT;
+        DlMsg op;
+        DlHdr hdr;
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
@@ -6905,11 +6730,9 @@ TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
         ts2.epoch     = 1787000000ULL;
         ts2.utcoffset = 0;
         ts2.sleepok   = true;
-        op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+        op.cmd_case   = DL_TIMESYNC;
         op.timesync   = &ts2;
-        size_t len = lora_client_operation_message__get_packed_size(&op);
-        ts_ok.assign(len, 0);
-        lora_client_operation_message__pack(&op, ts_ok.data());
+        ts_ok = pack_op(op);
     }
     disp.onReceiveNew(ts_ok.data(), static_cast<int>(ts_ok.size()));
 
@@ -7150,7 +6973,7 @@ constexpr int64_t  kRefAnchor = 90'000'000;
 // A GridSync stamped as leaving on slot kRefSlot's mark of round 0, delivered at
 // kRefAnchor + that offset + `err_us`.
 void deliverStampedGridSync(CmdDispatcher &disp, uint32_t msgid, int64_t err_us) {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
     hdr.msgid = msgid; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
@@ -7161,10 +6984,9 @@ void deliverStampedGridSync(CmdDispatcher &disp, uint32_t msgid, int64_t err_us)
     g.txround = 0; g.txslot = kRefSlot;
     g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
     g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    DlMsg op;
+    op.header = &hdr; op.cmd_case = DL_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes = pack_op(op);
     const int64_t rx = kRefAnchor + (int64_t) kRefSlot * timedgrid::kSlotPitchUs + err_us
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
     disp.noteDriftSample(rx);
@@ -7324,20 +7146,19 @@ TEST_F(RealNodeFixture, AModeBResidualShowsTheDriftAnUncorrectedPredictionLeaves
 
 namespace {
 
-// An OLD peer's frame: a LoraClientOperationMessage whose cmd is the removed
-// BaseNonceExchange (oneof field 15). Hand-encoded, because the stubs no longer
-// know the field: header (field 1) + 0x7A (field 15, length-delimited) + len +
-// { base_nonce (field 2) = DE AD BE EF }.
+// An OLD peer's frame: an application body (PORT 2, AUTH = NONE) whose only
+// field is the removed BaseNonceExchange (oneof field 15), which HubAppPdu does
+// not know: 0x7A (field 15, length-delimited) + len + { base_nonce (field 2) =
+// DE AD BE EF }. The body runs to the end of an untagged frame.
 std::vector<uint8_t> old_basenonce_frame(uint32_t msgid, uint32_t dest) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = dest;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
     hdr.msgid         = msgid;
     op.header = &hdr;
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     const uint8_t field15[] = {0x7A, 0x06, 0x12, 0x04, 0xDE, 0xAD, 0xBE, 0xEF};
     out.insert(out.end(), field15, field15 + sizeof(field15));
     return out;
@@ -7426,14 +7247,8 @@ TEST_F(RealNodeFixture, AForgedDownlinkWithAHugeMsgidCannotTearTheSessionDown) {
     // Valid construction, then one tag bit flipped: it fails CMAC, so it must
     // be dropped before the msgid guard can act on a value an attacker chose.
     auto forged = encrypted_sysop(disp, /*msgid=*/0x80000003u, CLIENT_OPERATION__CMD_STATUS, 0, true);
-    LoraClientOperationMessage *m = lora_client_operation_message__unpack(
-        nullptr, forged.size(), forged.data());
-    ASSERT_NE(m, nullptr);
-    ASSERT_NE(m->encrypted, nullptr);
-    m->encrypted->tag.data[0] ^= 0x01;
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(m));
-    lora_client_operation_message__pack(m, out.data());
-    lora_client_operation_message__free_unpacked(m, nullptr);
+    std::vector<uint8_t> out = forged;
+    out[out.size() - macwire::kTagBytes] ^= 0x01;   // the tag's first byte
     disp.onReceiveNew(out.data(), static_cast<int>(out.size()));
 
     EXPECT_FALSE(reg_queued(disp)) << "an unauthenticated frame must not trigger a relogin";
@@ -7479,7 +7294,7 @@ TEST_F(RealNodeFixture, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
 
 TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
     // Second line of defence: allocTxId_ never hands such an id out, but
-    // pack_response_message is where the keystream would actually repeat.
+    // packUplinkFrame_ is where the keystream would actually repeat.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
     while (disp.runOneTxCommand()) {}
@@ -7487,25 +7302,25 @@ TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
 
     ClientAvailable avail = CLIENT_AVAILABLE__INIT;
     avail.available = 1;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kHubAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kNodeAddr;
     hdr.msgid         = 5;
-    LoraClientResponseMessage msg = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    UplinkMsg msg;
     msg.header     = &hdr;
-    msg.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL;
+    msg.proto_case = UL_AVAIL;
     msg.avail      = &avail;
 
     uint8_t *buf = nullptr;
     size_t len = 0;
-    ASSERT_TRUE(disp.pack_response_message(&msg, &buf, &len)) << "control: an ordinary msgid seals";
+    ASSERT_TRUE(disp.packUplinkFrame_(msg, hdr, &buf, &len)) << "control: an ordinary msgid seals";
     free(buf);
     ASSERT_FALSE(disp.msgidReloginPendingForTest());
 
     hdr.msgid = 0x80000005u;     // would reuse msgid 5's keystream
     buf = nullptr;
-    EXPECT_FALSE(disp.pack_response_message(&msg, &buf, &len)) << "must not seal";
+    EXPECT_FALSE(disp.packUplinkFrame_(msg, hdr, &buf, &len)) << "must not seal";
     EXPECT_EQ(buf, nullptr);
     EXPECT_TRUE(disp.msgidReloginPendingForTest());
 }
@@ -7526,24 +7341,23 @@ namespace {
 // A plaintext SYSOP STATUS with every address field caller-controlled.
 std::vector<uint8_t> admit_plain_sysop(uint32_t dest, uint32_t sender, uint32_t subnet,
                                        uint32_t msgid, bool on_mark) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress   = dest;
     hdr.destsubnet    = subnet;
     hdr.senderaddress = sender;
     hdr.msgid         = msgid;
     hdr.onmark        = on_mark;
     op.header   = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    op.cmd_case = DL_SYSOP;
     op.sysop    = CLIENT_OPERATION__CMD_STATUS;
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
 // A plaintext MAC ping from an arbitrary sender.
 std::vector<uint8_t> admit_plain_ping(uint32_t sender, uint32_t seq, uint32_t msgid) {
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
@@ -7552,54 +7366,25 @@ std::vector<uint8_t> admit_plain_ping(uint32_t sender, uint32_t seq, uint32_t ms
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
     mc.seq  = seq;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    DlMsg op;
     op.header     = &hdr;
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.cmd_case   = DL_MACCONTROL;
     op.maccontrol = &mc;
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
+    std::vector<uint8_t> out = pack_op(op);
     return out;
 }
 
-// encrypt_op() with a burst position that the CMAC prefix also covers (its own
-// header never sets burstCount, which the freshness span depends on).
+// encrypt_op() with a burst position, which the tag covers like every header
+// byte (its own header never sets burstCount, which the freshness span depends on).
 std::vector<uint8_t> admit_enc_sysop_copy(CmdDispatcher &disp, uint32_t msgid,
                                           uint32_t burst_index, uint32_t burst_count) {
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    DlMsg inner;
+    inner.cmd_case = DL_SYSOP;
     inner.sysop    = CLIENT_OPERATION__CMD_STATUS;
-    std::vector<uint8_t> plain(lora_client_operation_message__get_packed_size(&inner));
-    lora_client_operation_message__pack(&inner, plain.data());
-
-    uint8_t ctr_iv[framecrypto::kCtrBlockBytes];
-    framecrypto::buildCtrInitialBlock(kMtNonce, kNodeAddr, /*downlink=*/true, msgid, 0, ctr_iv);
-    std::vector<uint8_t> ct(plain.size());
-    EXPECT_TRUE(disp.ctrEncryptForTest(ctr_iv, plain.data(), plain.size(), ct.data()));
-
-    framecrypto::EtmHeaderFields f{};
-    f.downlink = true; f.session_id = kMtNonce;
-    f.dest_address = kNodeAddr; f.dest_subnet = kSubnet; f.sender_address = kHubAddr;
-    f.msgid = msgid; f.burst_index = burst_index; f.burst_count = burst_count;
-    uint8_t prefix[framecrypto::kEtmPrefixBytes];
-    framecrypto::buildEtmCmacPrefix(f, static_cast<uint16_t>(ct.size()), prefix);
-    std::vector<uint8_t> mac_in(prefix, prefix + sizeof(prefix));
-    mac_in.insert(mac_in.end(), ct.begin(), ct.end());
-    uint8_t tag[framecrypto::kSessionCmacTagBytes];
-    EXPECT_TRUE(disp.cmacComputeForTest(mac_in.data(), mac_in.size(), tag, sizeof(tag)));
-
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
     hdr.msgid = msgid; hdr.burstindex = burst_index; hdr.burstcount = burst_count;
-    EncryptedPayload ep = ENCRYPTED_PAYLOAD__INIT;
-    ep.tag.data = tag; ep.tag.len = sizeof(tag);
-    ep.ciphertext.data = ct.data(); ep.ciphertext.len = ct.size();
-    LoraClientOperationMessage outer = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    outer.header = &hdr;
-    outer.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED;
-    outer.encrypted = &ep;
-    std::vector<uint8_t> frame(lora_client_operation_message__get_packed_size(&outer));
-    lora_client_operation_message__pack(&outer, frame.data());
-    return frame;
+    return seal_op(disp, inner, hdr, kMtNonce);
 }
 
 // Deliver `f` with its T0 on `mark`, as the radio would.
@@ -7622,17 +7407,16 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionAcceptsPl
     disp.setBaseNonceForTest(1, 0xABCDEF01);
     ASSERT_EQ(sys.getConfigAddress(), 0u);
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = 0; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr; hdr.msgid = 1;
     op.header = &hdr;
     CoverConfig cc = COVER_CONFIG__INIT;
     cc.opentime = 61; cc.closetime = 66;
     cc.blindheightmm = 2000.0f; cc.axlediametermm = 60.0f; cc.blindthicknessmm = 8.0f;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG;
+    op.cmd_case = DL_COVERCONFIG;
     op.coverconfig = &cc;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
     EXPECT_EQ(sys.open_time_s(), 61u)
@@ -7685,8 +7469,8 @@ TEST_F(RealNodeFixture, AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsA
         mc.kind = MAC_CONTROL__KIND__MAC_CONFIG;
         mc.disablecrypto = true;
         mc.durations = 60;
-        LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-        inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+        DlMsg inner;
+        inner.cmd_case = DL_MACCONTROL;
         inner.maccontrol = &mc;
         auto cfg = encrypt_op(disp, inner, /*msgid=*/2, kMtNonce, 0, false);
         disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
@@ -7732,19 +7516,17 @@ TEST_F(RealNodeFixture, AdmitFrame_AForgedLoginAgainstARestoredSessionIsStale) {
     const int64_t baseline = disp.lastAddressedUsForTest();
 
     proto_sim_timer_advance_us(60'000'000);   // past the LOGIN rate limit
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
     hdr.msgid = 4;
     op.header = &hdr;
     LoginMsg forged = LOGIN_MSG__INIT;
     forged.nonce = 0xDEADBEEFu;
-    uint8_t bad_mic[framecrypto::kSessionCmacTagBytes] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    forged.mic.data = bad_mic; forged.mic.len = sizeof(bad_mic);
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN;
+    op.cmd_case = DL_LOGIN;
     op.login = &forged;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
+    std::fill(bytes.end() - macwire::kTagBytes, bytes.end(), 0xFF);   // a K_AUTH tag that does not verify
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
     EXPECT_EQ(disp.sessionGenerationForTest(), 1u);
@@ -7879,8 +7661,8 @@ std::vector<uint8_t> mac_config_frame(CmdDispatcher &disp, uint32_t msgid, bool 
     mc.kind          = MAC_CONTROL__KIND__MAC_CONFIG;
     mc.disablecrypto = disable_crypto;
     mc.durations     = 60;
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    DlMsg inner;
+    inner.cmd_case   = DL_MACCONTROL;
     inner.maccontrol = &mc;
     return encrypt_op(disp, inner, msgid, kMtNonce, 0, false);
 }
@@ -8050,7 +7832,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnch
     constexpr int64_t  kBootError  = 8'000;
     nodeclock::setSettledForTest(false);
 
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
     hdr.msgid = 830; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
@@ -8061,10 +7843,9 @@ TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnch
     g.txround = 0; g.txslot = kSlot;
     g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
     g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    DlMsg op;
+    op.header = &hdr; op.cmd_case = DL_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes = pack_op(op);
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
     disp.noteDriftSample(gs_rx);
@@ -8089,7 +7870,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
     constexpr int64_t  kTrueAnchor = 90'000'000;
     constexpr int64_t  kBootError  = 8'000;
     nodeclock::setSettledForTest(false);
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
     hdr.msgid = 840; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
@@ -8100,10 +7881,9 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
     g.txround = 0; g.txslot = kSlot;
     g.beaconslotindex = timedgrid::kSlotCount - 1; g.beaconeveryrounds = 233;
     g.symtimeout = timedgrid::kSymbolTimeoutSymbols; g.resyncmaxs = 350; g.uloffsetus = 60000;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header = &hdr; op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC; op.gridsync = &g;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    DlMsg op;
+    op.header = &hdr; op.cmd_case = DL_GRIDSYNC; op.gridsync = &g;
+    std::vector<uint8_t> bytes = pack_op(op);
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
     disp.noteDriftSample(gs_rx);
@@ -8192,8 +7972,8 @@ TEST_F(RealNodeFixture, AdmitFrame_AControlFrameNeverFeedsThePhaseFitUnlessItIsA
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_CONFIG;
     mc.seq  = 50;
-    LoraClientOperationMessage inner = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    inner.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    DlMsg inner;
+    inner.cmd_case = DL_MACCONTROL;
     inner.maccontrol = &mc;
     auto cfg = encrypt_op(disp, inner, /*msgid=*/5000, kMtNonce, 0, /*on_mark=*/true);
     admit_deliver_on_mark(disp, cfg, mark);
@@ -8243,18 +8023,17 @@ TEST_F(RealNodeFixture, AdmitFrame_ABeaconIsNotAPhaseSampleEvenWhenAddressedAndP
     // A beacon addressed to THIS node (not the broadcast) and placed on its mark,
     // for a slot that is not the node's beacon slot, so its handler ignores it.
     // The beacon path has its own bounded sample; the generic commit must skip it.
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    LoraHeader hdr = LORA_HEADER__INIT;
+    DlMsg op;
+    DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
     hdr.msgid = 861; hdr.onmark = true;
     op.header = &hdr;
     GridBeacon gb = GRID_BEACON__INIT;
     gb.txround = 5;
     gb.txslot  = 3;   // not the beacon slot (kSlotCount - 1)
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON;
+    op.cmd_case = DL_GRIDBEACON;
     op.gridbeacon = &gb;
-    std::vector<uint8_t> bytes(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, bytes.data());
+    std::vector<uint8_t> bytes = pack_op(op);
 
     const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
     admit_deliver_on_mark(disp, bytes, mark);

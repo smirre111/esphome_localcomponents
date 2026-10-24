@@ -54,11 +54,8 @@ constexpr uint32_t    kNodeNonce  = 0xACE55001u;
 constexpr std::time_t kEpoch      = 1787000000;   // 2026-08-17 (CEST)
 constexpr unsigned    kSeed       = 0x5EED0001u;
 
-// S8: with MAC_WIRE_V1 these scenarios record the v1 wire into golden_v1/ (the
-// v0 files in golden/ stay pinned by the OFF build). Same scenarios, same
-// pinned inputs; the node side of each exchange is the sim's v1 frames.
-constexpr bool kV1 = true;
-
+// The v1 wire is recorded into golden_v1/. The node side of each exchange is
+// the sim's v1 frames.
 std::string describeV1(const std::vector<uint8_t> &b) {
     std::ostringstream s;
     macwire::WireHdr h;
@@ -74,24 +71,7 @@ std::string describeV1(const std::vector<uint8_t> &b) {
     return s.str();
 }
 
-std::string describeOp(const std::vector<uint8_t> &b) {
-    if (kV1)
-        return describeV1(b);
-    std::ostringstream s;
-    ::LoraClientOperationMessage *m =
-        lora_client_operation_message__unpack(nullptr, b.size(), b.data());
-    if (m == nullptr) {
-        s << "cmd=? len=" << b.size();
-        return s.str();
-    }
-    s << "cmd=" << (int) m->cmd_case << " len=" << b.size();
-    if (m->header != nullptr)
-        s << " dst=" << m->header->destaddress << " msgid=" << m->header->msgid
-          << " burst=" << m->header->burstindex << "/" << m->header->burstcount
-          << " onmark=" << m->header->onmark << " stamped=" << m->header->firestamped;
-    lora_client_operation_message__free_unpacked(m, nullptr);
-    return s.str();
-}
+std::string describeOp(const std::vector<uint8_t> &b) { return describeV1(b); }
 
 // The node's CommandAck reaches exactly this function in production.
 struct GProbe : LORAClient {
@@ -184,68 +164,20 @@ struct GoldenHub {
     }
 
     void sendRegister() {
-        if (kV1) {
-            ::ClientRegister reg = CLIENT_REGISTER__INIT;
-            reg.mac_addr     = kMac;
-            reg.needs_config = true;
-            std::vector<uint8_t> body(client_register__get_packed_size(&reg));
-            client_register__pack(&reg, body.data());
-            macwire::WireHdr h;
-            h.flags = macwire::withAuth(0, macwire::Auth::KAuth);
-            h.dst = macwire::kBroadcast; h.src = kNode; h.subnet = kSubnet; h.fcnt = 1;
-            h.port = macwire::kPortSession;
-            auto b = proto_sim::v1_kauth_frame(false, h, body);
-            rol.set_response(b.data(), b.size());
-            return;
-        }
-        proto_sim::LoraClientResponseMessage reg;
-        reg.proto            = proto_sim::LoraClientResponseMessage::Proto::Register;
-        reg.reg.mac_addr     = kMac;
-        reg.reg.needs_config = true;
-        auto b = proto_sim::serialize_resp(reg);
+        ::ClientRegister reg = CLIENT_REGISTER__INIT;
+        reg.mac_addr     = kMac;
+        reg.needs_config = true;
+        std::vector<uint8_t> body(client_register__get_packed_size(&reg));
+        client_register__pack(&reg, body.data());
+        macwire::WireHdr h;
+        h.flags = macwire::withAuth(0, macwire::Auth::KAuth);
+        h.dst = macwire::kBroadcast; h.src = kNode; h.subnet = kSubnet; h.fcnt = 1;
+        h.port = macwire::kPortSession;
+        auto b = proto_sim::v1_kauth_frame(false, h, body);
         rol.set_response(b.data(), b.size());
     }
 
-    void attachLoginAck() {
-        if (kV1) {
-            attachLoginAckV1();
-            return;
-        }
-        radio.add_sink([this](const proto_sim::AirFrame &f) {
-            if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
-            auto m = proto_sim::as_op(f);
-            if (!m || m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Login) return;
-            if (m->header.destAddress != kNode) return;
-            const uint32_t base = m->login.nonce;
-            base_nonce = base;
-            proto_sim::LoraClientResponseMessage inner;
-            inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
-            inner.header.destSubnet    = kSubnet;
-            inner.header.senderAddress = kNode;
-            inner.header.msgId         = 1;
-            inner.header.sessionNonce  = kNodeNonce;
-            inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Avail;
-            inner.avail.available      = true;
-            auto plain = proto_sim::serialize_resp_payload(inner);
-            framecrypto::EtmHeaderFields fields{};
-            fields.downlink       = false;
-            fields.session_id     = base;
-            fields.dest_address   = inner.header.destAddress;
-            fields.dest_subnet    = inner.header.destSubnet;
-            fields.sender_address = inner.header.senderAddress;
-            fields.msgid          = inner.header.msgId;
-            auto enc = proto_sim::encrypt_then_cmac_seal(base, kNodeNonce,
-                                                         esphome::lora_tracker::kHubAddress, kNode,
-                                                         false, fields, plain.data(), plain.size());
-            proto_sim::LoraClientResponseMessage outer;
-            outer.header               = inner.header;
-            outer.proto                = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
-            outer.encrypted.tag        = std::vector<uint8_t>(enc.tag, enc.tag + framecrypto::kSessionCmacTagBytes);
-            outer.encrypted.ciphertext = enc.ciphertext;
-            auto bytes = proto_sim::serialize_resp(outer);
-            rol.set_response(bytes.data(), bytes.size());
-        });
-    }
+    void attachLoginAck() { attachLoginAckV1(); }
 
     // REGISTER (needs_config) -> ClientConfig/CoverConfig -> LOGIN -> encrypted
     // ack -> confirmed session, then the post-confirmation pushes.
@@ -266,13 +198,13 @@ struct GoldenHub {
     // Everything sent so far, both streams.
     std::string dump() const {
         std::ostringstream s;
-        for (size_t i = 0; i < tracker.sent_wire.size(); ++i) {
+        for (size_t i = 0; i < tracker.sent_raw.size(); ++i) {
             const auto &p = tracker.sent_policy[i];
-            s << "raw " << i << " " << describeOp(tracker.sent_wire[i]) << " copies=" << p.copies
+            s << "raw " << i << " " << describeOp(tracker.sent_raw[i]) << " copies=" << p.copies
               << " stride=" << p.stride_ms << " earliest=" << p.earliest_us
               << " onmark=" << p.on_mark << " reply=" << p.expects_reply
               << " prio=" << (int) p.priority << " sup=" << p.supersede_key << "/"
-              << p.supersede_gen << " " << golden::hex(tracker.sent_wire[i]) << "\n";
+              << p.supersede_gen << " " << golden::hex(tracker.sent_raw[i]) << "\n";
         }
         size_t k = 0;
         for (const auto &f : radio.transcript()) {
@@ -404,8 +336,8 @@ TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
     h.session();
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     h.tick(10);
-    ASSERT_FALSE(h.tracker.sent_wire.empty());
-    const auto raw = h.tracker.sent_wire.back();
+    ASSERT_FALSE(h.tracker.sent_raw.empty());
+    const auto raw = h.tracker.sent_raw.back();
     const auto pol = h.tracker.sent_policy.back();
     ASSERT_NE(pol.sealer, nullptr);
     std::ostringstream s;

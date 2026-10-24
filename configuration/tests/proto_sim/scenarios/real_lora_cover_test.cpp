@@ -21,9 +21,7 @@
 
 #include <gtest/gtest.h>
 
-#include "sim/v1_client.h"
-// S8 / W4: v0-built uplinks reach the hub as v1 (sim/v1_client.h).
-using LORAClient = proto_sim::TestClient;
+using esphome::lora_tracker::LORAClient;
 using esphome::lora_tracker::LORATracker;
 using esphome::loracov::LoraCoverComponent;
 
@@ -87,7 +85,7 @@ TEST(RealLoraCover, OpenForRol2RoutesToAddr18OnWire) {
     h.cover.drive(call);
 
     bool found = false;
-    for (const auto& f : h.radio.hub_to_node_views()) {
+    for (const auto& f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (!m) continue;
         if (m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Operation) continue;
@@ -106,7 +104,7 @@ TEST(RealLoraCover, StopEmitsStopOperation) {
     h.cover.drive(call);
 
     int stop_count = 0;
-    for (const auto& f : h.radio.hub_to_node_views()) {
+    for (const auto& f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (!m) continue;
         if (m->cmd != proto_sim::LoraClientOperationMessage::Cmd::Operation) continue;
@@ -127,7 +125,7 @@ TEST(RealLoraCover, SendRemoteConfigEmitsCoverConfigWithGeometry) {
     h.cover.send_remote_config();
 
     int cfg_count = 0;
-    for (const auto& f : h.radio.hub_to_node_views()) {
+    for (const auto& f : h.radio.hub_to_node_frames()) {
         auto m = proto_sim::as_op(f);
         if (!m) continue;
         if (m->cmd != proto_sim::LoraClientOperationMessage::Cmd::CoverConfig) continue;

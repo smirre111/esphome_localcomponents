@@ -1,7 +1,6 @@
 #pragma once
 
 #include "sim/messages.h"
-#include "sim/v1_bridge.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -94,13 +93,6 @@ public:
         std::vector<AirFrame> out;
         for (const auto& f : transcript_)
             if (f.dir == AirFrame::Dir::HubToNode) out.push_back(f);
-        return out;
-    }
-    // S8 / W4: the hub's frames as a v0-era test INSPECTS them (sim/v1_bridge.h);
-    // what goes to a real node stays hub_to_node_frames().
-    std::vector<AirFrame> hub_to_node_views() const {
-        std::vector<AirFrame> out = hub_to_node_frames();
-        for (auto& f : out) f.bytes = v1bridge::downlinkToV0(f.bytes.data(), f.bytes.size());
         return out;
     }
     std::vector<AirFrame> node_to_hub_frames() const {

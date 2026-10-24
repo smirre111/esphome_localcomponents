@@ -6,27 +6,13 @@
 #include "esphome/components/lora_client/lora_client.h"
 #include "sim/messages.h"
 #include "sim/sim_radio.h"
-#include "sim/v1_bridge.h"
-#include "esphome/components/lora_client/HubLinkSecurity.h"
 #include "TimedGrid.h"
-#include "blinds.pb-c.h"
-#include "esphome/components/lora_client/MacHdrCodec.h"
 // S8: the production v1 burst frame, so the shim restamps/reseals a v1 copy
 // with exactly the code the real tracker uses.
 #include "../../../../../../local_components/lora_tracker/burst_frame.h"
 
 #include <cstring>
 #include <psa/crypto.h>
-
-namespace {
-// The bridge reads the hub's session id for a node (sim/v1_bridge.h).
-bool hubSessionId(uint8_t node, uint32_t *sid) {
-    return mac2::LinkSecurity::hub().store().sessionId(node, sid);
-}
-struct InstallBridge {
-    InstallBridge() { proto_sim::v1bridge::setSessionLookup(&hubSessionId); }
-} g_install_bridge;
-}  // namespace
 
 namespace esphome::lora_tracker {
 
@@ -52,44 +38,6 @@ void LORATracker::startGrid() {
     for (size_t i = 0; i < sizeof(net_key_); ++i)
         net_key_[i] = (uint8_t) (0xA0 + i);
     net_key_id_ = 0x5EED0001u;
-}
-
-// AES-CMAC, exactly as production computes it. Not a stub: the seam test's
-// whole point is that the hub's tag verifies on the real node, and a stub tag
-// would assert only that two mirrors of the same mistake agree.
-bool LORATracker::beaconMac(uint32_t tx_round, uint32_t tx_slot,
-                            uint32_t pending_mask, bool pending_mask_valid,
-                            uint32_t burst_index,
-                            uint8_t *out, size_t out_len) const {
-    if (out == nullptr || out_len != framecrypto::kBeaconMacBytes) return false;
-    if (!framecrypto::netKeyIsSet(net_key_, sizeof(net_key_), net_key_id_))
-        return false;
-
-    uint8_t input[framecrypto::kBeaconMacInputBytes];
-    framecrypto::buildBeaconMacInput(net_key_id_, tx_round, tx_slot,
-                                     pending_mask, pending_mask_valid,
-                                     burst_index, input);
-
-    psa_key_attributes_t attrs = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_usage_flags(&attrs, PSA_KEY_USAGE_SIGN_MESSAGE);
-    psa_set_key_algorithm(&attrs, PSA_ALG_CMAC);
-    psa_set_key_type(&attrs, PSA_KEY_TYPE_AES);
-    psa_set_key_bits(&attrs, framecrypto::kNetKeyBytes * 8);
-    psa_set_key_lifetime(&attrs, PSA_KEY_LIFETIME_VOLATILE);
-
-    psa_key_id_t kid = PSA_KEY_ID_NULL;
-    if (psa_import_key(&attrs, net_key_, sizeof(net_key_), &kid) != PSA_SUCCESS)
-        return false;
-    uint8_t full[16];
-    size_t  full_len = 0;
-    const psa_status_t st = psa_mac_compute(kid, PSA_ALG_CMAC, input,
-                                            sizeof(input), full, sizeof(full),
-                                            &full_len);
-    psa_destroy_key(kid);
-    if (st != PSA_SUCCESS || full_len < framecrypto::kBeaconMacBytes)
-        return false;
-    memcpy(out, full, framecrypto::kBeaconMacBytes);
-    return true;
 }
 
 uint32_t LORATracker::roundForSlotT0(uint8_t slot, int64_t t0_us) const {
@@ -153,10 +101,7 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     sent_supersede_gen.push_back(policy.supersede_gen);
     last_on_mark = policy.on_mark;
     last_expects_reply = policy.expects_reply;
-    // S8 / W4: sent_raw is what a test INSPECTS -- the v0 view of a v1 frame
-    // (sim/v1_bridge.h); sent_wire is the exact bytes handed over.
-    sent_wire.emplace_back(data, data + len);
-    sent_raw.push_back(proto_sim::v1bridge::downlinkToV0(data, len));
+    sent_raw.emplace_back(data, data + len);
     sent_policy.push_back(policy);
 
     // A simulated drop happens AFTER the policy is recorded and BEFORE anything
@@ -176,68 +121,20 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     for (int i = 0; i < n; ++i) {
         std::vector<uint8_t> bytes(data, data + len);
 
-        // v1: the real tracker's per-copy work (burst_frame.h), unstamped (the
+        // The real tracker's per-copy work (burst_frame.h), unstamped (the
         // shim has no fire instants): ON_MARK / BURST_IDX / BURST_CNT, then the
         // frame's own sealer over the raw bytes. A FLEET frame goes verbatim.
-        {
-            mac0::WireBurstFrame fr(data, len);
-            if (fr.ok()) {
-                fr.setBurst(n, policy.on_mark && policy.earliest_us > 0);
-                fr.setIndex(i);
-                uint64_t binding = policy.seal_binding;
-                if (fr.encrypted() && !fr.seal(policy.sealer, &binding))
-                    continue;   // drop this copy, matching production's skip_copy
-                bytes.resize(fr.packedSize());
-                fr.packInto(bytes.data());
-            }
-            proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode, bytes};
-            r->send(f);
-            continue;
+        mac0::WireBurstFrame fr(data, len);
+        if (fr.ok()) {
+            fr.setBurst(n, policy.on_mark && policy.earliest_us > 0);
+            fr.setIndex(i);
+            uint64_t binding = policy.seal_binding;
+            if (fr.encrypted() && !fr.seal(policy.sealer, &binding))
+                continue;   // drop this copy, matching production's skip_copy
+            bytes.resize(fr.packedSize());
+            fr.packInto(bytes.data());
         }
-
-        // Production stamps LoraHeader.onMark, burstIndex/burstCount in
-        // sendPacketBurst's per-copy re-stamp, THEN (Tier 3) retags an
-        // encrypted frame's CMAC over those just-stamped fields —
-        // sendPacketBurst's own ciphertext/tag was only a placeholder at
-        // pack time. This shim never really bursts (expand_bursts is almost
-        // always false), but it still has to redo that retag once, or every
-        // encrypted downlink the shim sends fails CMAC on the other end.
-        if (::LoraClientOperationMessage* m =
-                lora_client_operation_message__unpack(NULL, len, data)) {
-            if (m->header != nullptr) {
-                if (policy.on_mark && policy.earliest_us > 0) {
-                    m->header->onmark = 1;
-                }
-                if (m->cmd_case == LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED &&
-                    m->encrypted != nullptr) {
-                    m->header->burstindex = i;
-                    m->header->burstcount = n;
-                    // S4, mirrored: through the frame's OWN sealer, never a
-                    // client looked up by address (sealCopy_ in production).
-                    uint64_t binding = policy.seal_binding;
-                    mac::MacHdr hdr;
-                    uint8_t tag[8];
-                    const bool ok = policy.sealer != nullptr &&
-                                    machdr::fromLoraHeader(m->header, &hdr) &&
-                                    m->encrypted->tag.data != nullptr &&
-                                    m->encrypted->tag.len == sizeof(tag) &&
-                                    policy.sealer(&binding, hdr, m->encrypted->ciphertext.data,
-                                                  m->encrypted->ciphertext.len, tag);
-                    if (ok)
-                        memcpy(m->encrypted->tag.data, tag, sizeof(tag));
-                    if (!ok) {
-                        lora_client_operation_message__free_unpacked(m, NULL);
-                        continue;   // drop this copy, matching production's skip_copy
-                    }
-                }
-                bytes.resize(lora_client_operation_message__get_packed_size(m));
-                lora_client_operation_message__pack(m, bytes.data());
-            }
-            lora_client_operation_message__free_unpacked(m, NULL);
-        }
-
-        proto_sim::AirFrame f{proto_sim::AirFrame::Dir::HubToNode, bytes};
-        r->send(f);
+        r->send(proto_sim::AirFrame{proto_sim::AirFrame::Dir::HubToNode, bytes});
     }
     return true;
 }

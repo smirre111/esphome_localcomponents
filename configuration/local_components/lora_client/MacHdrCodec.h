@@ -1,19 +1,10 @@
 #pragma once
-// MacHdrCodec.h -- decode today's protobuf LoraHeader into a mac::MacHdr.
-//
-// Stage S4 of the MAC separation refactor (docs/mac-separation-layering-plan.md).
-// One decoder for the two places that hand a header to MAC-2: the listener
-// (seal, uplink verify) and the tracker's per-copy CopySealer call. At S8 the
-// header becomes fixed-offset bytes and this file goes away.
+// MacHdrCodec.h -- the MAC header decoders: the v1 wire header (fromWireHdr)
+// and the hub's internal header (fromHdr, HubFrames.h) into a mac::MacHdr.
 //
 // HUB-ONLY (not vendored): the node decodes its own frames.
-//
-// Refuses (returns false) a header whose address, subnet or burst field does not
-// fit MacHdr's one-byte width. Neither side ever sends one, and truncating it
-// instead would map two different wire headers onto one CMAC input. A missing
-// header decodes as all-zero.
 
-#include "esphome/components/blindsproto/blinds.pb-c.h"
+#include "esphome/components/lora_client/HubFrames.h"
 #include "esphome/components/lora_client/MacSap.h"
 #include "esphome/components/lora_client/MacWire.h"
 
@@ -39,7 +30,10 @@ inline void fromWireHdr(const macwire::WireHdr &h, mac::MacHdr *out)
     out->session_nonce = h.sessionOpening() ? h.node_nonce : 0;
 }
 
-inline bool fromLoraHeader(const ::LoraHeader *h, mac::MacHdr *out)
+// The internal header (HubFrames.h) as the MacHdr a child or MAC-2 reads.
+// Every field came from the one-byte wire fields, so this cannot fail; the
+// width check stays as a guard for hand-built headers.
+inline bool fromHdr(const hubframes::Hdr *h, mac::MacHdr *out)
 {
     *out = mac::MacHdr{};
     if (h == nullptr)

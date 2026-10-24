@@ -1,13 +1,13 @@
-// S8 / W3: the hub side of MAC wire format v1 (docs/mac-wire-format.md).
+// S8: the hub side of MAC wire format v1 (docs/mac-wire-format.md).
 //
-// Part 1 runs in BOTH configurations (the v1 code is compiled either way; only
-// the listener/tracker wiring is switched by MAC_WIRE_V1):
-//   * HubWire: routing, body packing, cmd_id, the uplink decode and its v0 view;
+// Part 1:
+//   * HubWire: routing, body packing, cmd_id, the uplink decode into the
+//     hub-internal view (HubFrames.h);
 //   * conformance with the node-owned shared vectors (MacWireVectors.h): the
 //     hub's own framing + MAC-0 restamp + copy sealer produce the vector bytes
 //     and tags, and the hub's verify/decrypt/decode accept the vector uplinks;
 //   * the sim's independent mbedtls implementation agrees with the vectors too.
-// Part 2 (#if MAC_WIRE_V1) drives the real listener end to end over v1.
+// Part 2 drives the real listener end to end over v1.
 
 #include "esphome/components/lora_client/lora_client.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
@@ -157,20 +157,20 @@ Bytes restampLike(const Bytes &frame, const mv::Vector &v, const mac2::FrameSeal
 TEST(HubWireRoute, EveryAckedDeliveryAndOnlyThoseAskForAMacAck) {
     // Spec 2.5: ACK_REQ on every Acked delivery -- Control (cover op, sysop),
     // Config (ScheduleConfig), Mac (GridSync); never on a Fire push or a stream.
-    struct Row { LoraClientOperationMessage__CmdCase c; uint8_t port; bool ack; };
+    struct Row { hubframes::DownCase c; uint8_t port; bool ack; };
     const Row rows[] = {
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION,    macwire::kPortApp,      true},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP,        macwire::kPortApp,      true},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE,     macwire::kPortApp,      true},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG, macwire::kPortApp,      false},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG,  macwire::kPortApp,      false},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC,     macwire::kPortApp,      false},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST,     macwire::kPortMac0Mgmt, false},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL,   macwire::kPortMac0Mgmt, false},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST,    macwire::kPortMac0Mgmt, false},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON,   macwire::kPortMac0Mgmt, false},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE,   macwire::kPortMac0Mgmt, false},
+        {hubframes::DL_OPERATION,    macwire::kPortApp,      true},
+        {hubframes::DL_SYSOP,        macwire::kPortApp,      true},
+        {hubframes::DL_SCHEDULE,     macwire::kPortApp,      true},
+        {hubframes::DL_CLIENTCONFIG, macwire::kPortApp,      false},
+        {hubframes::DL_COVERCONFIG,  macwire::kPortApp,      false},
+        {hubframes::DL_TIMESYNC,     macwire::kPortApp,      false},
+        {hubframes::DL_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
+        {hubframes::DL_MODETEST,     macwire::kPortMac0Mgmt, false},
+        {hubframes::DL_MACCONTROL,   macwire::kPortMac0Mgmt, false},
+        {hubframes::DL_DRIFTTEST,    macwire::kPortMac0Mgmt, false},
+        {hubframes::DL_GRIDBEACON,   macwire::kPortMac0Mgmt, false},
+        {hubframes::DL_GRIDDEMOTE,   macwire::kPortMac0Mgmt, false},
     };
     for (const Row &r : rows) {
         const hubwire::Route got = hubwire::routeDownlink(r.c);
@@ -180,32 +180,31 @@ TEST(HubWireRoute, EveryAckedDeliveryAndOnlyThoseAskForAMacAck) {
     }
     // ...which is exactly what the delivery policies say (DeliveryPolicy.h).
     using deliverypolicy::Mode;
-    struct P2 { LoraClientOperationMessage__CmdCase c; const deliverypolicy::Policy &p; };
+    struct P2 { hubframes::DownCase c; const deliverypolicy::Policy &p; };
     const P2 pol[] = {
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION,    deliverypolicy::kCoverPolicy},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP,        deliverypolicy::kSysopPolicy},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE,     deliverypolicy::kSchedulePolicy},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC,     deliverypolicy::kGridSyncPolicy},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC,     deliverypolicy::kTimeSyncPolicy},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG, deliverypolicy::kConfigPushPolicy},
-        {LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG,  deliverypolicy::kConfigPushPolicy},
+        {hubframes::DL_OPERATION,    deliverypolicy::kCoverPolicy},
+        {hubframes::DL_SYSOP,        deliverypolicy::kSysopPolicy},
+        {hubframes::DL_SCHEDULE,     deliverypolicy::kSchedulePolicy},
+        {hubframes::DL_GRIDSYNC,     deliverypolicy::kGridSyncPolicy},
+        {hubframes::DL_TIMESYNC,     deliverypolicy::kTimeSyncPolicy},
+        {hubframes::DL_CLIENTCONFIG, deliverypolicy::kConfigPushPolicy},
+        {hubframes::DL_COVERCONFIG,  deliverypolicy::kConfigPushPolicy},
     };
     for (const P2 &x : pol)
         EXPECT_EQ(hubwire::routeDownlink(x.c).ack_req, x.p.mode == Mode::Acked) << x.c;
 }
 
-TEST(HubWireRoute, LoginAndTheV0EnvelopeHaveNoV1Body) {
-    EXPECT_FALSE(hubwire::routeDownlink(LORA_CLIENT_OPERATION_MESSAGE__CMD_LOGIN).ok);
-    EXPECT_FALSE(hubwire::routeDownlink(LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED).ok);
-    EXPECT_FALSE(hubwire::routeDownlink(LORA_CLIENT_OPERATION_MESSAGE__CMD__NOT_SET).ok);
+TEST(HubWireRoute, LoginAndNoCommandHaveNoAppOrMacBody) {
+    EXPECT_FALSE(hubwire::routeDownlink(hubframes::DL_LOGIN).ok);
+    EXPECT_FALSE(hubwire::routeDownlink(hubframes::DL_NOT_SET).ok);
 }
 
 TEST(HubWireBody, ACoverOpCarriesItsCmdIdAndTheCallersMessageIsUntouched) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    hubframes::Down op{};
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
     covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
     covop.position   = 0.25f;
-    op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+    op.cmd_case  = hubframes::DL_OPERATION;
     op.operation = &covop;
     uint8_t buf[64];
     size_t len = 0;
@@ -213,12 +212,12 @@ TEST(HubWireBody, ACoverOpCarriesItsCmdIdAndTheCallersMessageIsUntouched) {
     const mv::Vector &v = vec("cover_op");
     EXPECT_EQ(B(buf, len), B(v.body, v.body_len))
         << "the vector's body: HubAppPdu.operation{position 0.25, cmd_id 7}";
-    EXPECT_EQ(covop.cmd_id, 0u) << "the v0 message must not be modified";
+    EXPECT_EQ(covop.cmd_id, 0u) << "the caller's message must not be modified";
 }
 
 TEST(HubWireBody, ASysopBecomesSysopCmdWithItsCmdId) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    hubframes::Down op{};
+    op.cmd_case = hubframes::DL_SYSOP;
     op.sysop    = CLIENT_OPERATION__CMD_OTA;
     uint8_t buf[32];
     size_t len = 0;
@@ -228,12 +227,12 @@ TEST(HubWireBody, ASysopBecomesSysopCmdWithItsCmdId) {
 }
 
 TEST(HubWireBody, AMacCommandIsAHubMacPduAndAFireCommandHasNoCmdId) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    hubframes::Down op{};
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
     mc.seq = 75;
     mc.wantecho = true;
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+    op.cmd_case   = hubframes::DL_MACCONTROL;
     op.maccontrol = &mc;
     uint8_t buf[32];
     size_t len = 0;
@@ -242,7 +241,7 @@ TEST(HubWireBody, AMacCommandIsAHubMacPduAndAFireCommandHasNoCmdId) {
     EXPECT_EQ(B(buf, len), B(v.body, v.body_len)) << "cmd_id is ignored outside Control";
 
     TimeSync ts = TIME_SYNC__INIT;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+    op.cmd_case = hubframes::DL_TIMESYNC;
     op.timesync = &ts;
     ASSERT_TRUE(hubwire::packDownlinkBody(&op, 999, buf, sizeof(buf), &len));
     HubAppPdu *app = hub_app_pdu__unpack(nullptr, len, buf);
@@ -252,14 +251,14 @@ TEST(HubWireBody, AMacCommandIsAHubMacPduAndAFireCommandHasNoCmdId) {
 }
 
 TEST(HubWireBody, RefusesWhatHasNoBodyOrDoesNotFit) {
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    hubframes::Down op{};
     uint8_t buf[4];
     size_t len = 0;
     EXPECT_FALSE(hubwire::packDownlinkBody(&op, 0, buf, sizeof(buf), &len)) << "no command";
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
     covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
     covop.position   = 0.5f;
-    op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+    op.cmd_case  = hubframes::DL_OPERATION;
     op.operation = &covop;
     EXPECT_FALSE(hubwire::packDownlinkBody(&op, 7, buf, sizeof(buf), &len)) << "4 B is too small";
     op.operation = nullptr;
@@ -284,17 +283,17 @@ TEST(HubWireAssemble, HeaderBodyAndTagRoomOrNothing) {
     EXPECT_FALSE(hubwire::assemble(h, body, 3, &f)) << "not encodable";
 }
 
-TEST(HubWireUplink, EachPortDecodesAsItsOwnMessageWithAV0View) {
+TEST(HubWireUplink, EachPortDecodesAsItsOwnMessage) {
     {   // PORT 2: NodeAppPdu.position
         const mv::Vector &v = vec("position_uplink");
         macwire::WireHdr h;
         h.port = macwire::kPortApp; h.src = 0x12; h.fcnt = 10;
         hubwire::Uplink u;
         ASSERT_TRUE(u.parse(h, v.body, v.body_len));
-        ASSERT_EQ(u.view()->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION);
+        ASSERT_EQ(u.view()->proto_case, hubframes::UL_POSITION);
         EXPECT_FLOAT_EQ(u.view()->position->position, 1.0f);
         EXPECT_EQ(u.view()->header->senderaddress, 0x12u);
-        EXPECT_EQ(u.view()->header->msgid, 10u) << "FCNT is the v0 msgid";
+        EXPECT_EQ(u.view()->header->msgid, 10u) << "FCNT is the msgid";
     }
     {   // PORT 0: MacAck needs FLAGS.ACK; ACKED_FCNT becomes ack_msg_id
         const mv::Vector &v = vec("mac_ack");
@@ -305,7 +304,7 @@ TEST(HubWireUplink, EachPortDecodesAsItsOwnMessageWithAV0View) {
         h.flags = macwire::kFlagAck;
         h.acked_fcnt = 7;
         ASSERT_TRUE(u.parse(h, v.body, v.body_len));
-        ASSERT_EQ(u.view()->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK);
+        ASSERT_EQ(u.view()->proto_case, hubframes::UL_ACK);
         EXPECT_EQ(u.view()->ack->ack_msg_id, 7u);
         ASSERT_NE(u.view()->ack->phase, nullptr) << "the phase report still rides on the ack";
     }
@@ -315,12 +314,8 @@ TEST(HubWireUplink, EachPortDecodesAsItsOwnMessageWithAV0View) {
         h.port = macwire::kPortSession;
         hubwire::Uplink u;
         ASSERT_TRUE(u.parse(h, v.body, v.body_len));
-        ASSERT_EQ(u.view()->proto_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER);
+        ASSERT_EQ(u.view()->proto_case, hubframes::UL_REGISTER);
         EXPECT_TRUE(u.view()->register_->needs_config);
-        LoraClientResponseMessage *owned = u.cloneV0();
-        ASSERT_NE(owned, nullptr);
-        EXPECT_EQ(owned->register_->mac_addr, u.view()->register_->mac_addr);
-        lora_client_response_message__free_unpacked(owned, nullptr);
     }
 }
 
@@ -331,21 +326,20 @@ TEST(HubWireUplink, AHubBodyOrGarbageOrAnEmptyCaseIsRefused) {
     const uint8_t garbage[] = {0xFF, 0xFF, 0xFF};
     EXPECT_FALSE(u.parse(h, garbage, sizeof(garbage)));
     EXPECT_FALSE(u.parse(h, nullptr, 0)) << "an empty NodeAppPdu has no case";
-    EXPECT_EQ(u.cloneV0(), nullptr);
     h.port = macwire::kPortMac0Mgmt;
     const mv::Vector &gs = vec("grid_sync_copy3");   // a HubMacPdu: case 21 is not a node case
     EXPECT_FALSE(u.parse(h, gs.body, gs.body_len));
 }
 
-TEST(HubWireUplink, TheSessionOpeningNonceReachesTheV0Header) {
+TEST(HubWireUplink, TheSessionOpeningNonceReachesTheHeaderView) {
     macwire::WireHdr h;
     h.flags = macwire::kFlagSessionOpening;
     h.node_nonce = 0x0BADCAFE;
-    ::LoraHeader lh;
-    hubwire::toLoraHeader(h, &lh);
+    hubframes::Hdr lh;
+    hubwire::toHdr(h, &lh);
     EXPECT_EQ(lh.sessionnonce, 0x0BADCAFEu);
     h.flags = 0;
-    hubwire::toLoraHeader(h, &lh);
+    hubwire::toHdr(h, &lh);
     EXPECT_EQ(lh.sessionnonce, 0u) << "only a SESSION_OPENING frame carries it";
 }
 
@@ -371,11 +365,11 @@ TEST(MacWireVectorsHub, CoverOpSealedStampedOnMark) {
     Hub hub;
     const mv::Vector &v = vec("cover_op");
     P(hub.rol).ctl().generation = 7;   // cmd_id = the Control slot's generation
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    hubframes::Down op{};
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
     covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
     covop.position   = 0.25f;
-    op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+    op.cmd_case  = hubframes::DL_OPERATION;
     op.operation = &covop;
     esphome::lora_tracker::DeliveryFrame f;
     ASSERT_TRUE(P(hub.rol).v1_frame_(&op, v.fcnt, /*encrypt=*/true, &f));
@@ -393,8 +387,8 @@ TEST(MacWireVectorsHub, SysopOtaCarriesItsCmdId) {
     Hub hub;
     const mv::Vector &v = vec("sysop_ota");
     P(hub.rol).ctl().generation = 300;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
+    hubframes::Down op{};
+    op.cmd_case = hubframes::DL_SYSOP;
     op.sysop    = CLIENT_OPERATION__CMD_OTA;
     esphome::lora_tracker::DeliveryFrame f;
     ASSERT_TRUE(P(hub.rol).v1_frame_(&op, v.fcnt, true, &f));
@@ -408,8 +402,8 @@ TEST(MacWireVectorsHub, GridSyncCopyThreeOfABurst) {
     HubMacPdu *pdu = hub_mac_pdu__unpack(nullptr, v.body_len, v.body);
     ASSERT_NE(pdu, nullptr);
     ASSERT_EQ(pdu->pdu_case, HUB_MAC_PDU__PDU_GRIDSYNC);
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
+    hubframes::Down op{};
+    op.cmd_case = hubframes::DL_GRIDSYNC;
     op.gridsync = pdu->gridsync;
     esphome::lora_tracker::DeliveryFrame f;
     ASSERT_TRUE(P(hub.rol).v1_frame_(&op, v.fcnt, true, &f));
@@ -421,12 +415,12 @@ TEST(MacWireVectorsHub, PlaintextPingAndDemoteAreUntagged) {
     Hub hub;
     {
         const mv::Vector &v = vec("mac_ping_plain");
-        LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+        hubframes::Down op{};
         MacControl mc = MAC_CONTROL__INIT;
         mc.kind = MAC_CONTROL__KIND__MAC_PING;
         mc.seq = 75;
         mc.wantecho = true;
-        op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL;
+        op.cmd_case   = hubframes::DL_MACCONTROL;
         op.maccontrol = &mc;
         esphome::lora_tracker::DeliveryFrame f;
         ASSERT_TRUE(P(hub.rol).v1_frame_(&op, v.fcnt, /*encrypt=*/false, &f));
@@ -443,14 +437,14 @@ TEST(MacWireVectorsHub, PlaintextPingAndDemoteAreUntagged) {
 
 TEST(MacWireVectorsHub, NoSessionMeansPlaintextAndASpentFcntIsRefused) {
     Hub hub;
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    hubframes::Down op{};
     TimeSync ts = TIME_SYNC__INIT;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC;
+    op.cmd_case = hubframes::DL_TIMESYNC;
     op.timesync = &ts;
     esphome::lora_tracker::DeliveryFrame f;
     ASSERT_TRUE(P(hub.rol).v1_frame_(&op, 5, /*encrypt=*/true, &f));
     EXPECT_EQ(macwire::authOf(f.bytes[1]), macwire::Auth::None)
-        << "no session id for the node: plaintext, the v0 rule";
+        << "no session id for the node: plaintext, the pre-session rule";
 
     VectorSession s;
     hub.rol.clearMsgidReloginForTest();
@@ -507,10 +501,10 @@ TEST(MacWireVectorsHub, ACopyForAnotherNodeOrAfterReloginIsNotTagged) {
     VectorSession s;
     Hub hub;
     const mv::Vector &v = vec("cover_op");
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
+    hubframes::Down op{};
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
     covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
-    op.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
+    op.cmd_case  = hubframes::DL_OPERATION;
     op.operation = &covop;
     esphome::lora_tracker::DeliveryFrame f;
     ASSERT_TRUE(P(hub.rol).v1_frame_(&op, v.fcnt, true, &f));
@@ -527,6 +521,155 @@ TEST(MacWireVectorsHub, ACopyForAnotherNodeOrAfterReloginIsNotTagged) {
     EXPECT_FALSE(mac2::LinkSecurity::copySealerV1(&binding, copy, f.bytes.data(), f.bytes.size() - 8, tag))
         << "keys moved on (F4): the frame is stale";
     EXPECT_FALSE(mac2::LinkSecurity::copySealerV1(nullptr, copy, f.bytes.data(), 1, tag));
+}
+
+// The seal and retag refusals, ported from the v0 characterization (S8 / W5:
+// packOperationForTest / retagLikeLastFrameForTest went with the v0 sealer).
+namespace {
+hubframes::Down timeSyncOp(TimeSync *ts) {
+    *ts = TIME_SYNC__INIT;
+    ts->epoch = 1787000000;
+    hubframes::Down op{};
+    op.cmd_case = hubframes::DL_TIMESYNC;
+    op.timesync = ts;
+    return op;
+}
+// A sealed frame for the vector node and the binding MAC-0 hands back per copy.
+struct SealedFrame {
+    esphome::lora_tracker::DeliveryFrame f;
+    mac::MacHdr copy;
+    uint8_t tag[8];
+    explicit SealedFrame(LORAClient &rol, uint32_t fcnt = 999) {
+        TimeSync ts;
+        hubframes::Down op = timeSyncOp(&ts);
+        EXPECT_TRUE(P(rol).v1_frame_(&op, fcnt, true, &f));
+        copy.dst  = mv::kNodeAddr;
+        copy.fcnt = fcnt;
+        memset(tag, 0xAA, sizeof(tag));
+    }
+    mac2::LinkSecurity::Retag retag() {
+        return mac2::LinkSecurity::hub().retagFrameV1(f.seal, copy, f.bytes.data(),
+                                                      f.bytes.size() - 8, tag);
+    }
+    bool untouched() const {
+        for (uint8_t b : tag) if (b != 0xAA) return false;
+        return true;
+    }
+};
+}  // namespace
+
+TEST(MacWireV1Seal, ASpentFcntIsRefusedOnlyWhenSealing) {
+    VectorSession s;
+    Hub hub;
+    TimeSync ts;
+    hubframes::Down op = timeSyncOp(&ts);
+    esphome::lora_tracker::DeliveryFrame f;
+    hub.rol.clearMsgidReloginForTest();
+    EXPECT_FALSE(P(hub.rol).v1_frame_(&op, 0x80000005u, true, &f)) << "2^31 + 5 would reuse FCNT 5's keystream";
+    EXPECT_TRUE(f.bytes.empty());
+    EXPECT_TRUE(hub.rol.msgidReloginPendingForTest());
+
+    // The same FCNT in the clear is not a CTR problem (no keystream).
+    hub.rol.clearMsgidReloginForTest();
+    ASSERT_TRUE(P(hub.rol).v1_frame_(&op, 0x80000005u, /*encrypt=*/false, &f));
+    EXPECT_EQ(macwire::authOf(f.bytes[1]), macwire::Auth::None);
+    EXPECT_FALSE(hub.rol.msgidReloginPendingForTest());
+}
+
+TEST(MacWireV1Seal, NoKeysOrASessionIdOfZeroSealsNothingAndAsksForNothing) {
+    Hub hub;
+    TimeSync ts;
+    hubframes::Down op = timeSyncOp(&ts);
+    esphome::lora_tracker::DeliveryFrame f;
+    auto &st = mac2::LinkSecurity::hub().store();
+    {
+        VectorSession s;
+        st.clearKeys(mv::kNodeAddr);   // the session id stays; K_enc/K_mac are gone
+        hub.rol.clearMsgidReloginForTest();
+        EXPECT_FALSE(P(hub.rol).v1_frame_(&op, 5, true, &f));
+        EXPECT_TRUE(f.bytes.empty()) << "never sent half-sealed, never downgraded";
+        EXPECT_FALSE(hub.rol.msgidReloginPendingForTest()) << "not an FCNT-space refusal";
+    }
+    {
+        VectorSession s;
+        const psa_key_id_t saved = st.liveKeys(mv::kNodeAddr).mac;
+        st.setMacKeyForTest(mv::kNodeAddr, PSA_KEY_ID_NULL);   // keys held, but not a whole pair
+        EXPECT_FALSE(P(hub.rol).v1_frame_(&op, 6, true, &f));
+        EXPECT_TRUE(f.bytes.empty()) << "half a key pair seals nothing";
+        st.setMacKeyForTest(mv::kNodeAddr, saved);
+    }
+    {
+        VectorSession s;
+        st.setSessionId(mv::kNodeAddr, 0);   // an entry, but zero: found, then refused
+        EXPECT_FALSE(P(hub.rol).v1_frame_(&op, 5, true, &f));
+        EXPECT_TRUE(f.bytes.empty());
+    }
+}
+
+TEST(MacWireV1Seal, TheCopyTagIsExactlyTheCmacOverTheCopysBytes) {
+    VectorSession s;
+    Hub hub;
+    SealedFrame sf(hub.rol);
+    ASSERT_TRUE(sf.f.seal.sealed);
+    ASSERT_EQ(sf.retag(), mac2::LinkSecurity::Retag::Ok);
+    uint8_t want[8];
+    proto_sim::v1_tag(mv::kKMac, true, mv::kSessionId, sf.f.bytes.data(), sf.f.bytes.size() - 8, want);
+    EXPECT_EQ(B(sf.tag, 8), B(want, 8));
+    // Every byte is covered: one header byte and one body byte move the tag.
+    for (size_t i : {(size_t) macwire::kOffBurstIdx, sf.f.bytes.size() - 9}) {
+        SealedFrame c(hub.rol);
+        c.f.bytes[i] ^= 1;
+        ASSERT_EQ(c.retag(), mac2::LinkSecurity::Retag::Ok);
+        EXPECT_NE(B(c.tag, 8), B(want, 8)) << "byte " << i;
+    }
+}
+
+TEST(MacWireV1Seal, EveryRetagRefusalLeavesTheTagBytesAlone) {
+    using R = mac2::LinkSecurity::Retag;
+    VectorSession s;
+    Hub hub;
+    auto &st = mac2::LinkSecurity::hub().store();
+    {
+        SealedFrame c(hub.rol);
+        c.copy.fcnt = macwire::kFcntLimit;
+        const uint32_t before = st.staleDrops(mv::kNodeAddr);
+        EXPECT_EQ(c.retag(), R::MsgidSpent);
+        EXPECT_TRUE(c.untouched());
+        EXPECT_EQ(st.staleDrops(mv::kNodeAddr), before) << "refused for the FCNT, not as stale";
+    }
+    {   // no MAC key installed: not stale, not tagged, not counted
+        SealedFrame c(hub.rol);
+        const psa_key_id_t saved = st.liveKeys(mv::kNodeAddr).mac;
+        const uint32_t before = st.staleDrops(mv::kNodeAddr);
+        st.setMacKeyForTest(mv::kNodeAddr, PSA_KEY_ID_NULL);
+        EXPECT_EQ(c.retag(), R::Failed);
+        st.setMacKeyForTest(mv::kNodeAddr, saved);
+        EXPECT_TRUE(c.untouched());
+        EXPECT_EQ(st.staleDrops(mv::kNodeAddr), before);
+    }
+    {   // a MAC key id PSA does not know: psa_mac_compute fails, nothing is written
+        SealedFrame c(hub.rol);
+        const psa_key_id_t saved = st.liveKeys(mv::kNodeAddr).mac;
+        st.setMacKeyForTest(mv::kNodeAddr, static_cast<psa_key_id_t>(0x7FFFFFF0u));
+        EXPECT_EQ(c.retag(), R::Failed);
+        st.setMacKeyForTest(mv::kNodeAddr, saved);
+        EXPECT_TRUE(c.untouched());
+    }
+    {   // keys moved on since the seal (a re-login mid-burst): stale, counted
+        SealedFrame c(hub.rol);
+        const uint32_t before = st.staleDrops(mv::kNodeAddr);
+        st.install(mv::kNodeAddr, mv::kSessionId, vectorKeys());
+        EXPECT_EQ(c.retag(), R::Stale);
+        EXPECT_TRUE(c.untouched());
+        EXPECT_EQ(st.staleDrops(mv::kNodeAddr), before + 1) << "counted as a stale-session drop";
+        EXPECT_EQ(hub.rol.staleSessionDropsForTest(), before + 1) << "and visible on the listener";
+    }
+    {   // the peer's session is gone altogether
+        SealedFrame c(hub.rol);
+        st.forget(mv::kNodeAddr);
+        EXPECT_EQ(c.retag(), R::NoSession);
+        EXPECT_TRUE(c.untouched());
+    }
 }
 
 // ===========================================================================
@@ -584,8 +727,8 @@ TEST(WireBurstFrame, AFleetOrNonV1FrameIsNotTouched) {
     const mv::Vector &b = vec("grid_beacon");
     mac0::WireBurstFrame fleet(b.frame, b.frame_len);
     EXPECT_FALSE(fleet.ok()) << "MAC-0 holds no fleet key: sent verbatim";
-    const uint8_t v0[] = {0x0A, 0x02, 0x08, 0x01};
-    mac0::WireBurstFrame old(v0, sizeof(v0));
+    const uint8_t not_v1[] = {0x0A, 0x02, 0x08, 0x01};   // VER is not 0x01
+    mac0::WireBurstFrame old(not_v1, sizeof(not_v1));
     EXPECT_FALSE(old.ok());
     Bytes big(256, 0x01);
     mac0::WireBurstFrame toolong(big.data(), big.size());
@@ -634,7 +777,7 @@ TEST(MacWireVectorsSim, EveryTagFromAnIndependentImplementation) {
 }
 
 // ===========================================================================
-// Part 2: the real listener, end to end over v1 (MAC_WIRE_V1 builds only)
+// Part 2: the real listener, end to end over v1
 // ===========================================================================
 
 namespace {
@@ -851,14 +994,14 @@ struct CaptureNode : esphome::lora_tracker::LORAClientNode {
     void send_remote_config() override {}
     void on_app_indication(const esphome::lora_tracker::AppIndication &ind) override {
         ++count;
-        last_case = ind.msg ? ind.msg->proto_case : LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET;
-        if (ind.msg && ind.msg->proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION)
+        last_case = ind.msg ? ind.msg->proto_case : hubframes::UL_NOT_SET;
+        if (ind.msg && ind.msg->proto_case == hubframes::UL_POSITION)
             position = ind.msg->position->position;
         authentic = ind.authentic;
         src = ind.hdr.src;
     }
     int count{0};
-    LoraClientResponseMessage__ProtoCase last_case{LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET};
+    hubframes::UpCase last_case{hubframes::UL_NOT_SET};
     float position{-1};
     bool authentic{false};
     uint8_t src{0};
@@ -886,7 +1029,7 @@ TEST(MacWireV1Listener, AnAuthenticPositionReachesTheChildAsAnAppIndication) {
     Bytes up = proto_sim::v1_session_frame(session, kNodeNonce, kHub, kNode, false, h, positionBody(0.4f));
     hub.rol.set_response(up.data(), up.size());
     ASSERT_EQ(child.count, 1);
-    EXPECT_EQ(child.last_case, LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION);
+    EXPECT_EQ(child.last_case, hubframes::UL_POSITION);
     EXPECT_FLOAT_EQ(child.position, 0.4f);
     EXPECT_TRUE(child.authentic);
     EXPECT_EQ(child.src, kNode);
@@ -991,17 +1134,17 @@ TEST(MacWireV1Listener, AConfigPushAfterRegisterIsAV1AppFrame) {
     EXPECT_TRUE(saw_config) << "unprovisioned: ClientConfig in the clear";
 }
 
-TEST(MacWireV1Listener, AV1FramesLengthIsExactSoFrameCanonHasNothingToDemote) {
+TEST(MacWireV1Listener, AnAuthenticV1FramesStampIsTheNodesUplinkOrigin) {
     // Spec 4.2: the fixed header has no varints and the tag covers the raw
     // bytes, so the on-air length is a T0 input as it stands (the MAC-1/MAC-2
-    // gates on timing use are unchanged). v0's re-encode check would call
-    // every v1 frame non-canonical: its envelope never packs to the v1 length.
+    // gates on timing use are unchanged); there is no re-encode check to pass.
     Hub hub;
     const uint32_t session = openSession(hub);
+    hub.tracker.last_rx_t0_us_v = 123'456;
     macwire::WireHdr h = uplinkHdr(2, macwire::kPortApp, macwire::Auth::Session);
     Bytes up = proto_sim::v1_session_frame(session, kNodeNonce, kHub, kNode, false, h, positionBody(0.2f));
     hub.rol.set_response(up.data(), up.size());
-    EXPECT_TRUE(hub.rol.rxTimingTrusted());
+    EXPECT_EQ(hub.rol.last_uplink_t0_us_, 123'456) << "the frame's T0 stamp is committed as is";
 }
 
 TEST(MacWireV1Listener, TheStartupDemoteIsAPlainBroadcastOnPortZero) {

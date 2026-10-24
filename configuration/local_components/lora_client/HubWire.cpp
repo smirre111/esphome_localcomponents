@@ -12,26 +12,26 @@ namespace hubwire
 // are Acked; TimeSync, ClientConfig, CoverConfig are Fire.
 struct RouteRow
 {
-    LoraClientOperationMessage__CmdCase cmd;
+    hubframes::DownCase cmd;
     uint8_t                             port;
     bool                                ack_req;
 };
 static constexpr RouteRow kRoutes[] = {
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST,    macwire::kPortMac0Mgmt, false},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL,   macwire::kPortMac0Mgmt, false},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST,     macwire::kPortMac0Mgmt, false},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON,   macwire::kPortMac0Mgmt, false},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE,   macwire::kPortMac0Mgmt, false},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION,    macwire::kPortApp,      true},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP,        macwire::kPortApp,      true},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE,     macwire::kPortApp,      true},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG, macwire::kPortApp,      false},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG,  macwire::kPortApp,      false},
-    {LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC,     macwire::kPortApp,      false},
+    {hubframes::DL_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
+    {hubframes::DL_DRIFTTEST,    macwire::kPortMac0Mgmt, false},
+    {hubframes::DL_MACCONTROL,   macwire::kPortMac0Mgmt, false},
+    {hubframes::DL_MODETEST,     macwire::kPortMac0Mgmt, false},
+    {hubframes::DL_GRIDBEACON,   macwire::kPortMac0Mgmt, false},
+    {hubframes::DL_GRIDDEMOTE,   macwire::kPortMac0Mgmt, false},
+    {hubframes::DL_OPERATION,    macwire::kPortApp,      true},
+    {hubframes::DL_SYSOP,        macwire::kPortApp,      true},
+    {hubframes::DL_SCHEDULE,     macwire::kPortApp,      true},
+    {hubframes::DL_CLIENTCONFIG, macwire::kPortApp,      false},
+    {hubframes::DL_COVERCONFIG,  macwire::kPortApp,      false},
+    {hubframes::DL_TIMESYNC,     macwire::kPortApp,      false},
 };
 
-Route routeDownlink(LoraClientOperationMessage__CmdCase c)
+Route routeDownlink(hubframes::DownCase c)
 {
     for (const RouteRow &r : kRoutes)
         if (r.cmd == c)
@@ -39,22 +39,22 @@ Route routeDownlink(LoraClientOperationMessage__CmdCase c)
     return {};
 }
 
-// HubMacPdu: the v0 oneof member is copied into the same-numbered PDU case.
-static bool s_mac_pdu(const LoraClientOperationMessage *op, ::HubMacPdu *pdu)
+// HubMacPdu: the command's body is moved into the same-numbered PDU case.
+static bool s_mac_pdu(const hubframes::Down *op, ::HubMacPdu *pdu)
 {
     switch (op->cmd_case)
     {
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_DRIFTTEST:
+    case hubframes::DL_DRIFTTEST:
         pdu->pdu_case = HUB_MAC_PDU__PDU_DRIFTTEST;  pdu->drifttest  = op->drifttest;  break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_MACCONTROL:
+    case hubframes::DL_MACCONTROL:
         pdu->pdu_case = HUB_MAC_PDU__PDU_MACCONTROL; pdu->maccontrol = op->maccontrol; break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC:
+    case hubframes::DL_GRIDSYNC:
         pdu->pdu_case = HUB_MAC_PDU__PDU_GRIDSYNC;   pdu->gridsync   = op->gridsync;   break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_MODETEST:
+    case hubframes::DL_MODETEST:
         pdu->pdu_case = HUB_MAC_PDU__PDU_MODETEST;   pdu->modetest   = op->modetest;   break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON:
+    case hubframes::DL_GRIDBEACON:
         pdu->pdu_case = HUB_MAC_PDU__PDU_GRIDBEACON; pdu->gridbeacon = op->gridbeacon; break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDDEMOTE:
+    case hubframes::DL_GRIDDEMOTE:
         pdu->pdu_case = HUB_MAC_PDU__PDU_GRIDDEMOTE; pdu->griddemote = op->griddemote; break;
     default:
         return false;
@@ -63,29 +63,29 @@ static bool s_mac_pdu(const LoraClientOperationMessage *op, ::HubMacPdu *pdu)
 }
 
 // HubAppPdu. The Control commands get their identity (section 7) here, in
-// copies, so the caller's v0 message is never modified.
-static bool s_app_pdu(const LoraClientOperationMessage *op, ::HubAppPdu *pdu,
+// copies, so the caller's command is never modified.
+static bool s_app_pdu(const hubframes::Down *op, ::HubAppPdu *pdu,
                       ::LoraCoverOperation *covop, ::SysopCmd *sysop, uint32_t cmd_id)
 {
     switch (op->cmd_case)
     {
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION:
+    case hubframes::DL_OPERATION:
         if (op->operation == nullptr)
             return false;
         *covop        = *op->operation;
         covop->cmd_id = cmd_id;
         pdu->pdu_case = HUB_APP_PDU__PDU_OPERATION; pdu->operation = covop; return true;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP:
+    case hubframes::DL_SYSOP:
         sysop->op     = op->sysop;
         sysop->cmd_id = cmd_id;
         pdu->pdu_case = HUB_APP_PDU__PDU_SYSOP; pdu->sysop = sysop; return true;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_CLIENTCONFIG:
+    case hubframes::DL_CLIENTCONFIG:
         pdu->pdu_case = HUB_APP_PDU__PDU_CLIENTCONFIG; pdu->clientconfig = op->clientconfig; break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_COVERCONFIG:
+    case hubframes::DL_COVERCONFIG:
         pdu->pdu_case = HUB_APP_PDU__PDU_COVERCONFIG; pdu->coverconfig = op->coverconfig; break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_TIMESYNC:
+    case hubframes::DL_TIMESYNC:
         pdu->pdu_case = HUB_APP_PDU__PDU_TIMESYNC; pdu->timesync = op->timesync; break;
-    case LORA_CLIENT_OPERATION_MESSAGE__CMD_SCHEDULE:
+    case hubframes::DL_SCHEDULE:
         pdu->pdu_case = HUB_APP_PDU__PDU_SCHEDULE; pdu->schedule = op->schedule; break;
     default:
         return false;
@@ -102,7 +102,7 @@ static bool s_pack(const ProtobufCMessage *m, uint8_t *out, size_t cap, size_t *
     return *len == n;
 }
 
-bool packDownlinkBody(const LoraClientOperationMessage *op, uint32_t cmd_id, uint8_t *out,
+bool packDownlinkBody(const hubframes::Down *op, uint32_t cmd_id, uint8_t *out,
                       size_t cap, size_t *len)
 {
     if (op == nullptr || out == nullptr || len == nullptr)
@@ -139,42 +139,9 @@ bool assemble(const macwire::WireHdr &h, const uint8_t *body, size_t body_len,
     return true;
 }
 
-static ::LoraClientResponseMessage *s_clone(const ::LoraClientResponseMessage *m)
+void toHdr(const macwire::WireHdr &h, hubframes::Hdr *out)
 {
-    const size_t n = lora_client_response_message__get_packed_size(m);
-    std::vector<uint8_t> buf(n ? n : 1);
-    lora_client_response_message__pack(m, buf.data());
-    return lora_client_response_message__unpack(nullptr, n, buf.data());
-}
-
-::LoraClientResponseMessage *sealedOuterV0(const macwire::WireHdr &h, const uint8_t *body,
-                                           size_t body_len, const uint8_t *tag)
-{
-    if (tag == nullptr || (body_len > 0 && body == nullptr))
-        return nullptr;
-    ::LoraHeader hdr = LORA_HEADER__INIT;
-    toLoraHeader(h, &hdr);
-    ::EncryptedPayload enc = ENCRYPTED_PAYLOAD__INIT;
-    enc.ciphertext.data    = const_cast<uint8_t *>(body);
-    enc.ciphertext.len     = body_len;
-    enc.tag.data           = const_cast<uint8_t *>(tag);
-    enc.tag.len            = macwire::kTagBytes;
-    ::LoraClientResponseMessage m = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-    m.header     = &hdr;
-    m.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ENCRYPTED;
-    m.encrypted  = &enc;
-    return s_clone(&m);
-}
-
-::LoraClientResponseMessage *Uplink::cloneV0() const
-{
-    return this->msg_.proto_case == LORA_CLIENT_RESPONSE_MESSAGE__PROTO__NOT_SET ? nullptr
-                                                                                 : s_clone(&this->msg_);
-}
-
-void toLoraHeader(const macwire::WireHdr &h, ::LoraHeader *out)
-{
-    *out               = LORA_HEADER__INIT;
+    *out               = hubframes::Hdr{};
     out->destaddress   = h.dst;
     out->destsubnet    = h.subnet;
     out->senderaddress = h.src;
@@ -192,12 +159,7 @@ void toLoraHeader(const macwire::WireHdr &h, ::LoraHeader *out)
 // Uplink
 // ---------------------------------------------------------------------------
 
-Uplink::Uplink()
-{
-    this->hdr_ = LORA_HEADER__INIT;
-    this->ack_ = COMMAND_ACK__INIT;
-    this->msg_ = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-}
+Uplink::Uplink() = default;
 
 Uplink::~Uplink() { this->reset_(); }
 
@@ -209,10 +171,23 @@ void Uplink::reset_()
     this->mac_ = nullptr;
     this->app_ = nullptr;
     this->reg_ = nullptr;
-    this->msg_ = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
+    this->msg_ = hubframes::Up{};
 }
 
-// MacAck + ACKED_FCNT is the v0 CommandAck; the other cases keep their message.
+void Uplink::sealed(const macwire::WireHdr &h, const uint8_t *body, size_t len, const uint8_t *tag)
+{
+    this->reset_();
+    toHdr(h, &this->hdr_);
+    this->sealed_.ciphertext.data = const_cast<uint8_t *>(body);
+    this->sealed_.ciphertext.len  = len;
+    this->sealed_.tag.data        = const_cast<uint8_t *>(tag);
+    this->sealed_.tag.len         = macwire::kTagBytes;
+    this->msg_.header     = &this->hdr_;
+    this->msg_.proto_case = hubframes::UL_SEALED;
+    this->msg_.encrypted  = &this->sealed_;
+}
+
+// MacAck + ACKED_FCNT is the UpAck; the other cases keep their message.
 bool Uplink::viewMac_(const macwire::WireHdr &h)
 {
     switch (this->mac_->pdu_case)
@@ -223,19 +198,19 @@ bool Uplink::viewMac_(const macwire::WireHdr &h)
         this->ack_.ack_msg_id = h.acked_fcnt;
         this->ack_.status     = this->mac_->ack->status;
         this->ack_.phase      = this->mac_->ack->phase;
-        this->msg_.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_ACK;
+        this->msg_.proto_case = hubframes::UL_ACK;
         this->msg_.ack        = &this->ack_;
         return true;
     case NODE_MAC_PDU__PDU_MACCONTROL:
-        this->msg_.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MACCONTROL;
+        this->msg_.proto_case = hubframes::UL_MACCONTROL;
         this->msg_.maccontrol = this->mac_->maccontrol;
         break;
     case NODE_MAC_PDU__PDU_MODETESTREPORT:
-        this->msg_.proto_case     = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_MODETESTREPORT;
+        this->msg_.proto_case     = hubframes::UL_MODETESTREPORT;
         this->msg_.modetestreport = this->mac_->modetestreport;
         break;
     case NODE_MAC_PDU__PDU_GRIDSYNCREQUEST:
-        this->msg_.proto_case      = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_GRIDSYNCREQUEST;
+        this->msg_.proto_case      = hubframes::UL_GRIDSYNCREQUEST;
         this->msg_.gridsyncrequest = this->mac_->gridsyncrequest;
         break;
     default:
@@ -249,13 +224,13 @@ bool Uplink::viewApp_()
     switch (this->app_->pdu_case)
     {
     case NODE_APP_PDU__PDU_AVAIL:
-        this->msg_.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_AVAIL;    this->msg_.avail = this->app_->avail; break;
+        this->msg_.proto_case = hubframes::UL_AVAIL;    this->msg_.avail = this->app_->avail; break;
     case NODE_APP_PDU__PDU_STATE:
-        this->msg_.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_STATE;    this->msg_.state = this->app_->state; break;
+        this->msg_.proto_case = hubframes::UL_STATE;    this->msg_.state = this->app_->state; break;
     case NODE_APP_PDU__PDU_POSITION:
-        this->msg_.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_POSITION; this->msg_.position = this->app_->position; break;
+        this->msg_.proto_case = hubframes::UL_POSITION; this->msg_.position = this->app_->position; break;
     case NODE_APP_PDU__PDU_BEACON:
-        this->msg_.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_BEACON;   this->msg_.beacon = this->app_->beacon; break;
+        this->msg_.proto_case = hubframes::UL_BEACON;   this->msg_.beacon = this->app_->beacon; break;
     default:
         return false;
     }
@@ -265,7 +240,7 @@ bool Uplink::viewApp_()
 bool Uplink::parse(const macwire::WireHdr &h, const uint8_t *body, size_t len)
 {
     this->reset_();
-    toLoraHeader(h, &this->hdr_);
+    toHdr(h, &this->hdr_);
     this->msg_.header = &this->hdr_;
     bool ok = false;
     if (h.port == macwire::kPortMac0Mgmt)
@@ -277,7 +252,7 @@ bool Uplink::parse(const macwire::WireHdr &h, const uint8_t *body, size_t len)
     {
         this->reg_ = client_register__unpack(nullptr, len, body);
         ok = this->reg_ != nullptr;
-        this->msg_.proto_case = LORA_CLIENT_RESPONSE_MESSAGE__PROTO_REGISTER;
+        this->msg_.proto_case = hubframes::UL_REGISTER;
         this->msg_.register_  = this->reg_;
     }
     else if (h.port == macwire::kPortApp)

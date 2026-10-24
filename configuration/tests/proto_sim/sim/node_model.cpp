@@ -105,6 +105,7 @@ void NodeModel::send_resp_(LoraClientResponseMessage msg) {
         outer.proto                = LoraClientResponseMessage::Proto::Encrypted;
         outer.encrypted.tag        = enc.tag;
         outer.encrypted.ciphertext = enc.ciphertext;
+        route_payload(msg, &outer.encrypted);   // the v1 PORT / ACK the body implies
 
         AirFrame f = make_resp_frame(outer);
         outbox_.push_back(f);

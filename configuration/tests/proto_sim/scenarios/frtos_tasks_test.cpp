@@ -44,6 +44,7 @@
 #include "ClassAWindows.h"
 #include "LoraTiming.h"
 #include "NodeClock.h"
+#include "MacWire.h"
 
 #include <lora.h>
 #include <gtest/gtest.h>
@@ -718,16 +719,26 @@ namespace {
 constexpr uint8_t kModeBNode   = 18;
 constexpr uint8_t kModeBSubnet = 2;
 
-// A GridSync the hub placed on this node's mark (header onMark).
-std::vector<uint8_t> gridSyncOnMark(uint32_t slot, uint32_t msgid) {
-    LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = kModeBNode;
-    hdr.destsubnet    = kModeBSubnet;
-    hdr.senderaddress = 1;
-    hdr.msgid         = msgid;
-    hdr.burstcount    = 17;
-    hdr.onmark        = true;
+// A pre-session (AUTH = NONE) v1 frame from the hub to this node.
+std::vector<uint8_t> hubFrame(uint8_t flags, uint32_t fcnt, uint8_t port, uint8_t burst_cnt,
+                              const std::vector<uint8_t> &body) {
+    macwire::WireHdr h;
+    h.flags     = flags;
+    h.dst       = kModeBNode;
+    h.src       = 1;
+    h.subnet    = kModeBSubnet;
+    h.fcnt      = fcnt;
+    h.port      = port;
+    h.burst_cnt = burst_cnt;
+    const size_t hlen = macwire::headerLen(h);
+    std::vector<uint8_t> out(hlen + body.size());
+    macwire::encodeHeader(h, out.data(), out.size());
+    std::copy(body.begin(), body.end(), out.begin() + hlen);
+    return out;
+}
 
+// A GridSync the hub placed on this node's mark (FLAGS.ON_MARK).
+std::vector<uint8_t> gridSyncOnMark(uint32_t slot, uint32_t msgid) {
     GridSync gs = GRID_SYNC__INIT;
     gs.enable            = true;
     gs.slotindex         = slot;
@@ -742,32 +753,27 @@ std::vector<uint8_t> gridSyncOnMark(uint32_t slot, uint32_t msgid) {
     gs.resyncmaxs        = 350;
     gs.uloffsetus        = 60000;
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header   = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDSYNC;
-    op.gridsync = &gs;
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
-    return out;
+    HubMacPdu pdu = HUB_MAC_PDU__INIT;
+    pdu.pdu_case = HUB_MAC_PDU__PDU_GRIDSYNC;
+    pdu.gridsync = &gs;
+    std::vector<uint8_t> body(hub_mac_pdu__get_packed_size(&pdu));
+    hub_mac_pdu__pack(&pdu, body.data());
+    return hubFrame(macwire::kFlagOnMark | macwire::kFlagAckReq, msgid, macwire::kPortMac0Mgmt,
+                    17, body);
 }
 
 // A status request the hub placed on this node's mark: a phase sample that
 // moves no motor.
 std::vector<uint8_t> statusOnMark(uint32_t msgid) {
-    LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = kModeBNode;
-    hdr.destsubnet    = kModeBSubnet;
-    hdr.senderaddress = 1;
-    hdr.msgid         = msgid;
-    hdr.onmark        = true;
-
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header   = &hdr;
-    op.cmd_case = LORA_CLIENT_OPERATION_MESSAGE__CMD_SYSOP;
-    op.sysop    = CLIENT_OPERATION__CMD_STATUS;
-    std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, out.data());
-    return out;
+    SysopCmd sc = SYSOP_CMD__INIT;
+    sc.op     = CLIENT_OPERATION__CMD_STATUS;
+    sc.cmd_id = msgid;
+    HubAppPdu pdu = HUB_APP_PDU__INIT;
+    pdu.pdu_case = HUB_APP_PDU__PDU_SYSOP;
+    pdu.sysop    = &sc;
+    std::vector<uint8_t> body(hub_app_pdu__get_packed_size(&pdu));
+    hub_app_pdu__pack(&pdu, body.data());
+    return hubFrame(macwire::kFlagOnMark | macwire::kFlagAckReq, msgid, macwire::kPortApp, 1, body);
 }
 
 }  // namespace

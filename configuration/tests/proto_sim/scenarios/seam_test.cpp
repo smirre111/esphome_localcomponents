@@ -40,6 +40,7 @@
 #include "GridState.h"
 #include "PendingData.h"
 
+#include "sim/crypto.h"
 #include "sim/wire_view.h"
 #include "sim/sim_clock.h"
 #include "sim/sim_radio.h"
@@ -396,27 +397,17 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
         << "and it must be the key THIS hub minted, not merely some key";
 
     // The beacon. Built here rather than pulled off the air, because the SHIM
-    // tracker has no serviceBeacon — that path is covered against the real
-    // tracker in real_lora_tracker_test, which unpacks the frame it queues and
-    // re-verifies its tag. What only THIS test can add is the other half: the
-    // tag is produced by the hub-side convention (full CMAC, first eight bytes)
-    // and checked by the node's real verify, which asks PSA for a TRUNCATED
-    // MAC. Those are two different algorithm identifiers over the same key, and
-    // nothing else in the suite puts them on opposite sides of one assertion.
+    // tracker has no serviceBeacon -- that path is covered against the real
+    // tracker in real_lora_tracker_test, which verifies the FLEET tag of the
+    // frame it queues. What only THIS test can add is the other half: a tag
+    // produced by the hub-side convention (full CMAC over "BW1" || dir || key
+    // id || frame, first eight bytes) checked by the node's real verify, which
+    // asks PSA for a TRUNCATED MAC. Those are two different algorithm
+    // identifiers over the same key, and nothing else in the suite puts them
+    // on opposite sides of one assertion.
     const uint32_t round = 0;
     const uint32_t slot  = disp.gridState().params.beacon_slot;
     const uint32_t mask  = pending::allListening();
-
-    uint8_t mac[framecrypto::kBeaconMacBytes];
-    ASSERT_TRUE(tracker.beaconMac(round, slot, mask, true, /*burst_index=*/0u, mac, sizeof(mac)))
-        << "a hub that cannot sign sends no beacon at all";
-
-    LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = LORATracker::broadcastAddressing;
-    hdr.destsubnet    = kSubnet;
-    hdr.senderaddress = 1;
-    hdr.msgid         = 0;      // a broadcast belongs to no per-node sequence
-    hdr.burstcount    = 1;
 
     GridBeacon gb = GRID_BEACON__INIT;
     gb.txround          = round;
@@ -424,16 +415,24 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
     gb.pendingmask      = mask;
     gb.pendingmaskvalid = true;
     gb.netkeyid         = tracker.netKeyId();
-    gb.mac.data         = mac;
-    gb.mac.len          = sizeof(mac);
+    HubMacPdu pdu = HUB_MAC_PDU__INIT;
+    pdu.pdu_case   = HUB_MAC_PDU__PDU_GRIDBEACON;
+    pdu.gridbeacon = &gb;
+    std::vector<uint8_t> body(hub_mac_pdu__get_packed_size(&pdu));
+    hub_mac_pdu__pack(&pdu, body.data());
 
-    LoraClientOperationMessage op = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    op.header     = &hdr;
-    op.cmd_case   = LORA_CLIENT_OPERATION_MESSAGE__CMD_GRIDBEACON;
-    op.gridbeacon = &gb;
-    std::vector<uint8_t> beacon(
-        lora_client_operation_message__get_packed_size(&op));
-    lora_client_operation_message__pack(&op, beacon.data());
+    macwire::WireHdr hdr;
+    hdr.flags     = macwire::withAuth(0, macwire::Auth::Fleet);
+    hdr.dst       = macwire::kBroadcast;
+    hdr.src       = 1;
+    hdr.subnet    = macwire::kAnySubnet;
+    hdr.fcnt      = 0;      // a broadcast belongs to no per-node sequence
+    hdr.port      = macwire::kPortMac0Mgmt;
+    hdr.burst_cnt = 1;
+    std::vector<uint8_t> beacon = proto_sim::v1_plain_frame(hdr, body);   // tag room at the end
+    proto_sim::v1_tag(tracker.netKey(), /*downlink=*/true, tracker.netKeyId(), beacon.data(),
+                      beacon.size() - macwire::kTagBytes,
+                      beacon.data() + beacon.size() - macwire::kTagBytes);
 
     // Delivered on the node's OWN predicted beacon mark, recovered from the
     // anchor the node solved rather than from the hub's — which is the whole

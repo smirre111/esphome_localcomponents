@@ -232,24 +232,6 @@ bool LinkSecurity::initAuthKey()
     return ok;
 }
 
-bool LinkSecurity::authMic(const uint8_t *mic_input, size_t len, uint8_t tag[kTagBytes])
-{
-    if (this->auth_key_ == PSA_KEY_ID_NULL)
-        return false;
-    size_t mic_len = 0;
-    return psa_mac_compute(this->auth_key_, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kTagBytes),
-                           mic_input, len, tag, kTagBytes, &mic_len) == PSA_SUCCESS &&
-           mic_len == kTagBytes;
-}
-
-bool LinkSecurity::verifyAuthMic(const uint8_t *mic_input, size_t len, const uint8_t *tag,
-                                 size_t tag_len)
-{
-    return this->auth_key_ != PSA_KEY_ID_NULL && tag_len == kTagBytes &&
-           psa_mac_verify(this->auth_key_, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, tag_len),
-                          mic_input, len, tag, tag_len) == PSA_SUCCESS;
-}
-
 // K_enc/K_mac from (K_root, session_id, node_nonce, hub/node addresses). Mirrors
 // CmdDispatcher::deriveSessionKeys_() on the node.
 bool LinkSecurity::deriveCandidate(mac::Addr hub, mac::Addr node, uint32_t session_id,
@@ -286,26 +268,6 @@ bool LinkSecurity::deriveCandidate(mac::Addr hub, mac::Addr node, uint32_t sessi
 // Encrypt-then-CMAC
 // ===========================================================================
 
-// The CMAC-covered fields of one frame.
-static framecrypto::EtmHeaderFields s_etm_fields(const mac::MacHdr &h, bool downlink,
-                                                 uint32_t session_id)
-{
-    framecrypto::EtmHeaderFields etm{};
-    etm.downlink       = downlink;
-    etm.session_id     = session_id;
-    etm.dest_address   = h.dst;
-    etm.dest_subnet    = h.subnet;
-    etm.sender_address = h.src;
-    etm.msgid          = h.fcnt;
-    etm.burst_index    = h.burst_idx;
-    etm.burst_count    = h.burst_cnt;
-    etm.on_mark        = h.on_mark;
-    etm.fire_stamped   = h.stamped;
-    etm.fire_round     = h.fire_round;
-    etm.fire_offset_us = h.fire_off_us;
-    return etm;
-}
-
 // One AES-CTR pass of in -> out (in_len bytes) under key_id. The caller holds
 // keys_mutex_ whenever the key could be destroyed concurrently.
 static bool s_ctr_pass(bool encrypt, psa_key_id_t key_id,
@@ -336,67 +298,6 @@ static bool s_ctr_pass(bool encrypt, psa_key_id_t key_id,
     return ok;
 }
 
-// The key id is read AND USED under keys_mutex_: this also runs on the esp_timer
-// task (build_mac_ping_frame_) while the ESPHome loop can install/destroy keys.
-// Records which key epoch the ciphertext is sealed under (I3, F4): the epoch,
-// not the key id, because volatile key ids are reused slot indices.
-LinkSecurity::Seal LinkSecurity::sealDownlink(const mac::MacHdr &hdr, const uint8_t *pt,
-                                              size_t len, uint8_t *ct, FrameSeal *seal)
-{
-    // The CTR counter block holds 31 bits of msgid but the CMAC covers 32.
-    if (!framecrypto::msgidFitsCtr(hdr.fcnt))
-        return Seal::MsgidSpent;
-    uint32_t session_id = 0;
-    this->store_.sessionId(hdr.dst, &session_id);
-    if (session_id == 0)
-        return Seal::NoSession;
-    uint8_t ctr_block[framecrypto::kCtrBlockBytes];
-    framecrypto::buildCtrInitialBlock(session_id, hdr.dst, /*downlink=*/true, hdr.fcnt,
-                                      /*block_idx=*/0, ctr_block);
-
-    std::lock_guard<std::mutex> lock(this->store_.keys_mutex_);
-    auto it = this->store_.keys_.find(hdr.dst);
-    if (it == this->store_.keys_.end() || it->second.live.enc == PSA_KEY_ID_NULL)
-        return Seal::NoKey;
-    if (!s_ctr_pass(true, it->second.live.enc, ctr_block, pt, len, ct))
-        return Seal::Failed;
-    seal->sealed    = true;
-    seal->peer      = hdr.dst;
-    seal->key_epoch = it->second.key_epoch;
-    return Seal::Ok;
-}
-
-// The H-1-measured per-copy path: everything that needs no key runs before the
-// lock, the lock covers one psa_mac_compute, the input lives on the stack.
-LinkSecurity::Retag LinkSecurity::retagCopy(const FrameSeal &seal, const mac::MacHdr &copy,
-                                            const uint8_t *ct, size_t ct_len,
-                                            uint8_t tag[kTagBytes])
-{
-    if (!framecrypto::msgidFitsCtr(copy.fcnt))
-        return Retag::MsgidSpent;
-    uint32_t session_id = 0;
-    if (!seal.sealed || !this->store_.sessionId(seal.peer, &session_id))
-        return Retag::NoSession;
-    if (ct_len > kMaxCt)
-        return Retag::Failed;
-
-    uint8_t mac_input[framecrypto::kEtmPrefixBytes + kMaxCt];
-    framecrypto::buildEtmCmacPrefix(s_etm_fields(copy, /*downlink=*/true, session_id),
-                                    static_cast<uint16_t>(ct_len), mac_input);
-    if (ct_len)
-        memcpy(mac_input + framecrypto::kEtmPrefixBytes, ct, ct_len);
-    const size_t input_len = framecrypto::kEtmPrefixBytes + ct_len;
-
-    uint8_t out[kTagBytes];
-    FrameSeal bound = seal;
-    if (copy.dst != seal.peer)
-        bound.key_epoch = ~seal.key_epoch;   // a copy for another node: never this frame's
-    const Retag verdict = this->macUnderKeyLock_(bound, mac_input, input_len, out);
-    if (verdict == Retag::Ok)
-        memcpy(tag, out, sizeof(out));
-    return verdict;
-}
-
 // The ONLY part of the retag that holds keys_mutex_: the peer's key epoch and
 // K_mac are read AND USED inside it (I3, I3 (c), F4). One psa_mac_compute, no
 // logging, no heap.
@@ -422,31 +323,6 @@ LinkSecurity::Retag LinkSecurity::macUnderKeyLock_(const FrameSeal &seal, const 
     return ok ? Retag::Ok : Retag::Failed;
 }
 
-// Verify the tag BEFORE decrypting: a tampered ciphertext or header field fails
-// without the cipher ever running over attacker-controlled bytes. The received
-// tag must be exactly kTagBytes (defence in depth; the key policy floors at 8).
-LinkSecurity::Verify LinkSecurity::verifyUplink(const mac::MacHdr &hdr, uint32_t session_id,
-                                                const KeyPair &keys, const uint8_t *ct,
-                                                size_t ct_len, const uint8_t *tag, size_t tag_len)
-{
-    if (!keys.complete())
-        return Verify::NoKeys;
-    uint8_t prefix[framecrypto::kEtmPrefixBytes];
-    framecrypto::buildEtmCmacPrefix(s_etm_fields(hdr, /*downlink=*/false, session_id),
-                                    static_cast<uint16_t>(ct_len), prefix);
-    uint8_t *mac_input = static_cast<uint8_t *>(malloc(sizeof(prefix) + ct_len));
-    if (!mac_input)
-        return Verify::NoMem;
-    memcpy(mac_input, prefix, sizeof(prefix));
-    if (ct_len)
-        memcpy(mac_input + sizeof(prefix), ct, ct_len);
-    const bool ok = tag_len == kTagBytes &&
-                    psa_mac_verify(keys.mac, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, tag_len),
-                                   mac_input, sizeof(prefix) + ct_len, tag, tag_len) == PSA_SUCCESS;
-    free(mac_input);
-    return ok ? Verify::Ok : Verify::BadTag;
-}
-
 // Runs on the ESPHome loop, the same task that installs/destroys keys, so the
 // key cannot vanish mid-pass (as before S2).
 bool LinkSecurity::decryptUplink(const mac::MacHdr &hdr, uint32_t session_id, const KeyPair &keys,
@@ -456,15 +332,6 @@ bool LinkSecurity::decryptUplink(const mac::MacHdr &hdr, uint32_t session_id, co
     framecrypto::buildCtrInitialBlock(session_id, hdr.src, /*downlink=*/false, hdr.fcnt,
                                       /*block_idx=*/0, ctr_block);
     return s_ctr_pass(false, keys.enc, ctr_block, ct, ct_len, pt);
-}
-
-bool LinkSecurity::copySealer(void *ctx, const mac::MacHdr &copy, const uint8_t *ct,
-                              size_t ct_len, uint8_t tag[8])
-{
-    if (ctx == nullptr)
-        return false;
-    const FrameSeal seal = FrameSeal::fromBinding(*static_cast<const uint64_t *>(ctx));
-    return hub().retagCopy(seal, copy, ct, ct_len, tag) == Retag::Ok;
 }
 
 // ===========================================================================

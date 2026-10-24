@@ -8,13 +8,10 @@
 //     under -- the port table of section 3 as the hub's producers see it;
 //   * packDownlinkBody: the ONE body message of section 3 (HubMacPdu or
 //     HubAppPdu), with cmd_id for the Control commands (section 7);
-//   * Uplink: a received v1 body decoded as the message its (direction, PORT)
-//     names, plus a v0-shaped view of it (LoraClientResponseMessage with a
-//     LoraHeader made from the wire header, and a CommandAck made from MacAck +
-//     ACKED_FCNT) so the hub's dispatch keeps one shape until W5 deletes v0.
-//
-// Compiled in BOTH configurations (MAC_WIRE_V1 on or off): only the listener's
-// and the tracker's wiring is switched, so this unit's tests always run.
+//   * Uplink: a received v1 frame as the hub's internal Up (HubFrames.h):
+//     the body decoded as the message its (direction, PORT) names, the MacAck +
+//     ACKED_FCNT as an UpAck, or (AUTH = SESSION, not yet opened) the sealed
+//     ciphertext and tag.
 //
 // HUB-ONLY (not vendored). No crypto here (HubLinkSecurity), no logging.
 
@@ -23,6 +20,7 @@
 #include <vector>
 
 #include "esphome/components/blindsproto/blinds.pb-c.h"
+#include "esphome/components/lora_client/HubFrames.h"
 #include "esphome/components/lora_client/MacWire.h"
 
 namespace hubwire
@@ -38,14 +36,13 @@ struct Route
     bool    ack_req{false};   // FLAGS.ACK_REQ: an Acked delivery (spec 2.5)
 };
 
-// LOGIN is not routed here (send_login builds it: PORT 1, AUTH = K_AUTH), nor
-// is ENCRYPTED (a v0 envelope, never a v1 body).
-Route routeDownlink(LoraClientOperationMessage__CmdCase c);
+// LOGIN is not routed here (send_login builds it: PORT 1, AUTH = K_AUTH).
+Route routeDownlink(hubframes::DownCase c);
 
 // The body for `op`'s command, packed into out[0..cap). cmd_id goes into
 // LoraCoverOperation.cmd_id / SysopCmd.cmd_id and is ignored for every other
 // command. False when the command has no v1 body or it does not fit.
-bool packDownlinkBody(const LoraClientOperationMessage *op, uint32_t cmd_id, uint8_t *out,
+bool packDownlinkBody(const hubframes::Down *op, uint32_t cmd_id, uint8_t *out,
                       size_t cap, size_t *len);
 
 // Header + body + (tag room when AUTH != NONE), in bytes.
@@ -59,17 +56,11 @@ inline size_t frameLen(const macwire::WireHdr &h, size_t body_len)
 bool assemble(const macwire::WireHdr &h, const uint8_t *body, size_t body_len,
               std::vector<uint8_t> *out);
 
-// The v0 LoraHeader view of a wire header (the fields dispatch reads).
-void toLoraHeader(const macwire::WireHdr &h, ::LoraHeader *out);
+// The internal header of a wire header (the fields dispatch reads).
+void toHdr(const macwire::WireHdr &h, hubframes::Hdr *out);
 
-// An AUTH = SESSION uplink as the v0 outer envelope the encrypted pipeline
-// walks (header from the wire, EncryptedPayload{ciphertext = body, tag}),
-// protobuf-c owned: free with lora_client_response_message__free_unpacked.
-::LoraClientResponseMessage *sealedOuterV0(const macwire::WireHdr &h, const uint8_t *body,
-                                           size_t body_len, const uint8_t *tag);
-
-// A received v1 body, decoded. Owns the unpacked message; view() is the v0
-// envelope dispatch consumes (valid while this object lives).
+// A received v1 frame. Owns the unpacked body; view() is the internal Up
+// dispatch consumes (valid while this object lives).
 class Uplink
 {
 public:
@@ -83,22 +74,25 @@ public:
     // does not decode, carries no case, or a MacAck arrives without FLAGS.ACK.
     bool parse(const macwire::WireHdr &h, const uint8_t *body, size_t len);
 
-    ::LoraClientResponseMessage *view() { return &this->msg_; }
-    // The view as a protobuf-c owned message (pack + unpack), for the paths
-    // that take ownership (handle_register_, set_response's tail).
-    ::LoraClientResponseMessage *cloneV0() const;
+    // An AUTH = SESSION frame before it is opened: the header, and the
+    // ciphertext and tag pointing into the caller's bytes (which must outlive
+    // this object).
+    void sealed(const macwire::WireHdr &h, const uint8_t *body, size_t len, const uint8_t *tag);
+
+    hubframes::Up *view() { return &this->msg_; }
 
 private:
     bool viewMac_(const macwire::WireHdr &h);
     bool viewApp_();
     void reset_();
 
-    ::NodeMacPdu               *mac_{nullptr};
-    ::NodeAppPdu               *app_{nullptr};
-    ::ClientRegister           *reg_{nullptr};
-    ::LoraHeader                hdr_;
-    ::CommandAck                ack_;
-    ::LoraClientResponseMessage msg_;
+    ::NodeMacPdu     *mac_{nullptr};
+    ::NodeAppPdu     *app_{nullptr};
+    ::ClientRegister *reg_{nullptr};
+    hubframes::Hdr    hdr_{};
+    hubframes::UpAck  ack_{};
+    hubframes::Sealed sealed_{};
+    hubframes::Up     msg_{};
 };
 
 }  // namespace hubwire

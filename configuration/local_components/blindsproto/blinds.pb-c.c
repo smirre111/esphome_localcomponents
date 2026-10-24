@@ -232,96 +232,6 @@ void   phase_report__free_unpacked
   assert(message->base.descriptor == &phase_report__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
-void   command_ack__init
-                     (CommandAck         *message)
-{
-  static const CommandAck init_value = COMMAND_ACK__INIT;
-  *message = init_value;
-}
-size_t command_ack__get_packed_size
-                     (const CommandAck *message)
-{
-  assert(message->base.descriptor == &command_ack__descriptor);
-  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
-}
-size_t command_ack__pack
-                     (const CommandAck *message,
-                      uint8_t       *out)
-{
-  assert(message->base.descriptor == &command_ack__descriptor);
-  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
-}
-size_t command_ack__pack_to_buffer
-                     (const CommandAck *message,
-                      ProtobufCBuffer *buffer)
-{
-  assert(message->base.descriptor == &command_ack__descriptor);
-  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
-}
-CommandAck *
-       command_ack__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data)
-{
-  return (CommandAck *)
-     protobuf_c_message_unpack (&command_ack__descriptor,
-                                allocator, len, data);
-}
-void   command_ack__free_unpacked
-                     (CommandAck *message,
-                      ProtobufCAllocator *allocator)
-{
-  if(!message)
-    return;
-  assert(message->base.descriptor == &command_ack__descriptor);
-  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
-}
-void   encrypted_payload__init
-                     (EncryptedPayload         *message)
-{
-  static const EncryptedPayload init_value = ENCRYPTED_PAYLOAD__INIT;
-  *message = init_value;
-}
-size_t encrypted_payload__get_packed_size
-                     (const EncryptedPayload *message)
-{
-  assert(message->base.descriptor == &encrypted_payload__descriptor);
-  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
-}
-size_t encrypted_payload__pack
-                     (const EncryptedPayload *message,
-                      uint8_t       *out)
-{
-  assert(message->base.descriptor == &encrypted_payload__descriptor);
-  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
-}
-size_t encrypted_payload__pack_to_buffer
-                     (const EncryptedPayload *message,
-                      ProtobufCBuffer *buffer)
-{
-  assert(message->base.descriptor == &encrypted_payload__descriptor);
-  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
-}
-EncryptedPayload *
-       encrypted_payload__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data)
-{
-  return (EncryptedPayload *)
-     protobuf_c_message_unpack (&encrypted_payload__descriptor,
-                                allocator, len, data);
-}
-void   encrypted_payload__free_unpacked
-                     (EncryptedPayload *message,
-                      ProtobufCAllocator *allocator)
-{
-  if(!message)
-    return;
-  assert(message->base.descriptor == &encrypted_payload__descriptor);
-  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
-}
 void   time_sync__init
                      (TimeSync         *message)
 {
@@ -500,51 +410,6 @@ void   node_wake_beacon__free_unpacked
   if(!message)
     return;
   assert(message->base.descriptor == &node_wake_beacon__descriptor);
-  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
-}
-void   lora_header__init
-                     (LoraHeader         *message)
-{
-  static const LoraHeader init_value = LORA_HEADER__INIT;
-  *message = init_value;
-}
-size_t lora_header__get_packed_size
-                     (const LoraHeader *message)
-{
-  assert(message->base.descriptor == &lora_header__descriptor);
-  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
-}
-size_t lora_header__pack
-                     (const LoraHeader *message,
-                      uint8_t       *out)
-{
-  assert(message->base.descriptor == &lora_header__descriptor);
-  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
-}
-size_t lora_header__pack_to_buffer
-                     (const LoraHeader *message,
-                      ProtobufCBuffer *buffer)
-{
-  assert(message->base.descriptor == &lora_header__descriptor);
-  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
-}
-LoraHeader *
-       lora_header__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data)
-{
-  return (LoraHeader *)
-     protobuf_c_message_unpack (&lora_header__descriptor,
-                                allocator, len, data);
-}
-void   lora_header__free_unpacked
-                     (LoraHeader *message,
-                      ProtobufCAllocator *allocator)
-{
-  if(!message)
-    return;
-  assert(message->base.descriptor == &lora_header__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
 void   drift_test__init
@@ -907,51 +772,6 @@ void   mode_test_report__free_unpacked
   assert(message->base.descriptor == &mode_test_report__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
-void   lora_client_operation_message__init
-                     (LoraClientOperationMessage         *message)
-{
-  static const LoraClientOperationMessage init_value = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-  *message = init_value;
-}
-size_t lora_client_operation_message__get_packed_size
-                     (const LoraClientOperationMessage *message)
-{
-  assert(message->base.descriptor == &lora_client_operation_message__descriptor);
-  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
-}
-size_t lora_client_operation_message__pack
-                     (const LoraClientOperationMessage *message,
-                      uint8_t       *out)
-{
-  assert(message->base.descriptor == &lora_client_operation_message__descriptor);
-  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
-}
-size_t lora_client_operation_message__pack_to_buffer
-                     (const LoraClientOperationMessage *message,
-                      ProtobufCBuffer *buffer)
-{
-  assert(message->base.descriptor == &lora_client_operation_message__descriptor);
-  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
-}
-LoraClientOperationMessage *
-       lora_client_operation_message__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data)
-{
-  return (LoraClientOperationMessage *)
-     protobuf_c_message_unpack (&lora_client_operation_message__descriptor,
-                                allocator, len, data);
-}
-void   lora_client_operation_message__free_unpacked
-                     (LoraClientOperationMessage *message,
-                      ProtobufCAllocator *allocator)
-{
-  if(!message)
-    return;
-  assert(message->base.descriptor == &lora_client_operation_message__descriptor);
-  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
-}
 void   client_register__init
                      (ClientRegister         *message)
 {
@@ -1175,51 +995,6 @@ void   grid_sync_request__free_unpacked
   if(!message)
     return;
   assert(message->base.descriptor == &grid_sync_request__descriptor);
-  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
-}
-void   lora_client_response_message__init
-                     (LoraClientResponseMessage         *message)
-{
-  static const LoraClientResponseMessage init_value = LORA_CLIENT_RESPONSE_MESSAGE__INIT;
-  *message = init_value;
-}
-size_t lora_client_response_message__get_packed_size
-                     (const LoraClientResponseMessage *message)
-{
-  assert(message->base.descriptor == &lora_client_response_message__descriptor);
-  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
-}
-size_t lora_client_response_message__pack
-                     (const LoraClientResponseMessage *message,
-                      uint8_t       *out)
-{
-  assert(message->base.descriptor == &lora_client_response_message__descriptor);
-  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
-}
-size_t lora_client_response_message__pack_to_buffer
-                     (const LoraClientResponseMessage *message,
-                      ProtobufCBuffer *buffer)
-{
-  assert(message->base.descriptor == &lora_client_response_message__descriptor);
-  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
-}
-LoraClientResponseMessage *
-       lora_client_response_message__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data)
-{
-  return (LoraClientResponseMessage *)
-     protobuf_c_message_unpack (&lora_client_response_message__descriptor,
-                                allocator, len, data);
-}
-void   lora_client_response_message__free_unpacked
-                     (LoraClientResponseMessage *message,
-                      ProtobufCAllocator *allocator)
-{
-  if(!message)
-    return;
-  assert(message->base.descriptor == &lora_client_response_message__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
 void   hub_mac_pdu__init
@@ -1775,7 +1550,7 @@ const ProtobufCMessageDescriptor cover_config__descriptor =
   (ProtobufCMessageInit) cover_config__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor login_msg__field_descriptors[4] =
+static const ProtobufCFieldDescriptor login_msg__field_descriptors[3] =
 {
   {
     "nonce",
@@ -1802,18 +1577,6 @@ static const ProtobufCFieldDescriptor login_msg__field_descriptors[4] =
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "mic",
-    3,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(LoginMsg, mic),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
     "hub_rebooted",
     4,
     PROTOBUF_C_LABEL_NONE,
@@ -1827,15 +1590,15 @@ static const ProtobufCFieldDescriptor login_msg__field_descriptors[4] =
   },
 };
 static const unsigned login_msg__field_indices_by_name[] = {
-  3,   /* field[3] = hub_rebooted */
-  2,   /* field[2] = mic */
+  2,   /* field[2] = hub_rebooted */
   0,   /* field[0] = nonce */
   1,   /* field[1] = request_register */
 };
-static const ProtobufCIntRange login_msg__number_ranges[1 + 1] =
+static const ProtobufCIntRange login_msg__number_ranges[2 + 1] =
 {
   { 1, 0 },
-  { 0, 4 }
+  { 4, 2 },
+  { 0, 3 }
 };
 const ProtobufCMessageDescriptor login_msg__descriptor =
 {
@@ -1845,10 +1608,10 @@ const ProtobufCMessageDescriptor login_msg__descriptor =
   "LoginMsg",
   "",
   sizeof(LoginMsg),
-  4,
+  3,
   login_msg__field_descriptors,
   login_msg__field_indices_by_name,
-  1,  login_msg__number_ranges,
+  2,  login_msg__number_ranges,
   (ProtobufCMessageInit) login_msg__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
@@ -2005,121 +1768,6 @@ const ProtobufCMessageDescriptor phase_report__descriptor =
   phase_report__field_indices_by_name,
   1,  phase_report__number_ranges,
   (ProtobufCMessageInit) phase_report__init,
-  NULL,NULL,NULL    /* reserved[123] */
-};
-static const ProtobufCFieldDescriptor command_ack__field_descriptors[3] =
-{
-  {
-    "ack_msg_id",
-    1,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(CommandAck, ack_msg_id),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "status",
-    2,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_ENUM,
-    0,   /* quantifier_offset */
-    offsetof(CommandAck, status),
-    &ack_status__descriptor,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "phase",
-    3,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    0,   /* quantifier_offset */
-    offsetof(CommandAck, phase),
-    &phase_report__descriptor,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-};
-static const unsigned command_ack__field_indices_by_name[] = {
-  0,   /* field[0] = ack_msg_id */
-  2,   /* field[2] = phase */
-  1,   /* field[1] = status */
-};
-static const ProtobufCIntRange command_ack__number_ranges[1 + 1] =
-{
-  { 1, 0 },
-  { 0, 3 }
-};
-const ProtobufCMessageDescriptor command_ack__descriptor =
-{
-  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
-  "CommandAck",
-  "CommandAck",
-  "CommandAck",
-  "",
-  sizeof(CommandAck),
-  3,
-  command_ack__field_descriptors,
-  command_ack__field_indices_by_name,
-  1,  command_ack__number_ranges,
-  (ProtobufCMessageInit) command_ack__init,
-  NULL,NULL,NULL    /* reserved[123] */
-};
-static const ProtobufCFieldDescriptor encrypted_payload__field_descriptors[2] =
-{
-  {
-    "tag",
-    1,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(EncryptedPayload, tag),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "ciphertext",
-    2,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(EncryptedPayload, ciphertext),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-};
-static const unsigned encrypted_payload__field_indices_by_name[] = {
-  1,   /* field[1] = ciphertext */
-  0,   /* field[0] = tag */
-};
-static const ProtobufCIntRange encrypted_payload__number_ranges[1 + 1] =
-{
-  { 1, 0 },
-  { 0, 2 }
-};
-const ProtobufCMessageDescriptor encrypted_payload__descriptor =
-{
-  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
-  "EncryptedPayload",
-  "EncryptedPayload",
-  "EncryptedPayload",
-  "",
-  sizeof(EncryptedPayload),
-  2,
-  encrypted_payload__field_descriptors,
-  encrypted_payload__field_indices_by_name,
-  1,  encrypted_payload__number_ranges,
-  (ProtobufCMessageInit) encrypted_payload__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
 static const ProtobufCFieldDescriptor time_sync__field_descriptors[5] =
@@ -2743,175 +2391,6 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   (ProtobufCMessageInit) node_wake_beacon__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_header__field_descriptors[11] =
-{
-  {
-    "destAddress",
-    1,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, destaddress),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "destSubnet",
-    2,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, destsubnet),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "senderAddress",
-    3,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, senderaddress),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "msgId",
-    4,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, msgid),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "burstIndex",
-    6,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, burstindex),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "burstCount",
-    7,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, burstcount),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "onMark",
-    8,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BOOL,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, onmark),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "fireStamped",
-    9,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BOOL,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, firestamped),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "fireRound",
-    10,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, fireround),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "fireOffsetUs",
-    11,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, fireoffsetus),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "sessionNonce",
-    12,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_FIXED32,
-    0,   /* quantifier_offset */
-    offsetof(LoraHeader, sessionnonce),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-};
-static const unsigned lora_header__field_indices_by_name[] = {
-  5,   /* field[5] = burstCount */
-  4,   /* field[4] = burstIndex */
-  0,   /* field[0] = destAddress */
-  1,   /* field[1] = destSubnet */
-  9,   /* field[9] = fireOffsetUs */
-  8,   /* field[8] = fireRound */
-  7,   /* field[7] = fireStamped */
-  3,   /* field[3] = msgId */
-  6,   /* field[6] = onMark */
-  2,   /* field[2] = senderAddress */
-  10,   /* field[10] = sessionNonce */
-};
-static const ProtobufCIntRange lora_header__number_ranges[2 + 1] =
-{
-  { 1, 0 },
-  { 6, 4 },
-  { 0, 11 }
-};
-const ProtobufCMessageDescriptor lora_header__descriptor =
-{
-  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
-  "LoraHeader",
-  "LoraHeader",
-  "LoraHeader",
-  "",
-  sizeof(LoraHeader),
-  11,
-  lora_header__field_descriptors,
-  lora_header__field_indices_by_name,
-  2,  lora_header__number_ranges,
-  (ProtobufCMessageInit) lora_header__init,
-  NULL,NULL,NULL    /* reserved[123] */
-};
 static const ProtobufCFieldDescriptor drift_test__field_descriptors[3] =
 {
   {
@@ -3124,7 +2603,7 @@ const ProtobufCMessageDescriptor mac_control__descriptor =
   (ProtobufCMessageInit) mac_control__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[6] =
+static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[5] =
 {
   {
     "txRound",
@@ -3186,21 +2665,8 @@ static const ProtobufCFieldDescriptor grid_beacon__field_descriptors[6] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
-  {
-    "mac",
-    6,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(GridBeacon, mac),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
 };
 static const unsigned grid_beacon__field_indices_by_name[] = {
-  5,   /* field[5] = mac */
   4,   /* field[4] = netKeyId */
   2,   /* field[2] = pendingMask */
   3,   /* field[3] = pendingMaskValid */
@@ -3210,7 +2676,7 @@ static const unsigned grid_beacon__field_indices_by_name[] = {
 static const ProtobufCIntRange grid_beacon__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 6 }
+  { 0, 5 }
 };
 const ProtobufCMessageDescriptor grid_beacon__descriptor =
 {
@@ -3220,7 +2686,7 @@ const ProtobufCMessageDescriptor grid_beacon__descriptor =
   "GridBeacon",
   "",
   sizeof(GridBeacon),
-  6,
+  5,
   grid_beacon__field_descriptors,
   grid_beacon__field_indices_by_name,
   1,  grid_beacon__number_ranges,
@@ -4386,230 +3852,7 @@ const ProtobufCMessageDescriptor mode_test_report__descriptor =
   (ProtobufCMessageInit) mode_test_report__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor lora_client_operation_message__field_descriptors[15] =
-{
-  {
-    "header",
-    1,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    0,   /* quantifier_offset */
-    offsetof(LoraClientOperationMessage, header),
-    &lora_header__descriptor,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "encrypted",
-    9,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, encrypted),
-    &encrypted_payload__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "operation",
-    10,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, operation),
-    &lora_cover_operation__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "sysop",
-    11,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_ENUM,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, sysop),
-    &client_operation__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "clientconfig",
-    12,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, clientconfig),
-    &client_config__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "coverconfig",
-    13,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, coverconfig),
-    &cover_config__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "login",
-    14,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, login),
-    &login_msg__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "timesync",
-    16,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, timesync),
-    &time_sync__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "schedule",
-    17,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, schedule),
-    &schedule_config__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "drifttest",
-    18,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, drifttest),
-    &drift_test__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "maccontrol",
-    20,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, maccontrol),
-    &mac_control__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "gridsync",
-    21,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, gridsync),
-    &grid_sync__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "modetest",
-    22,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, modetest),
-    &mode_test__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "gridbeacon",
-    23,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, gridbeacon),
-    &grid_beacon__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "griddemote",
-    24,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientOperationMessage, cmd_case),
-    offsetof(LoraClientOperationMessage, griddemote),
-    &grid_demote__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-};
-static const unsigned lora_client_operation_message__field_indices_by_name[] = {
-  4,   /* field[4] = clientconfig */
-  5,   /* field[5] = coverconfig */
-  9,   /* field[9] = drifttest */
-  1,   /* field[1] = encrypted */
-  13,   /* field[13] = gridbeacon */
-  14,   /* field[14] = griddemote */
-  11,   /* field[11] = gridsync */
-  0,   /* field[0] = header */
-  6,   /* field[6] = login */
-  10,   /* field[10] = maccontrol */
-  12,   /* field[12] = modetest */
-  2,   /* field[2] = operation */
-  8,   /* field[8] = schedule */
-  3,   /* field[3] = sysop */
-  7,   /* field[7] = timesync */
-};
-static const ProtobufCIntRange lora_client_operation_message__number_ranges[4 + 1] =
-{
-  { 1, 0 },
-  { 9, 1 },
-  { 16, 7 },
-  { 20, 10 },
-  { 0, 15 }
-};
-const ProtobufCMessageDescriptor lora_client_operation_message__descriptor =
-{
-  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
-  "LoraClientOperationMessage",
-  "LoraClientOperationMessage",
-  "LoraClientOperationMessage",
-  "",
-  sizeof(LoraClientOperationMessage),
-  15,
-  lora_client_operation_message__field_descriptors,
-  lora_client_operation_message__field_indices_by_name,
-  4,  lora_client_operation_message__number_ranges,
-  (ProtobufCMessageInit) lora_client_operation_message__init,
-  NULL,NULL,NULL    /* reserved[123] */
-};
-static const ProtobufCFieldDescriptor client_register__field_descriptors[3] =
+static const ProtobufCFieldDescriptor client_register__field_descriptors[2] =
 {
   {
     "mac_addr",
@@ -4635,28 +3878,15 @@ static const ProtobufCFieldDescriptor client_register__field_descriptors[3] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
-  {
-    "mic",
-    3,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_BYTES,
-    0,   /* quantifier_offset */
-    offsetof(ClientRegister, mic),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
 };
 static const unsigned client_register__field_indices_by_name[] = {
   0,   /* field[0] = mac_addr */
-  2,   /* field[2] = mic */
   1,   /* field[1] = needs_config */
 };
 static const ProtobufCIntRange client_register__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 3 }
+  { 0, 2 }
 };
 const ProtobufCMessageDescriptor client_register__descriptor =
 {
@@ -4666,7 +3896,7 @@ const ProtobufCMessageDescriptor client_register__descriptor =
   "ClientRegister",
   "",
   sizeof(ClientRegister),
-  3,
+  2,
   client_register__field_descriptors,
   client_register__field_indices_by_name,
   1,  client_register__number_ranges,
@@ -4901,190 +4131,6 @@ const ProtobufCMessageDescriptor grid_sync_request__descriptor =
   grid_sync_request__field_indices_by_name,
   1,  grid_sync_request__number_ranges,
   (ProtobufCMessageInit) grid_sync_request__init,
-  NULL,NULL,NULL    /* reserved[123] */
-};
-static const ProtobufCFieldDescriptor lora_client_response_message__field_descriptors[12] =
-{
-  {
-    "header",
-    1,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    0,   /* quantifier_offset */
-    offsetof(LoraClientResponseMessage, header),
-    &lora_header__descriptor,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "encrypted",
-    9,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, encrypted),
-    &encrypted_payload__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "avail",
-    10,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, avail),
-    &client_available__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "register",
-    11,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, register_),
-    &client_register__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "state",
-    12,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, state),
-    &client_battery__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "position",
-    13,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, position),
-    &cover_position__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "login",
-    14,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, login),
-    &login_msg__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "ack",
-    15,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, ack),
-    &command_ack__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "beacon",
-    16,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, beacon),
-    &node_wake_beacon__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "maccontrol",
-    20,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, maccontrol),
-    &mac_control__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "modetestreport",
-    22,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, modetestreport),
-    &mode_test_report__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "gridsyncrequest",
-    23,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_MESSAGE,
-    offsetof(LoraClientResponseMessage, proto_case),
-    offsetof(LoraClientResponseMessage, gridsyncrequest),
-    &grid_sync_request__descriptor,
-    NULL,
-    PROTOBUF_C_FIELD_FLAG_ONEOF,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-};
-static const unsigned lora_client_response_message__field_indices_by_name[] = {
-  7,   /* field[7] = ack */
-  2,   /* field[2] = avail */
-  8,   /* field[8] = beacon */
-  1,   /* field[1] = encrypted */
-  11,   /* field[11] = gridsyncrequest */
-  0,   /* field[0] = header */
-  6,   /* field[6] = login */
-  9,   /* field[9] = maccontrol */
-  10,   /* field[10] = modetestreport */
-  5,   /* field[5] = position */
-  3,   /* field[3] = register */
-  4,   /* field[4] = state */
-};
-static const ProtobufCIntRange lora_client_response_message__number_ranges[4 + 1] =
-{
-  { 1, 0 },
-  { 9, 1 },
-  { 20, 9 },
-  { 22, 10 },
-  { 0, 12 }
-};
-const ProtobufCMessageDescriptor lora_client_response_message__descriptor =
-{
-  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
-  "LoraClientResponseMessage",
-  "LoraClientResponseMessage",
-  "LoraClientResponseMessage",
-  "",
-  sizeof(LoraClientResponseMessage),
-  12,
-  lora_client_response_message__field_descriptors,
-  lora_client_response_message__field_indices_by_name,
-  4,  lora_client_response_message__number_ranges,
-  (ProtobufCMessageInit) lora_client_response_message__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
 static const ProtobufCFieldDescriptor hub_mac_pdu__field_descriptors[6] =
@@ -5627,34 +4673,6 @@ const ProtobufCEnumDescriptor client_operation__descriptor =
   client_operation__enum_values_by_name,
   1,
   client_operation__value_ranges,
-  NULL,NULL,NULL,NULL   /* reserved[1234] */
-};
-static const ProtobufCEnumValue encryption_algo__enum_values_by_number[2] =
-{
-  { "ENC_NONE", "ENCRYPTION_ALGO__ENC_NONE", 0 },
-  { "ENC_AES_GCM_128", "ENCRYPTION_ALGO__ENC_AES_GCM_128", 1 },
-};
-static const ProtobufCIntRange encryption_algo__value_ranges[] = {
-{0, 0},{0, 2}
-};
-static const ProtobufCEnumValueIndex encryption_algo__enum_values_by_name[2] =
-{
-  { "ENC_AES_GCM_128", 1 },
-  { "ENC_NONE", 0 },
-};
-const ProtobufCEnumDescriptor encryption_algo__descriptor =
-{
-  PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
-  "EncryptionAlgo",
-  "EncryptionAlgo",
-  "EncryptionAlgo",
-  "",
-  2,
-  encryption_algo__enum_values_by_number,
-  2,
-  encryption_algo__enum_values_by_name,
-  1,
-  encryption_algo__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
 static const ProtobufCEnumValue ack_status__enum_values_by_number[3] =
