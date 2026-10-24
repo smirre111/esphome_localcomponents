@@ -12,7 +12,6 @@
 
 namespace proto_sim {
 
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 class TestClient : public esphome::lora_tracker::LORAClient {
 public:
     void set_response(uint8_t *data, size_t len) {
@@ -20,8 +19,5 @@ public:
         esphome::lora_tracker::LORAClient::set_response(v1.data(), v1.size());
     }
 };
-#else
-using TestClient = esphome::lora_tracker::LORAClient;
-#endif
 
 }  // namespace proto_sim

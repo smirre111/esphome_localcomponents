@@ -214,8 +214,50 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
       (reasons in `mac_wire_v0_only_tests.txt`). Fixed on the way: a dangling
       capture in the `drive_session` test helper (ASan). Reservation of a placed
       v1 frame priced with its STAMP (`9286421`). proto_sim ON 1771 / OFF 1754.
-- [ ] Fixed header (version byte != 0x0A, hub dual-stack during the node-1 OTA),
-      FCnt/cmdId split, MAC ACK bit, CMAC over raw header bytes, delete
-      FrameCanon and the legacy GCM helpers. Node 2 by serial first, soak, then
-      node 1 by OTA, then remove the dual stack. Re-record the golden frames.
-- Gate: full H-2/H-3 campaign, MIC_FAIL 0, FER_link 0, 900 s Mode B+crypto soak.
+- [x] Cutover LIVE 2026-10-19 (hub 914a09a, both nodes fw 1.1.50): Mode A
+      turnaround 6.93/7.50 and 8.81/9.88 ms, Mode B 598/598, FER_link 0,
+      MIC_FAIL 0; stack minima send task 1312/4096, esp_timer 1528/3584 free.
+
+### W5 hub: delete v0 (plan, 2026-10-19)
+
+Order: everything that does not need the proto removal first (W5a/b, small
+commits, v1 goldens byte-identical, lint baselines lowered); the proto removal
+(W5c) last, in step with the node.
+
+W5a -- the switch and the OFF configuration:
+- `MacWireConfig.h` and every `MAC_WIRE_V1` / `kMacWireV1` branch in
+  lora_client.cpp, burst_frame.h, mac_mgmt.cpp, the shim tracker and the tests;
+- proto_sim's `PROTO_SIM_MAC_WIRE_V1` option and OFF build, `golden_v0/`,
+  `mac_wire_v0_only_tests.txt` + `proto_sim_discover_tests` and the 3 OFF-only
+  tests (padded / unknown-field / wide-header uplinks);
+- the node-harness targets (real_cmd_dispatcher_test, real_lora_interface_test)
+  keep `-DMAC_WIRE_V1=0` only while the node still has its v0 path; when node
+  W5b deletes it they are retired (the node repo covers its v1 path, seam/e2e
+  cover hub + node).
+
+W5b -- v0 production code:
+- lora_client.cpp: `s_pack_*`, `s_seal_downlink`, `pack_operation_`, the v0
+  arms of mac_frame_ / send_login (LOGIN MIC input) / GridDemote / set_response
+  unpack / REGISTER MIC / uplink verify / inner unpack, `check_uplink_canonical_`
+  + FrameCanon + `noncanonical_frames_`, `retagLikeLastFrameForTest`,
+  `packOperationForTest`;
+- HubLinkSecurity: `sealDownlink`, `retagCopy`, `copySealer`, the v0
+  `verifyUplink`, `authMic` / `verifyAuthMic` (the v1 calls stay);
+- MacHdrCodec.h `fromLoraHeader`; tracker `mac0::BurstFrame` (TxFrame becomes
+  WireBurstFrame); mac_mgmt `beaconMac` and the v0 beacon pack;
+- vendored FrameCanon.h + its drift gate (the hub no longer includes it);
+- tests of the deleted internals are deleted with them (their v1 counterparts:
+  mac_wire_v1_test, mac_wire_v1_tracker_test).
+
+W5c -- the proto (lands in both repos at once, after the node's commit):
+- delete LoraHeader, EncryptedPayload, LoraClientOperationMessage,
+  LoraClientResponseMessage, CommandAck (numbers and names reserved);
+  LoginMsg.mic / ClientRegister.mic / GridBeacon.mac reserved;
+- hub: producers build HubAppPdu / HubMacPdu / LoginMsg directly (no v0
+  envelope as the in-memory command); uplink dispatch takes the decoded PDU +
+  WireHdr (HubWire's v0 view goes); AppIndication carries the PDU;
+- tests build v1 frames natively: sim/v1_bridge, the v0 parts of
+  sim/wire_codec + crypto (EtM v0 prefix, LOGIN/REGISTER MIC inputs) and the
+  sim models that speak v0 are rewritten or retired; FrameCrypto.h legacy
+  helpers go per the node plan (re-vendored).
+- Gate: suite green, v1 goldens byte-identical, ESP32 build clean.

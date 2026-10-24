@@ -18,11 +18,7 @@
 namespace proto_sim {
 namespace wire {
 
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 constexpr bool kV1 = true;
-#else
-constexpr bool kV1 = false;
-#endif
 
 // The frame is the node's REGISTER; *mac (optional) gets its MAC.
 inline bool registerMac(const std::vector<uint8_t> &f, uint64_t *mac = nullptr) {

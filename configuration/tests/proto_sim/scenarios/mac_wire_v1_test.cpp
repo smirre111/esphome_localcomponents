@@ -633,7 +633,6 @@ TEST(MacWireVectorsSim, EveryTagFromAnIndependentImplementation) {
     }
 }
 
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 // ===========================================================================
 // Part 2: the real listener, end to end over v1 (MAC_WIRE_V1 builds only)
 // ===========================================================================
@@ -1014,4 +1013,3 @@ TEST(MacWireV1Listener, TheStartupDemoteIsAPlainBroadcastOnPortZero) {
     EXPECT_EQ(h.port, macwire::kPortMac0Mgmt);
     EXPECT_EQ(h.fcnt, 0u);
 }
-#endif   // MAC_WIRE_V1

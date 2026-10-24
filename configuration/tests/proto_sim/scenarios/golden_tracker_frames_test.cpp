@@ -34,7 +34,6 @@ struct GProbe : LORATracker {
     void init() { this->init_memory_pool(); }
 };
 
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 // S8: the same plaintext cover op as a v1 frame (PORT 2, AUTH = NONE); these
 // scenarios then record into golden_v1/.
 std::vector<uint8_t> plaintextOperation() {
@@ -53,25 +52,6 @@ std::vector<uint8_t> plaintextOperation() {
     hub_app_pdu__pack(&pdu, buf.data() + hlen);
     return buf;
 }
-#else
-std::vector<uint8_t> plaintextOperation() {
-    LoraHeader hdr = LORA_HEADER__INIT;
-    hdr.destaddress   = 18;
-    hdr.destsubnet    = 2;
-    hdr.senderaddress = 1;
-    hdr.msgid         = 42;
-    LoraCoverOperation op = LORA_COVER_OPERATION__INIT;
-    op.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
-    op.operation  = COV_OPERATION__CMD_OPEN;
-    LoraClientOperationMessage msg = LORA_CLIENT_OPERATION_MESSAGE__INIT;
-    msg.header    = &hdr;
-    msg.cmd_case  = LORA_CLIENT_OPERATION_MESSAGE__CMD_OPERATION;
-    msg.operation = &op;
-    std::vector<uint8_t> buf(lora_client_operation_message__get_packed_size(&msg));
-    lora_client_operation_message__pack(&msg, buf.data());
-    return buf;
-}
-#endif
 
 std::string dumpRecorder() {
     std::ostringstream s;

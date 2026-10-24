@@ -33,7 +33,6 @@ LoraClientOperationMessage *unpackView(const uint8_t *data, size_t len) {
     return lora_client_operation_message__unpack(NULL, v.size(), v.data());
 }
 
-#if MAC_WIRE_V1
 std::vector<uint8_t> v1Frame(uint8_t dst, uint8_t subnet, uint32_t fcnt, macwire::Auth a,
                              const std::vector<uint8_t> &body) {
     macwire::WireHdr h;
@@ -44,13 +43,11 @@ std::vector<uint8_t> v1Frame(uint8_t dst, uint8_t subnet, uint32_t fcnt, macwire
     std::copy(body.begin(), body.end(), f.begin() + macwire::headerLen(h));
     return f;
 }
-#endif
 
 // A real, packable operation frame. The burst loop only re-stamps copies it can
 // unpack; a buffer of zeroes fails to unpack, so a test that fed one would take
 // the raw-bytes fallback and never touch the indexing code at all.
 std::vector<uint8_t> packedOperationFrame() {
-#if MAC_WIRE_V1
     LoraCoverOperation op1 = LORA_COVER_OPERATION__INIT;
     HubAppPdu pdu = HUB_APP_PDU__INIT;
     pdu.pdu_case  = HUB_APP_PDU__PDU_OPERATION;
@@ -58,7 +55,6 @@ std::vector<uint8_t> packedOperationFrame() {
     std::vector<uint8_t> body(hub_app_pdu__get_packed_size(&pdu));
     hub_app_pdu__pack(&pdu, body.data());
     return v1Frame(7, 0, 42, macwire::Auth::None, body);
-#endif
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress   = 7;
     hdr.senderaddress = 1;
@@ -1198,7 +1194,6 @@ TEST(RealTrackerBeacon, ABeaconIsQueuedOnceAndPlacedOnItsOwnMark) {
     // serviceBeacon sends none at all rather than one without a tag.
     EXPECT_EQ(msg->gridbeacon->netkeyid, t.netKeyId());
     EXPECT_NE(msg->gridbeacon->netkeyid, 0u);
-#if MAC_WIRE_V1
     // v1 (spec 4.4): the frame's FLEET tag over every raw byte replaces the
     // GridBeacon.mac field; it verifies under the hub's own fleet key.
     EXPECT_EQ(msg->gridbeacon->mac.len, 0u) << "no mac field in v1";
@@ -1207,21 +1202,6 @@ TEST(RealTrackerBeacon, ABeaconIsQueuedOnceAndPlacedOnItsOwnMark) {
         ASSERT_TRUE(t.mgmt().fleetTagV1(bytes.data(), bytes.size() - 8, tag));
         EXPECT_EQ(memcmp(tag, bytes.data() + bytes.size() - 8, 8), 0);
     }
-#else
-    ASSERT_EQ(msg->gridbeacon->mac.len, framecrypto::kBeaconMacBytes);
-
-    // And it verifies under the hub's own key. Recomputed here from the LAYOUT
-    // rather than compared against a stored tag: what can silently disagree
-    // between the two ends is which bytes go into the MAC, and a golden tag
-    // would pin the hub's arithmetic against the hub's own choice.
-    uint8_t expect[framecrypto::kBeaconMacBytes];
-    ASSERT_TRUE(t.beaconMac(msg->gridbeacon->txround, msg->gridbeacon->txslot,
-                            msg->gridbeacon->pendingmask,
-                            msg->gridbeacon->pendingmaskvalid,
-                            msg->header->burstindex,
-                            expect, sizeof(expect)));
-    EXPECT_EQ(memcmp(expect, msg->gridbeacon->mac.data, sizeof(expect)), 0);
-#endif
 
     // The frame still fits the slot geometry it was priced against. A beacon
     // that outgrew kBeaconPayloadBytes would need a second clear slot after it
@@ -1795,19 +1775,11 @@ TEST(RealTrackerBeacon, ALaterBeaconCarriesItsOwnRoundAndTheFullBroadcastHeader)
     EXPECT_EQ(msg->header->msgid, 0u);
     EXPECT_EQ(msg->header->burstindex, 0u);
     EXPECT_EQ(msg->header->burstcount, 1u) << "one copy, not a burst";
-#if MAC_WIRE_V1
     {
         uint8_t tag[8];
         ASSERT_TRUE(t.mgmt().fleetTagV1(bytes.data(), bytes.size() - 8, tag));
         EXPECT_EQ(memcmp(tag, bytes.data() + bytes.size() - 8, 8), 0) << "FLEET tag (spec 4.4)";
     }
-#else
-    uint8_t expect[framecrypto::kBeaconMacBytes];
-    ASSERT_TRUE(t.beaconMac(msg->gridbeacon->txround, msg->gridbeacon->txslot,
-                            msg->gridbeacon->pendingmask, msg->gridbeacon->pendingmaskvalid,
-                            msg->header->burstindex, expect, sizeof(expect)));
-    EXPECT_EQ(memcmp(expect, msg->gridbeacon->mac.data, sizeof(expect)), 0);
-#endif
     EXPECT_EQ(t.postTxHoldMs(), 0u) << "a broadcast nobody answers: no hold after it";
     lora_client_operation_message__free_unpacked(msg, nullptr);
 }
@@ -1835,9 +1807,7 @@ bool fakeSealer(void *ctx, const mac::MacHdr &h, const uint8_t *ct, size_t len, 
     return g_seal.answer;
 }
 std::vector<uint8_t> encryptedFrame() {
-#if MAC_WIRE_V1
     return v1Frame(18, 2, 42, macwire::Auth::Session, {1, 2, 3, 4});
-#endif
     LoraHeader hdr = LORA_HEADER__INIT;
     hdr.destaddress = 18; hdr.destsubnet = 2; hdr.senderaddress = 1; hdr.msgid = 42;
     uint8_t ct[4] = {1, 2, 3, 4};

@@ -18,7 +18,6 @@
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/lora_client/MacHdrCodec.h"
 #include "esphome/components/lora_client/MacSap.h"
-#include "esphome/components/lora_client/MacWireConfig.h"
 #include "esphome/components/lora_client/MacWire.h"
 
 namespace mac0
@@ -220,12 +219,7 @@ private:
 
 // The burst engine's frame type for this build (spec section 12: a compile-time
 // switch, not a runtime dual stack).
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 using TxFrame = WireBurstFrame;
 static constexpr bool kTxFrameInsertsStamp = true;    // +kStampBytes when stamped
-#else
-using TxFrame = BurstFrame;
-static constexpr bool kTxFrameInsertsStamp = false;
-#endif
 
 }  // namespace mac0

@@ -11,17 +11,12 @@
 // S6: the one oneof -> mac::Port table.
 #include "esphome/components/lora_client/PortTable.h"
 // S8: MAC wire v1 -- the fixed header (shared) and the hub's bodies around it.
-#include "esphome/components/lora_client/MacWireConfig.h"
 #include "esphome/components/lora_client/MacWire.h"
 #include "esphome/components/lora_client/HubWire.h"
 
 // The compile-time wire switch (docs/mac-wire-format.md section 12): OFF keeps
 // every v0 path byte-identical (golden frames); ON sends and accepts only v1.
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 static constexpr bool kMacWireV1 = true;
-#else
-static constexpr bool kMacWireV1 = false;
-#endif
 // The funnel rate arithmetic, so a ModeTest report is recomputed on the hub
 // rather than trusted from the node (test-plan.md I1).
 #include "esphome/components/lora_client/MacFunnel.h"

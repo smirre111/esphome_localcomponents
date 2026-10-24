@@ -176,7 +176,6 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
     for (int i = 0; i < n; ++i) {
         std::vector<uint8_t> bytes(data, data + len);
 
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
         // v1: the real tracker's per-copy work (burst_frame.h), unstamped (the
         // shim has no fire instants): ON_MARK / BURST_IDX / BURST_CNT, then the
         // frame's own sealer over the raw bytes. A FLEET frame goes verbatim.
@@ -195,7 +194,6 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
             r->send(f);
             continue;
         }
-#endif
 
         // Production stamps LoraHeader.onMark, burstIndex/burstCount in
         // sendPacketBurst's per-copy re-stamp, THEN (Tier 3) retags an

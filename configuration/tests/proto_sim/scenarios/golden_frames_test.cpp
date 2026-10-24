@@ -54,14 +54,10 @@ constexpr uint32_t    kNodeNonce  = 0xACE55001u;
 constexpr std::time_t kEpoch      = 1787000000;   // 2026-08-17 (CEST)
 constexpr unsigned    kSeed       = 0x5EED0001u;
 
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 // S8: with MAC_WIRE_V1 these scenarios record the v1 wire into golden_v1/ (the
 // v0 files in golden/ stay pinned by the OFF build). Same scenarios, same
 // pinned inputs; the node side of each exchange is the sim's v1 frames.
 constexpr bool kV1 = true;
-#else
-constexpr bool kV1 = false;
-#endif
 
 std::string describeV1(const std::vector<uint8_t> &b) {
     std::ostringstream s;
@@ -401,7 +397,6 @@ TEST(GoldenHubFrames, EncryptedBurstRetagEveryCopy) {
     EXPECT_TRUE(golden::matches("hub_encrypted_burst_retag", h.dump()));
 }
 
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 // v1: the copy sealer over every raw header byte MAC-0 writes per copy (FLAGS
 // ON_MARK/STAMPED, BURST_IDX/CNT, the STAMP), through the real WireBurstFrame.
 TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
@@ -433,38 +428,3 @@ TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
     }
     EXPECT_TRUE(golden::matches("hub_retag_timing_fields", s.str()));
 }
-#else
-// The copy sealer over every timing field the CMAC prefix covers.
-TEST(GoldenHubFrames, RetagCoversEveryTimingField) {
-    GoldenHub h;
-    h.session();
-    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
-    h.tick(10);
-    ASSERT_FALSE(h.tracker.sent_wire.empty());
-    const auto raw = h.tracker.sent_wire.back();
-    ::LoraClientOperationMessage *m =
-        lora_client_operation_message__unpack(nullptr, raw.size(), raw.data());
-    ASSERT_NE(m, nullptr);
-    ASSERT_EQ(m->cmd_case, LORA_CLIENT_OPERATION_MESSAGE__CMD_ENCRYPTED);
-    std::ostringstream s;
-    const uint32_t cases[][6] = {
-        {0, 17, 0, 0, 0, 0}, {5, 17, 0, 0, 0, 0}, {5, 17, 1, 0, 0, 0},
-        {5, 17, 1, 1, 123, 4567}, {0, 1, 1, 1, 0xFFFFFF, 999999},
-    };
-    for (const auto &c : cases) {
-        m->header->burstindex   = c[0];
-        m->header->burstcount   = c[1];
-        m->header->onmark       = c[2];
-        m->header->firestamped  = c[3];
-        m->header->fireround    = c[4];
-        m->header->fireoffsetus = c[5];
-        ASSERT_TRUE(h.rol.retagLikeLastFrameForTest(m->encrypted, m->header));
-        std::vector<uint8_t> out(lora_client_operation_message__get_packed_size(m));
-        lora_client_operation_message__pack(m, out.data());
-        s << "retag " << c[0] << "/" << c[1] << " onmark=" << c[2] << " stamped=" << c[3]
-          << " round=" << c[4] << " off=" << c[5] << " " << golden::hex(out) << "\n";
-    }
-    lora_client_operation_message__free_unpacked(m, nullptr);
-    EXPECT_TRUE(golden::matches("hub_retag_timing_fields", s.str()));
-}
-#endif

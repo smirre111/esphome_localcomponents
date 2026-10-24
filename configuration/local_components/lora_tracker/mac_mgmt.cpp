@@ -8,7 +8,6 @@
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/lora_client/TimedGrid.h"
 #include "esphome/components/lora_client/PendingData.h"
-#include "esphome/components/lora_client/MacWireConfig.h"
 #include "esphome/components/lora_client/MacWire.h"
 
 #include <esp_random.h>
@@ -207,11 +206,9 @@ BeaconBuild HubMacManagement::buildBeacon(uint32_t round, int64_t now_us, size_t
         ESP_LOGE(TAG, "beacon for round %u could not be signed — not sent", (unsigned) round);
         return BeaconBuild::Unsigned;
     }
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
     // v1: the frame's FLEET tag replaces GridBeacon.mac (spec 4.4). The v0 MAC
     // above still ran: it is the "is there a key" gate, unchanged.
     return this->packBeaconV1(&gb, max_len, &out->bytes);
-#endif
     gb.netkeyid  = this->net_key_id_;
     gb.mac.data  = mac;
     gb.mac.len   = sizeof(mac);
