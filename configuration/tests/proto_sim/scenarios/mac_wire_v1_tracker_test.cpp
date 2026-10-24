@@ -106,7 +106,6 @@ TEST(H1Histogram, TheMaxSampleCarriesItsInstantAndCopy) {
     EXPECT_EQ(t.tag_latency_report_max_copy_, 4);
 }
 
-#if defined(MAC_WIRE_V1) && MAC_WIRE_V1
 // ---------------------------------------------------------------------------
 // The REAL burst loop over v1 frames (spec section 5): per copy only byte
 // writes and one sealer call over the copy's raw bytes; never a decode.
@@ -309,6 +308,66 @@ TEST(MacWireV1Burst, APlacedFramesReservationIsPricedWithTheStampItWillCarry) {
     }
 }
 
+namespace {
+struct QueueProbe : LORATracker {
+    using LORATracker::serviceTxQueue;
+    void init() { this->init_memory_pool(); }
+};
+}  // namespace
+
+TEST(MacWireV1Burst, ModeTestMarksOfEveryLengthLeaveOnTheirOwnSlotMark) {
+    // 2026-10-19 hardware: with hub 914a09a, Mode B marks 47 B on the air
+    // (41 B packed + the 6-byte STAMP) arrived ~2.5 ms off the mark (p50); 48 B
+    // ones were fine. The marks are placed exactly as mode_test_timer_cb_ does:
+    // the next clear mark of the slot (by interval, against everything already
+    // reserved, including the previous marks), never at or before the last one.
+    // Every mark must be the node's NEXT slot mark (none skipped, none doubled),
+    // fire on fireInstantUs(T0), and stamp T0.
+    const uint8_t slot = 1;
+    for (size_t body = 20; body <= 60; ++body) {
+        lorahal::rec().reset();
+        proto_sim_timer_reset();
+        proto_sim_timer_set_now_us(3'000'000);
+        QueueProbe t;
+        t.init();
+        t.startGrid();
+        macwire::WireHdr h;
+        h.dst = 0x12; h.src = 1; h.subnet = 2; h.port = macwire::kPortMac0Mgmt;
+        int64_t last_t0 = 0;
+        int64_t now = 3'000'000;
+        for (int k = 0; k < 6; ++k, now += (int64_t) timedgrid::kRoundUs) {
+            proto_sim_timer_set_now_us(now);
+            h.fcnt = 100 + k;
+            std::vector<uint8_t> f(macwire::headerLen(h) + body, 0x33);
+            macwire::encodeHeader(h, f.data(), f.size());
+            int64_t t0 = t.nextClearT0ForSlotUs(slot, now, 1, f.size(), false);
+            if (t0 <= last_t0)
+                t0 = t.nextClearT0ForSlotUs(slot, last_t0 + 1, 1, f.size(), false);
+            const int64_t natural = t.nextT0ForSlotUs(slot, now);
+            EXPECT_EQ(t0, natural) << "body " << body << " mark " << k << ": no slot skipped";
+            esphome::lora_tracker::TxPolicy p;
+            p.copies = 1;
+            p.earliest_us = loratiming::fireInstantUs(t0, 0);
+            p.on_mark = true;
+            p.expects_reply = false;
+            ASSERT_TRUE(t.send(f.data(), f.size(), p));
+            last_t0 = t0;
+            const int64_t release = p.earliest_us - LORATracker::kPrepareLeadUs;
+            proto_sim_timer_set_now_us(release);
+            ASSERT_TRUE(t.serviceTxQueue(release)) << "body " << body << " mark " << k;
+            const auto &pk = lorahal::rec().packets.back();
+            EXPECT_EQ(lorahal::rec().tx_us.back(), p.earliest_us) << "body " << body << " mark " << k;
+            macwire::WireHdr got;
+            size_t off = 0, blen = 0;
+            ASSERT_TRUE(macwire::decode(pk.data(), pk.size(), &got, &off, &blen));
+            const int64_t stamped = t.gridAnchorUs() + (int64_t) got.fire_round * (int64_t) timedgrid::kRoundUs +
+                                    (int64_t) got.fire_offset_us;
+            EXPECT_EQ(stamped, t0) << "body " << body << " mark " << k;
+            now = release;   // the next tick is one round after this one
+        }
+    }
+}
+
 TEST(MacWireV1Burst, TheFleetBeaconGoesOutVerbatim) {
     lorahal::rec().reset();
     const mv::Vector &v = beaconVector();
@@ -319,4 +378,3 @@ TEST(MacWireV1Burst, TheFleetBeaconGoesOutVerbatim) {
     ASSERT_EQ(lorahal::rec().packets.size(), 1u);
     EXPECT_EQ(lorahal::rec().packets[0], f);
 }
-#endif   // MAC_WIRE_V1

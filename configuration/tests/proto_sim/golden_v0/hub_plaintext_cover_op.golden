@@ -1,4 +1,0 @@
-raw 0 cmd=10 len=14 dst=18 msgid=1 burst=0/0 onmark=0 stamped=0 copies=0 stride=0 earliest=0 onmark=0 reply=1 prio=1 sup=18/2 0a08081210021801200152020800
-raw 1 cmd=10 len=14 dst=18 msgid=1 burst=0/0 onmark=0 stamped=0 copies=0 stride=0 earliest=0 onmark=0 reply=1 prio=1 sup=18/2 0a08081210021801200152020800
-air 0 cmd=10 len=14 dst=18 msgid=1 burst=0/0 onmark=0 stamped=0 0a08081210021801200152020800
-air 1 cmd=10 len=14 dst=18 msgid=1 burst=0/0 onmark=0 stamped=0 0a08081210021801200152020800

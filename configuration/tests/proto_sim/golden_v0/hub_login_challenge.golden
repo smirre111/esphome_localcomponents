@@ -1,4 +1,0 @@
-raw 0 cmd=14 len=32 dst=18 msgid=1 burst=0/0 onmark=0 stamped=0 copies=0 stride=0 earliest=0 onmark=0 reply=1 prio=1 sup=0/0 0a0808121002180120017214089799fedf0210011a080a20e4cf262c32802001
-raw 1 cmd=14 len=32 dst=18 msgid=1 burst=0/0 onmark=0 stamped=0 copies=0 stride=0 earliest=0 onmark=0 reply=1 prio=1 sup=0/0 0a0808121002180120017214089799fedf0210011a080a20e4cf262c32802001
-air 0 cmd=14 len=32 dst=18 msgid=1 burst=0/0 onmark=0 stamped=0 0a0808121002180120017214089799fedf0210011a080a20e4cf262c32802001
-air 1 cmd=14 len=32 dst=18 msgid=1 burst=0/0 onmark=0 stamped=0 0a0808121002180120017214089799fedf0210011a080a20e4cf262c32802001
