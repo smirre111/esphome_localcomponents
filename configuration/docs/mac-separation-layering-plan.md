@@ -218,7 +218,7 @@ Status legend: `[x]` done (commit), `[~]` in progress / partial, `[ ]` open,
       turnaround 6.93/7.50 and 8.81/9.88 ms, Mode B 598/598, FER_link 0,
       MIC_FAIL 0; stack minima send task 1312/4096, esp_timer 1528/3584 free.
 
-### W5 hub: delete v0 (plan, 2026-10-19)
+### W5 hub: delete v0 (plan 2026-10-19, DONE 2026-10-24)
 
 Order: everything that does not need the proto removal first (W5a/b, small
 commits, v1 goldens byte-identical, lint baselines lowered); the proto removal
@@ -261,3 +261,20 @@ W5c -- the proto (lands in both repos at once, after the node's commit):
   sim models that speak v0 are rewritten or retired; FrameCrypto.h legacy
   helpers go per the node plan (re-vendored).
 - Gate: suite green, v1 goldens byte-identical, ESP32 build clean.
+
+Status:
+- [x] W5a hub (`e8ce0f8`): the switch, the OFF build, golden_v0/ and the 3 OFF-only tests.
+- [x] W5b + W5c hub (`7473c61`, node e8647fc fw 1.1.52, stubs from the node's
+      regen_stubs.sh): every v0 production path above deleted, plus
+      `rx_timing_trusted_` (a v1 length is always a T0 input); hub-internal frame
+      types in `HubFrames.h` (Hdr / Down / Up / UpAck / Sealed, mirroring the
+      node's NodeFrames.h), HubWire decodes straight into them. Tests: the bridge
+      is gone and sim/wire_codec is native v1; the node-harness targets were
+      PORTED, not retired (real_cmd_dispatcher_test is the only CmdDispatcher
+      behaviour suite: it now feeds v1 frames built from the node's DownlinkView +
+      MacFrameHdr, sealed with the node's own keys). Retired with their deleted
+      helpers: 21 frame_crypto tests (v0 layouts; v1 pinned by MacWireVectors),
+      5 node FrameCanon tests, the hub's v0 seal/retag characterisation (ported as
+      MacWireVectorsHub/MacWireV1Seal.*) and the wide-header retag test (not
+      representable). proto_sim 1739 pass / 1 disabled; v1 goldens byte-identical;
+      all 24 drift gates green against e8647fc; lint client.pack_sites 1 -> 0.
