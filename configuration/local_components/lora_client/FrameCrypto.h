@@ -80,7 +80,7 @@ inline bool netKeyIsSet(const uint8_t *key, size_t len, uint32_t net_key_id)
 // burst shape (seal once, stamp+retransmit the same ciphertext across up to
 // 17 copies with per-copy timing fields) made that nonce-uniqueness
 // invariant fragile across three review rounds. CTR for confidentiality
-// (encrypt once per msgId, at allocation time) plus a nonce-free CMAC for
+// (encrypt once per frame counter, at allocation time) plus a nonce-free CMAC for
 // per-copy authenticity (tag any number of times, since CMAC has no nonce to
 // reuse) matches the actual access pattern instead of fighting it.
 // ---------------------------------------------------------------------------
@@ -126,6 +126,8 @@ inline void buildSessionKeyKdfInput(uint8_t half, uint32_t session_id,
 //
 // CTR initial counter block (16 bytes):
 //   sessionId_BE32 || nodeAddr_BE32 || ((dir<<31)|msgId)_BE32 || blockIdx_BE32
+// (`msgId` / `msgid` in this file = the v1 header's FCNT; sessionId = the
+// LOGIN's hub nonce.)
 //
 // `nodeAddr` is whichever address is the non-hub endpoint, in BOTH
 // directions — this is what removes the cross-node IV-domain collision a
@@ -159,6 +161,7 @@ inline void buildCtrInitialBlock(uint32_t session_id, uint32_t node_addr,
 static constexpr uint32_t kMsgidCtrLimit = 0x80000000u;
 
 // May a frame carrying this msgid be sealed (uplink) or opened (downlink)?
+// 0x7FFFFFFF is the last usable value; 0x80000000 and above are refused.
 inline bool msgidFitsCtr(uint32_t msgid)
 {
     return msgid < kMsgidCtrLimit;

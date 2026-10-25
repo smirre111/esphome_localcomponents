@@ -18,7 +18,7 @@
 // ---------------------------------------------------------------------------
 // MacWire.h -- MAC wire format v1 (stage S8), the fixed-offset frame header.
 //
-// Specification: esphome/configuration docs/mac-wire-format.md (hub 5787cf0).
+// Specification: esphome/configuration docs/mac-wire-format.md.
 // This header holds every constant, offset and layout helper of that spec and
 // nothing else: no crypto calls, no protobuf, no ESP-IDF. Shared: the node copy
 // is the source, the hub vendors it byte-identical under a drift gate.
@@ -41,7 +41,7 @@
 // All multi-byte fields big-endian. The tag is AES-CMAC (truncated to 8) over
 // buildMacInputPrefix() || frame[0 .. L-8) -- every transmitted byte except the
 // tag, so the on-air length is authenticated and there is no canonical-length
-// problem (FrameCanon goes away in W5).
+// problem.
 //
 // decode() makes SHAPE checks only; it never trusts content (FCNT bit 31, burst
 // position, stamp values are the receiver's business after the tag verified).

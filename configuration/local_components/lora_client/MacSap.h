@@ -29,8 +29,11 @@
 // hub vendors a byte-identical copy into local_components/lora_client/ and a
 // drift gate compares the two -- edit THIS file, never the vendored one.
 //
-// No wire change: until stage S8 MacHdr is decoded from today's protobuf
-// LoraHeader; the field set here is what a fixed header will carry.
+// Since S8 the fields of MacHdr are the MAC wire v1 fixed header (MacWire.h,
+// docs/mac-wire-format.md). Today the layers call each other through bespoke
+// methods (LinkSecurity::sealWireSession, Mac0Access::commitTiming, ...); the
+// request/indication structs below name the primitives those methods
+// implement (review N26: the SAP is the vocabulary, not yet the call API).
 // ---------------------------------------------------------------------------
 
 namespace mac
@@ -39,12 +42,13 @@ namespace mac
 // A short (one-byte) node/hub address. 0xFF is broadcast, 0 is "unprovisioned".
 using Addr = uint8_t;
 
-// MAC-1 frame counter. Today the protobuf header's msgid (31 bits usable: the
-// CTR counter block holds 31, see framecrypto::msgidFitsCtr).
+// MAC-1 frame counter: the header's FCNT (31 bits usable: the CTR counter
+// block holds 31, see framecrypto::msgidFitsCtr). Older code calls it msgid.
 using FCnt = uint32_t;
 
-// Payload demultiplexer (LoRaWAN FPort-like). Until the wire stage the port is
-// COMPUTED from the protobuf oneof case by one table, never carried.
+// Payload demultiplexer (LoRaWAN FPort-like): the header's PORT byte, which
+// selects the body PDU (0 HubMacPdu/NodeMacPdu, 1 LoginMsg/ClientRegister,
+// 2 HubAppPdu/NodeAppPdu).
 enum class Port : uint8_t
 {
     Mac0Mgmt = 0,   // grid, beacon, demote, ModeTest, MAC control
@@ -57,8 +61,8 @@ enum class Port : uint8_t
 // header keeps `mac1freshness::Class`.
 using Freshness = mac1freshness::Class;
 
-// The MAC header, decoded. Today every field comes from the protobuf
-// LoraHeader; at S8 they become fixed-offset bytes.
+// The MAC header, decoded (the fields MAC-0 and MAC-1 need; AUTH, ACK_REQ and
+// ACKED_FCNT stay in macwire::WireHdr).
 struct MacHdr
 {
     Addr     dst{0};
@@ -74,7 +78,7 @@ struct MacHdr
     bool     stamped{false};
     uint32_t fire_round{0};
     uint32_t fire_off_us{0};
-    // Session-opening uplink only (Tier 3 sessionNonce); 0 on every other frame.
+    // Session-opening uplink only (the NODE_NONCE extension); 0 on every other frame.
     uint32_t session_nonce{0};
 };
 
@@ -92,9 +96,11 @@ struct TxOpts
 
 // Per-copy authentication WITHOUT MAC-0 knowing keys: MAC-2 hands MAC-0 a
 // sealer bound to ONE frame's key generation; MAC-0 calls it once per copy
-// after stamping that copy's header. Returns false to drop the copy.
+// after stamping that copy's header bytes. Since S8 the tag covers the raw
+// copy: `frame` / `frame_len` are the copy's bytes up to the tag (header
+// included), not a ciphertext. Returns false to drop the copy.
 using CopySealer = bool (*)(void *ctx, const MacHdr &copy_hdr,
-                            const uint8_t *ct, size_t ct_len, uint8_t tag[8]);
+                            const uint8_t *frame, size_t frame_len, uint8_t tag[8]);
 
 // What MAC-0 knows about a received frame's timing. Travels up with the
 // indication and back down with MAC-1's freshness verdict (commitTiming).
@@ -102,7 +108,9 @@ struct RxTicket
 {
     int64_t  t0_us{0};            // SFD-end T0 recovered from RxDone
     uint32_t len{0};              // on-air length
-    bool     timing_trusted{false};  // FrameCanon verdict: the length may be used for T0
+    // May the length be used for T0? Always true on MAC wire v1, whose tag
+    // covers every raw byte (the FrameCanon check it replaced is gone).
+    bool     timing_trusted{false};
     uint32_t window_gen{0};       // the RX window that heard it (mark hits are window-scoped)
 };
 
@@ -132,7 +140,7 @@ enum class SecRxStatus : uint8_t
     Plaintext,    // arrived unsealed (bootstrap / exempt broadcast)
     BadMic,       // CMAC (or LOGIN/REGISTER MIC) failed
     NoSession,    // sealed, but no keys for this peer
-    MsgidSpent,   // the msgid space is exhausted (2^31); a fresh session is needed
+    MsgidSpent,   // the FCNT space is exhausted (2^31); a fresh session is needed
 };
 
 // MAC-2 data request (down) and indication (up).

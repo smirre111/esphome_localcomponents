@@ -15,34 +15,34 @@ PROTOBUF_C__BEGIN_DECLS
 #endif
 
 
+typedef struct HubMacPdu HubMacPdu;
+typedef struct HubAppPdu HubAppPdu;
+typedef struct NodeMacPdu NodeMacPdu;
+typedef struct NodeAppPdu NodeAppPdu;
+typedef struct SysopCmd SysopCmd;
+typedef struct MacAck MacAck;
+typedef struct LoginMsg LoginMsg;
+typedef struct ClientRegister ClientRegister;
 typedef struct LoraCoverOperation LoraCoverOperation;
 typedef struct ClientConfig ClientConfig;
 typedef struct CoverConfig CoverConfig;
-typedef struct LoginMsg LoginMsg;
-typedef struct PhaseReport PhaseReport;
 typedef struct TimeSync TimeSync;
-typedef struct ScheduleEntry ScheduleEntry;
 typedef struct ScheduleConfig ScheduleConfig;
-typedef struct NodeWakeBeacon NodeWakeBeacon;
-typedef struct DriftTest DriftTest;
-typedef struct MacControl MacControl;
-typedef struct GridBeacon GridBeacon;
-typedef struct GridDemote GridDemote;
-typedef struct GridSync GridSync;
-typedef struct ModeTest ModeTest;
-typedef struct Hist Hist;
-typedef struct ModeTestReport ModeTestReport;
-typedef struct ClientRegister ClientRegister;
+typedef struct ScheduleEntry ScheduleEntry;
 typedef struct ClientAvailable ClientAvailable;
 typedef struct ClientBattery ClientBattery;
 typedef struct CoverPosition CoverPosition;
+typedef struct NodeWakeBeacon NodeWakeBeacon;
+typedef struct PhaseReport PhaseReport;
+typedef struct GridSync GridSync;
+typedef struct GridBeacon GridBeacon;
+typedef struct GridDemote GridDemote;
 typedef struct GridSyncRequest GridSyncRequest;
-typedef struct HubMacPdu HubMacPdu;
-typedef struct SysopCmd SysopCmd;
-typedef struct HubAppPdu HubAppPdu;
-typedef struct MacAck MacAck;
-typedef struct NodeMacPdu NodeMacPdu;
-typedef struct NodeAppPdu NodeAppPdu;
+typedef struct MacControl MacControl;
+typedef struct ModeTest ModeTest;
+typedef struct Hist Hist;
+typedef struct ModeTestReport ModeTestReport;
+typedef struct DriftTest DriftTest;
 
 
 /* --- enums --- */
@@ -72,11 +72,26 @@ typedef enum _ModeTest__Mode {
   MODE_TEST__MODE__MODE_B = 2,
   MODE_TEST__MODE__MODE_C = 3,
   /*
-   * deliberate ARM error, for T_detect (bench only)
+   * deliberate arm error, for T_detect (bench only)
    */
   MODE_TEST__MODE__MODE_SWEEP = 4
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(MODE_TEST__MODE)
 } ModeTest__Mode;
+typedef enum _AckStatus {
+  /*
+   * executed
+   */
+  ACK_STATUS__ACK_OK = 0,
+  /*
+   * not dispatched (no known case) or failed
+   */
+  ACK_STATUS__ACK_ERROR = 1,
+  /*
+   * reserved for "not applied now"; not sent today
+   */
+  ACK_STATUS__ACK_BUSY = 2
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(ACK_STATUS)
+} AckStatus;
 typedef enum _CovOperation {
   COV_OPERATION__CMD_OPEN = 0,
   COV_OPERATION__CMD_CLOSE = 1,
@@ -84,51 +99,29 @@ typedef enum _CovOperation {
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(COV_OPERATION)
 } CovOperation;
 typedef enum _ClientOperation {
+  /*
+   * == "unset" on the wire: refused by the node, never sent
+   */
   CLIENT_OPERATION__CMD_ENABLE_WIFI = 0,
   CLIENT_OPERATION__CMD_DISABLE_WIFI = 1,
   CLIENT_OPERATION__CMD_OTA = 2,
   CLIENT_OPERATION__CMD_STATUS = 3,
   CLIENT_OPERATION__CMD_SLEEP = 4,
   /*
-   * Immediate mode transition for a node that is currently awake.  These ride
-   * the existing tracked/acked sysop path (retransmit until the MAC ACK), so a
-   * dropped toggle recovers.  The PERSISTED mode setting lives in
-   * ScheduleConfig.mode — these two must be kept consistent by the hub.
+   * Immediate mode switch for an awake node. The persisted setting is
+   * ScheduleConfig.mode; the hub keeps the two consistent.
    */
   CLIENT_OPERATION__CMD_MODE_AUTO = 5,
   CLIENT_OPERATION__CMD_MODE_INTERACTIVE = 6,
   /*
-   * 2026-09-29: runtime, on-demand debug toggles for motor/endstop
-   * diagnostics that used to be hand-edited `constexpr bool` flags in
-   * MotorCtrl.cpp before every capture session. Same tracked/acked sysop
-   * path as CMD_MODE_*, so a dropped toggle recovers. Persisted node-side
-   * (DebugFlags.h / NVS), survives reboot -- except TRACE_CAPTURE_ARM,
-   * which is one-shot by design (see DebugFlags.h) and never needs an
-   * explicit OFF command.
+   * Motor/endstop debug toggles, persisted node-side (DebugFlags.h) except
+   * TRACE_CAPTURE_ARM, which is one-shot.
    */
   CLIENT_OPERATION__CMD_DEBUG_IDLE_CURRENT_ON = 7,
   CLIENT_OPERATION__CMD_DEBUG_IDLE_CURRENT_OFF = 8,
   CLIENT_OPERATION__CMD_DEBUG_TRACE_CAPTURE_ARM = 9
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(CLIENT_OPERATION)
 } ClientOperation;
-/*
- * Result of processing a command on the node.
- */
-typedef enum _AckStatus {
-  /*
-   * command accepted / executed
-   */
-  ACK_STATUS__ACK_OK = 0,
-  /*
-   * command rejected or failed
-   */
-  ACK_STATUS__ACK_ERROR = 1,
-  /*
-   * node busy, command not applied
-   */
-  ACK_STATUS__ACK_BUSY = 2
-    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(ACK_STATUS)
-} AckStatus;
 typedef enum _SchedAction {
   SCHED_ACTION__SCHED_OPEN = 0,
   SCHED_ACTION__SCHED_CLOSE = 1,
@@ -141,7 +134,7 @@ typedef enum _SchedAction {
 } SchedAction;
 typedef enum _NodeMode {
   /*
-   * today's behaviour: radio listening while awake
+   * radio listening while awake
    */
   NODE_MODE__MODE_INTERACTIVE = 0,
   /*
@@ -161,1094 +154,20 @@ typedef enum _WakeReason {
    */
   WAKE_REASON__WAKE_TIMER_CHECKIN = 2,
   /*
-   * physical button -> switches to interactive
+   * physical button -> interactive
    */
   WAKE_REASON__WAKE_BUTTON = 3,
   WAKE_REASON__WAKE_UNKNOWN = 4,
   /*
-   * NOT A WAKE AT ALL — the node's Mode B status changed, and it is telling
-   * the hub unprompted.
-   * The PhaseReport that says whether a node is in Mode B rides an UPLINK: a
-   * wake beacon or a MAC ACK. An interactive node never sleeps, so it
-   * never wakes, so it never beacons; with no traffic it has nothing to ack.
-   * So the hub's belief about a promoted, QUIET node is stale indefinitely,
-   * and txRefusalFor can never clear NoPhaseReport for exactly the node that
-   * most deserves single shot — Mode B's 17->1 airtime saving is unreachable
-   * in the quiet regime Mode B exists for.
-   * Measured 2026-09-20 on node 2: 12.6 minutes provably in Mode B (reason 0
-   * on its own console, 2.44 % RX, one window per round) while the hub
-   * reported demotion reason 5 and refusal 7 throughout.
-   * A distinct value rather than reusing WAKE_TIMER_CHECKIN: this project has
-   * twice been bitten by a field that quietly lies (fwversion reporting 0,
-   * mode echoing the request rather than what was applied), and a beacon
-   * claiming a check-in that never happened is the same defect in a new
-   * place. Appended, never renumbered — the hub's name table is positional.
+   * Not a wake: the node's Mode B status changed and it tells the hub
+   * unprompted (a quiet interactive node has no other uplink to carry it).
+   * Appended, never renumbered: the hub's name table is positional.
    */
   WAKE_REASON__WAKE_MODE_CHANGED = 5
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(WAKE_REASON)
 } WakeReason;
 
 /* --- messages --- */
-
-typedef enum {
-  LORA_COVER_OPERATION__COVOP__NOT_SET = 0,
-  LORA_COVER_OPERATION__COVOP_OPERATION = 1,
-  LORA_COVER_OPERATION__COVOP_POSITION = 2
-    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_COVER_OPERATION__COVOP__CASE)
-} LoraCoverOperation__CovopCase;
-
-struct  LoraCoverOperation
-{
-  ProtobufCMessage base;
-  /*
-   * The command's identity (docs/mac-wire-format.md section 7), allocated per
-   * Home Assistant command by the hub's Control channel and kept across
-   * retries and re-packs. 0 = not set.
-   */
-  uint32_t cmd_id;
-  LoraCoverOperation__CovopCase covop_case;
-  union {
-    float position;
-    CovOperation operation;
-  };
-};
-#define LORA_COVER_OPERATION__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&lora_cover_operation__descriptor) \
-    , 0, LORA_COVER_OPERATION__COVOP__NOT_SET, {0} }
-
-
-struct  ClientConfig
-{
-  ProtobufCMessage base;
-  uint64_t mac_addr;
-  uint32_t addr;
-  uint32_t subnt;
-  ProtobufCBinaryData name;
-  uint64_t sleepduration;
-  /*
-   * Battery send interval in seconds (node force-sends battery this often).
-   * 0 = unset (old hub / not configured) -> node keeps its current default.
-   */
-  uint32_t batteryinterval;
-};
-#define CLIENT_CONFIG__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&client_config__descriptor) \
-    , 0, 0, 0, {0,NULL}, 0, 0 }
-
-
-struct  CoverConfig
-{
-  ProtobufCMessage base;
-  uint32_t opentime;
-  uint32_t closetime;
-  float blindheightmm;
-  float axlediametermm;
-  float blindthicknessmm;
-  /*
-   * Slat-slack handling at the bottom (closed) end.  openTime/closeTime are the
-   * bar-TRAVEL-only times (top <-> sill).  These add the extra motor run at the
-   * sill where the bar is parked and the slats nest/un-nest:
-   *   openSlack  = un-seal time: motor runs UP with position pinned at 0 before
-   *                travel starts, when opening FROM the fully-sealed state.
-   *   closeSlack = seal time: extra run budget after travel reaches 0 on a full
-   *                close, so the timed backstop does not cut the compression.
-   * Both in seconds; 0 = disabled (legacy behaviour).
-   */
-  uint32_t openslack;
-  uint32_t closeslack;
-};
-#define COVER_CONFIG__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&cover_config__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0 }
-
-
-struct  LoginMsg
-{
-  ProtobufCMessage base;
-  /*
-   * hub_nonce (mac-separation-implementation-plan.md section 2(b)): esp_random()
-   * on the hub. Mixed into the session-key derivation; covered by the frame's
-   * K_AUTH tag.
-   */
-  uint32_t nonce;
-  /*
-   * Set by the hub when it has NOT yet pushed config to this node this session
-   * (config_synced_ == false) — e.g. the hub rebooted (config change / OTA)
-   * while the node stayed awake and re-established via LOGIN instead of REGISTER.
-   * On receipt the node sends a REGISTER, which drives the hub's normal
-   * register -> config-push -> login path, delivering the updated config to an
-   * awake node without requiring it to reboot.  False on a normal login.
-   */
-  protobuf_c_boolean request_register;
-  /*
-   * Security review finding 7: true only when this is the hub's FIRST
-   * LOGIN send for this node since the hub process itself started
-   * (!login_acked_ at send time) — i.e. a genuine hub reboot, not one of
-   * the other triggers that mint a fresh session without the hub having
-   * restarted (tracked-op-retry exhaustion, config_sync_relogin, the
-   * REGISTER follow-up, the sleep-fallback timer). The node's
-   * demote-on-authenticated-LOGIN uses this instead of treating every
-   * fresh session as proof of a hub reboot, which cost a Mode B node its
-   * phase anchor on every one of those other triggers too.
-   */
-  protobuf_c_boolean hub_rebooted;
-};
-#define LOGIN_MSG__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&login_msg__descriptor) \
-    , 0, 0, 0 }
-
-
-/*
- * ---------------------------------------------------------------------------
- * What the node has measured about this link's TIMING.
- * This is the evidence section 4.6 promotes single-shot on: a measurement of
- * the HUB's transmissions against the marks the node armed for. It is not a
- * claim of readiness — the node is reporting where the hub's frames landed,
- * and the authenticated (CMAC-tagged) frame it rides is what makes it evidence
- * rather than an assertion.
- * It rides uplinks the node ALREADY SENDS, and that is a deliberate constraint
- * rather than an economy. A per-node periodic uplink at the cadence this needs
- * is exactly what section 4.4 prices and rejects: a unicast keepalive at 5.8
- * min is 3.4x worse than plain burst at 32 nodes. Freshness comes for free on
- * an ack — every addressed frame feeds the phase tracker, so a node acking a
- * command has just taken a sample against the frame it is acking.
- * Its own message rather than a row of fields per carrier, because two copies
- * of the same measurement is how they drift apart.
- */
-struct  PhaseReport
-{
-  ProtobufCMessage base;
-  /*
-   * 0 => nothing else here carries information
-   */
-  uint32_t samples;
-  /*
-   * mean of (measured - predicted), microseconds
-   */
-  int32_t errus;
-  /*
-   * Peak-to-peak, not a variance: it is what exposes a BIMODAL fit. Two
-   * clusters one slot pitch apart average to something innocent, and the
-   * spread is the only number that shows them.
-   */
-  int32_t spreadus;
-  /*
-   * Samples that fell outside the guard band. Mean and spread can both look
-   * healthy while individual samples miss the window, so the hub's promotion
-   * test is the node's own phaseTrustworthy(): every sample inside.
-   */
-  uint32_t outsideguard;
-  /*
-   * Gates promotion outright: on the internal RC oscillator (~5 %) a node
-   * cannot hold phase between frames and must stay in Mode A VISIBLY rather
-   * than silently failing to hear anything.
-   */
-  /*
-   * 0 unknown, 1 internal RC, 2 32 kHz crystal
-   */
-  uint32_t rtcslowsrc;
-  /*
-   * node-vs-hub clock error, 0 if unmeasured
-   */
-  int32_t ppmestimate;
-  /*
-   * 0 => ppmEstimate carries no information
-   */
-  uint32_t ppmsamples;
-  /*
-   * Windows the node MEANT to open and never did, because the radio was
-   * still busy when the mark came round. Counted since boot.
-   * It belongs beside the phase numbers because it is their complement: the
-   * fields above measure the hub's transmissions against the marks the node
-   * ARMED, and an unarmed mark is invisible to all of them — WMR included,
-   * since noteMarkArmed() is what opens a mark at all. So a node can report
-   * a perfect window-mark rate while hearing nothing, which is the one Mode B
-   * failure the KPIs cannot see. The count was kept on the node and never
-   * carried, which made it unseeable in a different way.
-   */
-  uint32_t rxbusyskips;
-  /*
-   * THE NODE'S DECISION (2026-09-14): whether it is in Mode B right now —
-   * arming one timed window per round — and, when not, the Demotion value
-   * that says why. Only the node knows whether its own phase error is small
-   * enough; the hub follows this rather than re-judging the numbers above.
-   * proto3 false = not in Mode B, so an older node keeps the hub bursting.
-   */
-  protobuf_c_boolean timedrxactive;
-  uint32_t demotionreason;
-};
-#define PHASE_REPORT__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&phase_report__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-
-
-/*
- * Hub -> node wall-clock synchronisation.  The node has no clock source of its
- * own (no SNTP, no RTC battery); its RTC runs off the external 32.768 kHz
- * crystal (CONFIG_RTC_CLK_SRC_EXT_CRYS, ~+/-20 ppm ~= 2 s/day), which is why
- * uncapped deep sleep between scheduled events is viable once seeded here.
- */
-struct  TimeSync
-{
-  ProtobufCMessage base;
-  /*
-   * Unix UTC seconds at hub TX time
-   */
-  uint64_t epoch;
-  /*
-   * LOCAL offset incl. DST, seconds (entries are local)
-   */
-  int32_t utcoffset;
-  /*
-   * epoch of next DST transition, 0 = unknown
-   */
-  uint64_t dstnext;
-  /*
-   * "I have nothing further for you — you may sleep."
-   * Without this the node cannot tell "the hub is finished" from "the hub is
-   * slow", so it waits out a fixed 20 s of silence before sleeping. Measured:
-   * a check-in wake costs 28.1 s, of which the real work finishes at 4.7 s.
-   * 73% of every wake is the node proving a negative.
-   * The hub already knows the answer — it has a per-node queue — so it can
-   * just say so. This is LoRaWAN's FPending bit inverted: there a set bit
-   * means "stay awake, more coming"; here it means "done, you may go".
-   * Deliberately NOT a "moreData" flag with the opposite sense. proto3 omits
-   * default values, so a hub that predates this field — or one that forgets
-   * to set it — sends false, which must mean "keep waiting", i.e. exactly
-   * today's behaviour. The safe default has to be the one that costs power,
-   * never the one that drops a command.
-   */
-  protobuf_c_boolean sleepok;
-  /*
-   * U-4: how many of this node's uplinks the HUB has seen land inside its
-   * slot, consecutively. The node's own promotion criterion
-   * (NodeState::in_slot_uplinks, Demotion::NotConfirmed) requires it and had
-   * no way to know it, so it was hardcoded optimistic and the criterion could
-   * never fire.
-   * It has to come from here rather than be measured locally, and that is the
-   * whole point of the field: §4.6 rejects a node's own claim as evidence —
-   * "a beacon saying I am ready says nothing about where its window actually
-   * landed" — because the placement is produced by the node's TRANSMIT path
-   * and the question is about where the frame ARRIVED. Only the hub can
-   * answer that.
-   * Proto3 omits defaults, so a hub predating this field sends 0, which the
-   * node reads as "not confirmed" and stays in Mode A. That is the correct
-   * direction to fail: the policy is a list of reasons to fall BACK, so an
-   * unset field costs airtime rather than a command. Note the node can still
-   * EARN the count from Mode A — the uplink aim places its frames on its mark
-   * regardless of mode, which is what makes this measurable at all.
-   */
-  uint32_t inslotuplinks;
-};
-#define TIME_SYNC__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&time_sync__descriptor) \
-    , 0, 0, 0, 0, 0 }
-
-
-/*
- * One schedule slot.  minuteOfDay is ALWAYS an absolute local time: sunrise /
- * sunset entries and jitter are resolved hub-side before sending, so the node
- * never computes astronomy and stays autonomous during a hub outage.
- */
-struct  ScheduleEntry
-{
-  ProtobufCMessage base;
-  /*
-   * 0..1439, local time
-   */
-  uint32_t minuteofday;
-  /*
-   * bit0=MON .. bit6=SUN
-   */
-  uint32_t daymask;
-  SchedAction action;
-  /*
-   * 0..100, only meaningful for SCHED_POSITION
-   */
-  uint32_t positionpct;
-  /*
-   * 0=fixed 1=sunrise 2=sunset (telemetry / HA display only)
-   */
-  uint32_t kind;
-};
-#define SCHEDULE_ENTRY__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&schedule_entry__descriptor) \
-    , 0, 0, SCHED_ACTION__SCHED_OPEN, 0, 0 }
-
-
-/*
- * Hub -> node.  The complete schedule + mode settings as ONE self-contained
- * blob (~150 B on air with 8 entries, vs. the 255 B frame limit).  Idempotent:
- * the node replaces its stored schedule wholesale, so there is no partial-update
- * state to get out of sync.  Only ENABLED entries are sent.
- * Sent SINGLE-SHOT (BURST_CNT = 0), never bursted: at ~150 B its
- * airtime (~95 ms at SF7/BW500/CR4/8) exceeds the 88 ms burst slot spacing.  It
- * is only ever sent in reply to a NodeWakeBeacon, so the node is provably
- * listening and the burst would be redundant anyway.
- */
-struct  ScheduleConfig
-{
-  ProtobufCMessage base;
-  /*
-   * CRC32 over the canonical blob; echoed by the node
-   */
-  uint32_t version;
-  NodeMode mode;
-  /*
-   * 0 = stay interactive until told otherwise
-   */
-  uint32_t interactivetimeout_s;
-  /*
-   * 0 = no periodic check-in wake
-   */
-  uint32_t checkininterval_s;
-  /*
-   * wake this early to beacon before executing
-   */
-  uint32_t beaconlead_s;
-  /*
-   * keep listening this long after executing
-   */
-  uint32_t posteventwindow_s;
-  /*
-   * 0 = never execute a missed event
-   */
-  uint32_t catchupwindow_s;
-  /*
-   * max 8
-   */
-  size_t n_entries;
-  ScheduleEntry **entries;
-};
-#define SCHEDULE_CONFIG__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&schedule_config__descriptor) \
-    , 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0,NULL }
-
-
-/*
- * Node -> hub, sent on every wake.  Carries everything the hub needs to decide
- * whether to push config, plus the telemetry that the periodic battery timer
- * used to provide (that timer is disabled in auto mode).
- */
-struct  NodeWakeBeacon
-{
-  ProtobufCMessage base;
-  WakeReason reason;
-  /*
-   * version the node currently has applied; 0 = none
-   */
-  uint32_t schedversion;
-  /*
-   * node clock at TX -> hub measures real drift
-   */
-  uint64_t nodeepoch;
-  NodeMode mode;
-  float voltage;
-  float position;
-  /*
-   * how long the node will keep listening
-   */
-  uint32_t awakewindow_ms;
-  /*
-   * 0 = nothing scheduled
-   */
-  uint64_t nexteventepoch;
-  /*
-   * node kept its AEAD session -> hub may skip login
-   */
-  protobuf_c_boolean sessionresume;
-  /*
-   * false -> node refuses to sleep, needs TimeSync
-   */
-  protobuf_c_boolean clockvalid;
-  /*
-   * capability gate for the hub
-   */
-  uint32_t fwversion;
-  PhaseReport *phase;
-  /*
-   * esp_reset_reason() from the boot that produced this beacon.
-   * A node in the field is otherwise undiagnosable: three separate incidents
-   * (a cold boot that lost RTC RAM, a run of OTA reboots, and a node that
-   * simply stopped answering) all needed the reset cause and none of them
-   * could be answered without physically attaching a serial cable. WakeReason
-   * above says why the node WOKE; this says why it BOOTED, which is a
-   * different question and the one that matters when RTC state was lost.
-   * Raw esp_reset_reason_t so the hub does not have to track an enum the IDF
-   * owns: 1=POWERON 3=SW 4=INT_WDT 5=TASK_WDT 6=WDT 7=DEEPSLEEP 8=BROWNOUT.
-   */
-  uint32_t resetreason;
-  /*
-   * --- Mode C, MAC-0: the wake clock ------------------------------------
-   * A Class A node wakes on the RTC timer, which counts the 32 kHz crystal
-   * through deep sleep; ESP-IDF converts the requested sleep to ticks with the
-   * NOMINAL period, so every scheduled wake inherits the crystal's error. The
-   * hub measures it: this beacon reports the RTC tick count at the PREVIOUS
-   * beacon's T0 (the counter runs through sleep and resets only at power-on),
-   * and the hub pairs it with its own receive stamp of that beacon, matched by
-   * msgId. Hub us against ticks x nominal period is the wake clock's rate.
-   * 0 / 0 = no previous beacon since power-on.
-   * The paired beacon, identified by its FCNT (renamed from prevBeaconMsgId
-   * in S8: same number, type and values).
-   */
-  uint32_t prevbeaconfcnt;
-  uint64_t prevbeacont0ticks;
-  /*
-   * The node's measured crystal period (Q19 us per tick), for the report: the
-   * rate the hub fits should equal the crystal error this implies.
-   */
-  uint32_t rtcperiodq19;
-  /*
-   * Class A funnel of the PREVIOUS wake, taken at deep-sleep entry: receive
-   * windows opened and hit, frames detected and CRC-valid. Mode C's FER.
-   */
-  uint32_t prevwakewindows;
-  uint32_t prevwakehits;
-  uint32_t prevwakedetected;
-  uint32_t prevwakecrcvalid;
-  /*
-   * Mode C's pass line (wake-timing error |ppm| < 20): the deep sleep before
-   * THIS wake, as the node wanted it and as it was handed to ESP-IDF after the
-   * node's crystal correction. The hub converts the handed-over value through
-   * its own wake-clock fit to the real sleep in hub time, and compares it with
-   * the request. Equal values = no correction applied. 0 = unknown (power-on).
-   */
-  uint64_t prevsleeprequestedus;
-  uint64_t prevsleepappliedus;
-};
-#define NODE_WAKE_BEACON__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
-    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-
-
-/*
- * Bench tool: characterise node-vs-hub clock drift (see DriftEstimator.h).
- * Switched over the air rather than compiled in, so a test can be started and
- * stopped from Home Assistant without reflashing — and, more importantly, so
- * the node can END it by itself.
- * While active the node holds the radio in CONTINUOUS RX to hear most of each
- * 17-copy burst, which costs ~11 mA against a ~1.2 mA interactive average. If
- * the "off" command were lost and the node had no timeout, that would flatten
- * the pack. Hence durationS is mandatory in practice and the node caps it.
- */
-struct  DriftTest
-{
-  ProtobufCMessage base;
-  protobuf_c_boolean enable;
-  /*
-   * node auto-exits after this; 0 = node default
-   */
-  uint32_t durations;
-  /*
-   * hub burst cadence while active; 0 = hub default
-   */
-  uint32_t gridperiodms;
-};
-#define DRIFT_TEST__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&drift_test__descriptor) \
-    , 0, 0, 0 }
-
-
-/*
- * MAC-layer control frame (configuration/docs/mac-layer.md section 5).
- * Consumed by the MAC: counted, timestamped, optionally echoed, and NEVER
- * handed to the application. That is the whole point of it — there is no inert
- * command to guard against, because no application code runs. It makes the MAC
- * measurable on its own: frame yield and timing without cover operations,
- * schedules or a motor anywhere in the path.
- * Deliberately usable with no session. The link is already unencrypted before
- * the base-nonce exchange, so an unencrypted MAC ping is not a new mode, it is
- * the state every node passes through on every cold boot. Security and the
- * frame counter are separate sublayers that get switched on afterwards, so each
- * one's cost lands in a measured delta rather than in the baseline.
- * ARMING a test is authenticated even when the traffic being measured is not:
- * a node with no session must refuse to start one.
- */
-struct  MacControl
-{
-  ProtobufCMessage base;
-  MacControl__Kind kind;
-  /*
-   * Opaque mark, carried whether or not the frame counter sublayer is on. A
-   * frame lost to the air leaves a GAP rather than shifting every later
-   * sample, which is why this is not derived from msgid.
-   */
-  uint32_t seq;
-  /*
-   * MAC-0 answers without an application round trip. This is what makes a
-   * measured turnaround mean RxDone -> TX fire and nothing else.
-   */
-  protobuf_c_boolean wantecho;
-  /*
-   * Pads time on air so a sweep can cover the 25 / 45 / 60 / 152 B frame
-   * table; the FIFO read is per byte, so turnaround must be measured as a
-   * function of length.
-   */
-  ProtobufCBinaryData pad;
-  /*
-   * --- MAC_CONFIG only (mac-layer.md section 4) -------------------------
-   * These switch the sublayers FOR MAC CONTROL FRAMES ONLY. Application
-   * traffic always passes through MAC-1 and MAC-2 whatever is set here; a
-   * switch that could disable the replay window or authentication for real
-   * commands would be a remote-unlock hole wearing a measurement's clothes.
-   * NEGATIVE sense, deliberately. proto3 bools default to FALSE and
-   * MAC_CONTROL__INIT zeroes them, so an "enable" field would make a zeroed
-   * or partially-filled message DISABLE both sublayers — a hub sending
-   * MAC_CONFIG with only durationS set, meaning to extend a run, would
-   * silently switch off the replay window. With "disable" the zero value is
-   * the safe one, which is the invariant this message needs.
-   * A MAC_CONFIG frame is refused unless it arrived AUTHENTICATED and the
-   * node holds a session — a plaintext frame asking to turn authentication
-   * off answers its own question.
-   */
-  /*
-   * MAC-1 off
-   */
-  protobuf_c_boolean disablecounter;
-  /*
-   * MAC-2 off
-   */
-  protobuf_c_boolean disablecrypto;
-  /*
-   * Node-owned deadline; the node caps it. 0 = node default.
-   */
-  uint32_t durations;
-};
-#define MAC_CONTROL__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&mac_control__descriptor) \
-    , MAC_CONTROL__KIND__MAC_UNSPEC, 0, 0, {0,NULL}, 0, 0, 0 }
-
-
-/*
- * GridSync — publishes the timed-window grid to one node (B3).
- * THE ANCHOR CANNOT BE SENT AS A TIMESTAMP. The hub's esp_timer and the node's
- * are unrelated clocks, so a hub-absolute anchor means nothing on the node.
- * Instead this frame declares its OWN position on the grid: "my T0 is round
- * txRound, slot txSlot". The node already recovers T0 from RxDone
- * (LoraTiming.h), so it can solve for a LOCAL anchor:
- *   anchor_node = T0_measured - txRound*roundUs - txSlot*pitchUs
- * which is the same grid expressed in the node's own time. Everything after
- * that is arithmetic the node does for itself, and no clock is ever
- * transferred.
- * The geometry fields are carried rather than assumed so the node can REFUSE a
- * grid it does not agree with: a hub and node compiled against different
- * TimedGrid.h constants would otherwise each believe in a different slot pitch
- * and quietly miss every window.
- * ---------------------------------------------------------------------------
- * The periodic broadcast beacon (section 4.4).
- * Separate from GridSync, and the separation is the point. GridSync ASSIGNS —
- * its slotIndex is "your slot", its params are the grid's geometry — and a
- * broadcast carrying those fields would hand every node in the fleet the same
- * slot. This carries only what is true for everyone: where this frame sits on
- * the grid, and who has traffic waiting.
- * What it is FOR is phase. Without it a node holds phase only for resyncMaxS
- * after each addressed frame; at 3.5 commands/day that is 2.9 % of the day in
- * Mode B and no measurable battery saving. The beacon is the mechanism that
- * keeps a node in the mode, which is why section 4.4 says it ships WITH the
- * one-window change rather than after it.
- * It is broadcast, so it cannot be ENCRYPTED per session — one frame serves 32
- * nodes — but nothing in it is secret either: the round, the slot and the
- * pending bitmap are all public. What it needs is AUTHENTICITY, and that is
- * what `mac` carries: an AES-CMAC over the beacon's own fields under a fleet
- * key the hub hands each node inside its already-encrypted GridSync.
- * A deterministic MAC rather than the AEAD the rest of the link uses. Extending
- * AES-GCM to a one-to-many key would need a shared base nonce AND a counter
- * that never repeats under it, which a hub reboot restarts while every node
- * still holds the old key — so the counter would have to be persisted, and the
- * failure mode for getting that wrong is not graceful. Two AAD-only tags under
- * one nonce give an attacker GHASH(H,A1) XOR GHASH(H,A2), solvable for the hash
- * subkey, after which beacons can be forged at will. CMAC has no nonce to reuse.
- * FRESHNESS IS NOT THE MAC'S JOB. A replayed beacon declares the round it was
- * minted for, so its predicted mark is rounds in the past and the node's
- * reanchorIsSane refuses it. The MAC only has to stop forgery.
- */
-struct  GridBeacon
-{
-  ProtobufCMessage base;
-  /*
-   * Where this frame sits on the grid, so a node can re-solve its anchor.
-   * txRound is the round the hub ACTUALLY transmits in — a beacon declaring 0
-   * would put the two ends on different round numbers, and "beacon round"
-   * would then mean something different at each end.
-   */
-  uint32_t txround;
-  /*
-   * the beacon slot
-   */
-  uint32_t txslot;
-  /*
-   * Section 4.4 Tier 3, same semantics as GridSync's copy: one bit per slot,
-   * SET means the hub has traffic for that node, and validity is carried
-   * separately because a zeroed proto3 field cannot be told apart from a
-   * deliberate "nothing for anyone".
-   */
-  uint32_t pendingmask;
-  protobuf_c_boolean pendingmaskvalid;
-  /*
-   * Which fleet key this beacon is signed under. Minted with the key when the
-   * grid starts, so it is a random id rather than a counter — a counter would
-   * need NVS on a hub whose anchor is already gone after a restart.
-   * A node holding a DIFFERENT id refuses the beacon outright rather than
-   * guessing: the hub has rotated and this node has not yet had the GridSync
-   * carrying the new key, so it coasts on resyncMaxS until its next addressed
-   * frame — which is exactly the pre-beacon behaviour, and safe.
-   */
-  uint32_t netkeyid;
-};
-#define GRID_BEACON__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&grid_beacon__descriptor) \
-    , 0, 0, 0, 0, 0 }
-
-
-/*
- * The hub's startup withdrawal, and the one frame that carries NOTHING.
- * After a restart the hub's anchor is gone while every node still holds the old
- * one, so every node has to be told to drop back to Mode A. That frame used to
- * be GridSync{enable=false} sent to the broadcast address — and it could never
- * work: s_pack_operation_message encrypts only when a session exists, and on a
- * fresh boot none does, so it went out in the clear and every node holding a
- * session resumed from NVS refused it under the plaintext gate. The one frame
- * that must not be missed, dropped by exactly the nodes it is aimed at.
- * So it is its own type, exempt from that gate. What makes the exemption safe
- * is the same rule the beacon's rests on: an unauthenticated frame may make a
- * node listen MORE and never less. Mode A is three windows per round against
- * Mode B's one — the safe direction, and the mode the fleet ships in.
- * IT HAS NO FIELDS, deliberately. A demote has exactly one meaning, so there is
- * nothing for a sender to choose and nothing for an attacker to set. Exempting
- * GridSync{enable=false} instead would have put a payload field inside the
- * gate's decision, and `enable=true` installs a slot assignment, the grid
- * geometry, armOffsetUs and the fleet key. Presence in the oneof is the whole
- * message.
- * What it must NOT do, and the node enforces both: it may not clear the fleet
- * key (a node with no key accepts UNSIGNED beacons again, which re-opens the
- * anchor walk the key was added to close), and it is accepted only as a
- * BROADCAST, so a targeted attacker has to take the whole fleet with it.
- */
-struct  GridDemote
-{
-  ProtobufCMessage base;
-};
-#define GRID_DEMOTE__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&grid_demote__descriptor) \
-     }
-
-
-struct  GridSync
-{
-  ProtobufCMessage base;
-  /*
-   * false = withdraw the grid, go back to Mode A
-   */
-  protobuf_c_boolean enable;
-  /*
-   * this node's slot
-   */
-  uint32_t slotindex;
-  /*
-   * grid depth, for agreement checking
-   */
-  uint32_t slotcount;
-  /*
-   * 1 500 000
-   */
-  uint32_t roundus;
-  /*
-   * roundUs / slotCount
-   */
-  uint32_t pitchus;
-  /*
-   * Where THIS frame sits on the grid, so the node can solve for its anchor.
-   */
-  uint32_t txround;
-  uint32_t txslot;
-  /*
-   * Beacon placement. The 32 private windows are at 32 different phases, so
-   * one broadcast cannot reach them all: the beacon needs its own instant
-   * that every node opens, on beacon rounds only.
-   */
-  uint32_t beaconslotindex;
-  /*
-   * 0 = no beacon
-   */
-  uint32_t beaconeveryrounds;
-  /*
-   * Runtime knobs the node applies rather than compiles in.
-   */
-  /*
-   * RX window width, in symbols
-   */
-  uint32_t symtimeout;
-  /*
-   * hold phase no longer than this without a frame
-   */
-  uint32_t resyncmaxs;
-  /*
-   * node replies at T0 + this, not "immediately"
-   */
-  uint32_t uloffsetus;
-  /*
-   * HW-2 only: arm the window deliberately early (negative) or late by this
-   * much, so the reception edges can be swept and T_detect measured.
-   * BENCH ONLY. It intentionally breaks reception, so a node not flagged as
-   * a bench unit refuses a non-zero value and stays on the correct arm lead.
-   */
-  int32_t armoffsetus;
-  /*
-   * The pending-data bitmap (section 4.4, Tier 3). One bit per slot: set
-   * means "the hub has traffic for that node". A node whose bit is clear may
-   * skip its private window until the next beacon is due, which is the whole
-   * saving — an armed window is ~29 ms of receive at ~11 mA against a ~1.2 mA
-   * average, and most windows on most nodes are empty.
-   * pendingMaskValid exists because a zeroed proto3 field is
-   * indistinguishable from a deliberate "nothing for anyone". Reading a
-   * MISSING bitmap as all-clear would put the whole fleet to sleep on the
-   * first beacon that omitted it, or on the first hub firmware that did not
-   * know the field. Absent is not empty; absent means listen.
-   */
-  uint32_t pendingmask;
-  protobuf_c_boolean pendingmaskvalid;
-  /*
-   * --- The fleet key (section 4.4 Tier 3) --------------------------------
-   * The key the broadcast beacon is signed under, and the id it is signed
-   * with. 16 bytes, AES-128, minted when the grid starts and re-minted on
-   * every hub restart — which costs nothing, because a restart already
-   * invalidates the anchor and forces this frame to be re-published anyway.
-   * The key's lifetime is therefore exactly the grid's.
-   * This needs no new bootstrap secret, which is what makes it cheap: every
-   * node already has a per-node AEAD session, so the fleet key rides an
-   * ordinary encrypted downlink and rotates the same way. The node adopts it
-   * ONLY from an authenticated GridSync — a plaintext one may not install a
-   * key, or the whole construction is decorative.
-   * Residual, stated rather than implied: any compromised node holds this key
-   * and can forge beacons for the fleet. That is inherent to one-to-many
-   * authentication without per-node signatures, and it is why the guard-band
-   * clamp on re-anchoring stays even for an authenticated beacon.
-   */
-  ProtobufCBinaryData netkey;
-  uint32_t netkeyid;
-};
-#define GRID_SYNC__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&grid_sync__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0,NULL}, 0 }
-
-
-/*
- * ---------------------------------------------------------------------------
- * ModeTest — the on-hardware validation mode (test-plan.md section 10).
- * Distinct from DriftTest, which measures one thing (relative clock rate) with
- * the power profile DISABLED. ModeTest runs under the PRODUCTION profile by
- * default and reports the frame funnel, the window decisions and four timing
- * distributions, so a mode's claims can be checked against the mode as it
- * actually ships.
- * The frames it produces are MAC CONTROL frames: MAC-0 counts, timestamps and
- * (with macEcho) answers them, and they never reach mac.on_payload. No
- * application code runs, so there is nothing to make inert.
- * ---------------------------------------------------------------------------
- */
-struct  ModeTest
-{
-  ProtobufCMessage base;
-  protobuf_c_boolean enable;
-  /*
-   * 0 = the node's default. The NODE caps this and ends the test on its own
-   * one-shot timer: every task loop blocks with portMAX_DELAY, so a poll
-   * would not end it, and a hub that goes away must not strand the node.
-   */
-  uint32_t durations;
-  ModeTest__Mode mode;
-  /*
-   * Integer milliseconds, and for MODE_A/MODE_SWEEP it must be INCOMMENSURATE
-   * with the node's RX interval. Commensurate periods phase-lock: a frame
-   * that lands in an RX-off gap does so forever. Observed at 1000 ms against
-   * 500 ms windows — ~300 frames sent, zero heard.
-   */
-  uint32_t gridperiodms;
-  /*
-   * 1..17 — exercises B-1's per-frame TX policy
-   */
-  uint32_t copies;
-  /*
-   * pad to N bytes: sweep time-on-air
-   */
-  uint32_t payloadpadto;
-  /*
-   * partial reports; 0 = final only
-   */
-  uint32_t reporteverys;
-  /*
-   * The hub's monotonic mark index, and the ruler. Deliberately NOT msgid:
-   * msgid is also the AEAD nonce input and the replay-filter key, so the test
-   * could not retransmit without disturbing both. A frame lost to the air
-   * leaves a GAP here instead of shifting every later sample.
-   */
-  uint32_t seq;
-  /*
-   * MODE_SWEEP only
-   */
-  int32_t armoffsetus;
-  /*
-   * Sublayers (mac-layer.md section 4). BOTH DEFAULT OFF here, unlike the
-   * production default: turning one on and re-running the identical grid is
-   * what makes that sublayer's cost a measured delta rather than an estimate.
-   */
-  /*
-   * MAC-1
-   */
-  protobuf_c_boolean enablecounter;
-  /*
-   * MAC-2
-   */
-  protobuf_c_boolean enablecrypto;
-  /*
-   * MAC-0 replies, no application round trip
-   */
-  protobuf_c_boolean macecho;
-  /*
-   * The difference from DriftTest, in the polarity proto3 can express.
-   * FALSE — the default, and what an omitting sender gets — means the node
-   * runs under its PRODUCTION power profile: light sleep on, CPU scaled. That
-   * is the whole point of this mode; a number measured with sleep disabled is
-   * not a production number, and the report echoes what it actually ran under
-   * so one can never be quoted as the other by accident.
-   * TRUE deliberately disables it, which is a bench act and reads like one at
-   * the call site.
-   */
-  protobuf_c_boolean droppowerprofile;
-};
-#define MODE_TEST__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&mode_test__descriptor) \
-    , 0, 0, MODE_TEST__MODE__MODE_UNSPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-
-
-/*
- * Five order statistics and a count. NOT a full histogram, and deliberately not
- * a mean: section 12.3 expects the RxDone latency to be multi-modal, because
- * production scales 40-240 MHz and the motor's PM lock moves the frequency
- * mid-operation. A mean would hide exactly the thing being looked for.
- */
-struct  Hist
-{
-  ProtobufCMessage base;
-  int32_t min;
-  int32_t p50;
-  int32_t p95;
-  int32_t p99;
-  int32_t max;
-  uint32_t n;
-};
-#define HIST__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&hist__descriptor) \
-    , 0, 0, 0, 0, 0, 0 }
-
-
-struct  ModeTestReport
-{
-  ProtobufCMessage base;
-  uint32_t seqfirst;
-  uint32_t seqlast;
-  uint32_t elapseds;
-  uint32_t mode;
-  protobuf_c_boolean powerprofileproduction;
-  /*
-   * The frame funnel, one counter per stage (mac-layer.md section 6.1).
-   * Stage 0 (offered) is the hub's and stage 1 (on air) is a witness
-   * receiver's; neither can be known here, which is the acknowledged gap I2.
-   * All of these come from raw radio events, never from mode state (I1).
-   */
-  /*
-   * RxDone or RxTimeout fired
-   */
-  uint32_t detected;
-  uint32_t crcvalid;
-  /*
-   * MAC-0 filter passed
-   */
-  uint32_t addressed;
-  /*
-   * MAC-1, when enableCounter
-   */
-  uint32_t counteraccepted;
-  /*
-   * MAC-2, when enableCrypto
-   */
-  uint32_t micvalid;
-  uint32_t crcerrors;
-  uint32_t duplicates;
-  uint32_t micfailures;
-  /*
-   * Derived from `seq`, so it stands even with MAC-1 off.
-   */
-  uint32_t seqgaps;
-  /*
-   * The mode's own decisions, reported as values UNDER TEST rather than as
-   * evidence that the mode worked.
-   */
-  uint32_t windowsarmed;
-  uint32_t windowshit;
-  uint32_t windowsempty;
-  uint32_t missedmarks;
-  uint32_t demotions;
-  uint32_t promotions;
-  /*
-   * Microseconds.
-   */
-  /*
-   * T0_measured - T0_predicted
-   */
-  Hist *phaseerrus;
-  /*
-   * t_arm_actual - t_arm_target
-   */
-  Hist *armresidualus;
-  /*
-   * MAC echo only: t_reply_fire - t_rxdone
-   */
-  Hist *turnaroundus;
-  /*
-   * esp_timer one-shot under light sleep
-   */
-  Hist *oneshoterrorus;
-  int32_t ppmestimate;
-  uint32_t ppmsamples;
-  int32_t measuredperiodus;
-  int32_t rssimin;
-  int32_t rssimean;
-  int32_t snrmin;
-  int32_t snrmean;
-  uint64_t sleepus;
-  uint64_t wallus;
-  uint32_t rtcslowsrc;
-  uint32_t tickratehz;
-  uint32_t cpufreqmhz;
-  /*
-   * Which sublayers this run used. They travel WITH the numbers for the same
-   * reason powerProfileProduction does: a KPI measured at MAC-0 must never be
-   * quoted later as a MAC-2 number by accident.
-   */
-  protobuf_c_boolean counteron;
-  protobuf_c_boolean cryptoon;
-  /*
-   * Why an arm was refused, when it was. 0 = it was not.
-   */
-  uint32_t armrefusal;
-  /*
-   * MAC-0 clock discipline, Mode B only. The rate the node's CORRECTED
-   * prediction still drifts at: a run-scoped fit of (measured T0 minus the
-   * rate-corrected predicted T0) over the run's marks. Mode B's pass line,
-   * |residualPpm| < 20, is judged on this; ppmEstimate above stays the RAW
-   * node-vs-hub rate, a hardware finding with no pass line. 0 / 0 until three
-   * marks were heard with a grid active.
-   */
-  int32_t residualppm;
-  uint32_t residualsamples;
-};
-#define MODE_TEST_REPORT__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&mode_test_report__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-
-
-struct  ClientRegister
-{
-  ProtobufCMessage base;
-  uint64_t mac_addr;
-  /*
-   * Set by the node when it needs the hub to (re)push its configuration —
-   * i.e. it is not yet provisioned.  A provisioned node waking from deep
-   * sleep leaves this false so the hub skips the ClientConfig/CoverConfig
-   * bursts and goes straight to the LoginMsg handshake (saves awake radio
-   * time / battery).  The hub also force-pushes once per hub boot regardless,
-   * so config changes flashed into the hub are always delivered.
-   */
-  protobuf_c_boolean needs_config;
-};
-#define CLIENT_REGISTER__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&client_register__descriptor) \
-    , 0, 0 }
-
-
-struct  ClientAvailable
-{
-  ProtobufCMessage base;
-  protobuf_c_boolean available;
-};
-#define CLIENT_AVAILABLE__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&client_available__descriptor) \
-    , 0 }
-
-
-struct  ClientBattery
-{
-  ProtobufCMessage base;
-  float voltage;
-};
-#define CLIENT_BATTERY__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&client_battery__descriptor) \
-    , 0 }
-
-
-struct  CoverPosition
-{
-  ProtobufCMessage base;
-  float position;
-  float voltage;
-  float current;
-  /*
-   * Battery-runtime compensation telemetry (hub repo:
-   * docs/battery-runtime-compensation-proposal.md) -- visibility only, the
-   * hub never computes or feeds back a model (decision 1). Set only for a
-   * FULL move that stopped via the current-sense endstop (the one
-   * ground-truth combination, proposal §2); 0/0 otherwise, which proto3's
-   * own "zero means absent" convention already reads correctly. A raw pair
-   * rather than a pre-divided ratio, since it's more useful for later
-   * analysis and the receiver can always divide.
-   */
-  /*
-   * elapsed time to the endstop firing
-   */
-  float actualruns;
-  /*
-   * the RAW factory open/close duration in force
-   */
-  float nominalruns;
-};
-#define COVER_POSITION__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&cover_position__descriptor) \
-    , 0, 0, 0, 0, 0 }
-
-
-/*
- * A node asks the hub to publish its grid again (node -> hub).
- * A demotion keeps the grid (fw 1.0.89), and a node out of Mode B hears no
- * beacon, so nothing corrects its anchor while its crystal drifts. Measured
- * 2026-09-15 on node 2 (fw 1.0.92): after ~17 minutes in Mode A the node came back
- * 11 ms off its marks against a 14.08 ms guard. The node re-centres what its own
- * samples can see; this frame is for what they cannot — an anchor older than the
- * published resyncMaxS, or samples refused as more than half a pitch off.
- * ADVICE, NOT A COMMAND. The hub answers only while timed mode is on, not while a
- * GridSync is still awaiting its ack, and not within a minute of its last one
- * (timedmode::hubAnswersSyncRequest), so a flood of these costs at most one burst
- * a minute. A node that does not know this field never sends it.
- */
-struct  GridSyncRequest
-{
-  ProtobufCMessage base;
-  /*
-   * timedmode::SyncRequestReason
-   */
-  uint32_t reason;
-  /*
-   * seconds since the node last corrected its anchor
-   */
-  uint32_t ssinceanchorfix;
-  /*
-   * samples refused beyond half a pitch since then
-   */
-  uint32_t refusedsamples;
-};
-#define GRID_SYNC_REQUEST__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&grid_sync_request__descriptor) \
-    , 0, 0, 0 }
-
 
 typedef enum {
   HUB_MAC_PDU__PDU__NOT_SET = 0,
@@ -1262,7 +181,7 @@ typedef enum {
 } HubMacPdu__PduCase;
 
 /*
- * hub -> node, PORT 0: MAC management.
+ * hub -> node, PORT 0: MAC management (MAC-0 grid, beacon, demote, bench tools).
  */
 struct  HubMacPdu
 {
@@ -1280,21 +199,6 @@ struct  HubMacPdu
 #define HUB_MAC_PDU__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&hub_mac_pdu__descriptor) \
     , HUB_MAC_PDU__PDU__NOT_SET, {0} }
-
-
-/*
- * A sysop with its command identity (section 7): ClientOperation was a bare
- * enum in the v0 envelope, so it gains a wrapper to carry cmd_id.
- */
-struct  SysopCmd
-{
-  ProtobufCMessage base;
-  ClientOperation op;
-  uint32_t cmd_id;
-};
-#define SYSOP_CMD__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&sysop_cmd__descriptor) \
-    , CLIENT_OPERATION__CMD_ENABLE_WIFI, 0 }
 
 
 typedef enum {
@@ -1327,22 +231,6 @@ struct  HubAppPdu
 #define HUB_APP_PDU__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&hub_app_pdu__descriptor) \
     , HUB_APP_PDU__PDU__NOT_SET, {0} }
-
-
-/*
- * node -> hub, PORT 0: the MAC ACK's body. The acknowledged FCNT travels in the
- * header (FLAGS.ACK + ACKED_FCNT); status means "executed", and the phase
- * report is section 4.6's evidence.
- */
-struct  MacAck
-{
-  ProtobufCMessage base;
-  AckStatus status;
-  PhaseReport *phase;
-};
-#define MAC_ACK__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&mac_ack__descriptor) \
-    , ACK_STATUS__ACK_OK, NULL }
 
 
 typedef enum {
@@ -1393,6 +281,9 @@ struct  NodeAppPdu
     ClientAvailable *avail;
     NodeWakeBeacon *beacon;
     CoverPosition *position;
+    /*
+     * the battery report (name kept for the stubs)
+     */
     ClientBattery *state;
   };
 };
@@ -1401,6 +292,1061 @@ struct  NodeAppPdu
     , NODE_APP_PDU__PDU__NOT_SET, {0} }
 
 
+/*
+ * A sysop with its command identity (docs/mac-wire-format.md section 7).
+ */
+struct  SysopCmd
+{
+  ProtobufCMessage base;
+  /*
+   * proto3 gives this no presence: an omitted op decodes as 0. The node
+   * therefore treats 0 (CMD_ENABLE_WIFI) as "unset" and refuses it, and the
+   * hub never sends that op. Unknown values are refused too.
+   */
+  ClientOperation op;
+  /*
+   * see LoraCoverOperation.cmd_id
+   */
+  uint32_t cmd_id;
+};
+#define SYSOP_CMD__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&sysop_cmd__descriptor) \
+    , CLIENT_OPERATION__CMD_ENABLE_WIFI, 0 }
+
+
+/*
+ * node -> hub, PORT 0: the MAC ACK's body. The acknowledged FCNT travels in the
+ * header (FLAGS.ACK + ACKED_FCNT). The node sends it only for a frame that
+ * carried FLAGS.ACK_REQ: status ACK_OK = executed; ACK_ERROR = the frame had no
+ * case this firmware can dispatch. A command the node knows but did not
+ * execute is not acked. The phase report rides every ack (the hub's Mode B
+ * evidence, see PhaseReport).
+ */
+struct  MacAck
+{
+  ProtobufCMessage base;
+  AckStatus status;
+  PhaseReport *phase;
+};
+#define MAC_ACK__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&mac_ack__descriptor) \
+    , ACK_STATUS__ACK_OK, NULL }
+
+
+struct  LoginMsg
+{
+  ProtobufCMessage base;
+  /*
+   * The hub's session id (called hub_nonce / base_nonce / session_id in the
+   * code): esp_random() on the hub, mixed into the K_enc/K_mac derivation and
+   * the CTR counter block.
+   */
+  uint32_t nonce;
+  /*
+   * The hub has NOT pushed config to this node in its current boot (e.g. it
+   * rebooted while the node stayed awake). The node answers with a REGISTER,
+   * which drives the hub's register -> config push -> login path.
+   */
+  protobuf_c_boolean request_register;
+  /*
+   * True only on the hub's FIRST LOGIN for this node since the hub process
+   * started (a real hub reboot). The node demotes to Mode A on it, and a
+   * genuinely new session with it set also clears the node's cmd_id guard
+   * (the hub's command ids restart). Not set on the other relogin triggers.
+   */
+  protobuf_c_boolean hub_rebooted;
+};
+#define LOGIN_MSG__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&login_msg__descriptor) \
+    , 0, 0, 0 }
+
+
+struct  ClientRegister
+{
+  ProtobufCMessage base;
+  uint64_t mac_addr;
+  /*
+   * The node needs its configuration (it is unprovisioned): the hub then
+   * pushes ClientConfig/CoverConfig in the clear before LOGIN. A provisioned
+   * node sends false; the hub also pushes once per hub boot, encrypted, after
+   * the session is confirmed.
+   */
+  protobuf_c_boolean needs_config;
+};
+#define CLIENT_REGISTER__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&client_register__descriptor) \
+    , 0, 0 }
+
+
+typedef enum {
+  LORA_COVER_OPERATION__COVOP__NOT_SET = 0,
+  LORA_COVER_OPERATION__COVOP_OPERATION = 1,
+  LORA_COVER_OPERATION__COVOP_POSITION = 2
+    PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(LORA_COVER_OPERATION__COVOP__CASE)
+} LoraCoverOperation__CovopCase;
+
+struct  LoraCoverOperation
+{
+  ProtobufCMessage base;
+  /*
+   * The command's identity (mac-wire-format.md section 7), allocated per Home
+   * Assistant command by the hub's Control channel and kept across retries and
+   * re-packs; 0 = not set. Scope: one hub boot (the node keeps the last
+   * executed id in RAM and clears it on a LOGIN with hub_rebooted that opens a
+   * new session). A command whose id equals the last executed one is acked,
+   * not run again.
+   */
+  uint32_t cmd_id;
+  LoraCoverOperation__CovopCase covop_case;
+  union {
+    /*
+     * 0 closed .. 1 open; the node refuses anything else
+     */
+    float position;
+    CovOperation operation;
+  };
+};
+#define LORA_COVER_OPERATION__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&lora_cover_operation__descriptor) \
+    , 0, LORA_COVER_OPERATION__COVOP__NOT_SET, {0} }
+
+
+/*
+ * Node provisioning. Sent in the clear to an unprovisioned node (the only
+ * application frame it accepts before a session, with CoverConfig), else
+ * encrypted. Skips the address filter: the gate is the mac_addr match.
+ */
+struct  ClientConfig
+{
+  ProtobufCMessage base;
+  uint64_t mac_addr;
+  /*
+   * the node's one-byte MAC address (MAC-0 data in an app PDU)
+   */
+  uint32_t addr;
+  uint32_t subnt;
+  /*
+   * not NUL-terminated
+   */
+  ProtobufCBinaryData name;
+  /*
+   * Fixed deep-sleep duration (interactive mode, CMD_SLEEP), seconds.
+   * 0 = keep the node's value; the node clamps to [60 s, 7 d].
+   */
+  uint64_t sleepduration;
+  /*
+   * Battery send interval in seconds; 0 = keep the node's default.
+   */
+  uint32_t batteryinterval;
+};
+#define CLIENT_CONFIG__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&client_config__descriptor) \
+    , 0, 0, 0, {0,NULL}, 0, 0 }
+
+
+struct  CoverConfig
+{
+  ProtobufCMessage base;
+  /*
+   * bar-travel-only times (top <-> sill), seconds
+   */
+  uint32_t opentime;
+  uint32_t closetime;
+  float blindheightmm;
+  float axlediametermm;
+  float blindthicknessmm;
+  /*
+   * Slat slack at the closed end, seconds, 0 = disabled:
+   *   openSlack  = motor runs UP with position pinned at 0 before travel
+   *                starts, when opening from fully sealed;
+   *   closeSlack = extra run budget after travel reaches 0 on a full close.
+   */
+  uint32_t openslack;
+  uint32_t closeslack;
+};
+#define COVER_CONFIG__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&cover_config__descriptor) \
+    , 0, 0, 0, 0, 0, 0, 0 }
+
+
+/*
+ * Wall-clock sync (the node has no other time source). Also carries two MAC-0
+ * facts, consumed by the node's MAC before the application sees the frame.
+ */
+struct  TimeSync
+{
+  ProtobufCMessage base;
+  /*
+   * Unix UTC seconds at hub TX time
+   */
+  uint64_t epoch;
+  /*
+   * LOCAL offset incl. DST, seconds (schedule entries are local)
+   */
+  int32_t utcoffset;
+  /*
+   * epoch of next DST transition, 0 = unknown
+   */
+  uint64_t dstnext;
+  /*
+   * MAC-0: "nothing further for you, you may sleep" (LoRaWAN FPending
+   * inverted). false -- also what an older hub sends -- means keep waiting,
+   * the safe direction.
+   */
+  protobuf_c_boolean sleepok;
+  /*
+   * MAC-0: how many of this node's uplinks the HUB saw land in its slot,
+   * consecutively (Mode B promotion evidence only the hub can measure).
+   * 0 = not confirmed, the safe direction.
+   */
+  uint32_t inslotuplinks;
+};
+#define TIME_SYNC__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&time_sync__descriptor) \
+    , 0, 0, 0, 0, 0 }
+
+
+/*
+ * The complete schedule + mode as one self-contained blob (~150 B with 8
+ * entries); the node replaces its stored schedule wholesale. Only enabled
+ * entries are sent. Delivered like any acked command (single shot when the hub
+ * has earned it, otherwise placed or as a burst), on a node's wake and after a
+ * login.
+ */
+struct  ScheduleConfig
+{
+  ProtobufCMessage base;
+  /*
+   * CRC32 over the canonical blob; echoed by the node
+   */
+  uint32_t version;
+  NodeMode mode;
+  /*
+   * 0 = stay interactive until told otherwise
+   */
+  uint32_t interactivetimeout_s;
+  /*
+   * 0 = no periodic check-in wake
+   */
+  uint32_t checkininterval_s;
+  /*
+   * wake this early to beacon before executing
+   */
+  uint32_t beaconlead_s;
+  /*
+   * keep listening this long after executing
+   */
+  uint32_t posteventwindow_s;
+  /*
+   * 0 = never execute a missed event
+   */
+  uint32_t catchupwindow_s;
+  /*
+   * max 8
+   */
+  size_t n_entries;
+  ScheduleEntry **entries;
+};
+#define SCHEDULE_CONFIG__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&schedule_config__descriptor) \
+    , 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0,NULL }
+
+
+/*
+ * One schedule slot. minuteOfDay is ALWAYS an absolute local time: sunrise /
+ * sunset and jitter are resolved by the hub, so the node computes no astronomy
+ * and stays autonomous during a hub outage.
+ */
+struct  ScheduleEntry
+{
+  ProtobufCMessage base;
+  /*
+   * 0..1439, local time
+   */
+  uint32_t minuteofday;
+  /*
+   * bit0 = MON .. bit6 = SUN
+   */
+  uint32_t daymask;
+  SchedAction action;
+  /*
+   * 0..100, only for SCHED_POSITION
+   */
+  uint32_t positionpct;
+  /*
+   * 0 fixed, 1 sunrise, 2 sunset (display only)
+   */
+  uint32_t kind;
+};
+#define SCHEDULE_ENTRY__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&schedule_entry__descriptor) \
+    , 0, 0, SCHED_ACTION__SCHED_OPEN, 0, 0 }
+
+
+struct  ClientAvailable
+{
+  ProtobufCMessage base;
+  protobuf_c_boolean available;
+};
+#define CLIENT_AVAILABLE__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&client_available__descriptor) \
+    , 0 }
+
+
+struct  ClientBattery
+{
+  ProtobufCMessage base;
+  /*
+   * 0 = no measurement yet (no presence; see CoverPosition)
+   */
+  float voltage;
+};
+#define CLIENT_BATTERY__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&client_battery__descriptor) \
+    , 0 }
+
+
+struct  CoverPosition
+{
+  ProtobufCMessage base;
+  /*
+   * Plain proto3 scalars: a real 0.0 cannot be told from "not set".
+   */
+  float position;
+  float voltage;
+  /*
+   * motor current, amps
+   */
+  float current;
+  /*
+   * Battery-runtime compensation telemetry (hub docs/battery-runtime-
+   * compensation-proposal.md), visibility only: set only for a FULL move that
+   * ended on the current-sense endstop, 0/0 otherwise.
+   */
+  /*
+   * elapsed time to the endstop
+   */
+  float actualruns;
+  /*
+   * the raw factory duration in force for this move
+   */
+  float nominalruns;
+};
+#define COVER_POSITION__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&cover_position__descriptor) \
+    , 0, 0, 0, 0, 0 }
+
+
+/*
+ * Sent on every wake / boot: why the node woke, its clock, telemetry, and the
+ * facts the hub needs to decide what to push. Also carries MAC facts (the
+ * phase report, the session-resume claim, the Mode C wake clock).
+ */
+struct  NodeWakeBeacon
+{
+  ProtobufCMessage base;
+  WakeReason reason;
+  /*
+   * schedule version applied; 0 = none
+   */
+  uint32_t schedversion;
+  /*
+   * node clock at TX (the hub measures drift)
+   */
+  uint64_t nodeepoch;
+  NodeMode mode;
+  float voltage;
+  float position;
+  /*
+   * how long the node keeps listening
+   */
+  uint32_t awakewindow_ms;
+  /*
+   * 0 = nothing scheduled
+   */
+  uint64_t nexteventepoch;
+  /*
+   * MAC-2: the node still holds its session keys (resumed from NVS), so the
+   * hub may skip the LOGIN round trip.
+   */
+  protobuf_c_boolean sessionresume;
+  /*
+   * false: the node will not sleep, it needs a TimeSync
+   */
+  protobuf_c_boolean clockvalid;
+  /*
+   * major*10000 + minor*100 + patch; the hub's capability gate
+   */
+  uint32_t fwversion;
+  /*
+   * Usually samples = 0 on a beacon: the phase state is RAM and the beacon goes
+   * out before this wake heard a grid-aligned frame.
+   * (Declared before resetReason, as it always was: protoc-c lays the C
+   * struct out in declaration order.)
+   */
+  PhaseReport *phase;
+  /*
+   * esp_reset_reason() of the boot that produced this beacon:
+   * 1 POWERON, 3 SW, 4 INT_WDT, 5 TASK_WDT, 6 WDT, 7 DEEPSLEEP, 8 BROWNOUT.
+   */
+  uint32_t resetreason;
+  /*
+   * --- Mode C, MAC-0: the wake clock --------------------------------------
+   * The RTC tick count at the PREVIOUS beacon's T0, identified by that
+   * beacon's FCNT; the hub pairs it with its own receive stamp to measure the
+   * wake clock's rate. 0 / 0 = no previous beacon since power-on.
+   */
+  uint32_t prevbeaconfcnt;
+  uint64_t prevbeacont0ticks;
+  /*
+   * the node's measured crystal period, Q19 us per tick
+   */
+  uint32_t rtcperiodq19;
+  /*
+   * Class A funnel of the PREVIOUS wake (Mode C's frame error rate).
+   */
+  uint32_t prevwakewindows;
+  uint32_t prevwakehits;
+  uint32_t prevwakedetected;
+  uint32_t prevwakecrcvalid;
+  /*
+   * The deep sleep before THIS wake, as wanted and as handed to ESP-IDF after
+   * the crystal correction (Mode C pass line |ppm| < 20). 0 = unknown.
+   */
+  uint64_t prevsleeprequestedus;
+  uint64_t prevsleepappliedus;
+};
+#define NODE_WAKE_BEACON__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+
+/*
+ * What the node measured about the TIMING of the hub's frames against the
+ * marks it armed (Mode B promotion evidence). Rides uplinks the node sends
+ * anyway (wake beacon, MAC ack): a periodic keepalive per node is what Mode B
+ * exists to avoid.
+ */
+struct  PhaseReport
+{
+  ProtobufCMessage base;
+  /*
+   * 0 => nothing else here carries information
+   */
+  uint32_t samples;
+  /*
+   * mean of (measured - predicted), us
+   */
+  int32_t errus;
+  /*
+   * peak-to-peak: exposes a bimodal fit a mean hides
+   */
+  int32_t spreadus;
+  /*
+   * samples outside the guard band
+   */
+  uint32_t outsideguard;
+  /*
+   * 0 unknown, 1 internal RC, 2 32 kHz crystal (RC => no Mode B)
+   */
+  uint32_t rtcslowsrc;
+  /*
+   * node-vs-hub clock error, 0 if unmeasured
+   */
+  int32_t ppmestimate;
+  /*
+   * 0 => ppmEstimate carries no information
+   */
+  uint32_t ppmsamples;
+  /*
+   * marks never armed (radio busy), since boot
+   */
+  uint32_t rxbusyskips;
+  /*
+   * The node's own decision: in Mode B now, and if not, the
+   * timedmode::Demotion value that says why. false = not in Mode B, so an
+   * older node keeps the hub bursting.
+   */
+  protobuf_c_boolean timedrxactive;
+  uint32_t demotionreason;
+};
+#define PHASE_REPORT__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&phase_report__descriptor) \
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+
+/*
+ * Publishes the timed-window grid to ONE node (encrypted, ACK_REQ). The frame
+ * declares its own position on the grid ("my T0 is round txRound, slot
+ * txSlot"); the node solves a LOCAL anchor from its measured T0, so no clock
+ * crosses the link:
+ *   anchor_node = T0_measured - txRound*roundUs - txSlot*pitchUs
+ * The geometry is carried so a node can REFUSE a grid it disagrees with.
+ * Accepted in the clear only by a node with no session, and then without the
+ * fleet key.
+ */
+struct  GridSync
+{
+  ProtobufCMessage base;
+  /*
+   * false = withdraw the grid, back to Mode A
+   */
+  protobuf_c_boolean enable;
+  /*
+   * this node's slot
+   */
+  uint32_t slotindex;
+  /*
+   * grid depth, for agreement checking
+   */
+  uint32_t slotcount;
+  /*
+   * 1 500 000
+   */
+  uint32_t roundus;
+  /*
+   * roundUs / slotCount
+   */
+  uint32_t pitchus;
+  /*
+   * where THIS frame sits on the grid
+   */
+  uint32_t txround;
+  uint32_t txslot;
+  /*
+   * The beacon's own instant, which every node opens on beacon rounds.
+   */
+  uint32_t beaconslotindex;
+  /*
+   * 0 = no beacon
+   */
+  uint32_t beaconeveryrounds;
+  /*
+   * RX window width, in symbols
+   */
+  uint32_t symtimeout;
+  /*
+   * hold phase no longer than this without a frame
+   */
+  uint32_t resyncmaxs;
+  /*
+   * node replies at T0 + this
+   */
+  uint32_t uloffsetus;
+  /*
+   * BENCH ONLY (HW-2 sweep): arm the window deliberately early/late. A node
+   * not flagged as a bench unit refuses a non-zero value.
+   */
+  int32_t armoffsetus;
+  /*
+   * Pending-data bitmap, one bit per slot, SET = the hub has traffic for that
+   * node. Validity is separate because a zeroed field cannot be told from a
+   * deliberate "nothing for anyone": absent means listen.
+   */
+  uint32_t pendingmask;
+  protobuf_c_boolean pendingmaskvalid;
+  /*
+   * The fleet key GridBeacons are tagged with (AUTH = FLEET), and its id.
+   * AES-128, minted when the grid starts and on every hub restart. The node
+   * adopts it ONLY from an authenticated GridSync. Any compromised node holds
+   * it (inherent to one-to-many authentication), which is why the beacon's
+   * re-anchoring stays clamped to the guard band.
+   */
+  ProtobufCBinaryData netkey;
+  uint32_t netkeyid;
+};
+#define GRID_SYNC__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_sync__descriptor) \
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0,NULL}, 0 }
+
+
+/*
+ * The periodic broadcast beacon. Unlike GridSync it carries only what is true
+ * for every node: where this frame sits on the grid, and who has traffic
+ * waiting. It keeps idle nodes in phase (and so in Mode B). Broadcast, so not
+ * encrypted; authenticated by the frame's FLEET tag under GridSync.netKey.
+ * Freshness is not the tag's job: a replay declares an old round, so its
+ * predicted mark is rounds away and the node refuses it.
+ */
+struct  GridBeacon
+{
+  ProtobufCMessage base;
+  /*
+   * the round the hub actually transmits in
+   */
+  uint32_t txround;
+  /*
+   * the beacon slot
+   */
+  uint32_t txslot;
+  /*
+   * same semantics as GridSync's
+   */
+  uint32_t pendingmask;
+  protobuf_c_boolean pendingmaskvalid;
+  /*
+   * The fleet key this beacon is tagged under (a random id minted with the
+   * key). A node holding a different id refuses the beacon.
+   */
+  uint32_t netkeyid;
+};
+#define GRID_BEACON__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_beacon__descriptor) \
+    , 0, 0, 0, 0, 0 }
+
+
+/*
+ * The hub's startup withdrawal: every node drops back to Mode A (after a
+ * restart the hub's anchor is gone). Broadcast and in the clear, with NO
+ * fields: it can only make a node listen more. The node accepts it only as a
+ * broadcast, rate-limits it, and never clears the fleet key on it.
+ */
+struct  GridDemote
+{
+  ProtobufCMessage base;
+};
+#define GRID_DEMOTE__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_demote__descriptor) \
+     }
+
+
+/*
+ * A node asks the hub to publish its grid again: its anchor is older than
+ * resyncMaxS, or its samples are refused as more than half a pitch off.
+ * Advice, not a command: the hub answers at most once a minute and only while
+ * timed mode is on.
+ */
+struct  GridSyncRequest
+{
+  ProtobufCMessage base;
+  /*
+   * timedmode::SyncRequestReason (TimedModePolicy.h)
+   */
+  uint32_t reason;
+  /*
+   * seconds since the node last corrected its anchor
+   */
+  uint32_t ssinceanchorfix;
+  /*
+   * samples refused beyond half a pitch since then
+   */
+  uint32_t refusedsamples;
+};
+#define GRID_SYNC_REQUEST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&grid_sync_request__descriptor) \
+    , 0, 0, 0 }
+
+
+/*
+ * MAC control frame (hub docs/mac-layer.md section 5): counted, timestamped,
+ * optionally echoed by the MAC, and never handed to the application, so the MAC
+ * can be measured on its own. ARMING a test (MAC_CONFIG, ModeTest) requires an
+ * authenticated frame and a session.
+ */
+struct  MacControl
+{
+  ProtobufCMessage base;
+  MacControl__Kind kind;
+  /*
+   * Opaque mark, separate from the FCNT, so a frame lost to the air leaves a
+   * gap rather than shifting every later sample.
+   */
+  uint32_t seq;
+  /*
+   * MAC-0 answers: turnaround = RxDone -> TX fire, nothing else
+   */
+  protobuf_c_boolean wantecho;
+  /*
+   * pads time on air for a length sweep
+   */
+  ProtobufCBinaryData pad;
+  /*
+   * MAC_CONFIG only. Switch the sublayers FOR MAC CONTROL FRAMES ONLY;
+   * application traffic always passes MAC-1 and MAC-2. Negative polarity on
+   * purpose: a zeroed message leaves both sublayers ON.
+   */
+  /*
+   * MAC-1 off
+   */
+  protobuf_c_boolean disablecounter;
+  /*
+   * MAC-2 off
+   */
+  protobuf_c_boolean disablecrypto;
+  /*
+   * node-owned deadline, capped; 0 = node default
+   */
+  uint32_t durations;
+};
+#define MAC_CONTROL__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&mac_control__descriptor) \
+    , MAC_CONTROL__KIND__MAC_UNSPEC, 0, 0, {0,NULL}, 0, 0, 0 }
+
+
+/*
+ * The on-hardware validation mode (hub docs/test-plan.md section 10). Runs
+ * under the PRODUCTION power profile by default and reports the frame funnel,
+ * the window decisions and four timing distributions. Its frames are MAC
+ * control frames; no application code runs. Bench nodes only.
+ */
+struct  ModeTest
+{
+  ProtobufCMessage base;
+  protobuf_c_boolean enable;
+  /*
+   * 0 = node default; the node caps it and ends the test itself
+   */
+  uint32_t durations;
+  ModeTest__Mode mode;
+  /*
+   * For MODE_A / MODE_SWEEP it must be INCOMMENSURATE with the node's RX
+   * interval, or frames landing in an RX-off gap do so forever.
+   */
+  uint32_t gridperiodms;
+  /*
+   * 1..17
+   */
+  uint32_t copies;
+  /*
+   * pad to N bytes: sweep time on air
+   */
+  uint32_t payloadpadto;
+  /*
+   * partial reports; 0 = final only
+   */
+  uint32_t reporteverys;
+  /*
+   * The hub's monotonic mark index (the ruler), separate from the FCNT so the
+   * test can retransmit without disturbing the replay window.
+   */
+  uint32_t seq;
+  /*
+   * MODE_SWEEP only
+   */
+  int32_t armoffsetus;
+  /*
+   * Sublayers (mac-layer.md section 4), both DEFAULT OFF here so each one's
+   * cost is a measured delta.
+   */
+  /*
+   * MAC-1
+   */
+  protobuf_c_boolean enablecounter;
+  /*
+   * MAC-2
+   */
+  protobuf_c_boolean enablecrypto;
+  /*
+   * MAC-0 replies, no application round trip
+   */
+  protobuf_c_boolean macecho;
+  /*
+   * false (the default) = production power profile; true disables it.
+   */
+  protobuf_c_boolean droppowerprofile;
+};
+#define MODE_TEST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&mode_test__descriptor) \
+    , 0, 0, MODE_TEST__MODE__MODE_UNSPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+
+/*
+ * Five order statistics and a count, not a mean: the latencies measured are
+ * expected to be multi-modal.
+ */
+struct  Hist
+{
+  ProtobufCMessage base;
+  int32_t min;
+  int32_t p50;
+  int32_t p95;
+  int32_t p99;
+  int32_t max;
+  uint32_t n;
+};
+#define HIST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&hist__descriptor) \
+    , 0, 0, 0, 0, 0, 0 }
+
+
+struct  ModeTestReport
+{
+  ProtobufCMessage base;
+  uint32_t seqfirst;
+  uint32_t seqlast;
+  uint32_t elapseds;
+  /*
+   * the ModeTest.Mode actually run; 0 = not run (refused)
+   */
+  uint32_t mode;
+  protobuf_c_boolean powerprofileproduction;
+  /*
+   * The frame funnel, one counter per stage, from raw radio events.
+   */
+  /*
+   * RxDone or RxTimeout fired
+   */
+  uint32_t detected;
+  uint32_t crcvalid;
+  /*
+   * MAC-0 filter passed
+   */
+  uint32_t addressed;
+  /*
+   * MAC-1, when enableCounter
+   */
+  uint32_t counteraccepted;
+  /*
+   * MAC-2, when enableCrypto
+   */
+  uint32_t micvalid;
+  uint32_t crcerrors;
+  uint32_t duplicates;
+  uint32_t micfailures;
+  /*
+   * from `seq`, so it stands with MAC-1 off
+   */
+  uint32_t seqgaps;
+  /*
+   * The mode's own decisions (values under test, not evidence).
+   */
+  uint32_t windowsarmed;
+  uint32_t windowshit;
+  uint32_t windowsempty;
+  uint32_t missedmarks;
+  uint32_t demotions;
+  uint32_t promotions;
+  /*
+   * Microseconds.
+   */
+  /*
+   * T0_measured - T0_predicted
+   */
+  Hist *phaseerrus;
+  /*
+   * t_arm_actual - t_arm_target
+   */
+  Hist *armresidualus;
+  /*
+   * MAC echo only: t_reply_fire - t_rxdone
+   */
+  Hist *turnaroundus;
+  /*
+   * esp_timer one-shot under light sleep
+   */
+  Hist *oneshoterrorus;
+  int32_t ppmestimate;
+  uint32_t ppmsamples;
+  int32_t measuredperiodus;
+  int32_t rssimin;
+  int32_t rssimean;
+  int32_t snrmin;
+  int32_t snrmean;
+  uint64_t sleepus;
+  uint64_t wallus;
+  /*
+   * as PhaseReport.rtcSlowSrc
+   */
+  uint32_t rtcslowsrc;
+  uint32_t tickratehz;
+  uint32_t cpufreqmhz;
+  /*
+   * which sublayers this run used
+   */
+  protobuf_c_boolean counteron;
+  protobuf_c_boolean cryptoon;
+  /*
+   * modetest::ArmRefusal (ModeTestPolicy.h); 0 = armed
+   */
+  uint32_t armrefusal;
+  /*
+   * Mode B clock discipline: the rate the node's CORRECTED prediction still
+   * drifts at (pass line |residualPpm| < 20); ppmEstimate stays the raw
+   * node-vs-hub rate. 0 / 0 until three marks were heard with a grid.
+   */
+  int32_t residualppm;
+  uint32_t residualsamples;
+};
+#define MODE_TEST_REPORT__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&mode_test_report__descriptor) \
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+
+/*
+ * Bench tool: characterise node-vs-hub clock drift (DriftEstimator.h). The node
+ * holds the radio in continuous RX (~11 mA), so it caps durationS and ends the
+ * test itself, and starts one only on a bench node from an authenticated frame.
+ */
+struct  DriftTest
+{
+  ProtobufCMessage base;
+  protobuf_c_boolean enable;
+  /*
+   * node auto-exits after this; 0 = node default
+   */
+  uint32_t durations;
+  /*
+   * hub burst cadence while active; 0 = hub default
+   */
+  uint32_t gridperiodms;
+};
+#define DRIFT_TEST__INIT \
+ { PROTOBUF_C_MESSAGE_INIT (&drift_test__descriptor) \
+    , 0, 0, 0 }
+
+
+/* HubMacPdu methods */
+void   hub_mac_pdu__init
+                     (HubMacPdu         *message);
+size_t hub_mac_pdu__get_packed_size
+                     (const HubMacPdu   *message);
+size_t hub_mac_pdu__pack
+                     (const HubMacPdu   *message,
+                      uint8_t             *out);
+size_t hub_mac_pdu__pack_to_buffer
+                     (const HubMacPdu   *message,
+                      ProtobufCBuffer     *buffer);
+HubMacPdu *
+       hub_mac_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   hub_mac_pdu__free_unpacked
+                     (HubMacPdu *message,
+                      ProtobufCAllocator *allocator);
+/* HubAppPdu methods */
+void   hub_app_pdu__init
+                     (HubAppPdu         *message);
+size_t hub_app_pdu__get_packed_size
+                     (const HubAppPdu   *message);
+size_t hub_app_pdu__pack
+                     (const HubAppPdu   *message,
+                      uint8_t             *out);
+size_t hub_app_pdu__pack_to_buffer
+                     (const HubAppPdu   *message,
+                      ProtobufCBuffer     *buffer);
+HubAppPdu *
+       hub_app_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   hub_app_pdu__free_unpacked
+                     (HubAppPdu *message,
+                      ProtobufCAllocator *allocator);
+/* NodeMacPdu methods */
+void   node_mac_pdu__init
+                     (NodeMacPdu         *message);
+size_t node_mac_pdu__get_packed_size
+                     (const NodeMacPdu   *message);
+size_t node_mac_pdu__pack
+                     (const NodeMacPdu   *message,
+                      uint8_t             *out);
+size_t node_mac_pdu__pack_to_buffer
+                     (const NodeMacPdu   *message,
+                      ProtobufCBuffer     *buffer);
+NodeMacPdu *
+       node_mac_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   node_mac_pdu__free_unpacked
+                     (NodeMacPdu *message,
+                      ProtobufCAllocator *allocator);
+/* NodeAppPdu methods */
+void   node_app_pdu__init
+                     (NodeAppPdu         *message);
+size_t node_app_pdu__get_packed_size
+                     (const NodeAppPdu   *message);
+size_t node_app_pdu__pack
+                     (const NodeAppPdu   *message,
+                      uint8_t             *out);
+size_t node_app_pdu__pack_to_buffer
+                     (const NodeAppPdu   *message,
+                      ProtobufCBuffer     *buffer);
+NodeAppPdu *
+       node_app_pdu__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   node_app_pdu__free_unpacked
+                     (NodeAppPdu *message,
+                      ProtobufCAllocator *allocator);
+/* SysopCmd methods */
+void   sysop_cmd__init
+                     (SysopCmd         *message);
+size_t sysop_cmd__get_packed_size
+                     (const SysopCmd   *message);
+size_t sysop_cmd__pack
+                     (const SysopCmd   *message,
+                      uint8_t             *out);
+size_t sysop_cmd__pack_to_buffer
+                     (const SysopCmd   *message,
+                      ProtobufCBuffer     *buffer);
+SysopCmd *
+       sysop_cmd__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   sysop_cmd__free_unpacked
+                     (SysopCmd *message,
+                      ProtobufCAllocator *allocator);
+/* MacAck methods */
+void   mac_ack__init
+                     (MacAck         *message);
+size_t mac_ack__get_packed_size
+                     (const MacAck   *message);
+size_t mac_ack__pack
+                     (const MacAck   *message,
+                      uint8_t             *out);
+size_t mac_ack__pack_to_buffer
+                     (const MacAck   *message,
+                      ProtobufCBuffer     *buffer);
+MacAck *
+       mac_ack__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   mac_ack__free_unpacked
+                     (MacAck *message,
+                      ProtobufCAllocator *allocator);
+/* LoginMsg methods */
+void   login_msg__init
+                     (LoginMsg         *message);
+size_t login_msg__get_packed_size
+                     (const LoginMsg   *message);
+size_t login_msg__pack
+                     (const LoginMsg   *message,
+                      uint8_t             *out);
+size_t login_msg__pack_to_buffer
+                     (const LoginMsg   *message,
+                      ProtobufCBuffer     *buffer);
+LoginMsg *
+       login_msg__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   login_msg__free_unpacked
+                     (LoginMsg *message,
+                      ProtobufCAllocator *allocator);
+/* ClientRegister methods */
+void   client_register__init
+                     (ClientRegister         *message);
+size_t client_register__get_packed_size
+                     (const ClientRegister   *message);
+size_t client_register__pack
+                     (const ClientRegister   *message,
+                      uint8_t             *out);
+size_t client_register__pack_to_buffer
+                     (const ClientRegister   *message,
+                      ProtobufCBuffer     *buffer);
+ClientRegister *
+       client_register__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   client_register__free_unpacked
+                     (ClientRegister *message,
+                      ProtobufCAllocator *allocator);
 /* LoraCoverOperation methods */
 void   lora_cover_operation__init
                      (LoraCoverOperation         *message);
@@ -1458,44 +1404,6 @@ CoverConfig *
 void   cover_config__free_unpacked
                      (CoverConfig *message,
                       ProtobufCAllocator *allocator);
-/* LoginMsg methods */
-void   login_msg__init
-                     (LoginMsg         *message);
-size_t login_msg__get_packed_size
-                     (const LoginMsg   *message);
-size_t login_msg__pack
-                     (const LoginMsg   *message,
-                      uint8_t             *out);
-size_t login_msg__pack_to_buffer
-                     (const LoginMsg   *message,
-                      ProtobufCBuffer     *buffer);
-LoginMsg *
-       login_msg__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   login_msg__free_unpacked
-                     (LoginMsg *message,
-                      ProtobufCAllocator *allocator);
-/* PhaseReport methods */
-void   phase_report__init
-                     (PhaseReport         *message);
-size_t phase_report__get_packed_size
-                     (const PhaseReport   *message);
-size_t phase_report__pack
-                     (const PhaseReport   *message,
-                      uint8_t             *out);
-size_t phase_report__pack_to_buffer
-                     (const PhaseReport   *message,
-                      ProtobufCBuffer     *buffer);
-PhaseReport *
-       phase_report__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   phase_report__free_unpacked
-                     (PhaseReport *message,
-                      ProtobufCAllocator *allocator);
 /* TimeSync methods */
 void   time_sync__init
                      (TimeSync         *message);
@@ -1514,25 +1422,6 @@ TimeSync *
                       const uint8_t       *data);
 void   time_sync__free_unpacked
                      (TimeSync *message,
-                      ProtobufCAllocator *allocator);
-/* ScheduleEntry methods */
-void   schedule_entry__init
-                     (ScheduleEntry         *message);
-size_t schedule_entry__get_packed_size
-                     (const ScheduleEntry   *message);
-size_t schedule_entry__pack
-                     (const ScheduleEntry   *message,
-                      uint8_t             *out);
-size_t schedule_entry__pack_to_buffer
-                     (const ScheduleEntry   *message,
-                      ProtobufCBuffer     *buffer);
-ScheduleEntry *
-       schedule_entry__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   schedule_entry__free_unpacked
-                     (ScheduleEntry *message,
                       ProtobufCAllocator *allocator);
 /* ScheduleConfig methods */
 void   schedule_config__init
@@ -1553,195 +1442,24 @@ ScheduleConfig *
 void   schedule_config__free_unpacked
                      (ScheduleConfig *message,
                       ProtobufCAllocator *allocator);
-/* NodeWakeBeacon methods */
-void   node_wake_beacon__init
-                     (NodeWakeBeacon         *message);
-size_t node_wake_beacon__get_packed_size
-                     (const NodeWakeBeacon   *message);
-size_t node_wake_beacon__pack
-                     (const NodeWakeBeacon   *message,
+/* ScheduleEntry methods */
+void   schedule_entry__init
+                     (ScheduleEntry         *message);
+size_t schedule_entry__get_packed_size
+                     (const ScheduleEntry   *message);
+size_t schedule_entry__pack
+                     (const ScheduleEntry   *message,
                       uint8_t             *out);
-size_t node_wake_beacon__pack_to_buffer
-                     (const NodeWakeBeacon   *message,
+size_t schedule_entry__pack_to_buffer
+                     (const ScheduleEntry   *message,
                       ProtobufCBuffer     *buffer);
-NodeWakeBeacon *
-       node_wake_beacon__unpack
+ScheduleEntry *
+       schedule_entry__unpack
                      (ProtobufCAllocator  *allocator,
                       size_t               len,
                       const uint8_t       *data);
-void   node_wake_beacon__free_unpacked
-                     (NodeWakeBeacon *message,
-                      ProtobufCAllocator *allocator);
-/* DriftTest methods */
-void   drift_test__init
-                     (DriftTest         *message);
-size_t drift_test__get_packed_size
-                     (const DriftTest   *message);
-size_t drift_test__pack
-                     (const DriftTest   *message,
-                      uint8_t             *out);
-size_t drift_test__pack_to_buffer
-                     (const DriftTest   *message,
-                      ProtobufCBuffer     *buffer);
-DriftTest *
-       drift_test__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   drift_test__free_unpacked
-                     (DriftTest *message,
-                      ProtobufCAllocator *allocator);
-/* MacControl methods */
-void   mac_control__init
-                     (MacControl         *message);
-size_t mac_control__get_packed_size
-                     (const MacControl   *message);
-size_t mac_control__pack
-                     (const MacControl   *message,
-                      uint8_t             *out);
-size_t mac_control__pack_to_buffer
-                     (const MacControl   *message,
-                      ProtobufCBuffer     *buffer);
-MacControl *
-       mac_control__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   mac_control__free_unpacked
-                     (MacControl *message,
-                      ProtobufCAllocator *allocator);
-/* GridBeacon methods */
-void   grid_beacon__init
-                     (GridBeacon         *message);
-size_t grid_beacon__get_packed_size
-                     (const GridBeacon   *message);
-size_t grid_beacon__pack
-                     (const GridBeacon   *message,
-                      uint8_t             *out);
-size_t grid_beacon__pack_to_buffer
-                     (const GridBeacon   *message,
-                      ProtobufCBuffer     *buffer);
-GridBeacon *
-       grid_beacon__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   grid_beacon__free_unpacked
-                     (GridBeacon *message,
-                      ProtobufCAllocator *allocator);
-/* GridDemote methods */
-void   grid_demote__init
-                     (GridDemote         *message);
-size_t grid_demote__get_packed_size
-                     (const GridDemote   *message);
-size_t grid_demote__pack
-                     (const GridDemote   *message,
-                      uint8_t             *out);
-size_t grid_demote__pack_to_buffer
-                     (const GridDemote   *message,
-                      ProtobufCBuffer     *buffer);
-GridDemote *
-       grid_demote__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   grid_demote__free_unpacked
-                     (GridDemote *message,
-                      ProtobufCAllocator *allocator);
-/* GridSync methods */
-void   grid_sync__init
-                     (GridSync         *message);
-size_t grid_sync__get_packed_size
-                     (const GridSync   *message);
-size_t grid_sync__pack
-                     (const GridSync   *message,
-                      uint8_t             *out);
-size_t grid_sync__pack_to_buffer
-                     (const GridSync   *message,
-                      ProtobufCBuffer     *buffer);
-GridSync *
-       grid_sync__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   grid_sync__free_unpacked
-                     (GridSync *message,
-                      ProtobufCAllocator *allocator);
-/* ModeTest methods */
-void   mode_test__init
-                     (ModeTest         *message);
-size_t mode_test__get_packed_size
-                     (const ModeTest   *message);
-size_t mode_test__pack
-                     (const ModeTest   *message,
-                      uint8_t             *out);
-size_t mode_test__pack_to_buffer
-                     (const ModeTest   *message,
-                      ProtobufCBuffer     *buffer);
-ModeTest *
-       mode_test__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   mode_test__free_unpacked
-                     (ModeTest *message,
-                      ProtobufCAllocator *allocator);
-/* Hist methods */
-void   hist__init
-                     (Hist         *message);
-size_t hist__get_packed_size
-                     (const Hist   *message);
-size_t hist__pack
-                     (const Hist   *message,
-                      uint8_t             *out);
-size_t hist__pack_to_buffer
-                     (const Hist   *message,
-                      ProtobufCBuffer     *buffer);
-Hist *
-       hist__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   hist__free_unpacked
-                     (Hist *message,
-                      ProtobufCAllocator *allocator);
-/* ModeTestReport methods */
-void   mode_test_report__init
-                     (ModeTestReport         *message);
-size_t mode_test_report__get_packed_size
-                     (const ModeTestReport   *message);
-size_t mode_test_report__pack
-                     (const ModeTestReport   *message,
-                      uint8_t             *out);
-size_t mode_test_report__pack_to_buffer
-                     (const ModeTestReport   *message,
-                      ProtobufCBuffer     *buffer);
-ModeTestReport *
-       mode_test_report__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   mode_test_report__free_unpacked
-                     (ModeTestReport *message,
-                      ProtobufCAllocator *allocator);
-/* ClientRegister methods */
-void   client_register__init
-                     (ClientRegister         *message);
-size_t client_register__get_packed_size
-                     (const ClientRegister   *message);
-size_t client_register__pack
-                     (const ClientRegister   *message,
-                      uint8_t             *out);
-size_t client_register__pack_to_buffer
-                     (const ClientRegister   *message,
-                      ProtobufCBuffer     *buffer);
-ClientRegister *
-       client_register__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   client_register__free_unpacked
-                     (ClientRegister *message,
+void   schedule_entry__free_unpacked
+                     (ScheduleEntry *message,
                       ProtobufCAllocator *allocator);
 /* ClientAvailable methods */
 void   client_available__init
@@ -1800,6 +1518,101 @@ CoverPosition *
 void   cover_position__free_unpacked
                      (CoverPosition *message,
                       ProtobufCAllocator *allocator);
+/* NodeWakeBeacon methods */
+void   node_wake_beacon__init
+                     (NodeWakeBeacon         *message);
+size_t node_wake_beacon__get_packed_size
+                     (const NodeWakeBeacon   *message);
+size_t node_wake_beacon__pack
+                     (const NodeWakeBeacon   *message,
+                      uint8_t             *out);
+size_t node_wake_beacon__pack_to_buffer
+                     (const NodeWakeBeacon   *message,
+                      ProtobufCBuffer     *buffer);
+NodeWakeBeacon *
+       node_wake_beacon__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   node_wake_beacon__free_unpacked
+                     (NodeWakeBeacon *message,
+                      ProtobufCAllocator *allocator);
+/* PhaseReport methods */
+void   phase_report__init
+                     (PhaseReport         *message);
+size_t phase_report__get_packed_size
+                     (const PhaseReport   *message);
+size_t phase_report__pack
+                     (const PhaseReport   *message,
+                      uint8_t             *out);
+size_t phase_report__pack_to_buffer
+                     (const PhaseReport   *message,
+                      ProtobufCBuffer     *buffer);
+PhaseReport *
+       phase_report__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   phase_report__free_unpacked
+                     (PhaseReport *message,
+                      ProtobufCAllocator *allocator);
+/* GridSync methods */
+void   grid_sync__init
+                     (GridSync         *message);
+size_t grid_sync__get_packed_size
+                     (const GridSync   *message);
+size_t grid_sync__pack
+                     (const GridSync   *message,
+                      uint8_t             *out);
+size_t grid_sync__pack_to_buffer
+                     (const GridSync   *message,
+                      ProtobufCBuffer     *buffer);
+GridSync *
+       grid_sync__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_sync__free_unpacked
+                     (GridSync *message,
+                      ProtobufCAllocator *allocator);
+/* GridBeacon methods */
+void   grid_beacon__init
+                     (GridBeacon         *message);
+size_t grid_beacon__get_packed_size
+                     (const GridBeacon   *message);
+size_t grid_beacon__pack
+                     (const GridBeacon   *message,
+                      uint8_t             *out);
+size_t grid_beacon__pack_to_buffer
+                     (const GridBeacon   *message,
+                      ProtobufCBuffer     *buffer);
+GridBeacon *
+       grid_beacon__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_beacon__free_unpacked
+                     (GridBeacon *message,
+                      ProtobufCAllocator *allocator);
+/* GridDemote methods */
+void   grid_demote__init
+                     (GridDemote         *message);
+size_t grid_demote__get_packed_size
+                     (const GridDemote   *message);
+size_t grid_demote__pack
+                     (const GridDemote   *message,
+                      uint8_t             *out);
+size_t grid_demote__pack_to_buffer
+                     (const GridDemote   *message,
+                      ProtobufCBuffer     *buffer);
+GridDemote *
+       grid_demote__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data);
+void   grid_demote__free_unpacked
+                     (GridDemote *message,
+                      ProtobufCAllocator *allocator);
 /* GridSyncRequest methods */
 void   grid_sync_request__init
                      (GridSyncRequest         *message);
@@ -1819,122 +1632,127 @@ GridSyncRequest *
 void   grid_sync_request__free_unpacked
                      (GridSyncRequest *message,
                       ProtobufCAllocator *allocator);
-/* HubMacPdu methods */
-void   hub_mac_pdu__init
-                     (HubMacPdu         *message);
-size_t hub_mac_pdu__get_packed_size
-                     (const HubMacPdu   *message);
-size_t hub_mac_pdu__pack
-                     (const HubMacPdu   *message,
+/* MacControl methods */
+void   mac_control__init
+                     (MacControl         *message);
+size_t mac_control__get_packed_size
+                     (const MacControl   *message);
+size_t mac_control__pack
+                     (const MacControl   *message,
                       uint8_t             *out);
-size_t hub_mac_pdu__pack_to_buffer
-                     (const HubMacPdu   *message,
+size_t mac_control__pack_to_buffer
+                     (const MacControl   *message,
                       ProtobufCBuffer     *buffer);
-HubMacPdu *
-       hub_mac_pdu__unpack
+MacControl *
+       mac_control__unpack
                      (ProtobufCAllocator  *allocator,
                       size_t               len,
                       const uint8_t       *data);
-void   hub_mac_pdu__free_unpacked
-                     (HubMacPdu *message,
+void   mac_control__free_unpacked
+                     (MacControl *message,
                       ProtobufCAllocator *allocator);
-/* SysopCmd methods */
-void   sysop_cmd__init
-                     (SysopCmd         *message);
-size_t sysop_cmd__get_packed_size
-                     (const SysopCmd   *message);
-size_t sysop_cmd__pack
-                     (const SysopCmd   *message,
+/* ModeTest methods */
+void   mode_test__init
+                     (ModeTest         *message);
+size_t mode_test__get_packed_size
+                     (const ModeTest   *message);
+size_t mode_test__pack
+                     (const ModeTest   *message,
                       uint8_t             *out);
-size_t sysop_cmd__pack_to_buffer
-                     (const SysopCmd   *message,
+size_t mode_test__pack_to_buffer
+                     (const ModeTest   *message,
                       ProtobufCBuffer     *buffer);
-SysopCmd *
-       sysop_cmd__unpack
+ModeTest *
+       mode_test__unpack
                      (ProtobufCAllocator  *allocator,
                       size_t               len,
                       const uint8_t       *data);
-void   sysop_cmd__free_unpacked
-                     (SysopCmd *message,
+void   mode_test__free_unpacked
+                     (ModeTest *message,
                       ProtobufCAllocator *allocator);
-/* HubAppPdu methods */
-void   hub_app_pdu__init
-                     (HubAppPdu         *message);
-size_t hub_app_pdu__get_packed_size
-                     (const HubAppPdu   *message);
-size_t hub_app_pdu__pack
-                     (const HubAppPdu   *message,
+/* Hist methods */
+void   hist__init
+                     (Hist         *message);
+size_t hist__get_packed_size
+                     (const Hist   *message);
+size_t hist__pack
+                     (const Hist   *message,
                       uint8_t             *out);
-size_t hub_app_pdu__pack_to_buffer
-                     (const HubAppPdu   *message,
+size_t hist__pack_to_buffer
+                     (const Hist   *message,
                       ProtobufCBuffer     *buffer);
-HubAppPdu *
-       hub_app_pdu__unpack
+Hist *
+       hist__unpack
                      (ProtobufCAllocator  *allocator,
                       size_t               len,
                       const uint8_t       *data);
-void   hub_app_pdu__free_unpacked
-                     (HubAppPdu *message,
+void   hist__free_unpacked
+                     (Hist *message,
                       ProtobufCAllocator *allocator);
-/* MacAck methods */
-void   mac_ack__init
-                     (MacAck         *message);
-size_t mac_ack__get_packed_size
-                     (const MacAck   *message);
-size_t mac_ack__pack
-                     (const MacAck   *message,
+/* ModeTestReport methods */
+void   mode_test_report__init
+                     (ModeTestReport         *message);
+size_t mode_test_report__get_packed_size
+                     (const ModeTestReport   *message);
+size_t mode_test_report__pack
+                     (const ModeTestReport   *message,
                       uint8_t             *out);
-size_t mac_ack__pack_to_buffer
-                     (const MacAck   *message,
+size_t mode_test_report__pack_to_buffer
+                     (const ModeTestReport   *message,
                       ProtobufCBuffer     *buffer);
-MacAck *
-       mac_ack__unpack
+ModeTestReport *
+       mode_test_report__unpack
                      (ProtobufCAllocator  *allocator,
                       size_t               len,
                       const uint8_t       *data);
-void   mac_ack__free_unpacked
-                     (MacAck *message,
+void   mode_test_report__free_unpacked
+                     (ModeTestReport *message,
                       ProtobufCAllocator *allocator);
-/* NodeMacPdu methods */
-void   node_mac_pdu__init
-                     (NodeMacPdu         *message);
-size_t node_mac_pdu__get_packed_size
-                     (const NodeMacPdu   *message);
-size_t node_mac_pdu__pack
-                     (const NodeMacPdu   *message,
+/* DriftTest methods */
+void   drift_test__init
+                     (DriftTest         *message);
+size_t drift_test__get_packed_size
+                     (const DriftTest   *message);
+size_t drift_test__pack
+                     (const DriftTest   *message,
                       uint8_t             *out);
-size_t node_mac_pdu__pack_to_buffer
-                     (const NodeMacPdu   *message,
+size_t drift_test__pack_to_buffer
+                     (const DriftTest   *message,
                       ProtobufCBuffer     *buffer);
-NodeMacPdu *
-       node_mac_pdu__unpack
+DriftTest *
+       drift_test__unpack
                      (ProtobufCAllocator  *allocator,
                       size_t               len,
                       const uint8_t       *data);
-void   node_mac_pdu__free_unpacked
-                     (NodeMacPdu *message,
-                      ProtobufCAllocator *allocator);
-/* NodeAppPdu methods */
-void   node_app_pdu__init
-                     (NodeAppPdu         *message);
-size_t node_app_pdu__get_packed_size
-                     (const NodeAppPdu   *message);
-size_t node_app_pdu__pack
-                     (const NodeAppPdu   *message,
-                      uint8_t             *out);
-size_t node_app_pdu__pack_to_buffer
-                     (const NodeAppPdu   *message,
-                      ProtobufCBuffer     *buffer);
-NodeAppPdu *
-       node_app_pdu__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   node_app_pdu__free_unpacked
-                     (NodeAppPdu *message,
+void   drift_test__free_unpacked
+                     (DriftTest *message,
                       ProtobufCAllocator *allocator);
 /* --- per-message closures --- */
 
+typedef void (*HubMacPdu_Closure)
+                 (const HubMacPdu *message,
+                  void *closure_data);
+typedef void (*HubAppPdu_Closure)
+                 (const HubAppPdu *message,
+                  void *closure_data);
+typedef void (*NodeMacPdu_Closure)
+                 (const NodeMacPdu *message,
+                  void *closure_data);
+typedef void (*NodeAppPdu_Closure)
+                 (const NodeAppPdu *message,
+                  void *closure_data);
+typedef void (*SysopCmd_Closure)
+                 (const SysopCmd *message,
+                  void *closure_data);
+typedef void (*MacAck_Closure)
+                 (const MacAck *message,
+                  void *closure_data);
+typedef void (*LoginMsg_Closure)
+                 (const LoginMsg *message,
+                  void *closure_data);
+typedef void (*ClientRegister_Closure)
+                 (const ClientRegister *message,
+                  void *closure_data);
 typedef void (*LoraCoverOperation_Closure)
                  (const LoraCoverOperation *message,
                   void *closure_data);
@@ -1944,50 +1762,14 @@ typedef void (*ClientConfig_Closure)
 typedef void (*CoverConfig_Closure)
                  (const CoverConfig *message,
                   void *closure_data);
-typedef void (*LoginMsg_Closure)
-                 (const LoginMsg *message,
-                  void *closure_data);
-typedef void (*PhaseReport_Closure)
-                 (const PhaseReport *message,
-                  void *closure_data);
 typedef void (*TimeSync_Closure)
                  (const TimeSync *message,
-                  void *closure_data);
-typedef void (*ScheduleEntry_Closure)
-                 (const ScheduleEntry *message,
                   void *closure_data);
 typedef void (*ScheduleConfig_Closure)
                  (const ScheduleConfig *message,
                   void *closure_data);
-typedef void (*NodeWakeBeacon_Closure)
-                 (const NodeWakeBeacon *message,
-                  void *closure_data);
-typedef void (*DriftTest_Closure)
-                 (const DriftTest *message,
-                  void *closure_data);
-typedef void (*MacControl_Closure)
-                 (const MacControl *message,
-                  void *closure_data);
-typedef void (*GridBeacon_Closure)
-                 (const GridBeacon *message,
-                  void *closure_data);
-typedef void (*GridDemote_Closure)
-                 (const GridDemote *message,
-                  void *closure_data);
-typedef void (*GridSync_Closure)
-                 (const GridSync *message,
-                  void *closure_data);
-typedef void (*ModeTest_Closure)
-                 (const ModeTest *message,
-                  void *closure_data);
-typedef void (*Hist_Closure)
-                 (const Hist *message,
-                  void *closure_data);
-typedef void (*ModeTestReport_Closure)
-                 (const ModeTestReport *message,
-                  void *closure_data);
-typedef void (*ClientRegister_Closure)
-                 (const ClientRegister *message,
+typedef void (*ScheduleEntry_Closure)
+                 (const ScheduleEntry *message,
                   void *closure_data);
 typedef void (*ClientAvailable_Closure)
                  (const ClientAvailable *message,
@@ -1998,26 +1780,38 @@ typedef void (*ClientBattery_Closure)
 typedef void (*CoverPosition_Closure)
                  (const CoverPosition *message,
                   void *closure_data);
+typedef void (*NodeWakeBeacon_Closure)
+                 (const NodeWakeBeacon *message,
+                  void *closure_data);
+typedef void (*PhaseReport_Closure)
+                 (const PhaseReport *message,
+                  void *closure_data);
+typedef void (*GridSync_Closure)
+                 (const GridSync *message,
+                  void *closure_data);
+typedef void (*GridBeacon_Closure)
+                 (const GridBeacon *message,
+                  void *closure_data);
+typedef void (*GridDemote_Closure)
+                 (const GridDemote *message,
+                  void *closure_data);
 typedef void (*GridSyncRequest_Closure)
                  (const GridSyncRequest *message,
                   void *closure_data);
-typedef void (*HubMacPdu_Closure)
-                 (const HubMacPdu *message,
+typedef void (*MacControl_Closure)
+                 (const MacControl *message,
                   void *closure_data);
-typedef void (*SysopCmd_Closure)
-                 (const SysopCmd *message,
+typedef void (*ModeTest_Closure)
+                 (const ModeTest *message,
                   void *closure_data);
-typedef void (*HubAppPdu_Closure)
-                 (const HubAppPdu *message,
+typedef void (*Hist_Closure)
+                 (const Hist *message,
                   void *closure_data);
-typedef void (*MacAck_Closure)
-                 (const MacAck *message,
+typedef void (*ModeTestReport_Closure)
+                 (const ModeTestReport *message,
                   void *closure_data);
-typedef void (*NodeMacPdu_Closure)
-                 (const NodeMacPdu *message,
-                  void *closure_data);
-typedef void (*NodeAppPdu_Closure)
-                 (const NodeAppPdu *message,
+typedef void (*DriftTest_Closure)
+                 (const DriftTest *message,
                   void *closure_data);
 
 /* --- services --- */
@@ -2025,42 +1819,42 @@ typedef void (*NodeAppPdu_Closure)
 
 /* --- descriptors --- */
 
+extern const ProtobufCEnumDescriptor    ack_status__descriptor;
 extern const ProtobufCEnumDescriptor    cov_operation__descriptor;
 extern const ProtobufCEnumDescriptor    client_operation__descriptor;
-extern const ProtobufCEnumDescriptor    ack_status__descriptor;
 extern const ProtobufCEnumDescriptor    sched_action__descriptor;
 extern const ProtobufCEnumDescriptor    node_mode__descriptor;
 extern const ProtobufCEnumDescriptor    wake_reason__descriptor;
+extern const ProtobufCMessageDescriptor hub_mac_pdu__descriptor;
+extern const ProtobufCMessageDescriptor hub_app_pdu__descriptor;
+extern const ProtobufCMessageDescriptor node_mac_pdu__descriptor;
+extern const ProtobufCMessageDescriptor node_app_pdu__descriptor;
+extern const ProtobufCMessageDescriptor sysop_cmd__descriptor;
+extern const ProtobufCMessageDescriptor mac_ack__descriptor;
+extern const ProtobufCMessageDescriptor login_msg__descriptor;
+extern const ProtobufCMessageDescriptor client_register__descriptor;
 extern const ProtobufCMessageDescriptor lora_cover_operation__descriptor;
 extern const ProtobufCMessageDescriptor client_config__descriptor;
 extern const ProtobufCMessageDescriptor cover_config__descriptor;
-extern const ProtobufCMessageDescriptor login_msg__descriptor;
-extern const ProtobufCMessageDescriptor phase_report__descriptor;
 extern const ProtobufCMessageDescriptor time_sync__descriptor;
-extern const ProtobufCMessageDescriptor schedule_entry__descriptor;
 extern const ProtobufCMessageDescriptor schedule_config__descriptor;
+extern const ProtobufCMessageDescriptor schedule_entry__descriptor;
+extern const ProtobufCMessageDescriptor client_available__descriptor;
+extern const ProtobufCMessageDescriptor client_battery__descriptor;
+extern const ProtobufCMessageDescriptor cover_position__descriptor;
 extern const ProtobufCMessageDescriptor node_wake_beacon__descriptor;
-extern const ProtobufCMessageDescriptor drift_test__descriptor;
-extern const ProtobufCMessageDescriptor mac_control__descriptor;
-extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
+extern const ProtobufCMessageDescriptor phase_report__descriptor;
+extern const ProtobufCMessageDescriptor grid_sync__descriptor;
 extern const ProtobufCMessageDescriptor grid_beacon__descriptor;
 extern const ProtobufCMessageDescriptor grid_demote__descriptor;
-extern const ProtobufCMessageDescriptor grid_sync__descriptor;
+extern const ProtobufCMessageDescriptor grid_sync_request__descriptor;
+extern const ProtobufCMessageDescriptor mac_control__descriptor;
+extern const ProtobufCEnumDescriptor    mac_control__kind__descriptor;
 extern const ProtobufCMessageDescriptor mode_test__descriptor;
 extern const ProtobufCEnumDescriptor    mode_test__mode__descriptor;
 extern const ProtobufCMessageDescriptor hist__descriptor;
 extern const ProtobufCMessageDescriptor mode_test_report__descriptor;
-extern const ProtobufCMessageDescriptor client_register__descriptor;
-extern const ProtobufCMessageDescriptor client_available__descriptor;
-extern const ProtobufCMessageDescriptor client_battery__descriptor;
-extern const ProtobufCMessageDescriptor cover_position__descriptor;
-extern const ProtobufCMessageDescriptor grid_sync_request__descriptor;
-extern const ProtobufCMessageDescriptor hub_mac_pdu__descriptor;
-extern const ProtobufCMessageDescriptor sysop_cmd__descriptor;
-extern const ProtobufCMessageDescriptor hub_app_pdu__descriptor;
-extern const ProtobufCMessageDescriptor mac_ack__descriptor;
-extern const ProtobufCMessageDescriptor node_mac_pdu__descriptor;
-extern const ProtobufCMessageDescriptor node_app_pdu__descriptor;
+extern const ProtobufCMessageDescriptor drift_test__descriptor;
 
 PROTOBUF_C__END_DECLS
 
