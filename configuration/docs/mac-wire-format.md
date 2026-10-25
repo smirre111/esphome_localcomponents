@@ -1,10 +1,32 @@
 # MAC wire format v1 (stage S8) — specification
 
-Status: **SPEC, not implemented.** Stage S8 of `docs/mac-separation-layering-plan.md`,
-derived from `docs/mac-review-2026-10-16.md` §5.5. Both repos implement exactly this;
-the shared dependency-free header **`MacWire.h`** (node copy is the source, hub vendors
-it byte-identical under a drift gate) holds every constant, offset and layout helper
-below. Written 2026-10-18 against hub `e0a1fdb` / node `1db0151`.
+Status: **IMPLEMENTED — the only wire since 2026-10-19** (S8 W4 cutover, hub `914a09a`,
+nodes fw 1.1.50; v0 deleted in W5). Stage S8 of `docs/mac-separation-layering-plan.md`,
+derived from `docs/mac-review-2026-10-16.md` §5.5. The shared dependency-free header
+**`MacWire.h`** (node copy is the source, hub vendors it byte-identical under a drift
+gate) holds every constant, offset and layout helper below, and `MacWireVectors.h`
+pins exact frames for both implementations. Written 2026-10-18 against hub `e0a1fdb` /
+node `1db0151`; refreshed 2026-10-25 against node `6d83b28` (2026-10-25 review, P9).
+
+> **Deviations as built** (the sections below are corrected; this box lists them):
+> - §2.5: the node acks **iff the frame carries `ACK_REQ`** and the command executed
+>   (the header is authoritative); an authenticated `ACK_REQ`'d frame with no body case
+>   the node knows gets a MacAck with `status = ACK_ERROR`. ACKED_FCNT is honoured by
+>   the hub only on a MacAck body; v1 never piggybacks.
+> - §3: the sysop is `SysopCmd {op, cmd_id}`; the hub's uplink port table
+>   (`PortTable.h`) is a switch, the node keeps `PortMap.h` (case → port, expected ACK_REQ).
+> - §4.1: the hub runs the MAC-1 `check` before the tag; the node verifies, decrypts
+>   and decodes first and runs check + commit in its admission pipeline (still after the
+>   tag, so a forged frame never touches the window).
+> - §4.2: `RxTicket.timing_trusted` is always true (the tag covers the length).
+> - §4.5: before a session the node accepts in the clear only ClientConfig, CoverConfig
+>   and GridSync (grid only, no fleet key), plus LOGIN (K_AUTH), GridBeacon, GridDemote;
+>   FLEET is valid only for a GridBeacon body; there is no sealed broadcast.
+> - §6: the shared vector `cover_op` is 35 B (9-byte body, unstamped); the 46 B row is a
+>   stamped cover op with a larger body.
+> - §7: the node's cmd_id guard is one RAM slot whose scope is a **hub boot** (cleared by
+>   a LOGIN with `hub_rebooted` that opens a new session), not a session.
+> - §10: `stampCopy` returns `bool`; the CTR helper is `buildCtrInitialBlock`.
 
 User decisions this spec is built on: the wire break is approved; **no backward
 compatibility and no dual stack** — hub and nodes cut over together (§13).
@@ -18,9 +40,9 @@ CRC is outside it). "Frame" = the full LoRa payload; "header" = bytes before the
 
 ## 1. Why (one paragraph)
 
-Today addressing and per-copy timing live in protobuf field 1 (`LoraHeader`) of the
-application envelope, an encrypted frame carries a second (inner) envelope, and the
-CMAC is computed over *decoded* header values. That forces a full decode, mutate,
+In v0 (deleted) addressing and per-copy timing lived in protobuf field 1 (`LoraHeader`) of
+the application envelope, an encrypted frame carried a second (inner) envelope, and the
+CMAC was computed over *decoded* header values. That forces a full decode, mutate,
 re-encode and re-MAC per burst copy (H-1 ~1.9 ms p50), created the canonical-length
 problem (`FrameCanon.h`, demote-not-drop), and gives `msgId` seven roles. v1 puts a
 fixed-offset header on the wire, authenticates the raw bytes, and splits `msgId`.
@@ -91,8 +113,8 @@ MAC-1 counter of the link, one per direction (hub→node per node, node→hub). 
 allocation, persistence and replay rules as today's msgid (`mac1::Sequencer`: hub
 ForwardRatchet, node SlidingWindow). It is also the CTR nonce input (§4.1), so a frame
 re-sent byte for byte (pack-once) reuses its FCNT and its ciphertext. Bit 31 MUST be 0
-(the CTR block holds 31 bits): the allocator refuses 2^31 − 1 and requests a fresh
-session (today's `msgid_relogin_pending_` path); a receiver drops a frame with bit 31
+(the CTR block holds 31 bits): the allocator hands out up to and including 0x7FFFFFFF,
+refuses the next one and requests a fresh session (the `msgid_relogin_pending_` path); a receiver drops a frame with bit 31
 set **after** the tag verified (a forged frame must not be able to cost a session),
 and asks for a fresh session if it was authentic.
 
@@ -101,33 +123,42 @@ window, as today; GridBeacon's replay protection stays its `txRound` monotonicit
 
 ### 2.5 MAC ACK
 
-ARQ moves from the App `CommandAck.ack_msg_id` to the MAC header:
-- the hub sets `ACK_REQ` on every Acked delivery (Control, Config, Mac channels);
-- the node answers with an uplink carrying `FLAGS.ACK` + `ACKED_FCNT` = the request's
-  FCNT. The ack uplink's body is `MacAck { AckStatus status; PhaseReport phase; }` on
-  PORT 0 (today's CommandAck minus `ack_msg_id`; status still means "executed", the phase
-  report is still §4.6's evidence);
-- a duplicate (same FCNT, already executed) is re-acked from the node's AckCache, which is
-  keyed on FCNT (today: msgid, same numbers);
+ARQ lives in the MAC header (v0's App `CommandAck.ack_msg_id` is gone):
+- the hub sets `ACK_REQ` on every Acked delivery (Control, Config, Mac channels:
+  OPERATION, SYSOP, SCHEDULE, GRIDSYNC — `HubWire.cpp kRoutes`);
+- the receiver acks **iff `ACK_REQ` is set**: the node answers an executed command with
+  an uplink carrying `FLAGS.ACK` + `ACKED_FCNT` = the request's FCNT and the body
+  `MacAck { AckStatus status; PhaseReport phase; }` on PORT 0, `status = ACK_OK`. An
+  authenticated `ACK_REQ`'d frame whose body has no case the node knows (a newer peer's
+  new command) is answered with `status = ACK_ERROR`, so the sender can fail fast
+  instead of retrying into a session teardown. A known command the node did not execute
+  is not acked. The node's `PortMap.h` keeps the ACK_REQ it expects per case; the hub's
+  `mirror_tables_test` pins it against `kRoutes`;
+- a duplicate (same FCNT, already executed) is re-acked from the node's AckCache, keyed
+  on FCNT;
 - the hub's delivery service matches `ACKED_FCNT` against its slots (S7's `dlv_ack_`).
-An ACK may piggyback on any uplink (the flag is independent of the body), but v1 sends
-it as its own frame, as today.
+The format would allow an ACK to piggyback on any uplink, but v1 sends it as its own
+frame, and the hub honours `ACKED_FCNT` only on a MacAck body.
 
 ## 3. Body
 
 The body is **one protobuf message without any header**; there is no inner envelope
-any more (today's `EncryptedPayload{tag, ciphertext}` wrapper and the stripped inner
-`header` both go away). Which message it is follows from (direction, PORT):
+(v0's `EncryptedPayload{tag, ciphertext}` wrapper and the stripped inner `header` are
+gone). Which message it is follows from (direction, PORT):
 
 | direction | PORT 0 Mac0Mgmt | PORT 1 Session | PORT 2 App |
 |---|---|---|---|
-| hub → node | `HubMacPdu` oneof: GridSync, GridBeacon, GridDemote, ModeTest, MacControl, DriftTest | `LoginMsg` | `HubAppPdu` oneof: LoraCoverOperation, ClientOperation (sysop), ClientConfig, CoverConfig, TimeSync, ScheduleConfig |
+| hub → node | `HubMacPdu` oneof: GridSync, GridBeacon, GridDemote, ModeTest, MacControl, DriftTest | `LoginMsg` | `HubAppPdu` oneof: LoraCoverOperation, SysopCmd, ClientConfig, CoverConfig, TimeSync, ScheduleConfig |
 | node → hub | `NodeMacPdu` oneof: MacAck, MacControl (echo), ModeTestReport, GridSyncRequest | `ClientRegister` | `NodeAppPdu` oneof: ClientAvailable, ClientBattery, CoverPosition, NodeWakeBeacon |
 
 The receiver decodes the body with the message the (direction, PORT) pair names and
-drops it if it does not decode. The port table is then the schema itself (S6's
-`PortTable.h` becomes a `static_assert` that each oneof case appears under exactly one
-port). Control commands in `HubAppPdu` carry `uint32 cmd_id` (§7).
+drops it if it does not decode. Oneof case numbers are unique across the two PDUs of a
+direction (the node folds them into one internal enum); `blinds.proto` reserves each
+PDU's numbers in its sibling so protoc rejects a collision. As built, the hub maps uplink
+cases to ports with a switch (`PortTable.h`) and the node keeps `PortMap.h`; neither is
+the static_assert this section once promised. Control commands in `HubAppPdu` carry
+`uint32 cmd_id` (§7). A body case unknown to the receiver decodes as "no case" (see §2.5
+for the ACK_ERROR answer).
 
 ## 4. Authentication and confidentiality
 
@@ -148,20 +179,21 @@ in GridSync. Tags are AES-CMAC truncated to **8 bytes** everywhere.
   is never transmitted (direction and session bind the tag; the hub and node addresses
   are inside the raw header), followed by **every transmitted byte except the tag**:
   header, extensions and ciphertext.
-- Receive order (unchanged principle): check VER/FLAGS/PORT shape → MAC-1 `check(FCNT)`
-  (read-only) → verify tag → bit-31 check → CTR-decrypt → decode body → MAC-1 `commit`
-  → MAC-0 timing commit → deliver by port.
+- Receive order: check VER/FLAGS/PORT shape → MAC-1 `check(FCNT)` (read-only) → verify
+  tag → bit-31 check → CTR-decrypt → decode body → MAC-1 `commit` → MAC-0 timing commit
+  → deliver by port. The hub follows this order. The node checks its address first, then
+  tag → bit 31 → decrypt → decode, and runs MAC-1 check + commit inside its admission
+  pipeline (`admitFrame`); the window still moves only for a frame whose tag verified.
 
 ### 4.2 Canonicality — FrameCanon is deleted
 
 The tag covers the exact transmitted byte string, so the on-air length the T0 formula
 uses (`RegRxNbBytes`) is authenticated for every AUTH != NONE frame, and the header has
-no varint encodings. `FrameCanon.h`, `noncanonical_frames_`, the demote-not-drop rule
-and the `timing_trusted` FrameCanon verdict go away. Replacement rule: a frame's length
-is a T0 input iff `AUTH != NONE` and its tag verified; plaintext frames (bootstrap,
-GridDemote, MAC-2-off pings) are timing-trusted only where today's MAC-1/MAC-2 gates
-already allow them (unchanged policy), and their length is still exact because the
-header is fixed-size.
+no varint encodings. `FrameCanon.h`, `noncanonical_frames_` and the demote-not-drop
+rule are gone. As built, `RxTicket.timing_trusted` is always true: the length of every
+frame that reaches the timing code is exact (fixed-size header, raw-byte tag), and the
+MAC-1/MAC-2 gates decide which plaintext frames (bootstrap, GridDemote, MAC-2-off pings)
+may feed timing at all.
 
 ### 4.3 AUTH = K_AUTH (LOGIN, REGISTER)
 
@@ -187,12 +219,17 @@ Replaces `buildBeaconMacInput` and `GridBeacon.mac`; the burst index (today the
 | LOGIN | ↓ | 1 | K_AUTH | plaintext body; the one session-establishing downlink |
 | REGISTER | ↑ | 1 | K_AUTH | bypasses the replay window (bootstrap), time-rate-limited |
 | session-opening uplink | ↑ | any | SESSION | `SESSION_OPENING` + NODE_NONCE; hub derives the candidate keys from it |
-| GridBeacon | ↓ bcast | 0 | FLEET | FCNT 0, BURST 0/1, never STAMPED (fits kBeaconPayloadBytes) |
+| GridBeacon | ↓ bcast | 0 | FLEET | FCNT 0, BURST 0/1, never STAMPED (fits kBeaconPayloadBytes); FLEET is valid for this body only — the node drops any other body under FLEET |
 | GridDemote | ↓ bcast | 0 | NONE | unauthenticated by design (its only effect is to listen more) |
-| GridSync, ModeTest, DriftTest | ↓ | 0 | SESSION | plaintext only before a session, as today |
-| MacControl ping | ↓ | 0 | SESSION, or NONE while MAC-2 is switched off for control (bench) | MAC-2-off pings use the dedicated counter, as today |
+| GridSync | ↓ | 0 | SESSION | NONE accepted only by a node without a session, and then without the fleet key |
+| ModeTest, DriftTest | ↓ | 0 | SESSION | arming requires an authenticated frame (and a bench node) |
+| MacControl ping | ↓ | 0 | SESSION, or NONE while MAC-2 is switched off for control during an authenticated ModeTest (bench) | MAC-2-off pings use the dedicated counter |
 | MacControl echo, ModeTestReport, GridSyncRequest, MacAck | ↑ | 0 | SESSION | |
-| App frames | ↕ | 2 | SESSION (NONE only before a session) | |
+| ClientConfig, CoverConfig | ↓ | 2 | SESSION; NONE to a node without a session (provisioning) or with address 0 | |
+| other App frames | ↕ | 2 | SESSION | a node without a session refuses them in the clear |
+
+There is no sealed broadcast: a SESSION frame must be unicast (session keys and the CTR
+block are per node).
 
 ## 5. Per-copy burst restamp
 
@@ -202,8 +239,9 @@ MAC-0 writes, per copy, at fixed offsets and with no decode:
 - byte 10 BURST_IDX, byte 11 BURST_CNT;
 - bytes 12..17 STAMP (when STAMPED): FIRE_ROUND u24, FIRE_OFFSET_US u24;
 then one CMAC over `prefix || frame[0 .. L-8)` and 8 bytes written at `L-8`.
-The ciphertext is never touched (sealed once at pack time). The `CopySealer` signature
-from `MacSap.h` stays; its input becomes the raw copy bytes instead of a decoded MacHdr.
+The ciphertext is never touched (sealed once at pack time). `MacSap.h`'s `CopySealer`
+keeps its shape `(ctx, const MacHdr&, const uint8_t *frame, size_t frame_len, tag)`; the
+bytes it tags are the raw copy up to the tag, not a ciphertext.
 Cost: ≤ 6 byte writes + one CMAC over (8 + L − 8) bytes — for a 46-byte cover op that is
 one AES-CMAC over 46 bytes (3 blocks), replacing today's protobuf unpack + pack per copy
 (the dominant part of H-1's ~1.9 ms p50). `BurstFrame` (hub) and the node's restamp shrink
@@ -229,7 +267,9 @@ header, T_sym 256 µs; preamble 12 symbols down / 8 up, +4.25):
 
 Gains come in 8-symbol (2 048 µs) steps, so a frame that does not cross a block boundary
 gains nothing; the largest frame stays far below 255 B. A 17-copy burst of the cover op
-saves 17 × 8 192 µs ≈ 139 ms of shared air.
+saves 17 × 8 192 µs ≈ 139 ms of shared air. (The rows are the 2026-10-18 estimates; the
+shared vector `cover_op` in `MacWireVectors.h` is an unstamped cover op with a 9-byte
+body, 35 B on air — use the vectors for exact sizes.)
 
 ## 7. msgId split
 
@@ -244,9 +284,13 @@ saves 17 × 8 192 µs ≈ 139 ms of shared air.
 | wake-clock pairing | `NodeWakeBeacon.prevBeaconFcnt` (rename of prevBeaconMsgid; same numbers) |
 | session exhaustion (2^31) | FCNT bit 31 rule (§2.4) |
 
-The node keeps executing a Control command once per FCNT (AckCache) and additionally once
-per `cmd_id` within a session, so a hub re-pack after a session change cannot run an OTA
-twice; a retry keeps both FCNT and cmd_id.
+The node executes a Control command once per FCNT (replay window + AckCache) and
+additionally once per `cmd_id`: it keeps the last executed cmd_id (one slot, RAM) across
+sessions, so a hub re-pack after a session change cannot run an OTA twice; a retry keeps
+both FCNT and cmd_id. The slot is cleared when a LOGIN with `hub_rebooted` opens a new
+session (the hub's ids restart with its boot), so the scope of `cmd_id` is **one hub
+boot**. A node reboot also forgets it (the hub's at-most-once delivery is then the only
+guard).
 
 ## 8. blinds.proto changes (both repos; every stub copy regenerated by `proto/regen_stubs.sh`)
 
@@ -290,10 +334,10 @@ Dependency-free (`<stdint.h>`, `<stddef.h>`, `<string.h>`), no crypto calls:
   presence); never trusts content;
 - `size_t encodeHeader(const WireHdr&, uint8_t *out, size_t cap)`;
 - `size_t buildMacInputPrefix(uint8_t out[8], bool downlink, uint32_t session_or_key_id)`;
-- `void stampCopy(uint8_t *frame, size_t len, uint8_t idx, uint8_t cnt, bool on_mark,
-  bool stamped, uint32_t round, uint32_t offset)`;
+- `bool stampCopy(...)` (refuses values above 24 bits and a layout change between copies;
+  see `MacWire.h` for the exact parameters);
 - `int32_t roundDelta24(uint32_t a, uint32_t b)`;
-- `void buildCtrBlock(...)` stays in FrameCrypto.h (unchanged construction).
+- `buildCtrInitialBlock(...)` stays in FrameCrypto.h (unchanged construction).
 `MacSap.h` keeps `MacHdr` (decoded from `WireHdr` by one function) and `CopySealer`.
 
 ## 11. Test strategy
