@@ -1156,3 +1156,24 @@ TEST(MacWireV1Listener, TheStartupDemoteIsAPlainBroadcastOnPortZero) {
     EXPECT_EQ(h.port, macwire::kPortMac0Mgmt);
     EXPECT_EQ(h.fcnt, 0u);
 }
+
+// Review HB7: the session id and the key epoch used to be coupled only by call
+// order (every caller cleared the keys before setting a new id). A new session
+// id with the old keys still installed let a copy be tagged under (new id, old
+// key), which the node rejects. Now a changed id moves the key epoch itself.
+TEST(MacWireV1Seal, ANewSessionIdMakesEveryFrameSealedBeforeItStale) {
+    VectorSession s;
+    Hub hub;
+    SealedFrame sf(hub.rol);
+    ASSERT_EQ(sf.retag(), mac2::LinkSecurity::Retag::Ok) << "precondition";
+    auto &st = mac2::LinkSecurity::hub().store();
+    const uint32_t epoch = st.keyEpoch(mv::kNodeAddr);
+    st.setSessionId(mv::kNodeAddr, mv::kSessionId);   // the same id: nothing moves
+    EXPECT_EQ(st.keyEpoch(mv::kNodeAddr), epoch);
+    st.setSessionId(mv::kNodeAddr, mv::kSessionId + 1);   // keys NOT cleared first
+    EXPECT_NE(st.keyEpoch(mv::kNodeAddr), epoch);
+    memset(sf.tag, 0xAA, sizeof(sf.tag));
+    EXPECT_EQ(sf.retag(), mac2::LinkSecurity::Retag::Stale)
+        << "a copy was tagged under the new session id with the old frame's binding";
+    EXPECT_TRUE(sf.untouched());
+}

@@ -32,9 +32,10 @@
 //   * Nothing in this unit logs (the callers log, outside any lock).
 //   * The retag path builds its CMAC input on the stack: no heap, no virtual call
 //     (H-1 measures it per copy).
-//   * session_mutex_ (was s_base_nonce_map_mutex) and keys_mutex_ are never held
-//     together, and PSA-internal locks are only ever taken inside keys_mutex_, so
-//     there is no lock-order cycle.
+//   * The session id lives with the keys under keys_mutex_ and is read inside
+//     the seal/retag lock, so a frame's CTR block / MAC prefix and its key are
+//     always from one consistent state. PSA-internal locks are only ever taken
+//     inside keys_mutex_, so there is no lock-order cycle.
 //   * The generation is a monotonically increasing per-peer counter, never
 //     reused (key ids are); a clear keeps it, forget (listener destroyed) drops it.
 //     A frame is bound to the KEY EPOCH instead (FrameSeal), which also moves on
@@ -105,6 +106,9 @@ class SessionKeyStore
 {
 public:
     // -- session id (the LOGIN's base nonce, input of the CTR block and KDF) --
+    // Held with the keys under keys_mutex_. A CHANGED id moves the key epoch,
+    // so no frame sealed under the previous id is retagged under the new one
+    // (review HB7); setting the same id again moves nothing.
     void setSessionId(mac::Addr peer, uint32_t session_id);
     // False when the peer has no entry; an entry holding 0 is found with 0.
     bool sessionId(mac::Addr peer, uint32_t *out) const;
@@ -142,11 +146,11 @@ private:
         KeyPair  live{};
         uint32_t generation{0};            // per peer, monotonic, never reused
         uint32_t installed_session_id{0};  // the session id `live` was derived for
-        uint32_t key_epoch{0};             // moves on every install and clear (FrameSeal)
+        uint32_t key_epoch{0};             // moves on install, clear and a new session id
         uint32_t stale_drops{0};           // copies refused as stale
+        uint32_t session_id{0};            // the LOGIN base nonce (CTR block, MAC prefix)
+        bool     has_session_id{false};
     };
-    mutable std::mutex                session_mutex_;   // session_ids_
-    std::map<mac::Addr, uint32_t>     session_ids_;
     mutable std::mutex                keys_mutex_;      // keys_
     std::map<mac::Addr, Keys>         keys_;
 };
@@ -225,7 +229,7 @@ public:
 
 private:
     bool authTagV1_(bool downlink, const uint8_t *bytes, size_t n, uint8_t (&tag)[kTagBytes]);
-    Retag macUnderKeyLock_(const FrameSeal &seal, const uint8_t *in, size_t len,
+    Retag macUnderKeyLock_(const FrameSeal &seal, const uint8_t *bytes, size_t n,
                            uint8_t (&out)[kTagBytes]);
     SessionKeyStore store_;
     psa_key_id_t    auth_key_{PSA_KEY_ID_NULL};

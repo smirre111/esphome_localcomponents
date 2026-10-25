@@ -34,17 +34,22 @@ static constexpr size_t kMaxCt = 256;
 
 void SessionKeyStore::setSessionId(mac::Addr peer, uint32_t session_id)
 {
-    std::lock_guard<std::mutex> lock(this->session_mutex_);
-    this->session_ids_[peer] = session_id;
+    std::lock_guard<std::mutex> lock(this->keys_mutex_);
+    Keys &k = this->keys_[peer];
+    if (k.has_session_id && k.session_id == session_id)
+        return;
+    k.session_id     = session_id;
+    k.has_session_id = true;
+    ++k.key_epoch;
 }
 
 bool SessionKeyStore::sessionId(mac::Addr peer, uint32_t *out) const
 {
-    std::lock_guard<std::mutex> lock(this->session_mutex_);
-    auto it = this->session_ids_.find(peer);
-    if (it == this->session_ids_.end())
+    std::lock_guard<std::mutex> lock(this->keys_mutex_);
+    auto it = this->keys_.find(peer);
+    if (it == this->keys_.end() || !it->second.has_session_id)
         return false;
-    *out = it->second;
+    *out = it->second.session_id;
     return true;
 }
 
@@ -74,10 +79,6 @@ void SessionKeyStore::clearKeys(mac::Addr peer)
 
 void SessionKeyStore::forget(mac::Addr peer)
 {
-    {
-        std::lock_guard<std::mutex> lock(this->session_mutex_);
-        this->session_ids_.erase(peer);
-    }
     std::lock_guard<std::mutex> lock(this->keys_mutex_);
     auto it = this->keys_.find(peer);
     if (it == this->keys_.end())
@@ -305,23 +306,34 @@ static bool s_ctr_pass(bool encrypt, psa_key_id_t key_id,
     return ok;
 }
 
-// The ONLY part of the retag that holds keys_mutex_: the peer's key epoch and
-// K_mac are read AND USED inside it (I3, I3 (c), F4). One psa_mac_compute, no
-// logging, no heap.
-LinkSecurity::Retag LinkSecurity::macUnderKeyLock_(const FrameSeal &seal, const uint8_t *in,
-                                                   size_t len, uint8_t (&out)[kTagBytes])
+// prefix || bytes on the stack (<= 8 + 255). False when it would not fit.
+static bool s_v1_mac_input(bool downlink, uint32_t id, const uint8_t *bytes, size_t n,
+                           uint8_t (&in)[macwire::kMacInputPrefixBytes + kMaxCt], size_t *len);
+
+// The ONLY part of the retag that holds keys_mutex_: the peer's session id, key
+// epoch and K_mac are read AND USED inside it (I3, I3 (c), F4, HB7), so the MAC
+// prefix and the key always belong to one state. One stack copy and one
+// psa_mac_compute; no logging, no heap.
+LinkSecurity::Retag LinkSecurity::macUnderKeyLock_(const FrameSeal &seal, const uint8_t *bytes,
+                                                   size_t n, uint8_t (&out)[kTagBytes])
 {
+    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
+    size_t  len = 0;
     std::lock_guard<std::mutex> lock(this->store_.keys_mutex_);
     auto s = this->store_.keys_.find(seal.peer);
     if (s == this->store_.keys_.end())
-        return Retag::Stale;
+        return Retag::NoSession;   // the peer is forgotten altogether
     if (s->second.key_epoch != seal.key_epoch)
     {
         ++s->second.stale_drops;
         return Retag::Stale;
     }
+    if (!s->second.has_session_id)
+        return Retag::NoSession;
     const psa_key_id_t mac_key = s->second.live.mac;
     if (mac_key == PSA_KEY_ID_NULL)
+        return Retag::Failed;
+    if (!s_v1_mac_input(true, s->second.session_id, bytes, n, in, &len))
         return Retag::Failed;
     size_t out_len = 0;
     const bool ok = psa_mac_compute(mac_key, PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, kTagBytes), in,
@@ -411,20 +423,22 @@ LinkSecurity::Seal LinkSecurity::sealFrameV1(uint8_t *frame, size_t hdr_len, siz
         return Seal::Failed;
     if (h.fcnt >= macwire::kFcntLimit)
         return Seal::MsgidSpent;
-    uint32_t session_id = 0;
-    this->store_.sessionId(h.dst, &session_id);
-    if (session_id == 0)
-        return Seal::NoSession;
-    uint8_t ctr_block[framecrypto::kCtrBlockBytes];
-    framecrypto::buildCtrInitialBlock(session_id, h.dst, /*downlink=*/true, h.fcnt, 0, ctr_block);
 
     std::unique_ptr<V1SealWork> work(new (std::nothrow) V1SealWork);
     if (!work)
         return Seal::Failed;
+    // The session id, the keys and the epoch are read and used under one lock
+    // (HB7): the CTR block can never pair one session's id with another's key.
     std::lock_guard<std::mutex> lock(this->store_.keys_mutex_);
     auto it = this->store_.keys_.find(h.dst);
-    if (it == this->store_.keys_.end() || !it->second.live.complete())
+    const uint32_t session_id =
+        (it != this->store_.keys_.end() && it->second.has_session_id) ? it->second.session_id : 0;
+    if (session_id == 0)
+        return Seal::NoSession;
+    if (!it->second.live.complete())
         return Seal::NoKey;
+    uint8_t ctr_block[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(session_id, h.dst, /*downlink=*/true, h.fcnt, 0, ctr_block);
     if (!s_v1_seal_locked(it->second.live, session_id, ctr_block, frame, hdr_len, body_len, *work))
         return Seal::Failed;
     seal->sealed    = true;
@@ -491,26 +505,24 @@ LinkSecurity::Verify LinkSecurity::verifyUplinkV1(uint32_t session_id, const Key
                : Verify::BadTag;
 }
 
-// The v1 per-copy path (H-1): the input is built on the stack before the lock,
-// the lock covers one psa_mac_compute (macUnderKeyLock_), no heap, no logging.
+// The v1 per-copy path (H-1): the MAC input is built on the stack inside the
+// key lock (macUnderKeyLock_, with the session id it belongs to) and tagged by
+// one psa_mac_compute; no heap, no logging.
 LinkSecurity::Retag LinkSecurity::retagFrameV1(const FrameSeal &seal, const mac::MacHdr &copy,
                                                const uint8_t *bytes, size_t n,
                                                uint8_t tag[kTagBytes])
 {
     if (copy.fcnt >= macwire::kFcntLimit)
         return Retag::MsgidSpent;
-    uint32_t session_id = 0;
-    if (!seal.sealed || !this->store_.sessionId(seal.peer, &session_id))
+    if (!seal.sealed)
         return Retag::NoSession;
-    uint8_t in[macwire::kMacInputPrefixBytes + kMaxCt];
-    size_t  in_len = 0;
-    if (!s_v1_mac_input(true, session_id, bytes, n, in, &in_len))
+    if (n > kMaxCt || (n > 0 && bytes == nullptr))
         return Retag::Failed;
     uint8_t   out[kTagBytes];
     FrameSeal bound = seal;
     if (copy.dst != seal.peer)
         bound.key_epoch = ~seal.key_epoch;   // a copy for another node: never this frame's
-    const Retag verdict = this->macUnderKeyLock_(bound, in, in_len, out);
+    const Retag verdict = this->macUnderKeyLock_(bound, bytes, n, out);
     if (verdict == Retag::Ok)
         memcpy(tag, out, sizeof(out));
     return verdict;
