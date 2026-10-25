@@ -123,7 +123,6 @@ namespace esphome
     } __attribute__((packed));
 
  
-
     // A request for the generic delivery glue (LORAListener::deliver_): what to
     // send, what to do when it is acknowledged, what to do when it is given up.
     // The retry rules are the Policy (DeliveryPolicy.h); the callbacks are the
@@ -316,8 +315,6 @@ namespace esphome
       void sendDebugSysop(int32_t op);
       virtual void set_response(uint8_t *data, size_t len);
 
-      // void send_remote_address();
-      // void send_remote_sleep_time();
       void send_login();
       // P1: push wall-clock time to the node.  The node has no clock source of
       // its own, so this is its only way to learn the time.  Sent once the

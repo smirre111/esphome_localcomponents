@@ -2,7 +2,6 @@
 
 #include "esphome/components/button/button.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
-#include "esphome/components/loracover/loracover_base.h"
 
 namespace esphome
 {

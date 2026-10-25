@@ -3,7 +3,6 @@
 #include "esphome/core/component.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
 #include "esphome/components/cover/cover.h"
-#include "esphome/components/loracover/loracover_base.h"
 
 
 
@@ -56,8 +55,6 @@ namespace esphome
       float blind_thickness_mm_{8.0f};
       // uint64_t sleep_duration_{28800};
 
-      std::unique_ptr<LoraCovEncoder> encoder_;
-      std::unique_ptr<LoraCovDecoder> decoder_;
       float target_position_{0};
 
       uint32_t start_dir_time_{0};

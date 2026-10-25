@@ -267,10 +267,6 @@ namespace esphome
       //     ESP_LOG_BUFFER_HEX(TAG, rx_buffer->data, rx_buffer->length);
       //   }
 
-      //   // Return buffer to pool
-      //   this->return_buffer_to_pool(rx_buffer);
-      // }
-      // }
     }
 
     void LORATracker::checkReception()
@@ -957,11 +953,6 @@ namespace esphome
                  free_buffer_queue, data_queue);
         return false;
       }
-      // if (free_buffer_queue == NULL)
-      // {
-      //   ESP_LOGE(TAG, "Free buffer queue not initialized");
-      //   ESP_ERROR_CHECK(this->init_memory_pool());
-      // }
 
       ESP_LOGV(TAG, "Free buffers available: %u",
                (unsigned) uxQueueMessagesWaiting(free_buffer_queue));

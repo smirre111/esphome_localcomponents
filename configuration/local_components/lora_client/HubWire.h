@@ -26,8 +26,6 @@
 namespace hubwire
 {
 
-// The hub's own short address (SRC of every downlink).
-static constexpr uint8_t kHubAddr = 0x01;
 
 struct Route
 {

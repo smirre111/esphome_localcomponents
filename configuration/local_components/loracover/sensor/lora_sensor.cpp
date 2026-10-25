@@ -17,9 +17,6 @@ namespace esphome
 
     void LoraCover::setup()
     {
-      this->encoder_ = make_unique<LoraCovEncoder>();
-      this->decoder_ = make_unique<LoraCovDecoder>();
-      // this->registered_ = false;
       this->last_battery_update_ = 0;
       this->current_sensor_ = 0;
     }

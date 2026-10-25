@@ -15,3 +15,7 @@ tests/proto_sim/build_clean/
 .esphome/
 logs/
 loradevices.bench.yml
+
+# Python bytecode (esphome config/compile rewrites it on every run).
+__pycache__/
+*.pyc

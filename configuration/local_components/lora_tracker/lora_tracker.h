@@ -161,7 +161,6 @@ namespace esphome
   };
 
 
-
     // class LORATracker;
 
     // class LORAClientNode
@@ -169,8 +168,6 @@ namespace esphome
     // public:
     //   virtual void set_response(uint8_t *data, size_t len) = 0;
 
-    //   virtual void loop() {}
-    //   void set_lora_client_parent(LORAClient *parent) { this->parent_ = parent; }
 
     // protected:
     //   LORAClient *parent_{nullptr};
@@ -670,11 +667,6 @@ namespace esphome
       std::atomic<bool> lora_tx_busy_{false};   // sendTask writes, loop() reads
       uint8_t buf_[255]; // Maximum Payload size of SX1276/77/78/79 is 255
 
-      // rx_buffer_t memory_pool[POOL_SIZE] {};
-      // QueueHandle_t free_buffer_queue;
-      // QueueHandle_t data_queue;
-      // SemaphoreHandle_t pool_mutex;
-      // pool_stats_t pool_stats = {};
 
       int rxSlotsPerRound{3};
       int txSlotsPerRound{17};

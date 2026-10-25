@@ -35,27 +35,12 @@ namespace esphome
         this->position = 0.5f;
       }
 
-      // this->position = COVER_OPEN;
-      this->encoder_ = make_unique<LoraCovEncoder>();
-      this->decoder_ = make_unique<LoraCovDecoder>();
-      // this->registered_ = false;
     }
 
     void LoraCoverComponent::loop()
     {
 
-      // const uint32_t now = App.get_loop_component_start_time();
 
-      // if ((now - this->start_dir_time_ > 2e3) && (this->busy_ == true))
-      // {
-      //   this->busy_ = false;
-      //   ESP_LOGI(TAG, "'%s' - Assuming target position reached after 2s.", this->name_.c_str());
-      //   if (this->position != this->target_position_)
-      //   {
-      //     this->position = this->target_position_;
-      //     this->publish_state();
-      //   }
-      // }
     }
 
     CoverTraits LoraCoverComponent::get_traits()
@@ -158,48 +143,11 @@ namespace esphome
       this->publish_state(true);
     }
 
-    // void LoraCoverComponent::send_remote_duration()
-    // {
-    //   ESP_LOGI(TAG, "Setting remote close duration for device %s", this->address_str());
-    //   // Implementation to set remote close duration
-
-    //   BlndOperationMessage op_message BLND_OPERATION_MESSAGE__INIT;
-    //   op_message.destaddress = esphome::lora_tracker::LORATracker::broadcastAddressing;
-    //   op_message.destsubnet = esphome::lora_tracker::LORATracker::subnetAddressing;
-    //   op_message.senderaddress = 0x12345678; // TODO: Use unique address
-    //   op_message.msgid = 0;                  // Incrementing message ID
-    //   op_message.cmd_case = BLND_OPERATION_MESSAGE__CMD_TIME;
-
-    //   TimeUpdate time_update = TIME_UPDATE__INIT;
-    //   time_update.closetime = this->close_duration_;
-    //   time_update.opentime = this->open_duration_;
-    //   op_message.time = &time_update;
-
-    //   auto status = false;
-
-    //   uint8_t *txBuf;
-    //   unsigned len;
-    //   len = blnd_operation_message__get_packed_size(&op_message);
-    //   txBuf = new uint8_t[len];
-    //   blnd_operation_message__pack(&op_message, txBuf);
-
-    //   // this->parent_->sendPacketOnce(txBuf, len);
-    //   this->parent_->send(txBuf, len);
-
-    //   if (status)
-    //   {
-    //     ESP_LOGW(TAG, "Error writing sleep command to device");
-    //   }
-
-    // }
 
     void LoraCoverComponent::send_remote_config()
     {
       ESP_LOGI(TAG, "Sending remote config for device %s", this->parent_->address_str());
-      // Implementation to send remote address
 
-      // this->parent_->frame_counter_.tx_message_id = 0;
-      // this->parent_->frame_counter_.rx_message_id = 0;
 
       CoverConfig coverconfig = COVER_CONFIG__INIT;
       coverconfig.closetime = this->close_duration_;

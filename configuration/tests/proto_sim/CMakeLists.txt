@@ -298,14 +298,12 @@ set(LORACOVER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/loracover)
 add_library(real_lora_cover STATIC
     ${LORACOVER_DIR}/cover/lora_cover.cpp
     ${LORACOVER_DIR}/sensor/lora_sensor.cpp   # S6: the sensor child, host-tested
-    ${LORACOVER_DIR}/loracover_base.cpp
 )
 target_include_directories(real_lora_cover
     BEFORE PUBLIC
         ${SHIM_DIR}
         ${LORACOVER_DIR}/cover         # lora_cover.h
         ${LORACOVER_DIR}/sensor        # lora_sensor.h
-        ${LORACOVER_DIR}                # loracover_base.h
         ${LORA_CLIENT_DIR}              # lora_client.h, lora_client_node.h
         ${BLINDSPROTO_DIR}              # blinds.pb-c.h
         ${CMAKE_CURRENT_SOURCE_DIR}     # sim/*

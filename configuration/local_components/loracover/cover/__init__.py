@@ -13,8 +13,6 @@ DEPENDENCIES = ["lora_tracker", "lora_client"]
 AUTO_LOAD = ["loracover", "blindsproto"]
 
 CONF_INVERT_POSITION = "invert_position"
-# CONF_SHORT_ADDRESS = "short_address"
-# CONF_SUBNET_ADDRESS = "subnet_address"
 CONF_OPEN_DURATION = "open_duration"
 CONF_CLOSE_DURATION = "close_duration"
 CONF_OPEN_SLACK = "open_slack"
@@ -33,20 +31,11 @@ LoraCoverComponent = loracov_ns.class_(
 
 # HomeassistantTime = ha.homeassistant_ns.class_("HomeassistantTime", time_.RealTimeClock)
 
-# TIME_SCHEMA = cv.Schema(
-#     {
-#         cv.GenerateID(CONF_TIME_ID): cv.use_id(HomeassistantTime),
-#     }
-# )
 
 LORA_COVER_SCHEMA = (
     cover.cover_schema(LoraCoverComponent)
     .extend(
         {
-            # cv.Required(CONF_MAC_ADDRESS): cv.mac_address,
-            # cv.Optional(CONF_SHORT_ADDRESS, default=0x11): cv.int_range(min=0, max=0xFF),
-            # cv.Optional(CONF_SUBNET_ADDRESS, default=0x11): cv.int_range(min=0, max=0xFF),
-            # cv.Optional(CONF_PIN, default=8888): cv.int_range(min=0, max=0xFFFF),
             cv.Optional(CONF_INVERT_POSITION, default=False): cv.boolean,
             cv.Optional(CONF_OPEN_DURATION, default=False): cv.int_range(0, 120),
             cv.Optional(CONF_CLOSE_DURATION, default=False): cv.int_range(0, 120),
@@ -55,8 +44,6 @@ LORA_COVER_SCHEMA = (
             cv.Optional(CONF_BLIND_HEIGHT_MM, default=2000.0): cv.float_range(min=1),
             cv.Optional(CONF_AXLE_DIAMETER_MM, default=60.0): cv.float_range(min=1),
             cv.Optional(CONF_BLIND_THICKNESS_MM, default=8.0): cv.float_range(min=0.1),
-            # cv.Optional(CONF_SLEEP_DURATION, default=False): cv.int_range(0, 864000),
-            # cv.Required(CONF_TIME_ID): cv.use_id(time_.RealTimeClock),  # Require time component ID
         }
     )
     .extend(lora_client.LORA_CLIENT_SCHEMA)
@@ -81,9 +68,6 @@ CONFIG_SCHEMA = (
     .extend(lora_client.LORA_CLIENT_SCHEMA)
     .extend(cv.COMPONENT_SCHEMA)
 )
-
-
-
 
 
 async def to_code(config):

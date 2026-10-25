@@ -4,7 +4,6 @@
 
 #include "esphome/components/lora_tracker/lora_tracker.h"
 #include "esphome/components/sensor/sensor.h"
-#include "esphome/components/loracover/loracover_base.h"
 
 namespace esphome
 {
@@ -46,8 +45,6 @@ namespace esphome
       void send_remote_config() override;
     protected:
       uint16_t char_handle_;
-      std::unique_ptr<LoraCovEncoder> encoder_;
-      std::unique_ptr<LoraCovDecoder> decoder_;
       // bool registered_;
       sensor::Sensor *battery_{nullptr};
       sensor::Sensor *voltage_{nullptr};
