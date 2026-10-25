@@ -1917,7 +1917,6 @@ namespace esphome
     {
     public:
       // Memory optimized layout
-      uint8_t app_id; // App IDs are small integers assigned sequentially
 
     protected:
     };

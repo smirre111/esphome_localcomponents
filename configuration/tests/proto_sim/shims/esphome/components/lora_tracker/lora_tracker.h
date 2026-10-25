@@ -192,7 +192,6 @@ public:
 private:
     std::vector<LORAClient*>   clients_;
     std::vector<LORAListener*> listeners_;
-    uint8_t                    app_id_{0};
 };
 
 } // namespace esphome::lora_tracker

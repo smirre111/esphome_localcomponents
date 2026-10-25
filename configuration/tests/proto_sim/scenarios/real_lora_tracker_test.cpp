@@ -1702,6 +1702,22 @@ TEST(RealTrackerBeacon, ABeaconDroppedForWantOfABufferIsRetriedNotRecorded) {
     EXPECT_EQ(t.beaconsSent(), 1u) << "and the next pass places it";
 }
 
+// Review HB9 (2026-10-25): the shadow pending mask's sources were filled only
+// by register_listener, whose sole caller was SleepTrigger (codegen commented
+// out), so every 'beacon shadow' line evaluated zero nodes. Every registered
+// client is a source now. (This target links no real listener: the object is
+// never used beyond its address, which is all register_client stores.)
+TEST(RealTrackerBeacon, EveryRegisteredClientFeedsTheShadowMask) {
+    BeaconProbe t;
+    ASSERT_EQ(t.mgmt().shadowSourceCount(), 0u);
+    using esphome::lora_tracker::LORAClient;
+    alignas(LORAClient) static unsigned char storage[2][sizeof(LORAClient)];
+    t.register_client(reinterpret_cast<LORAClient *>(storage[0]));
+    t.register_client(reinterpret_cast<LORAClient *>(storage[1]));
+    EXPECT_EQ(t.mgmt().shadowSourceCount(), 2u)
+        << "a registered node's state never reached the shadow pending mask";
+}
+
 TEST(RealTrackerBeacon, NullListenerEntriesAreSkippedWhenGatheringTheShadow) {
     lorahal::rec().reset();
     proto_sim_timer_reset();

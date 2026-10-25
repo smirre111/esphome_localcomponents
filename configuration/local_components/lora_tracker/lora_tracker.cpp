@@ -1555,16 +1555,19 @@ namespace esphome
       this->firePacket(not_before_us);
     }
 
+    // Every node's listener: it sends through this tracker, receives every
+    // uplink (checkReception's fan-out), and its state feeds the shadow
+    // pending mask (review HB9: only SleepTrigger objects reached
+    // register_listener, so every 'beacon shadow' line evaluated zero nodes).
     void LORATracker::register_client(LORAClient *client)
     {
-      client->set_parent(this);          // required: lets the client send via the radio
-      client->app_id = ++this->app_id_;
+      this->register_listener(client);
       this->clients_.push_back(client);
     }
 
     void LORATracker::register_listener(LORAListener *listener)
     {
-      listener->set_parent(this);
+      listener->set_parent(this);              // lets the listener send via the radio
       this->mgmt_.addShadowSource(listener);   // its state feeds the shadow mask
     }
 

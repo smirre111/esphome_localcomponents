@@ -141,7 +141,6 @@ bool LORATracker::send(uint8_t* data, size_t len, const TxPolicy& policy) {
 
 void LORATracker::register_client(LORAClient* client) {
     client->set_parent(this);
-    client->app_id = ++app_id_;
     clients_.push_back(client);
 }
 

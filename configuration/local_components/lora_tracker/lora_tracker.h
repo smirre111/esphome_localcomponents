@@ -650,7 +650,6 @@ namespace esphome
       // Group 1: Large objects (12+ bytes) - vectors and callback manager
       std::vector<LORAClient *> clients_;
       // Group 4: 1-byte types (enums, uint8_t, bool)
-      uint8_t app_id_{0};
 
       // Serialises all SX1278 SPI access so a TX copy and an RX read can never
       // overlap on the shared bus.  lora_tx_busy_ is kept only as a lightweight
