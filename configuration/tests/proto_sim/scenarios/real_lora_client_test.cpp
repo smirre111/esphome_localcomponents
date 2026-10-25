@@ -10384,6 +10384,26 @@ TEST(FireDelivery, AClientConfigCarriesEveryFieldTheNodeIsProvisionedFrom) {
     EXPECT_EQ(seen, 1);
 }
 
+// Review HB6: set_sleep_duration took a uint16_t, so the schema's own range
+// (0..864000 s, 10 days) and the header's 24 h default were cut to 16 bits on
+// the way in: 86400 s reached the node as 20864 s.
+TEST(FireDelivery, AClientConfigCarriesASleepDurationWiderThanSixteenBits) {
+    using namespace real_helpers;
+    for (const uint32_t secs : {86400u, 864000u}) {
+        RealHubHarness h{18, kMacRol2};
+        h.rol.set_sleep_duration(secs);
+        h.rol.send_remote_config();
+        int seen = 0;
+        for (const auto &f : h.radio.hub_to_node_frames()) {
+            auto m = proto_sim::as_op(f);
+            if (!m || m->cmd != OpCmd::ClientConfig) continue;
+            ++seen;
+            EXPECT_EQ(m->clientconfig.sleepDuration, secs);
+        }
+        EXPECT_EQ(seen, 1) << secs;
+    }
+}
+
 TEST(FireDelivery, ATimeSyncSentLogLineNamesTheEpochTheOffsetAndTheMsgidOnTheAir) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};

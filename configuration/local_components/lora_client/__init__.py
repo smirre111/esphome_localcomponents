@@ -341,7 +341,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SHORT_ADDRESS): cv.int_range(min=1, max=0xFD),
             cv.Required(CONF_SUBNET_ADDRESS): cv.int_range(min=0, max=0xFF),
             cv.Required(CONF_TIME_ID): cv.use_id(time_.RealTimeClock),  # Require time component ID
-            cv.Optional(CONF_SLEEP_DURATION, default=False): cv.int_range(0, 864000),
+            # Seconds the node sleeps after the nightly SLEEP (pushed in
+            # ClientConfig). 24 h when omitted, as the C++ member default; 0 is
+            # refused (a zero-length sleep is not a sleep).
+            cv.Optional(CONF_SLEEP_DURATION, default=86400): cv.int_range(min=1, max=864000),
             # How often the node force-sends its battery status.  Accepts a time
             # period (e.g. "15min", "900s"); pushed to the node via ClientConfig.
             cv.Optional(CONF_BATTERY_UPDATE_INTERVAL, default="15min"): cv.All(
