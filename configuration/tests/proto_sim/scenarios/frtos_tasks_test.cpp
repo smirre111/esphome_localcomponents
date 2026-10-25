@@ -48,6 +48,8 @@
 
 #include <lora.h>
 #include <gtest/gtest.h>
+#include <psa/crypto.h>
+#include "FrameCrypto.h"
 
 #include <cstring>
 
@@ -96,6 +98,8 @@ struct DispProbe : CmdDispatcher {
     using CmdDispatcher::mode_test_active_;
 };
 
+void resetIrqSession();   // the Mode B section's session context (below)
+
 struct Irq : public ::testing::Test {
     portMUX_TYPE  motorMux{};
     portMUX_TYPE  buttonMux{};
@@ -108,6 +112,7 @@ struct Irq : public ::testing::Test {
 
     void SetUp() override {
         loranode::rec().reset();
+        resetIrqSession();
         // The firmware's globals, as main.cpp would set them.
         motCtrl       = &mot;
         sysCtrl       = &sys;
@@ -719,11 +724,103 @@ namespace {
 constexpr uint8_t kModeBNode   = 18;
 constexpr uint8_t kModeBSubnet = 2;
 
-// A pre-session (AUTH = NONE) v1 frame from the hub to this node.
+// Node review N10 (node d3eb776): a node WITHOUT a session refuses a plaintext
+// sysop, so the tests whose phase samples are carried by status requests give
+// the node a session first: a LOGIN under K_AUTH (the host build's fleet
+// phrase), then every hubFrame sealed under the node's own
+// keys (CTR under K_enc, CMAC-8 under K_mac), as the hub seals in a session.
+struct IrqSession {
+    CmdDispatcher *disp{nullptr};
+    uint32_t       nonce{0};
+};
+IrqSession g_irq_session;
+void resetIrqSession() { g_irq_session = IrqSession{}; }
+
+bool cmacPsa(const uint8_t *key, size_t key_len, const uint8_t *in, size_t len, uint8_t *out,
+             size_t out_len) {
+    psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&a, PSA_KEY_USAGE_SIGN_MESSAGE);
+    psa_set_key_algorithm(&a, PSA_ALG_CMAC);
+    psa_set_key_type(&a, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&a, (psa_key_bits_t) (key_len * 8));
+    psa_key_id_t id = PSA_KEY_ID_NULL;
+    if (psa_import_key(&a, key, key_len, &id) != PSA_SUCCESS) return false;
+    uint8_t full[16];
+    size_t n = 0;
+    const bool ok = psa_mac_compute(id, PSA_ALG_CMAC, in, len, full, sizeof(full), &n) == PSA_SUCCESS;
+    psa_destroy_key(id);
+    if (ok) memcpy(out, full, out_len);
+    return ok;
+}
+
+// A LOGIN (PORT 1, AUTH = K_AUTH) carrying `nonce` as the session id.
+std::vector<uint8_t> kauthLogin(uint32_t nonce, uint32_t fcnt) {
+    LoginMsg lm = LOGIN_MSG__INIT;
+    lm.nonce = nonce;
+    std::vector<uint8_t> body(login_msg__get_packed_size(&lm));
+    login_msg__pack(&lm, body.data());
+    macwire::WireHdr h;
+    h.flags  = macwire::withAuth(0, macwire::Auth::KAuth);
+    h.dst    = kModeBNode;
+    h.src    = 1;
+    h.subnet = kModeBSubnet;
+    h.fcnt   = fcnt;
+    h.port   = macwire::kPortSession;
+    const size_t hlen = macwire::headerLen(h);
+    std::vector<uint8_t> f(hlen + body.size() + macwire::kTagBytes, 0);
+    macwire::encodeHeader(h, f.data(), f.size());
+    std::copy(body.begin(), body.end(), f.begin() + hlen);
+    uint8_t hash[32];
+    size_t hl = 0;
+    const char *phrase = CONFIG_BLINDS_LORA_FLEET_KEY;   // shims_node/sdkconfig.h
+    EXPECT_EQ(psa_hash_compute(PSA_ALG_SHA_256, (const uint8_t *) phrase, strlen(phrase), hash,
+                               sizeof(hash), &hl), PSA_SUCCESS);
+    uint8_t kdf[framecrypto::kKdfInputBytes];
+    framecrypto::buildKAuthKdfInput(kdf);
+    uint8_t k_auth[16];
+    EXPECT_TRUE(cmacPsa(hash, 16, kdf, sizeof(kdf), k_auth, 16));
+    std::vector<uint8_t> mi(macwire::kMacInputPrefixBytes);
+    macwire::buildMacInputPrefix(mi.data(), /*downlink=*/true, 0);
+    mi.insert(mi.end(), f.begin(), f.end() - macwire::kTagBytes);
+    EXPECT_TRUE(cmacPsa(k_auth, 16, mi.data(), mi.size(), f.data() + f.size() - macwire::kTagBytes,
+                        macwire::kTagBytes));
+    return f;
+}
+
+void irqSession(CmdDispatcher &disp) {
+    ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
+    constexpr uint32_t kNonce = 0x1A2B3C4Du;
+    auto login = kauthLogin(kNonce, /*fcnt=*/1);
+    disp.onReceiveNew(login.data(), (int) login.size());
+    ASSERT_GE(disp.sessionGenerationForTest(), 1u) << "irqSession: the LOGIN derived no keys";
+    g_irq_session.disp  = &disp;
+    g_irq_session.nonce = kNonce;
+}
+
+// Seal a whole v1 frame (header already AUTH = SESSION) under the node's keys.
+void irqSeal(std::vector<uint8_t> &f, const macwire::WireHdr &h, size_t hlen, size_t body_len) {
+    CmdDispatcher &d = *g_irq_session.disp;
+    uint8_t iv[framecrypto::kCtrBlockBytes];
+    framecrypto::buildCtrInitialBlock(g_irq_session.nonce, h.dst, /*downlink=*/true, h.fcnt, 0, iv);
+    std::vector<uint8_t> ct(body_len);
+    if (body_len && !d.ctrEncryptForTest(iv, f.data() + hlen, body_len, ct.data()))
+        ADD_FAILURE() << "irqSeal: no session keys";
+    std::copy(ct.begin(), ct.end(), f.begin() + hlen);
+    std::vector<uint8_t> mi(macwire::kMacInputPrefixBytes);
+    macwire::buildMacInputPrefix(mi.data(), /*downlink=*/true, g_irq_session.nonce);
+    mi.insert(mi.end(), f.begin(), f.end() - macwire::kTagBytes);
+    if (!d.cmacComputeForTest(mi.data(), mi.size(), f.data() + f.size() - macwire::kTagBytes,
+                              macwire::kTagBytes))
+        ADD_FAILURE() << "irqSeal: no session keys";
+}
+
+// A v1 frame from the hub to this node: AUTH = NONE before a session, sealed
+// once irqSession() gave the node one.
 std::vector<uint8_t> hubFrame(uint8_t flags, uint32_t fcnt, uint8_t port, uint8_t burst_cnt,
                               const std::vector<uint8_t> &body) {
     macwire::WireHdr h;
-    h.flags     = flags;
+    const bool sealed = g_irq_session.disp != nullptr;
+    h.flags     = sealed ? macwire::withAuth(flags, macwire::Auth::Session) : flags;
     h.dst       = kModeBNode;
     h.src       = 1;
     h.subnet    = kModeBSubnet;
@@ -731,9 +828,11 @@ std::vector<uint8_t> hubFrame(uint8_t flags, uint32_t fcnt, uint8_t port, uint8_
     h.port      = port;
     h.burst_cnt = burst_cnt;
     const size_t hlen = macwire::headerLen(h);
-    std::vector<uint8_t> out(hlen + body.size());
+    std::vector<uint8_t> out(hlen + body.size() + (sealed ? macwire::kTagBytes : 0));
     macwire::encodeHeader(h, out.data(), out.size());
     std::copy(body.begin(), body.end(), out.begin() + hlen);
+    if (sealed)
+        irqSeal(out, h, hlen, body.size());
     return out;
 }
 
@@ -784,6 +883,7 @@ TEST_F(Irq, AModeBNodeArmsItsOwnNextMarkEveryRound) {
     // node booked no missed mark until 563.9 s. Driven here pass by pass through
     // the real receive-loop halves and the real DIO1 handler.
     sys.setAddress(kModeBNode, kModeBSubnet);
+    irqSession(disp);   // node N10: the status samples need a session
     proto_sim_timer_set_now_us(40'000'000);
     lif.setupRXPollingTimer();
     lif.setCmdDispatcher(&disp);
@@ -851,8 +951,10 @@ TEST_F(Irq, AModeBNodeArmsItsOwnNextMarkEveryRound) {
 namespace {
 // Adopt a grid from an on-mark GridSync at t0 = 40 s, on the crystal, with timed
 // RX enabled — and no phase samples, so the node is NOT promoted.
-void adoptGridUnpromoted(Irq &f) {
+void adoptGridUnpromoted(Irq &f, bool with_session = false) {
     f.sys.setAddress(kModeBNode, kModeBSubnet);
+    if (with_session)
+        irqSession(f.disp);
     proto_sim_timer_set_now_us(40'000'000);
     f.lif.setupRXPollingTimer();
     f.lif.setCmdDispatcher(&f.disp);
@@ -919,7 +1021,7 @@ TEST_F(Irq, AnAdoptedNodeListensAtItsOwnMarkWhileStillInModeA) {
 }
 
 TEST_F(Irq, PromotionEndsTheTrialAndModeBTakesTheTimer) {
-    adoptGridUnpromoted(*this);
+    adoptGridUnpromoted(*this, /*with_session=*/true);   // node N10: sysops need a session
     lif.armNextRxWindow();
     ASSERT_EQ(lif.arm_source_, Probe::ArmSource::Trial);
 

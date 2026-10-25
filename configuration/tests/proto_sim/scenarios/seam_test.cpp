@@ -115,6 +115,23 @@ struct Seam : public ::testing::Test {
         return f.empty() ? std::vector<uint8_t>{} : f.back().bytes;
     }
 
+    // A real session (node N10, d3eb776: a node without one refuses a
+    // plaintext cover op): the hub's LOGIN to the node, the node's
+    // session-opening uplink back to the hub, as e2e_test's settle() does.
+    void bringUpSession() {
+        rol.config_synced_ = true;   // a bare LOGIN, not a re-register request
+        const size_t from = radio.hub_to_node_frames().size();
+        rol.send_login();
+        const auto &f = radio.hub_to_node_frames();
+        for (size_t i = from; i < f.size(); ++i)
+            disp.onReceiveNew(const_cast<uint8_t *>(f[i].bytes.data()), (int) f[i].bytes.size(),
+                              esp_timer_get_time());
+        while (disp.runOneTxCommand()) {}
+        for (auto &frame : lif.drain_tx_queue())
+            rol.set_response(frame.data(), frame.size());
+        ASSERT_TRUE(rol.session_confirmed_) << "bringUpSession: no session";
+    }
+
     // Deliver a frame to the node as the radio would: the node is handed
     // RxDone, and recovers T0 itself. Handing it a T0 directly would skip the
     // one conversion most likely to be wrong.
@@ -139,6 +156,7 @@ TEST_F(Seam, AGridAlignedDownlinkArrivesInsideTheNodesWindow) {
     // window comes from nextArmInstantUs off the anchor it solved from a real
     // GridSync frame. Nothing here recomputes either side's expression.
     proto_sim_timer_set_now_us(1'000'000);
+    bringUpSession();
     tracker.startGrid();
     rol.enable_timed_mode(true);
     ASSERT_TRUE(tracker.gridStarted());

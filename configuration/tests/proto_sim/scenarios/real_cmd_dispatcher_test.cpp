@@ -153,10 +153,30 @@ macwire::WireHdr dl_wire_hdr(const DlHdr &h, DownlinkCase c, macwire::Auth a) {
     return w;
 }
 
-// A plaintext downlink (AUTH = NONE), or a LOGIN under K_AUTH.
+// Node review N10 (node d3eb776): a node WITHOUT a session accepts in the
+// clear only the provisioning frames (ClientConfig, CoverConfig, GridSync)
+// plus LOGIN / GridBeacon / GridDemote. Tests whose subject is a command's
+// effect (not the plaintext gate) therefore run in a session
+// (RealNodeFixture::useSession), and pack_op then seals every frame the hub
+// seals in a session, under the node's own current keys.
+struct AutoSeal {
+    CmdDispatcher *disp{nullptr};
+    uint32_t       nonce{0};
+};
+AutoSeal g_auto_seal;
+std::vector<uint8_t> seal_op(CmdDispatcher &disp, const DownlinkView &inner, const DlHdr &h,
+                             uint32_t nonce);
+bool sealed_in_session(DownlinkCase c) {
+    return c != DL_LOGIN && c != DL_GRIDBEACON && c != DL_GRIDDEMOTE;
+}
+
+// A plaintext downlink (AUTH = NONE), or a LOGIN under K_AUTH -- or, inside
+// useSession(), the frame sealed as the hub seals it in a session.
 std::vector<uint8_t> pack_op(const DlMsg &op) {
     static const DlHdr none{};
     const DlHdr &h = op.header ? *op.header : none;
+    if (g_auto_seal.disp != nullptr && sealed_in_session(op.cmd_case))
+        return seal_op(*g_auto_seal.disp, op, h, g_auto_seal.nonce);
     if (op.cmd_case == DL_LOGIN)
         return proto_sim::v1_kauth_frame(/*downlink=*/true, dl_wire_hdr(h, DL_LOGIN, macwire::Auth::KAuth),
                                          dl_body(op));
@@ -283,6 +303,23 @@ struct RealNodeFixture : public ::testing::Test {
         // keeps what RTC_DATA_ATTR retains, which is the distinction the bench
         // failed to model when it passed a fix that does nothing on hardware.
         CmdDispatcher::resetModeAnnounceState();
+        g_auto_seal = AutoSeal{};
+    }
+
+    void TearDown() override { g_auto_seal = AutoSeal{}; }
+
+    // The node holds a session (a LOGIN under K_AUTH, FCNT 1) and every later
+    // pack_op frame is sealed under its keys, as the hub sends in a session.
+    // The LOGIN's own uplink is drained so a test sees only what it causes.
+    static constexpr uint32_t kAutoSessionNonce = 0x5E55AA01u;
+    void useSession() {
+        auto login = pack_login_op(/*msgid=*/1, kAutoSessionNonce);
+        disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
+        ASSERT_GE(disp.sessionGenerationForTest(), 1u) << "useSession: the LOGIN derived no keys";
+        CmdDispatcher::tx_command_t drain{};
+        while (xQueueReceive(disp.txCmdQueueNew, &drain, 0) == pdTRUE) {}
+        g_auto_seal.disp  = &disp;
+        g_auto_seal.nonce = kAutoSessionNonce;
     }
 
     // Pump one item off the TX queue and execute one iteration of
@@ -424,6 +461,7 @@ TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
 }
 
 TEST_F(RealNodeFixture, CmdOperationReplayRejected) {
+    useSession();   // node N10: commands need a session
     // CMD_OPEN with msgid=1, then again with msgid=1.
     DlMsg op;
     DlHdr hdr;
@@ -871,6 +909,7 @@ std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
 } // namespace
 
 TEST_F(RealNodeFixture, TimeSyncEstablishesClockAndOffset) {
+    useSession();   // node N10: commands need a session
     auto frame = pack_timesync_op(/*msgid=*/10, /*epoch=*/1787000000ULL,
                                   /*utcoffset=*/7200);
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
@@ -880,6 +919,7 @@ TEST_F(RealNodeFixture, TimeSyncEstablishesClockAndOffset) {
 }
 
 TEST_F(RealNodeFixture, TimeSyncRendersLocalWallTime) {
+    useSession();   // node N10: commands need a session
     auto frame = pack_timesync_op(/*msgid=*/11, /*epoch=*/1787000000ULL,
                                   /*utcoffset=*/7200);
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
@@ -891,6 +931,7 @@ TEST_F(RealNodeFixture, TimeSyncRendersLocalWallTime) {
 }
 
 TEST_F(RealNodeFixture, TimeSyncHandlesNegativeUtcOffset) {
+    useSession();   // node N10: commands need a session
     auto frame = pack_timesync_op(/*msgid=*/12, /*epoch=*/1787000000ULL,
                                   /*utcoffset=*/-18000);
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
@@ -903,6 +944,7 @@ TEST_F(RealNodeFixture, TimeSyncHandlesNegativeUtcOffset) {
 }
 
 TEST_F(RealNodeFixture, TimeSyncWithZeroEpochIsIgnoredAndKeepsPriorClock) {
+    useSession();   // node N10: commands need a session
     // The hub sends epoch 0 only if its OWN clock is invalid. A node that
     // already has a good clock must keep it: a known-stale clock is far better
     // than none, because I8 makes a clockless node refuse to sleep at all.
@@ -919,6 +961,7 @@ TEST_F(RealNodeFixture, TimeSyncWithZeroEpochIsIgnoredAndKeepsPriorClock) {
 }
 
 TEST_F(RealNodeFixture, TimeSyncStoresDstNextForLaterUse) {
+    useSession();   // node N10: commands need a session
     auto frame = pack_timesync_op(/*msgid=*/30, /*epoch=*/1787000000ULL,
                                   /*utcoffset=*/7200, /*dstnext=*/1793491200ULL);
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
@@ -1005,6 +1048,7 @@ TEST_F(RealNodeFixture, BeaconIsQueuedWithTheGivenReason) {
 }
 
 TEST_F(RealNodeFixture, BeaconCarriesClockOnlyWhenValid) {
+    useSession();   // node N10: commands need a session
     // I8's precondition: a node that has never been told the time must say so,
     // rather than reporting epoch 0 as if it were a real clock. The hub uses
     // this to decide whether the offset it computes means anything.
@@ -1209,6 +1253,7 @@ TEST_F(RealNodeFixture, AutoModeRefusedWithAllEntriesDisabled) {
 }
 
 TEST_F(RealNodeFixture, AutoModeAcceptedWithClockAndUsableSchedule) {
+    useSession();   // node N10: commands need a session
     give_clock(disp, 202, 1787000000ULL, 7200);
     sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};   // 07:30 daily
     sys.setSchedule(0xABCD, 1, 0, 0, 0, 0, 1800, e, 1);
@@ -1227,6 +1272,7 @@ TEST_F(RealNodeFixture, AutoModeIgnoredWhenModeIsInteractive) {
 }
 
 TEST_F(RealNodeFixture, SleepIsCappedByTheCheckinInterval) {
+    useSession();   // node N10: commands need a session
     // A weekly entry would otherwise mean a week of radio silence, during which
     // no hub-side config change could reach the node at all.
     give_clock(disp, 204, 1787000000ULL, 7200);
@@ -1240,6 +1286,7 @@ TEST_F(RealNodeFixture, SleepIsCappedByTheCheckinInterval) {
 }
 
 TEST_F(RealNodeFixture, SleepWakesBeaconLeadBeforeTheEvent) {
+    useSession();   // node N10: commands need a session
     // I1: wake early, beacon, apply pending config, THEN act — so a schedule
     // edit made an hour ago takes effect on THIS event, cancellation included.
     //
@@ -1269,6 +1316,7 @@ TEST_F(RealNodeFixture, SleepWakesBeaconLeadBeforeTheEvent) {
 }
 
 TEST_F(RealNodeFixture, ScheduleConfigIsAppliedAndAcked) {
+    useSession();   // node N10: commands need a session
     // Unlike TimeSync, a schedule push IS acked: the hub retransmits until
     // acknowledged and must know its pending config actually landed.
     ScheduleEntry e1 = SCHEDULE_ENTRY__INIT;
@@ -1340,6 +1388,7 @@ TEST_F(RealNodeFixture, ZeroHandlingFollowsWhatTheProtoDocumentsPerField) {
 }
 
 TEST_F(RealNodeFixture, DisabledCheckinLeavesSleepDrivenPurelyByTheSchedule) {
+    useSession();   // node N10: commands need a session
     // The counterpart to SleepIsCappedByTheCheckinInterval: with check-in
     // explicitly disabled, the sleep must run all the way to the next event.
     give_clock(disp, 206, 1787000000ULL, 0);
@@ -1412,6 +1461,7 @@ TEST_F(RealNodeFixture, ScheduleReplacesWholesaleRatherThanMerging) {
 // ---------------------------------------------------------------------------
 
 TEST_F(RealNodeFixture, ButtonPressSuspendsAutoModeWithoutDisablingIt) {
+    useSession();   // node N10: commands need a session
     give_clock(disp, 400, 1787000000ULL, 0);
     sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
     sys.setSchedule(1, /*mode=*/1, /*interactive=*/1800, 0, 0, 0, 1800, e, 1);
@@ -1429,6 +1479,7 @@ TEST_F(RealNodeFixture, ButtonPressSuspendsAutoModeWithoutDisablingIt) {
 }
 
 TEST_F(RealNodeFixture, InteractiveOverrideExpiresAndAutoModeResumes) {
+    useSession();   // node N10: commands need a session
     give_clock(disp, 401, 1787000000ULL, 0);
     sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
     // 1 s window so expiry is observable without waiting.
@@ -1497,6 +1548,7 @@ TEST_F(RealNodeFixture, OverrideIsIgnoredWhenAutoModeWasNeverOn) {
 }
 
 TEST_F(RealNodeFixture, NoOverrideMeansNoSuspension) {
+    useSession();   // node N10: commands need a session
     give_clock(disp, 405, 1787000000ULL, 0);
     sched::Entry e[] = {sched_entry(450, sched::DAY_ALL)};
     sys.setSchedule(1, 1, 1800, 0, 0, 0, 1800, e, 1);
@@ -1536,6 +1588,7 @@ bool drain_for_sleep_after_quiet_window(CmdDispatcher &d) {
 }  // namespace
 
 TEST_F(RealNodeFixture, ApplyingAScheduleDoesNotSleepImmediately) {
+    useSession();   // node N10: commands need a session
     // Direct regression for the crash: entering deep sleep from the RX task
     // right after applying a schedule reset the node. Auto mode takes effect at
     // the next boot/wake instead. If someone reinstates the immediate sleep,
@@ -1726,6 +1779,7 @@ TEST_F(RealNodeFixture, ALoginEndsTheRegisterRetry) {
 // ---------------------------------------------------------------------------
 
 TEST_F(RealNodeFixture, BootPolicyLeavesTheNodeInteractive) {
+    useSession();   // node N10: commands need a session
     // Simulates what app_main does after loading config: forget the stored mode
     // and version, whatever they were.
     give_clock(disp, 600, 1787000000ULL, 0);
@@ -1745,6 +1799,7 @@ TEST_F(RealNodeFixture, BootPolicyLeavesTheNodeInteractive) {
 }
 
 TEST_F(RealNodeFixture, ClearedVersionMakesTheHubRePushAndReArmAutoMode) {
+    useSession();   // node N10: commands need a session
     // Version 0 is what the node reports in its beacon, so the hub sees a
     // mismatch and pushes again. That push is what re-arms auto mode, which is
     // why clearing the version is not a one-way door.
@@ -1805,6 +1860,7 @@ std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t
 } // namespace
 
 TEST_F(RealNodeFixture, ScheduleBeforeTimeSyncStillEntersAutoMode) {
+    useSession();   // node N10: commands need a session
     // The order that broke it live. The schedule cannot start auto mode on its
     // own (no clock yet), so the TimeSync that follows must do it.
     CmdDispatcher::tx_command_t drain{};
@@ -1830,6 +1886,7 @@ TEST_F(RealNodeFixture, ScheduleBeforeTimeSyncStillEntersAutoMode) {
 }
 
 TEST_F(RealNodeFixture, TimeSyncBeforeScheduleAlsoEntersAutoMode) {
+    useSession();   // node N10: commands need a session
     // The intended order, which must keep working.
     CmdDispatcher::tx_command_t drain{};
     while (xQueueReceive(disp.sysCmdQueueNew, &drain, 0) == pdTRUE) {}
@@ -2079,6 +2136,7 @@ TEST_F(RealNodeFixture, AutoModeIgnoresTheNightlySleepCommand) {
 }
 
 TEST_F(RealNodeFixture, InteractiveModeStillObeysTheNightlySleep) {
+    useSession();   // node N10: commands need a session
     // The case the command exists for must keep working.
     sys.setAutoMode(false);
     ASSERT_FALSE(sys.getAutoMode()) << "precondition: node is interactive";
@@ -2114,6 +2172,7 @@ TEST_F(RealNodeFixture, NoClockMakesTheNodeAskAgain) {
 }
 
 TEST_F(RealNodeFixture, AClockStopsTheAsking) {
+    useSession();   // node N10: commands need a session
     sched::Entry e = sched_entry(450, sched::DAY_ALL);
     sys.setSchedule(1, /*mode=*/1, 1800, 600, 30, 20, 1800, &e, 1);
     ASSERT_FALSE(disp.shouldRunAutoMode());   // arms the retry
@@ -2178,6 +2237,7 @@ TEST_F(RealNodeFixture, QuietWindowIsFlooredBelowTheHubsInterFrameGaps) {
 }
 
 TEST_F(RealNodeFixture, AutoSleepWaitsForTheQuietWindow) {
+    useSession();   // node N10: commands need a session
     give_clock(disp, 730, 1787000000ULL, 0);
     auto sched = pack_schedule_op(/*msgid=*/731, 0xC0DE, NODE_MODE__MODE_AUTO);
     disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()));
@@ -2448,6 +2508,7 @@ TEST(RealCmdDispatcherFresh, UnprovisionedNodeIsNotMistakenForProvisioned) {
 }
 
 TEST_F(RealNodeFixture, ForeignClientConfigDoesNotWedgeOurLink) {
+    useSession();   // node N10: commands need a session
     give_clock(disp, /*msgid=*/50, 1787000000ULL, 0);
 
     // A ClientConfig for a different node, carrying a much higher msgid.
@@ -2484,6 +2545,7 @@ TEST_F(RealNodeFixture, ForeignClientConfigDoesNotWedgeOurLink) {
 }
 
 TEST_F(RealNodeFixture, AnEntryThatFallsDueWhileAwakeIsStillExecuted) {
+    useSession();   // node N10: commands need a session
     // NOTE: the harness has no settimeofday shim, so glibc's fails without root
     // and the node clock is real wall time. The schedule below is therefore
     // built RELATIVE TO NOW rather than from a pinned epoch.
@@ -2594,6 +2656,7 @@ int drain_closes(CmdDispatcher &d) {
 }  // namespace
 
 TEST_F(RealNodeFixture, CatchupZeroNeverReplaysAMissedEntry) {
+    useSession();   // node N10: commands need a session
     // catchup_window == 0 is documented as "never replay a miss". A node that
     // was off overnight must not slam the blind on the morning it comes back.
     //
@@ -2612,6 +2675,7 @@ TEST_F(RealNodeFixture, CatchupZeroNeverReplaysAMissedEntry) {
 }
 
 TEST_F(RealNodeFixture, AnEntryOlderThanTheCatchupWindowIsNotReplayed) {
+    useSession();   // node N10: commands need a session
     // Outside the window the miss is stale — acting on it would move the blind
     // for a reason hours in the past.
     if (arm_missed_entry(disp, sys, /*minutes_ago=*/20, /*catchup=*/300) == 0xFFFF)
@@ -2625,6 +2689,7 @@ TEST_F(RealNodeFixture, AnEntryOlderThanTheCatchupWindowIsNotReplayed) {
 }
 
 TEST_F(RealNodeFixture, AnEntryInsideTheCatchupWindowIsReplayedExactlyOnce) {
+    useSession();   // node N10: commands need a session
     // Inside the window it replays — and, crucially, only once. Since the quiet
     // window now re-checks, a broken guard would re-run the entry on every wake
     // and on every hub lull.
@@ -2660,6 +2725,7 @@ TEST_F(RealNodeFixture, AnEntryInsideTheCatchupWindowIsReplayedExactlyOnce) {
 // An entry falling due NOW is not a missed event. It must run whatever
 // catchup_window says.
 TEST_F(RealNodeFixture, CatchupZeroStillRunsAnEntryThatIsDueNow) {
+    useSession();   // node N10: commands need a session
     if (arm_missed_entry(disp, sys, /*minutes_ago=*/1, /*catchup=*/0) == 0xFFFF)
         GTEST_SKIP() << "would wrap past midnight UTC";
     ASSERT_TRUE(disp.shouldRunAutoMode());
@@ -2824,6 +2890,7 @@ std::vector<uint8_t> build_mac_ping(uint32_t seq, bool want_echo,
 }  // namespace
 
 TEST_F(RealNodeFixture, MacPingIsCountedAndTimestamped) {
+    useSession();   // node N10: commands need a session
     ASSERT_EQ(disp.macCounters().ping_rx, 0u);
 
     auto bytes = build_mac_ping(/*seq=*/7, /*want_echo=*/false, /*msgid=*/1000);
@@ -2834,6 +2901,7 @@ TEST_F(RealNodeFixture, MacPingIsCountedAndTimestamped) {
 }
 
 TEST_F(RealNodeFixture, MacPingWithoutEchoSendsNothing) {
+    useSession();   // node N10: commands need a session
     auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/1000);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
@@ -2842,6 +2910,7 @@ TEST_F(RealNodeFixture, MacPingWithoutEchoSendsNothing) {
 }
 
 TEST_F(RealNodeFixture, MacPingWithEchoRepliesFromMac0) {
+    useSession();   // node N10: commands need a session
     auto bytes = build_mac_ping(/*seq=*/42, /*want_echo=*/true, /*msgid=*/1000);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
@@ -2853,6 +2922,7 @@ TEST_F(RealNodeFixture, MacPingWithEchoRepliesFromMac0) {
 }
 
 TEST_F(RealNodeFixture, SeqIsCarriedNotDerivedFromMsgid) {
+    useSession();   // node N10: commands need a session
     // A frame lost to the air must leave a GAP rather than shifting every
     // later sample, which is why seq is its own field. Send marks 5 and 9 with
     // consecutive msgids: the node reports the MARK, not the msgid.
@@ -2898,6 +2968,7 @@ TEST_F(RealNodeFixture, MacEchoFromAPeerIsIgnored) {
 }
 
 TEST_F(RealNodeFixture, PaddingSweepsTimeOnAirWithoutChangingBehaviour) {
+    useSession();   // node N10: commands need a session
     // The FIFO read is per byte, so turnaround has to be measurable as a
     // function of frame length. Padding must not change what the MAC does.
     for (size_t pad : {size_t{0}, size_t{20}, size_t{100}}) {
@@ -2939,6 +3010,7 @@ TEST_F(RealNodeFixture, FunnelCountsGarbageAsAParseFailureNotLoss) {
 }
 
 TEST_F(RealNodeFixture, FunnelCountsTheReplayWindowAsDuplicatesNotLoss) {
+    useSession();   // node N10: commands need a session
     auto a = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/150);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     const uint32_t accepted_after_first = disp.macFunnel().counter_accepted;
@@ -3023,6 +3095,7 @@ TEST_F(RealNodeFixture, MacConfigDoesNotDriveTheApplication) {
 }
 
 TEST_F(RealNodeFixture, ApplicationFramesStillFaceTheReplayWindow) {
+    useSession();   // node N10: commands need a session
     // Even if the switches were somehow off, a non-MAC-control frame must be
     // checked. Asserted through the real admission path with a replayed msgid.
     auto a = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/420);
@@ -3236,6 +3309,7 @@ TEST_F(RealNodeFixture, WithdrawalIsUnconditionalAndClearsPhase) {
 }
 
 TEST_F(RealNodeFixture, ReAnchoringResetsPhaseStats) {
+    useSession();   // node N10: commands need a session
     auto a = build_grid_sync(true, 4, 630);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     auto ping = build_mac_ping(1, false, 631);
@@ -3573,6 +3647,7 @@ int drain_acks(CmdDispatcher &d) {
 }  // namespace
 
 TEST_F(RealNodeFixture, AnAcceptedSysopIsAcked) {
+    useSession();   // node N10: commands need a session
     auto op = pack_sysop_op(/*msgid=*/900, CLIENT_OPERATION__CMD_STATUS);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
     EXPECT_EQ(drain_acks(disp), 1);
@@ -3604,6 +3679,7 @@ TEST_F(RealNodeFixture, ARefusedGridSyncIsNotAcked) {
 }
 
 TEST_F(RealNodeFixture, TheOtherSixteenBurstCopiesStaySilent) {
+    useSession();   // node N10: commands need a session
     // The trap the cache exists for. A naive cached ack answers all sixteen —
     // sixteen uplinks per command, on a battery node, for a command that
     // already succeeded. That is worse than the bug it fixes.
@@ -3619,6 +3695,7 @@ TEST_F(RealNodeFixture, TheOtherSixteenBurstCopiesStaySilent) {
 }
 
 TEST_F(RealNodeFixture, AnUnseenIdBehindTheMarkIsAcceptedOnceThenRefused) {
+    useSession();   // node N10: commands need a session
     // This test USED TO assert that an id the node had "already moved past" was
     // an ordinary replay and must be dropped. That was the assumption, and it
     // is what made a retried command undeliverable: pack-once retransmits the
@@ -3648,11 +3725,13 @@ TEST_F(RealNodeFixture, APlaintextDuplicateNeverMakesTheNodeTransmit) {
     // The security half. Recovering a lost ack must not become an
     // unauthenticated uplink trigger: an attacker who observed a msgid could
     // otherwise replay it in plaintext to make the node transmit on demand.
-    // These frames are plaintext (no session in this fixture), so even a
-    // duplicate that is old enough to be a genuine retry must stay silent.
+    // These frames are plaintext (no session in this fixture). Since node N10
+    // a plaintext sysop before a session is not executed at all, so neither
+    // the first copy nor a duplicate old enough to be a genuine retry may
+    // produce an uplink.
     auto op = pack_sysop_op(/*msgid=*/920, CLIENT_OPERATION__CMD_STATUS);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()));
-    ASSERT_EQ(drain_acks(disp), 1);
+    ASSERT_EQ(drain_acks(disp), 0) << "a plaintext sysop before a session is refused (N10)";
 
     // Past the burst span, so classify() would say ReAck on an encrypted frame.
     std::this_thread::sleep_for(
@@ -3664,6 +3743,7 @@ TEST_F(RealNodeFixture, APlaintextDuplicateNeverMakesTheNodeTransmit) {
 }
 
 TEST_F(RealNodeFixture, AckingACommandArmsTheReAckCache) {
+    useSession();   // node N10: commands need a session
     // Wiring half 1: sendCommandAck populates the cache. It is recorded there
     // rather than at the three handler call sites so a handler added later
     // cannot forget to do it — this asserts that placement holds.
@@ -3679,6 +3759,7 @@ TEST_F(RealNodeFixture, AckingACommandArmsTheReAckCache) {
 }
 
 TEST_F(RealNodeFixture, TheArmedCacheWouldReAckOnceTheBurstSpanHasPassed) {
+    useSession();   // node N10: commands need a session
     // Wiring half 2: the cache the dispatcher actually built yields ReAck at
     // the right time. Together with the test above and ack_cache_test.cpp this
     // leaves exactly one unverified link — the `&& was_encrypted` conjunction
@@ -3720,6 +3801,7 @@ TEST_F(RealNodeFixture, AdoptingAGridEnablesTimedRx) {
 }
 
 TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
+    useSession();   // node N10: commands need a session
     // expected_t0_us_ was assigned once at adoption and never advanced, so
     // every sample after the first was measured against a mark one round
     // further in the past — +1.5 s, +3.0 s, and so on. phaseTrustworthy()
@@ -3781,6 +3863,7 @@ TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
 // MissedMarksCountButNeitherDemoteNorCostTheGrid.
 
 TEST_F(RealNodeFixture, AnAddressedFrameResetsTheMissedMarkCount) {
+    useSession();   // node N10: commands need a session
     auto gs = build_grid_sync(true, /*slot=*/7, /*msgid=*/730);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 30'000'000);
     ASSERT_TRUE(disp.gridState().active);
@@ -3803,6 +3886,7 @@ TEST_F(RealNodeFixture, AnAddressedFrameResetsTheMissedMarkCount) {
 }
 
 TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
+    useSession();   // node N10: commands need a session
     // Adopt a grid first, because that is what production does. This test used
     // to seed the expectation with setExpectedT0Us(), a setter no production
     // path ever calls — and relying on it hid the fact that the expectation was
@@ -3846,6 +3930,7 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
 // way also proves the exemption still works.
 
 TEST_F(RealNodeFixture, AResentScheduleIsAckedButNotWrittenToFlashAgain) {
+    useSession();   // node N10: commands need a session
     // The hub re-sends a ScheduleConfig until it hears the ack. Measured
     // 2026-09-15 on node 2 (fw 1.0.85): every copy rewrote config.txt, and the
     // reset that emptied it came during the save of such a repeat.
@@ -4703,6 +4788,7 @@ TEST_F(RealNodeFixture, ModeTestCIsRefusedBecauseTheHandlerCannotApplyIt) {
 // ---------------------------------------------------------------------------
 
 TEST_F(RealNodeFixture, ThePhaseReportCarriesWhatTheTrackerMeasured) {
+    useSession();   // node N10: commands need a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/900);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -4739,6 +4825,7 @@ TEST_F(RealNodeFixture, ThePhaseReportCarriesWhatTheTrackerMeasured) {
 }
 
 TEST_F(RealNodeFixture, ReAnchoringClearsWhatThePhaseReportWouldClaim) {
+    useSession();   // node N10: commands need a session
     // The report must not outlive the anchor it describes. A node that adopted
     // a new grid and kept reporting the old fit would hand the hub evidence for
     // a window that has moved.
@@ -5023,6 +5110,7 @@ int64_t settle_on_grid(CmdDispatcher &disp, uint32_t slot, uint32_t first_msgid)
 }  // namespace
 
 TEST_F(RealNodeFixture, AnAckIsAimedAtTheMarkTheHubWillSubtract) {
+    useSession();   // node N10: commands need a session
     const int64_t mark = settle_on_grid(disp, /*slot=*/4, /*first_msgid=*/900);
     ASSERT_NE(mark, 0);
     ASSERT_TRUE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs))
@@ -5044,6 +5132,7 @@ TEST_F(RealNodeFixture, AnAckIsAimedAtTheMarkTheHubWillSubtract) {
 }
 
 TEST_F(RealNodeFixture, AnUnplaceableUplinkDeclinesAndSaysSo) {
+    useSession();   // node N10: commands need a session
     const int64_t mark = settle_on_grid(disp, /*slot=*/4, /*first_msgid=*/950);
     ASSERT_NE(mark, 0);
 
@@ -5655,6 +5744,7 @@ TEST_F(RealNodeFixture, AGridOrBeaconUpdateBringsTheReceiveTaskRoundToReArm) {
 }
 
 TEST_F(RealNodeFixture, ABurstCopyIsStampedAsCopyZero) {
+    useSession();   // node N10: commands need a session
     // handleGridSync and handleGridBeacon both back out burstIndex; the generic
     // phase path did not. Copies are one 88 ms stride apart, so stamping copy N
     // as copy 0 commits an error of N x 88 ms against a 14 080 us guard — and
@@ -5720,6 +5810,7 @@ void deliverStamped(CmdDispatcher &disp, const std::vector<uint8_t> &f,
 }  // namespace
 
 TEST_F(RealNodeFixture, AStampedFrameIsAPhaseSampleWhereverItWasSent) {
+    useSession();   // node N10: commands need a session
     // The declared fire instant makes an UNPLACED frame — a LOGIN, a Mode A burst
     // — as good a phase sample as a mark. Measured 2026-09-14: without it the node
     // waited ~23 s per lucky mark catch for the eight samples promotion needs.
@@ -5738,6 +5829,7 @@ TEST_F(RealNodeFixture, AStampedFrameIsAPhaseSampleWhereverItWasSent) {
 }
 
 TEST_F(RealNodeFixture, ASampleFurtherThanHalfAPitchIsNotCountedAgainstPromotion) {
+    useSession();   // node N10: commands need a session
     // Measured 2026-09-15 on node 2 (fw 1.0.88): one sample of +86 841 us latched
     // outside_guard and held promotion off for 830 s.
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/830);
@@ -5791,6 +5883,7 @@ TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
 }
 
 TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
+    useSession();   // node N10: commands need a session
     // Measured 2026-09-14 on node 2: a GridSync adopted 10-14 s after boot left
     // every later mark 8 ms off; the same GridSync adopted at 297 s put marks
     // within ~1 ms. The anchor is kept but not trusted until the clock settles.
@@ -5856,6 +5949,7 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
 // and the grid is still provisional (the exact state the re-solve is
 // waiting for).
 TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
+    useSession();   // node N10: commands need a session
     constexpr uint32_t kSlot       = 4;
     constexpr int64_t  kTrueAnchor = 90'000'000;
     constexpr int64_t  kBootError  = 8'000;
@@ -5921,6 +6015,7 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
 }
 
 TEST_F(RealNodeFixture, CopiesOfOneFrameCannotVouchForThemselves) {
+    useSession();   // node N10: commands need a session
     // Every heard copy of a stamped burst is a sample, but all copies of one frame
     // share its timing. Promotion needs evidence from more than one transmission.
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/760);
@@ -5944,6 +6039,7 @@ TEST_F(RealNodeFixture, CopiesOfOneFrameCannotVouchForThemselves) {
 }
 
 TEST_F(RealNodeFixture, ANodePromotesFromItsLoginTrafficInSeconds) {
+    useSession();   // node N10: commands need a session
     // The ordinary burst traffic after a login — a few frames, three heard copies
     // each — is enough to promote once every copy declares its instant.
     disp.setTimedRxEnabled(true);
@@ -5970,6 +6066,7 @@ TEST_F(RealNodeFixture, ANodePromotesFromItsLoginTrafficInSeconds) {
 }
 
 TEST_F(RealNodeFixture, AnUnplacedFrameIsNotAPhaseSample) {
+    useSession();   // node N10: commands need a session
     // Measured 2026-09-14 on node 2: two 900 s Mode B production runs armed no
     // window (windows 0/0) although every ModeTest mark read inside the guard
     // (p99 9 377 us). The ModeTest START is unplaced and arrived 463 ms off the
@@ -6089,6 +6186,7 @@ void bringNodeToTheEdgeOfPromotion(CmdDispatcher &disp, uint32_t samples = 8) {
 // promotes on its own phase evidence and reports the decision; the hub follows.
 
 TEST_F(RealNodeFixture, TheNodePromotesOnItsOwnPhaseEvidence) {
+    useSession();   // node N10: commands need a session
     bringNodeToTheEdgeOfPromotion(disp);
 
     ASSERT_TRUE(phase::phaseTrustworthy(disp.phaseStats(), timedgrid::kGuardUs))
@@ -6151,6 +6249,7 @@ void framesOnMarks(CmdDispatcher &d, int64_t from_us, uint32_t count, int64_t er
 }  // namespace
 
 TEST_F(RealNodeFixture, AKeptGridIsRecentredOnItsOwnSamples) {
+    useSession();   // node N10: commands need a session
     disp.setTimedRxEnabled(true);
     disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
     auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/600);
@@ -6177,6 +6276,7 @@ TEST_F(RealNodeFixture, AKeptGridIsRecentredOnItsOwnSamples) {
 }
 
 TEST_F(RealNodeFixture, InModeBTheBeaconNotTheTrialOwnsTheAnchor) {
+    useSession();   // node N10: commands need a session
     bringNodeToTheEdgeOfPromotion(disp);
     ASSERT_TRUE(disp.timedRxActive());
     const int64_t anchor_before = disp.gridState().anchor_us;
@@ -6234,6 +6334,7 @@ beaconsIn(const std::vector<CmdDispatcher::tx_command_t> &sent) {
 }  // namespace
 
 TEST_F(RealNodeFixture, AModeChangeIsAnnouncedToTheHubExactlyOnce) {
+    useSession();   // node N10: commands need a session
     proto_sim_timer_set_now_us(1'000'000);
     promoteAndSettle(disp);
     drainTx(disp);
@@ -6274,6 +6375,7 @@ TEST_F(RealNodeFixture, AModeChangeIsAnnouncedToTheHubExactlyOnce) {
 }
 
 TEST_F(RealNodeFixture, AChangeInsideTheFloorIsHeldNotDropped) {
+    useSession();   // node N10: commands need a session
     proto_sim_timer_set_now_us(1'000'000);
     promoteAndSettle(disp);
     (void) disp.timedRxActive();
@@ -6309,6 +6411,7 @@ TEST_F(RealNodeFixture, AChangeInsideTheFloorIsHeldNotDropped) {
 }
 
 TEST_F(RealNodeFixture, TheLastStateWinsWhenTheModeFlickersInsideTheFloor) {
+    useSession();   // node N10: commands need a session
     // THE DESIGN DECISION THIS PINS. The announcement carries the reason as it
     // is NOW, not the one that raised the flag. A node that flickered
     // A -> B -> A inside the floor must leave the hub believing A; recording
@@ -6379,6 +6482,7 @@ TEST_F(RealNodeFixture, TheLastStateWinsWhenTheModeFlickersInsideTheFloor) {
 // Measured before the fix: Timed Mode withdrawn on node 2, 120 s of hub log,
 // not one beacon, the hub's demotion-reason sensor still republishing 5.
 TEST_F(RealNodeFixture, AWithdrawnGridIsAnnouncedAlthoughTimedRxIsNowOff) {
+    useSession();   // node N10: commands need a session
     proto_sim_timer_set_now_us(1'000'000);
     promoteAndSettle(disp);
     (void) disp.timedRxActive();
@@ -6600,6 +6704,7 @@ TEST_F(RealNodeFixture, ABaselineOneSampleShortStaysInModeA) {
 }
 
 TEST_F(RealNodeFixture, TheHubsInSlotCountNoLongerDecidesTheNodesMode) {
+    useSession();   // node N10: commands need a session
     bringNodeToTheEdgeOfPromotion(disp);
     ASSERT_TRUE(disp.timedRxActive());
 
@@ -6612,6 +6717,7 @@ TEST_F(RealNodeFixture, TheHubsInSlotCountNoLongerDecidesTheNodesMode) {
 }
 
 TEST_F(RealNodeFixture, ThePhaseReportCarriesTheNodesOwnDecision) {
+    useSession();   // node N10: commands need a session
     // The hub follows this, so it must say what the node actually does.
     {
         PhaseReport pr = PHASE_REPORT__INIT;
@@ -6691,6 +6797,7 @@ TEST_F(RealNodeFixture, ASleepOkDoesNotLeakIntoTheNextUplinksWindows) {
 }
 
 TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
+    useSession();   // node N10: commands need a session
     // Through the real handler, so the wiring itself is under test rather than
     // the method it calls. This is the U-3 gap: the field was decoded and acted
     // on for auto-sleep, and the Class A sequence was never told.
@@ -6907,6 +7014,7 @@ TEST_F(RealNodeFixture, ANodeLearnsItsClockRateFromBeaconsAndComesBackInsideTheG
 }
 
 TEST_F(RealNodeFixture, LearningTheClockRateDoesNotThrowANodeOutOfModeB) {
+    useSession();   // node N10: commands need a session
     // Measured 2026-09-14 on node 2 (fw 1.0.72): in Mode B with 420 in-guard
     // samples, a beacon learned the rate (+9957 ppb), the reset left n = 1, and
     // "Grid arming off" followed at once. It would repeat at every beacon.
@@ -7032,6 +7140,7 @@ TEST_F(RealNodeFixture, AGridSyncOnAnUnsettledClockDoesNotStartTheRateSpan) {
 }
 
 TEST_F(RealNodeFixture, TheBootMinuteReSolveStartsTheRateSpan) {
+    useSession();   // node N10: commands need a session
     nodeclock::setSettledForTest(false);
     deliverStampedGridSync(disp, 780, /*err_us=*/8000);
     nodeclock::setSettledForTest(true);
@@ -7355,6 +7464,25 @@ std::vector<uint8_t> admit_plain_sysop(uint32_t dest, uint32_t sender, uint32_t 
     return out;
 }
 
+// A plaintext CoverConfig from an arbitrary sender: one of the provisioning
+// frames a node WITHOUT a session still admits in the clear (node N10).
+std::vector<uint8_t> admit_plain_coverconfig(uint32_t dest, uint32_t sender, uint32_t subnet,
+                                             uint32_t msgid) {
+    DlMsg op;
+    DlHdr hdr;
+    hdr.destaddress   = dest;
+    hdr.destsubnet    = subnet;
+    hdr.senderaddress = sender;
+    hdr.msgid         = msgid;
+    op.header   = &hdr;
+    static CoverConfig cc = COVER_CONFIG__INIT;
+    cc.opentime = 61; cc.closetime = 66;
+    cc.blindheightmm = 2000.0f; cc.axlediametermm = 60.0f; cc.blindthicknessmm = 8.0f;
+    op.cmd_case    = DL_COVERCONFIG;
+    op.coverconfig = &cc;
+    return pack_op(op);
+}
+
 // A plaintext MAC ping from an arbitrary sender.
 std::vector<uint8_t> admit_plain_ping(uint32_t sender, uint32_t seq, uint32_t msgid) {
     DlHdr hdr;
@@ -7432,11 +7560,12 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionStillRefu
     CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
     ASSERT_EQ(sys.getConfigAddress(), 0u);
 
-    // CONTROL: with no session the very same frame is admitted, and an admitted
-    // frame retargets the uplinks at its sender.
-    auto f1 = admit_plain_sysop(/*dest=*/0, /*sender=*/33, kSubnet, /*msgid=*/1, false);
+    // CONTROL: with no session a provisioning frame is admitted in the clear
+    // (node N10 admits only those before a session), and an admitted frame
+    // retargets the uplinks at its sender.
+    auto f1 = admit_plain_coverconfig(/*dest=*/0, /*sender=*/33, kSubnet, /*msgid=*/1);
     disp.onReceiveNew(f1.data(), static_cast<int>(f1.size()));
-    ASSERT_EQ(disp.uplinkAddress(), 33u) << "control: a node without a session admits plaintext";
+    ASSERT_EQ(disp.uplinkAddress(), 33u) << "control: a node without a session admits provisioning";
 
     disp.setBaseNonceForTest(1, 0xABCDEF01);
     auto f2 = admit_plain_sysop(/*dest=*/0, /*sender=*/77, kSubnet, /*msgid=*/2, false);
@@ -7449,7 +7578,8 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionStillRefu
 // --- an admitted frame retargets the uplinks, a refused one does not ---------
 
 TEST_F(RealNodeFixture, AdmitFrame_AnAdmittedFrameRetargetsUplinksAtItsSender) {
-    auto f = admit_plain_sysop(kNodeAddr, /*sender=*/33, /*subnet=*/9, /*msgid=*/1, false);
+    // A provisioning frame: what a node without a session still admits (N10).
+    auto f = admit_plain_coverconfig(kNodeAddr, /*sender=*/33, /*subnet=*/9, /*msgid=*/1);
     disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
     EXPECT_EQ(disp.uplinkAddress(), 33u);
     EXPECT_EQ(disp.uplinkSubnet(), 9u);
@@ -7715,6 +7845,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ApplicationTrafficStaysSequencedWhenMac1IsOff
 }
 
 TEST_F(RealNodeFixture, AdmitFrame_TheFrameCounterFunnelCountsAcceptsAndDuplicates) {
+    useSession();   // node N10: commands need a session
     auto a = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, /*msgid=*/30, false);
     const uint32_t acc0 = disp.macFunnel().counter_accepted;
     const uint32_t dup0 = disp.macFunnel().duplicates;
@@ -7747,6 +7878,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ABurstCopyIsNeverReAckedAndALateRetryIsBounde
 // --- mark-hit bookkeeping ---------------------------------------------------
 
 TEST_F(RealNodeFixture, AdmitFrame_AReplayedUnicastFrameStillResetsMissedMarks) {
+    useSession();   // node N10: commands need a session
     auto a = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, /*msgid=*/50, false);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     auto b = admit_plain_sysop(kNodeAddr, kHubAddr, kSubnet, /*msgid=*/51, false);
@@ -7771,6 +7903,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AReplayedUnicastFrameStillResetsMissedMarks) 
 // --- the phase-sample commit gate, as composed in admitFrame ------------------
 
 TEST_F(RealNodeFixture, AdmitFrame_OnlyAPlacedUnicastFrameIsAPhaseSample) {
+    useSession();   // node N10: commands need a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/800);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -7812,6 +7945,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AFrameWithoutAnArrivalStampIsNotEvenAttempted
 }
 
 TEST_F(RealNodeFixture, AdmitFrame_AFrameHalfARoundOffTheMarkBelongsToTheNextMark) {
+    useSession();   // node N10: commands need a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/820);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -7866,6 +8000,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnch
 // --- more of the phase / re-anchor bookkeeping --------------------------------
 
 TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARateSpan) {
+    useSession();   // node N10: commands need a session
     constexpr uint32_t kSlot       = 4;
     constexpr int64_t  kTrueAnchor = 90'000'000;
     constexpr int64_t  kBootError  = 8'000;
@@ -7904,6 +8039,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
 }
 
 TEST_F(RealNodeFixture, AdmitFrame_AReplayedCopyCannotTriggerAnAnchorRecentre) {
+    useSession();   // node N10: commands need a session
     disp.setTimedRxEnabled(true);
     disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
     auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/600);
@@ -8041,6 +8177,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ABeaconIsNotAPhaseSampleEvenWhenAddressedAndP
 }
 
 TEST_F(RealNodeFixture, AdmitFrame_ARecentreCountsAsAnAnchorFixAndClearsTheRefusals) {
+    useSession();   // node N10: commands need a session
     disp.setTimedRxEnabled(true);
     disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
     auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/870);
