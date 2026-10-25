@@ -1,3 +1,4 @@
+#include <cinttypes>
 #include <thread>
 #include "esphome/components/lora_client/lora_client.h"
 // Shared with the node firmware — the AEAD wire format now lives in exactly
@@ -88,6 +89,23 @@ namespace esphome
 
     LORAListener::~LORAListener()
     {
+      // The three esp_timer callbacks hold `this`: stop and delete them before
+      // the object goes (review HB22; a real hub never destroys a listener,
+      // the host harness does so constantly).
+      this->mode_test_active_ = false;
+      this->drift_test_active_ = false;
+      this->mac_ping_active_ = false;
+      for (esp_timer_handle_t *t : {&this->mode_test_timer_, &this->drift_timer_, &this->mac_ping_timer_})
+      {
+        if (*t == nullptr)
+          continue;
+        esp_timer_stop(*t);
+        esp_timer_delete(*t);
+        *t = nullptr;
+      }
+      wait_callback_idle_(this->mt_cb_busy_);
+      wait_callback_idle_(this->drift_cb_busy_);
+      wait_callback_idle_(this->mac_ping_cb_busy_);
       s_onboarding_gate_.release(this);
       // Tier 3: this node's keys, otherwise never freed — fine for the
       // handful of LORAListener instances a real hub constructs once at
@@ -864,8 +882,8 @@ namespace esphome
                                         uint8_t *data, size_t len)
     {
         ClientRegister *reg = rcv_message->register_;
-        ESP_LOGI(TAG, "Received register command for MAC address: %d", reg->mac_addr);
-        ESP_LOGI(TAG, "This clients' MAC address: %d", this->address_uint64_);
+        ESP_LOGD(TAG, "Received register command for MAC address: 0x%012" PRIx64, (uint64_t) reg->mac_addr);
+        ESP_LOGD(TAG, "This clients' MAC address: 0x%012" PRIx64, (uint64_t) this->address_uint64_);
         if (reg->mac_addr != this->address_uint64_)
         {
           // Every REGISTER reaches every listener; all but the addressed one land
@@ -1021,11 +1039,11 @@ namespace esphome
     bool LORAListener::admit_frame_(hubframes::Up *rcv_message)
     {
       if (rcv_message->header) {
-        ESP_LOGI(TAG, "Received message with ID %d from address %d", rcv_message->header->msgid, rcv_message->header->senderaddress);
-        ESP_LOGI(TAG, "My message ID: %d", this->seq_.rxId());
-        ESP_LOGI(TAG, "My address: %d",  this->short_address_);
+        ESP_LOGV(TAG, "Received message with ID %u from address %u (my rx id %u, my address %u)",
+                 (unsigned) rcv_message->header->msgid, (unsigned) rcv_message->header->senderaddress,
+                 (unsigned) this->seq_.rxId(), (unsigned) this->short_address_);
       } else {
-        ESP_LOGI(TAG, "Received message without header");
+        ESP_LOGD(TAG, "Received message without header");
       }
 
       if (this->registered_ == false)
@@ -1072,7 +1090,9 @@ namespace esphome
         }
         else
         {
-          ESP_LOGE(TAG, "%s, duplicate or old message ID: %d, ignoring. My MsgID: %d",this->get_name().c_str(), (rcv_message->header? rcv_message->header->msgid : 0), this->seq_.rxId());
+          ESP_LOGE(TAG, "%s, duplicate or old FCNT %u, ignoring (rx id %u)", this->get_name().c_str(),
+                   (unsigned) (rcv_message->header ? rcv_message->header->msgid : 0u),
+                   (unsigned) this->seq_.rxId());
           return false;
         }
       }
@@ -1653,7 +1673,7 @@ namespace esphome
                                          uint8_t *data, size_t len)
     {
       const hubframes::Sealed *enc = rcv_message->encrypted;
-      ESP_LOGI(TAG, "Received encrypted payload ciphertext=%d bytes", (int)enc->ciphertext.len);
+      ESP_LOGD(TAG, "Received encrypted payload ciphertext=%u bytes", (unsigned) enc->ciphertext.len);
 
       // Use the header's msgid as the unified frame counter.  Replay protection
       // was already enforced above (seq_.check(msgid)).
@@ -2227,7 +2247,8 @@ namespace esphome
       std::unique_ptr<hubwire::Uplink> owned = this->unpack_uplink_(data, len);
       if (!owned)
       {
-        ESP_LOGE(TAG, "Could not read protobuf");
+        ESP_LOGW(TAG, "%s: uplink is not a v1 frame this listener can decode — dropped",
+                 this->get_name().c_str());
         return;
       }
       hubframes::Up *rcv_message = owned->view();
@@ -4948,7 +4969,13 @@ namespace esphome
             .name     = "modetestgrid",
             .skip_unhandled_events = true,
         };
-        esp_timer_create(&args, &this->mode_test_timer_);
+        if (esp_timer_create(&args, &this->mode_test_timer_) != ESP_OK)
+        {
+          ESP_LOGE(TAG, "[%s] ModeTest: timer create failed — no marks", this->get_name().c_str());
+          this->mode_test_timer_ = nullptr;
+          this->mode_test_active_ = false;
+          return;
+        }
       }
       esp_timer_stop(this->mode_test_timer_);
 
@@ -5094,7 +5121,13 @@ namespace esphome
             .name     = "driftgrid",
             .skip_unhandled_events = true,
         };
-        esp_timer_create(&args, &this->drift_timer_);
+        if (esp_timer_create(&args, &this->drift_timer_) != ESP_OK)
+        {
+          ESP_LOGE(TAG, "[%s] drift test: timer create failed — no ticks", this->get_name().c_str());
+          this->drift_timer_ = nullptr;
+          this->drift_test_active_ = false;
+          return;
+        }
       }
       esp_timer_stop(this->drift_timer_);
 

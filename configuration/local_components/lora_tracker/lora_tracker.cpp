@@ -320,11 +320,9 @@ namespace esphome
 
       if (rxLen > 0)
       {
-        ESP_LOGI(TAG, "Received packet with length %d", rxLen);
-        float packetStrength = this->last_packet_rssi_ + this->last_packet_snr_ * 0.25;
-
-        ESP_LOGI(TAG, "Packet RSSI: %d, SNR: %.2f, Estimated Strength: %.2f dBm",
-                 this->last_packet_rssi_, this->last_packet_snr_, packetStrength);
+        const float packetStrength = this->last_packet_rssi_ + this->last_packet_snr_ * 0.25f;
+        ESP_LOGD(TAG, "Received packet: %d B, RSSI %d, SNR %.2f, estimated strength %.2f dBm",
+                 rxLen, (int) this->last_packet_rssi_, this->last_packet_snr_, packetStrength);
 
         // ESP_LOGI(TAG, "%s byte packet received:[%.*s]", rxLen, rxLen, buf_);
         for (int i = 0; i < this->clients_.size(); i++)
@@ -357,8 +355,8 @@ namespace esphome
         }
         if (rx_buffer->length > BUFFER_SIZE)
         {
-          ESP_LOGE(TAG, "Buffer length %d exceeds max %d",
-                   rx_buffer->length, BUFFER_SIZE);
+          ESP_LOGE(TAG, "Buffer length %u exceeds max %u",
+                   (unsigned) rx_buffer->length, (unsigned) BUFFER_SIZE);
           this->return_buffer_to_pool(rx_buffer);
           continue;
         }
@@ -1549,7 +1547,7 @@ namespace esphome
       // VERBOSE, because a stamped copy's fire instant is already chosen when
       // this runs: a UART line here (~3.5 ms at 115200 baud, 17 per burst) is
       // spent out of kStampLeadUs.
-      ESP_LOGV(TAG, "Sending packet of length %d", len);
+      ESP_LOGV(TAG, "Sending packet of length %u", (unsigned) len);
 
       this->preparePacket(data, len);
       this->firePacket(not_before_us);

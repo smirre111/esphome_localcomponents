@@ -88,6 +88,15 @@ esp_err_t esp_timer_stop(esp_timer_handle_t timer) {
     return ESP_OK;
 }
 
+// Declared in esp_timer.h; the listener destructor deletes its timers (HB22).
+esp_err_t esp_timer_delete(esp_timer_handle_t timer) {
+    if (!timer) return ESP_ERR_INVALID_ARG;
+    timer->armed = 0;
+    timer->periodic = 0;
+    timer->used = 0;
+    return ESP_OK;
+}
+
 // ---------------------------------------------------------------------------
 // Firing. DECLARED IN esp_timer.h SINCE THE SHIM WAS WRITTEN, DEFINED ONLY
 // NODE-SIDE UNTIL 2026-09-21.
