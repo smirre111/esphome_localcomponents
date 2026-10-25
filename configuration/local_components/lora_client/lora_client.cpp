@@ -1989,7 +1989,13 @@ namespace esphome
     void LORAListener::deliver_uplink_(hubframes::Up *msg, const hubframes::Hdr *outer,
                                        bool authentic)
     {
-      this->dispatch_payload_(msg);
+      // Only an AUTHENTICATED frame may drive the MAC (ack, PhaseReport, ModeTest
+      // report, grid request) or the beacon handling (reset detection, beacon
+      // clock, mode, sleep model): a plaintext frame before a session exists is
+      // unauthenticated, and anyone in range can forge one (review HB4 / P5).
+      // Its application content still reaches the children, marked unauthentic.
+      if (authentic)
+        this->dispatch_payload_(msg);
       if (porttable::uplinkPort(msg->proto_case) != mac::Port::App)
         return;
       AppIndication ind;
@@ -2236,17 +2242,18 @@ namespace esphome
 
       if (!this->accept_plaintext_uplink_(rcv_message))
         return;
-      // The high-water mark that used to suppress plaintext duplicates here is
-      // gone with the frames it bounded: on a confirmed session none of them
-      // reach this point any more. It is still maintained in commit_rx_msgid_,
-      // where it belongs to the authenticated counter.
       this->deliver_uplink_(rcv_message, rcv_message->header, /*authentic=*/false);
     }
 
 
     // Plaintext path. Before the handshake there is nothing to authenticate
-    // with and the msgid is the only sequencing the hub has, so the counter
-    // moves here and the frame is acted on — that is the bootstrap.
+    // with. Such a frame is NOT trusted (review HB4): it never moves the MAC-1
+    // receive counter or the timing (a forged FCNT 1000 would make the hub
+    // refuse the node's real session-opening uplink, FCNT ~1, as "old", again
+    // after every login retry), and it drives no MAC or beacon handling
+    // (deliver_uplink_). Duplicates are suppressed by the plaintext high-water
+    // mark alone; the application content goes to the children marked
+    // unauthentic.
     //
     // ONCE THE SESSION IS CONFIRMED, IT IS REFUSED OUTRIGHT (review finding 1,
     // 2026-09-15). Suppressing duplicates was not enough, because dispatch is
@@ -2269,7 +2276,15 @@ namespace esphome
     {
       if (!this->session_confirmed_)
       {
-        this->commit_rx_msgid_(rcv_message);
+        const uint32_t id = rcv_message->header != nullptr ? rcv_message->header->msgid : 0u;
+        if (this->have_plaintext_hwm_ && id <= this->plaintext_hwm_)
+        {
+          ESP_LOGD(TAG, "[%s] plaintext uplink msgid %u not above %u — duplicate, dropped",
+                   this->get_name().c_str(), (unsigned) id, (unsigned) this->plaintext_hwm_);
+          return false;
+        }
+        this->plaintext_hwm_      = id;
+        this->have_plaintext_hwm_ = true;
         return true;
       }
       this->plaintext_refused_++;

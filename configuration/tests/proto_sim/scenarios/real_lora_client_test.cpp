@@ -158,6 +158,39 @@ constexpr uint32_t kTestNodeNonce = 0xACE55001u;
 // ONE branch in decrypt_payload_gcm that returns false without logging.
 void ensure_psa_ready() { ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS); }
 
+// Review HB4 (2026-10-25): a plaintext uplink before a session exists is NOT
+// authenticated, so it no longer moves MAC-1, the timing, or any MAC/beacon
+// state. Tests whose subject is the MAC or the timing therefore give the node a
+// confirmed session and feed the uplink SEALED, as a real node in session
+// sends it.
+constexpr uint32_t kTestSessionId = 0x5E55105Eu;
+// The listener holds a confirmed session under (kTestSessionId,
+// kTestNodeNonce), exactly the keys both ends derive.
+void give_session(LORAClient &rol) {
+    ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
+    rol.registered_ = true;
+    ASSERT_TRUE(rol.deriveSessionKeysForTest(kTestSessionId, kTestNodeNonce));
+    rol.session_confirmed_ = true;
+}
+// A plaintext v1 uplink re-framed as the node seals it in that session.
+std::vector<uint8_t> sealed_like_node(const std::vector<uint8_t> &plain) {
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    if (!macwire::decode(plain.data(), plain.size(), &h, &off, &blen))
+        return plain;
+    h.flags = macwire::withAuth(h.flags, macwire::Auth::Session);
+    const std::vector<uint8_t> body(plain.begin() + off, plain.begin() + off + blen);
+    return proto_sim::v1_session_frame(kTestSessionId, kTestNodeNonce,
+                                       (uint8_t) esphome::lora_tracker::kHubAddress, h.src,
+                                       /*downlink=*/false, h, body);
+}
+// Feed an uplink: sealed when the listener holds a confirmed session (a real
+// node in session never sends plaintext), as it is otherwise.
+void feed_sealed(LORAClient &rol, const std::vector<uint8_t> &plain) {
+    std::vector<uint8_t> f = rol.session_confirmed_ ? sealed_like_node(plain) : plain;
+    rol.set_response(f.data(), f.size());
+}
+
 // Answer every outgoing LoginMsg with a properly ENCRYPTED ClientAvailable,
 // exactly as the node's CMD_LOGIN handler does (store the nonce, then
 // sendAvailable()).  The hub sets login_acked_ ONLY inside the successful-
@@ -710,7 +743,7 @@ void deliverBeaconWithWakeFunnel(LORAClient &rol, uint32_t prev_msgid,
 TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    h.rol.registered_ = true;
+    give_session(h.rol);
 
     ASSERT_EQ(h.rol.class_a_stats().offered, 0u) << "a fresh listener owes nothing";
 
@@ -747,7 +780,7 @@ TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
     h.tracker.last_rx_t0_us_v  = kT0;
     h.tracker.rx_uncertainty_v = 250;
     auto from_self = real_helpers::serialize_avail(/*sender=*/18, /*msg_id=*/1);
-    h.rol.set_response(from_self.data(), from_self.size());
+    feed_sealed(h.rol, from_self);
     ASSERT_EQ(h.rol.last_uplink_t0_us_, kT0)
         << "the node's OWN uplink is the origin — precondition, not the claim";
 
@@ -776,10 +809,10 @@ TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
 TEST(RealLoraClient, AnAdmittedUplinkBecomesTheClassAOrigin) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    h.rol.registered_ = true;
+    give_session(h.rol);
     h.tracker.last_rx_t0_us_v = 100'000;
     auto f = real_helpers::serialize_avail(18, 1);
-    h.rol.set_response(f.data(), f.size());
+    feed_sealed(h.rol, f);
     EXPECT_EQ(h.rol.last_uplink_t0_us_, 100'000);
 }
 
@@ -929,18 +962,67 @@ TEST(RealLoraClient, AForgedPlaintextAckCannotEarnSingleShot) {
     EXPECT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::Burst);
 }
 
-TEST(RealLoraClient, PlaintextIsStillTheBootstrapBeforeASessionExists) {
+TEST(RealLoraClient, PlaintextBeforeASessionIsAcceptedButNeverTrusted) {
+    // Review HB4 / P5 (2026-10-25). Before a session there is nothing to
+    // authenticate with, so a plaintext uplink is still ACCEPTED (refusing it
+    // would silence the node's telemetry) -- but it is not trusted: it moves
+    // neither the MAC-1 counter nor the timing, and its ack / PhaseReport are
+    // not acted on.
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;           // no session confirmed: the node holds no key
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    auto &op = static_cast<TrackedOpProbe &>(h.rol);
+    ASSERT_TRUE(op.ctl().awaiting_ack) << "precondition: a command is in flight";
+    h.tracker.last_rx_t0_us_v = 100'000;
 
-    auto frame = plaintext_ack_frame(/*msgid=*/5, /*ack_msg_id=*/1, /*timed=*/false);
+    auto frame = plaintext_ack_frame(/*msgid=*/5, op.ctl().last_msgid, /*timed=*/true);
     h.rol.set_response(frame.data(), frame.size());
 
     EXPECT_EQ(h.rol.plaintextRefused(), 0u) << "refusing here would close the bootstrap";
-    EXPECT_EQ(h.rol.seq_.rxId(), 5u)
-        << "and with nothing to authenticate with, the msgid is the only sequencing there is";
+    EXPECT_EQ(h.rol.seq_.rxId(), 0u) << "an unauthenticated FCNT moved the MAC-1 counter";
+    EXPECT_EQ(h.rol.last_uplink_t0_us_, 0) << "an unauthenticated frame moved the timing";
+    EXPECT_TRUE(op.ctl().awaiting_ack) << "a plaintext ack retired a tracked command";
+    EXPECT_FALSE(h.rol.hubBelief().phase_reported) << "a plaintext PhaseReport reached the belief";
 }
+
+TEST(RealLoraClient, AForgedPlaintextFcntCannotBlockTheSessionOpeningUplink) {
+    // Review HB4: before the fix one forged AUTH=NONE frame at FCNT 1000 after a
+    // LOGIN moved the hub's receive counter, and the node's real
+    // session-opening uplink (FCNT 1) was then refused as "duplicate or old" --
+    // repeatable after every login retry, a pre-authentication DoS.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    auto base = std::make_shared<uint32_t>(0);
+    h.radio.add_sink([base](const proto_sim::AirFrame &f) {
+        if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login) *base = m->login.nonce;
+    });
+    h.rol.send_login();
+    ASSERT_NE(*base, 0u) << "precondition: a LOGIN went out";
+
+    // Between the LOGIN and the node's reply: one forged plaintext frame.
+    auto forged = serialize_avail(/*sender=*/18, /*msg_id=*/1000);
+    h.rol.set_response(forged.data(), forged.size());
+
+    // The node's real session-opening uplink, FCNT 1, sealed under the new keys.
+    proto_sim::LoraClientResponseMessage inner;
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = 2;
+    inner.header.senderAddress = 18;
+    inner.header.msgId         = 1;
+    inner.header.sessionNonce  = kTestNodeNonce;
+    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Avail;
+    inner.avail.available      = true;
+    auto reply = proto_sim::seal_resp(inner, *base, kTestNodeNonce);
+    h.rol.set_response(reply.data(), reply.size());
+    EXPECT_TRUE(h.rol.session_confirmed_)
+        << "the node's session-opening uplink was refused after a forged plaintext FCNT";
+}
+
 
 // Characterisation (CCN refactor of set_response): the branches no other test
 // reaches -- undecodable bytes, the never-legitimate plaintext LOGIN uplink,
@@ -1266,14 +1348,14 @@ TEST(RealLoraClient, ReplyFromOtherNodeRejectedByListener) {
     rol_2.set_time(&time);
     tracker.register_client(&rol_1);
     tracker.register_client(&rol_2);
-    rol_1.registered_ = true;
-    rol_2.registered_ = true;
+    give_session(rol_1);
+    give_session(rol_2);
 
     // Synthesize a reply with sender=18. Inject into both listeners and
     // verify rol_1 ignores it (sender filter) while rol_2 acts on it.
     auto ack = serialize_avail(/*sender=*/18, /*msg_id=*/1);
-    rol_1.set_response(ack.data(), ack.size());
-    rol_2.set_response(ack.data(), ack.size());
+    feed_sealed(rol_1, ack);
+    feed_sealed(rol_2, ack);
 
     EXPECT_EQ(rol_1.seq_.rxId(), 0u)
         << "rol_1 (short_address=17) must REJECT a reply from sender=18 — "
@@ -1840,8 +1922,8 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     rol_1.set_time(&time); rol_2.set_time(&time);
     tracker.register_client(&rol_1);
     tracker.register_client(&rol_2);
-    rol_1.registered_ = true;
-    rol_2.registered_ = true;
+    give_session(rol_1);
+    give_session(rol_2);
 
     // Node 17 transmits. The tracker stamps it; both listeners see the frame,
     // only rol_1 admits it.
@@ -1849,8 +1931,8 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     tracker.last_rx_t0_us_v = kT0Node17;
     tracker.rx_uncertainty_v = 250;
     auto from_17 = real_helpers::serialize_avail(/*sender=*/17, /*msg_id=*/1);
-    rol_1.set_response(from_17.data(), from_17.size());
-    rol_2.set_response(from_17.data(), from_17.size());
+    feed_sealed(rol_1, from_17);
+    feed_sealed(rol_2, from_17);
 
     // Node 18 transmits 300 ms later, inside the window before the hub replies
     // to node 17. This is the frame that used to decide where node 17's reply
@@ -1858,8 +1940,8 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     constexpr int64_t kT0Node18 = 400'000;
     tracker.last_rx_t0_us_v = kT0Node18;
     auto from_18 = real_helpers::serialize_avail(/*sender=*/18, /*msg_id=*/1);
-    rol_1.set_response(from_18.data(), from_18.size());
-    rol_2.set_response(from_18.data(), from_18.size());
+    feed_sealed(rol_1, from_18);
+    feed_sealed(rol_2, from_18);
 
     EXPECT_EQ(rol_1.last_uplink_t0_us_, kT0Node17)
         << "a frame from another node must not become this node's window origin";
@@ -1951,7 +2033,7 @@ void feed_in_slot_uplink(RealHubHarness& h, uint32_t msgid, int64_t err_us = 0) 
                                                    h.tracker.gridAnchorUs());
     h.tracker.last_rx_t0_us_v = mark + (int64_t) LORAClient::kUplinkOffsetUs + err_us;
     auto up = serialize_avail(/*sender=*/18, msgid);
-    h.rol.set_response(up.data(), up.size());
+    feed_sealed(h.rol, up);
 }
 
 }  // namespace real_helpers
@@ -2920,7 +3002,7 @@ TEST(MacPing, EchoIsCountedAndConsumedNotForwarded) {
     // initializer) until the LORAListener layout shifted and it started
     // reading false — see lora_client.h's fix. Set it explicitly, same as
     // the placement tests above.
-    h.rol.registered_ = true;
+    give_session(h.rol);
 
     h.rol.start_mac_ping(300, 1100);
     ASSERT_EQ(h.rol.mac_stats().echoes_rx, 0u);
@@ -2930,7 +3012,7 @@ TEST(MacPing, EchoIsCountedAndConsumedNotForwarded) {
     echo.kind = MAC_CONTROL__KIND__MAC_ECHO;
     echo.seq  = 1;
     std::vector<uint8_t> bytes = mac_control_uplink(echo, /*fcnt=*/500, /*src=*/2);
-    h.rol.set_response(bytes.data(), bytes.size());
+    feed_sealed(h.rol, bytes);
 
     EXPECT_EQ(h.rol.mac_stats().echoes_rx, 1u);
     EXPECT_EQ(h.rol.mac_stats().last_seq_echoed, 1u);
@@ -2941,7 +3023,7 @@ TEST(MacPing, MissingMarksAreCountedAsGapsBySeq) {
     using namespace real_helpers;
     RealHubHarness h{2, kMacRol2};
     ensure_psa_ready();
-    h.rol.registered_ = true;
+    give_session(h.rol);
     h.rol.start_mac_ping(300, 1100);
 
     auto feed_echo = [&](uint32_t seq, uint32_t msgid) {
@@ -2949,7 +3031,7 @@ TEST(MacPing, MissingMarksAreCountedAsGapsBySeq) {
         e.kind = MAC_CONTROL__KIND__MAC_ECHO;
         e.seq  = seq;
         std::vector<uint8_t> b = mac_control_uplink(e, msgid, /*src=*/2);
-        h.rol.set_response(b.data(), b.size());
+        feed_sealed(h.rol, b);
     };
 
     // Marks 1 and 4 come back; 2 and 3 were lost. A lost frame must leave a
@@ -2968,14 +3050,14 @@ TEST(MacPing, FirstEchoIsNotAGapEvenIfItsSeqIsHigh) {
     using namespace real_helpers;
     RealHubHarness h{2, kMacRol2};
     ensure_psa_ready();
-    h.rol.registered_ = true;
+    give_session(h.rol);
     h.rol.start_mac_ping(300, 1100);
 
     ::MacControl e = MAC_CONTROL__INIT;
     e.kind = MAC_CONTROL__KIND__MAC_ECHO;
     e.seq  = 9;
     std::vector<uint8_t> b = mac_control_uplink(e, /*fcnt=*/700, /*src=*/2);
-    h.rol.set_response(b.data(), b.size());
+    feed_sealed(h.rol, b);
 
     // Without the have_echo guard this would report eight phantom losses on the
     // very first echo of every run.
@@ -3664,7 +3746,7 @@ TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
     RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
     rol.set_time(&time);
     tracker.register_client(&rol);
-    rol.registered_ = true;
+    give_session(rol);
 
     EXPECT_FALSE(rol.mode_test_summary().valid)
         << "nothing has been measured yet — the entity must read unknown, not 0";
@@ -3701,7 +3783,7 @@ TEST(RealLoraClient, AModeTestReportIsKeptAsNumbersNotJustLogged) {
     pdu.pdu_case       = NODE_MAC_PDU__PDU_MODETESTREPORT;
     pdu.modetestreport = &rep;
     std::vector<uint8_t> frame = v1_uplink(/*fcnt=*/1, macwire::kPortMac0Mgmt, pack_pdu(&pdu));
-    rol.set_response(frame.data(), frame.size());
+    feed_sealed(rol, frame);
 
     const auto &s = rol.mode_test_summary();
     ASSERT_TRUE(s.valid) << "a report must reach the summary, not only the log";
@@ -3843,7 +3925,7 @@ TEST(PlacedDownlinks, ATimeSyncCarriesTheHubsInSlotCountToTheNode) {
     // asserts the wire bytes and not a second definition of them.
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    h.rol.registered_ = true;
+    give_session(h.rol);
     h.rol.enable_timed_mode(true);
 
     // Three uplinks landing in this node's slot: what the node is not allowed
@@ -3860,7 +3942,13 @@ TEST(PlacedDownlinks, ATimeSyncCarriesTheHubsInSlotCountToTheNode) {
 
     int seen = 0;
     for (const auto &f : h.radio.hub_to_node_frames()) {
-        RealDown *m = real_down_plain(f.bytes);
+        // In session the TimeSync is sealed: open it with the session's keys.
+        macwire::WireHdr w;
+        auto body = proto_sim::v1_open_session_frame(
+            kTestSessionId, kTestNodeNonce, (uint8_t) esphome::lora_tracker::kHubAddress, 18,
+            /*downlink=*/true, f.bytes, &w);
+        if (!body) continue;
+        RealDown *m = real_down_body(w, body->data(), body->size());
         if (m == nullptr) continue;
         if (m->cmd_case == hubframes::DL_TIMESYNC &&
             m->timesync != nullptr) {
@@ -11943,18 +12031,18 @@ TEST(Mac1HubS3, EveryHandedOutMsgidIsPersistedAtOnceOneWriteEach) {
 TEST(Mac1HubS3, TheReceiveWindowIsStrictlyForwardAndAtMost1024Wide) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    h.rol.registered_ = true;
+    give_session(h.rol);
     auto first = plainAvail(18, 10);
-    h.rol.set_response(first.data(), first.size());
+    feed_sealed(h.rol, first);
     ASSERT_EQ(h.rol.seq_.rxId(), 10u);
     for (uint32_t bad : {10u, 9u, 10u + 1025u}) {
         auto f = plainAvail(18, bad);
-        h.rol.set_response(f.data(), f.size());
+        feed_sealed(h.rol, f);
         EXPECT_EQ(h.rol.seq_.rxId(), 10u) << "refused: " << bad;
     }
     auto edge = plainAvail(18, 10u + 1024u);
     const int n0 = esphome::prefs_save_count();
-    h.rol.set_response(edge.data(), edge.size());
+    feed_sealed(h.rol, edge);
     EXPECT_EQ(h.rol.seq_.rxId(), 10u + 1024u) << "the window's far edge is in";
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 1) << "one write per committed uplink";
     EXPECT_EQ(lastSaved().rx_message_id, 10u + 1024u);
@@ -11965,18 +12053,18 @@ TEST(Mac1HubS3, TheReceiveWindowIsStrictlyForwardAndAtMost1024Wide) {
 TEST(Mac1HubS3, ARefusedOrSkippedOverIdIsNeitherCommittedNorForwarded) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    h.rol.registered_ = true;
+    give_session(h.rol);
     RecordingNode node;
     h.rol.register_lora_node(&node);
     for (uint32_t id : {10u, 15u}) {
         auto f = plainAvail(18, id);
-        h.rol.set_response(f.data(), f.size());
+        feed_sealed(h.rol, f);
     }
     ASSERT_EQ(h.rol.seq_.rxId(), 15u);
     ASSERT_EQ(node.got.size(), 2u);
     for (uint32_t bad : {12u, 15u, 15u + 1025u}) {
         auto f = plainAvail(18, bad);
-        h.rol.set_response(f.data(), f.size());
+        feed_sealed(h.rol, f);
         EXPECT_EQ(h.rol.seq_.rxId(), 15u) << bad;
     }
     EXPECT_EQ(node.got.size(), 2u) << "no refused frame reached a child";
@@ -12064,11 +12152,11 @@ TEST(Mac1HubS3, AMacPingReservationTakesABlockAndPersistsItsEnd) {
 TEST(Mac0TimingS5, TheCommittedOriginIsThisFramesStampAndUncertainty) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    h.rol.registered_ = true;
+    give_session(h.rol);
     h.tracker.last_rx_t0_us_v  = 123'000;
     h.tracker.rx_uncertainty_v = 250;
     auto a = serialize_avail(18, 1);
-    h.rol.set_response(a.data(), a.size());
+    feed_sealed(h.rol, a);
     EXPECT_EQ(h.rol.last_uplink_t0_us_, 123'000);
     EXPECT_EQ(h.rol.last_uplink_unc_us_, 250u);
 
@@ -12076,13 +12164,13 @@ TEST(Mac0TimingS5, TheCommittedOriginIsThisFramesStampAndUncertainty) {
     h.tracker.last_rx_t0_us_v  = 456'000;
     h.tracker.rx_uncertainty_v = 999;
     auto stale = serialize_avail(18, 1);
-    h.rol.set_response(stale.data(), stale.size());
+    feed_sealed(h.rol, stale);
     EXPECT_EQ(h.rol.last_uplink_t0_us_, 123'000);
     EXPECT_EQ(h.rol.last_uplink_unc_us_, 250u);
 
     // The next admitted one moves both.
     auto b = serialize_avail(18, 2);
-    h.rol.set_response(b.data(), b.size());
+    feed_sealed(h.rol, b);
     EXPECT_EQ(h.rol.last_uplink_t0_us_, 456'000);
     EXPECT_EQ(h.rol.last_uplink_unc_us_, 999u);
 }
