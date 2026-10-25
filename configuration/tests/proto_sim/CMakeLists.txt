@@ -642,37 +642,45 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # instead of the real ESP-IDF-laden file.
     set(NODE_STAGE ${CMAKE_BINARY_DIR}/node_stage)
     file(MAKE_DIRECTORY ${NODE_STAGE})
-    configure_file(${BLINDS_ESP_MAIN}/CmdDispatcher.cpp ${NODE_STAGE}/CmdDispatcher.cpp COPYONLY)
-    # SessionManager: the session state extracted out of CmdDispatcher. Staged
-    # alongside so the harness compiles the REAL class, not a shim.
-    configure_file(${BLINDS_ESP_MAIN}/SessionManager.cpp ${NODE_STAGE}/SessionManager.cpp COPYONLY)
-    configure_file(${BLINDS_ESP_MAIN}/include/SessionManager.h ${NODE_STAGE}/SessionManager.h COPYONLY)
+    # The node owns the list of sources and headers a host build of the real
+    # CmdDispatcher needs (test/node_dispatcher_sources.cmake), so splitting
+    # CmdDispatcher.cpp into more translation units does not break this build.
+    # A node tree older than that list gets the list as it was.
+    set(_node_dispatcher_list ${BLINDS_ESP_ROOT}/test/node_dispatcher_sources.cmake)
+    if(EXISTS ${_node_dispatcher_list})
+        include(${_node_dispatcher_list})
+    else()
+        set(NODE_DISPATCHER_SOURCES CmdDispatcher.cpp SessionManager.cpp comm_utils.c)
+        set(NODE_DISPATCHER_STAGED_HEADERS CmdDispatcher.h SessionManager.h comm_utils.h common.h
+                                           Packet.h MotorPolicy.h)
+        set(NODE_DISPATCHER_PLAIN_SOURCES Scheduler.cpp)
+    endif()
+    # Staged next to the shims: a quoted include searches the including file's
+    # own directory first. (MotorPolicy.h must be staged too: it includes
+    # "common.h", and an unstaged copy would pull in a second common.h.)
+    set(NODE_STAGED_SOURCES "")
+    foreach(_src ${NODE_DISPATCHER_SOURCES})
+        configure_file(${BLINDS_ESP_MAIN}/${_src} ${NODE_STAGE}/${_src} COPYONLY)
+        list(APPEND NODE_STAGED_SOURCES ${NODE_STAGE}/${_src})
+    endforeach()
+    foreach(_hdr ${NODE_DISPATCHER_STAGED_HEADERS})
+        configure_file(${BLINDS_ESP_MAIN}/include/${_hdr} ${NODE_STAGE}/${_hdr} COPYONLY)
+    endforeach()
+    set(NODE_PLAIN_SOURCES "")
+    foreach(_src ${NODE_DISPATCHER_PLAIN_SOURCES})
+        list(APPEND NODE_PLAIN_SOURCES ${BLINDS_ESP_MAIN}/${_src})
+    endforeach()
     # S3 (node 449b673): SessionManager.h includes the MAC-1 Sequencer.h, quoted --
     # so it must sit next to it in the stage.
     configure_file(${BLINDS_ESP_MAIN}/include/Sequencer.h ${NODE_STAGE}/Sequencer.h COPYONLY)
-    configure_file(${BLINDS_ESP_MAIN}/comm_utils.c      ${NODE_STAGE}/comm_utils.c      COPYONLY)
-    configure_file(${BLINDS_ESP_MAIN}/include/comm_utils.h ${NODE_STAGE}/comm_utils.h   COPYONLY)
-    configure_file(${BLINDS_ESP_MAIN}/include/CmdDispatcher.h ${NODE_STAGE}/CmdDispatcher.h COPYONLY)
-    configure_file(${BLINDS_ESP_MAIN}/include/common.h         ${NODE_STAGE}/common.h         COPYONLY)
-    configure_file(${BLINDS_ESP_MAIN}/include/Packet.h         ${NODE_STAGE}/Packet.h         COPYONLY)
-    # MotorPolicy.h MUST be staged, not reached in place. CmdDispatcher.cpp
-    # includes it for keptTravelDurationS (the CoverConfig zero-duration guard),
-    # and MotorPolicy.h in turn includes "common.h" — quoted, so it resolves
-    # relative to ITS OWN directory. Left unstaged it drags in the real
-    # main/include/common.h while the staged CmdDispatcher.cpp has already
-    # included node_stage/common.h. Two distinct files, so `#pragma once` cannot
-    # fire, and every enum/struct/constant in common.h redefines.
-    configure_file(${BLINDS_ESP_MAIN}/include/MotorPolicy.h    ${NODE_STAGE}/MotorPolicy.h    COPYONLY)
     # Drop the sibling shims into the same staging directory.
     foreach(shim MotorCtrl.h SystemCtrl.h LoraInterface.h myinterrupts.h)
         configure_file(${NODE_SHIM_DIR}/${shim} ${NODE_STAGE}/${shim} COPYONLY)
     endforeach()
 
     add_library(real_cmd_dispatcher STATIC
-        ${NODE_STAGE}/CmdDispatcher.cpp
-        ${NODE_STAGE}/SessionManager.cpp
-        ${NODE_STAGE}/comm_utils.c
-        ${BLINDS_ESP_MAIN}/Scheduler.cpp
+        ${NODE_STAGED_SOURCES}
+        ${NODE_PLAIN_SOURCES}
         ${NODE_SHIM_DIR}/esp_idf_stubs.c
         ${NODE_SHIM_DIR}/host_clock.c
         ${NODE_SHIM_DIR}/extern_stubs.cpp
@@ -749,9 +757,7 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # serves both halves; a seam test where each side reads its own clock could
     # not assert anything about arrival versus window, which is its whole point.
     add_library(real_cmd_dispatcher_seam STATIC
-        ${NODE_STAGE}/CmdDispatcher.cpp
-        ${NODE_STAGE}/SessionManager.cpp
-        ${NODE_STAGE}/comm_utils.c
+        ${NODE_STAGED_SOURCES}
         ${NODE_SHIM_DIR}/esp_idf_stubs.c
         ${NODE_SHIM_DIR}/extern_stubs.cpp
     )
@@ -843,12 +849,12 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     # the DIO1 RX_TIMEOUT branch that is the only source of noteMarkMissed() and
     # therefore of demotion — and no test in either repository had ever compiled
     # it, let alone run it. Two real defects were fixed blind in there.
-    foreach(f CmdDispatcher.cpp SessionManager.cpp comm_utils.c LoraInterface.cpp
-              frtosTasks.cpp)
+    set(IFACE_STAGED_SOURCES "")
+    foreach(f ${NODE_DISPATCHER_SOURCES} LoraInterface.cpp frtosTasks.cpp)
         configure_file(${BLINDS_ESP_MAIN}/${f} ${IFACE_STAGE}/${f} COPYONLY)
+        list(APPEND IFACE_STAGED_SOURCES ${IFACE_STAGE}/${f})
     endforeach()
-    foreach(h CmdDispatcher.h SessionManager.h comm_utils.h common.h Packet.h
-              LoraInterface.h myinterrupts.h frtosTasks.h MotorPolicy.h)
+    foreach(h ${NODE_DISPATCHER_STAGED_HEADERS} LoraInterface.h myinterrupts.h frtosTasks.h)
         configure_file(${BLINDS_ESP_MAIN}/include/${h} ${IFACE_STAGE}/${h} COPYONLY)
     endforeach()
     # Only the siblings that are genuinely not under test here.
@@ -857,12 +863,8 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
     endforeach()
 
     add_library(real_lora_interface STATIC
-        ${IFACE_STAGE}/LoraInterface.cpp
-        ${IFACE_STAGE}/frtosTasks.cpp
-        ${IFACE_STAGE}/CmdDispatcher.cpp
-        ${IFACE_STAGE}/SessionManager.cpp
-        ${IFACE_STAGE}/comm_utils.c
-        ${BLINDS_ESP_MAIN}/Scheduler.cpp
+        ${IFACE_STAGED_SOURCES}
+        ${NODE_PLAIN_SOURCES}
         ${NODE_SHIM_DIR}/lora_hal_stub_node.cpp
         ${NODE_SHIM_DIR}/adc_stub.c
         ${NODE_SHIM_DIR}/esp_idf_stubs.c

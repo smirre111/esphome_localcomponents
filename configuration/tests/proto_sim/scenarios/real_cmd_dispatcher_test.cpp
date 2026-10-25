@@ -2760,6 +2760,10 @@ TEST_F(RealNodeFixture, AutoSleepRechecksTheConditionWhenItFires) {
 // ---------------------------------------------------------------------------
 
 TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
+    // Node N15 (ae291f4): a DriftTest starts only on a bench node and from an
+    // authenticated frame, so the node is a bench node with a session here.
+    disp.setBenchNode(true);
+    useSession();
     // The measuring profile disables light sleep and pins the CPU at 240 MHz:
     // ~11 mA against the ~1.2 mA interactive average. If a test ever ends
     // without restoring production, the node quietly burns ~9x its budget and
@@ -2770,7 +2774,7 @@ TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
-    hdr.senderaddress = kHubAddr; hdr.msgid = 1;
+    hdr.senderaddress = kHubAddr; hdr.msgid = 5;
     op.header = &hdr;
 
     DriftTest dt = DRIFT_TEST__INIT;
@@ -2778,13 +2782,16 @@ TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
     op.cmd_case = DL_DRIFTTEST;
     op.drifttest = &dt;
 
-    disp.handleDriftTest(&op, &hdr);
+    auto on = pack_op(op);   // sealed: useSession() is on
+    disp.onReceiveNew(on.data(), static_cast<int>(on.size()));
     EXPECT_TRUE(SystemCtrl::measuringProfile())
         << "entering the test must disable light sleep";
     EXPECT_TRUE(disp.driftTestActive());
 
     dt.enable = false;
-    disp.handleDriftTest(&op, &hdr);
+    hdr.msgid = 6;
+    auto off = pack_op(op);
+    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
     EXPECT_FALSE(SystemCtrl::measuringProfile())
         << "leaving the test MUST restore production power management";
     EXPECT_FALSE(disp.driftTestActive());
