@@ -276,6 +276,8 @@ namespace esphome
       // Placed frames that reached the radio more than a guard past their mark,
       // and so went out without claiming it. Should stay 0; see sendPacketBurst.
       uint32_t  latePlacedFrames() const { return this->tx_late_placed_; }
+      // Copies dropped because their sealer refused them (HB8: counted, not logged per copy).
+      uint32_t  txSealDrops() const { return this->tx_seal_drops_; }
       // On-mark frames that left more than kMarkLateToleranceUs after their mark
       // but inside the guard, so they still claimed it. Should stay 0.
       uint32_t  lateMarks() const { return this->tx_mark_late_; }
@@ -558,6 +560,16 @@ namespace esphome
       int64_t queued_air_end_us_{0};
       uint32_t tx_late_placed_{0};
       uint32_t tx_mark_late_{0};
+      // HB8: send-task counters (no logging there) and what loop() last reported.
+      uint32_t tx_seal_drops_{0};
+      int64_t  tx_last_late_us_{0};
+      int64_t  tx_last_mark_late_us_{0};
+      uint32_t rep_late_{0}, rep_mark_{0}, rep_stamp_{0}, rep_seal_{0}, rep_supers_{0};
+      int64_t  rep_last_us_{0};
+      void drainTxAnomalyReport_();
+      // The send task's per-copy pack buffer (a frame is at most 255 B; the
+      // STAMP extension is inserted per copy).
+      uint8_t copy_buf_[BUFFER_SIZE + 16]{};
       // Whether the frame sendTask last sent is answered (see postTxHoldMs).
       bool last_tx_expects_reply_{true};
       // Every span the channel is spoken for: frames placed and not yet sent, and

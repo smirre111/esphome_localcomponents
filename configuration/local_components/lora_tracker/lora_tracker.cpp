@@ -226,6 +226,7 @@ namespace esphome
       // noteTagWriteLatencyUs_() computed, deferred out of the burst retag
       // loop to here.
       this->drainTagLatencyReport_();
+      this->drainTxAnomalyReport_();
       this->logStackWatermarks_();
       esphome::delay(10);
       // this->sendPacketBytes(txBuf, len);
@@ -432,19 +433,12 @@ namespace esphome
         }
         if (!current)
         {
-          this->tx_superseded_drops_++;
-          ESP_LOGI(TAG, "dropping superseded frame for node %u (gen %u), %u so far",
-                   (unsigned) rx_buffer->tx_supersede_key,
-                   (unsigned) rx_buffer->tx_supersede_gen,
-                   (unsigned) this->tx_superseded_drops_);
+          this->tx_superseded_drops_++;   // reported from loop() (HB8)
           this->return_buffer_to_pool(rx_buffer);
           continue;   // the next entry may be the one that IS wanted
         }
         break;
       }
-
-      ESP_LOGI(TAG, "Processing %d bytes from buffer %p",
-               rx_buffer->length, rx_buffer);
 
       // Declare the channel busy BEFORE transmitting, not after: a caller
       // deciding where to place a timed downlink must see the burst that is
@@ -476,11 +470,6 @@ namespace esphome
                             rx_buffer->tx_sealer, rx_buffer->tx_seal_binding,
                             rx_buffer->tx_fire_stamp != 0);
       lora_tx_busy_ = false;
-
-      if (rx_buffer->length > 0)
-      {
-        ESP_LOG_BUFFER_HEX(TAG, rx_buffer->data, rx_buffer->length);
-      }
 
       this->return_buffer_to_pool(rx_buffer);
       return true;
@@ -976,8 +965,8 @@ namespace esphome
       //   ESP_ERROR_CHECK(this->init_memory_pool());
       // }
 
-      UBaseType_t free_buffers = uxQueueMessagesWaiting(free_buffer_queue);
-      ESP_LOGI(TAG, "Free buffers available: %d", free_buffers);
+      ESP_LOGV(TAG, "Free buffers available: %u",
+               (unsigned) uxQueueMessagesWaiting(free_buffer_queue));
 
       // Ensure we don't overflow
       if (len >= BUFFER_SIZE)
@@ -1079,9 +1068,10 @@ namespace esphome
       const TickType_t xFrequency = pdMS_TO_TICKS(stride_eff_ms);
       const int burstCopies = (copies > 0) ? copies : this->txSlotsPerRound;
 
-      TickType_t xLastWakeTime;
-      ESP_LOGI(TAG, "Sending packed burst");
-      xLastWakeTime = xTaskGetTickCount();
+      // Nothing in this function logs or allocates (HB8): it runs per copy on
+      // the send task, between a copy's stamp and its fire instant. Anomalies
+      // are counted here and reported from loop() (drainTxAnomalyReport_).
+      TickType_t xLastWakeTime = xTaskGetTickCount();
 
       // WHERE EACH COPY GOES. The node backs a copy's arrival out to copy 0 as
       // arrival - burstIndex * 88 ms, so copy k must leave at copy 0 + k * stride.
@@ -1119,9 +1109,8 @@ namespace esphome
         if (late_us > (int64_t) timedgrid::kGuardUs)
         {
           this->tx_late_placed_++;
-          on_mark_eff = false;
-          ESP_LOGW(TAG, "placed frame %lld us past its mark (%u so far) — sent, not on mark",
-                   (long long) late_us, (unsigned) this->tx_late_placed_);
+          this->tx_last_late_us_ = late_us;
+          on_mark_eff = false;   // sent, but no longer claims the mark
         }
       }
 
@@ -1205,19 +1194,18 @@ namespace esphome
             this->noteTagWriteLatencyUs_((uint32_t) (seal_t1 - seal_t0), seal_t1, cnt);
             if (!sealed)
             {
-              ESP_LOGW(TAG, "Could not seal copy %d's tag (no session, or keys changed since the "
-                            "frame was sealed) — dropping this copy", cnt);
+              // No session, or the keys changed since the frame was sealed.
+              this->tx_seal_drops_++;
               skip_copy = true;
             }
           }
 
-          size_t clen  = skip_copy ? 0 : frame.packedSize();
-          uint8_t *cbuf = skip_copy ? nullptr : static_cast<uint8_t *>(malloc(clen));
-          if (cbuf)
+          // The copy is packed into the send task's own buffer: no heap per copy.
+          const size_t clen = skip_copy ? 0 : frame.packedSize();
+          if (!skip_copy && clen <= sizeof(this->copy_buf_))
           {
-            frame.packInto(cbuf);
-            this->sendPacketAt(cbuf, clen, stamped ? fire_at_us : copy_at_us);
-            free(cbuf);
+            frame.packInto(this->copy_buf_);
+            this->sendPacketAt(this->copy_buf_, clen, stamped ? fire_at_us : copy_at_us);
             // The stamp check below compares against the stamp, which is moved
             // later when the frame was released late — so a mark that left 20 ms
             // after its instant, honestly stamped, was invisible. A Mode B node
@@ -1227,30 +1215,18 @@ namespace esphome
                 this->last_fire_us_ - copy_at_us > kMarkLateToleranceUs)
             {
               this->tx_mark_late_++;
-              ESP_LOGW(TAG, "on-mark frame msgid %u left %lld us after its mark (%u so far)",
-                       (unsigned) frame.msgid(),
-                       (long long) (this->last_fire_us_ - copy_at_us),
-                       (unsigned) this->tx_mark_late_);
+              this->tx_last_mark_late_us_ = this->last_fire_us_ - copy_at_us;
             }
             if (stamped && this->last_fire_us_ - fire_at_us > kStampToleranceUs)
-            {
               this->tx_stamp_misses_++;
-              ESP_LOGW(TAG, "copy %d left %lld us after its stamped instant (%u so far)",
-                       cnt, (long long) (this->last_fire_us_ - fire_at_us),
-                       (unsigned) this->tx_stamp_misses_);
-            }
           }
-          else if (!skip_copy && !encrypted)
+          // else: dropped -- the seal failed (counted above), or a copy that
+          // would not fit the buffer, which a frame of at most 255 B plus its
+          // stamp never is (counted, never sent half-built).
+          else if (!skip_copy)
           {
-            // OOM fallback: unindexed copy, still placed. Plaintext only —
-            // an encrypted frame's `data`/`len` still carry the placeholder
-            // tag from pack time (the copy sealer never ran on them), so
-            // sending them raw would ship an unverifiable frame instead of
-            // dropping it.
-            this->sendPacketAt(data, len, copy_at_us);
+            this->tx_seal_drops_++;
           }
-          // else: deliberately dropped (sealing failed, or OOM on an
-          // encrypted copy) — counted via the warning log above, not sent.
         }
         else
         {
@@ -1292,6 +1268,35 @@ namespace esphome
         }
       }
 
+    }
+
+    // The send task's anomaly counters, reported from the loop at most every
+    // 10 s and only when one moved (HB8: nothing logs on the send task).
+    void LORATracker::drainTxAnomalyReport_()
+    {
+      const uint32_t late   = this->tx_late_placed_;
+      const uint32_t mark   = this->tx_mark_late_;
+      const uint32_t stamp  = this->tx_stamp_misses_;
+      const uint32_t seal   = this->tx_seal_drops_;
+      const uint32_t supers = this->tx_superseded_drops_;
+      if (late == this->rep_late_ && mark == this->rep_mark_ && stamp == this->rep_stamp_ &&
+          seal == this->rep_seal_ && supers == this->rep_supers_)
+        return;
+      const int64_t now = esp_timer_get_time();
+      if (this->rep_last_us_ != 0 && now - this->rep_last_us_ < 10000000)
+        return;
+      this->rep_last_us_ = now;
+      ESP_LOGW(TAG, "tx anomalies (totals): placed late %u (last %lld us), on-mark late %u "
+                    "(last %lld us), stamp misses %u, copies dropped unsealed %u, "
+                    "superseded frames dropped %u",
+               (unsigned) late, (long long) this->tx_last_late_us_, (unsigned) mark,
+               (long long) this->tx_last_mark_late_us_, (unsigned) stamp, (unsigned) seal,
+               (unsigned) supers);
+      this->rep_late_   = late;
+      this->rep_mark_   = mark;
+      this->rep_stamp_  = stamp;
+      this->rep_seal_   = seal;
+      this->rep_supers_ = supers;
     }
 
     // H-1 acceptance gate: bucket one copy-sealer (BurstFrame::seal) latency sample and,

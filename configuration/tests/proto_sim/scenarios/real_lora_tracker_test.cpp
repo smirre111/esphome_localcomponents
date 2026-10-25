@@ -1878,6 +1878,7 @@ TEST(RealTrackerSealer, ACopyTheSealerRefusesIsDropped) {
     t.sendPacketBurst(f.data(), f.size(), 2, 0, 0, false, &fakeSealer, kBinding);
     EXPECT_EQ(g_seal.calls, 2);
     EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0) << "refused copies never leave";
+    EXPECT_EQ(t.txSealDrops(), 2u) << "each refused copy is counted for the loop's report";
 }
 
 TEST(RealTrackerSealer, AnEncryptedFrameWithoutASealerIsNeverSentHalfSealed) {

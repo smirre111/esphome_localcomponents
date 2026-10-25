@@ -1138,6 +1138,8 @@ namespace esphome
       // Guarded by session_tx_mutex_.
       bool     mac_ping_crypto_{false};
       mac1::FcntReservation mac_ping_fcnts_{};
+      // The decrypted body of the uplink being processed (loop only, HB8).
+      uint8_t uplink_pt_[256]{};
       esp_timer_handle_t mac_ping_timer_{nullptr};
       uint8_t  mac_ping_frame_[192]{};
       size_t   mac_ping_frame_len_{0};

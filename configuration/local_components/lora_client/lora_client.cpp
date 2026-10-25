@@ -1576,35 +1576,32 @@ namespace esphome
       return true;
     }
 
-    // CTR-decrypt the verified ciphertext. Returns a malloc'd plaintext, or
-    // nullptr (candidate destroyed) on failure.
+    // CTR-decrypt the verified ciphertext into the listener's own buffer (no
+    // heap on the receive path, HB8). Returns it, or nullptr (candidate
+    // destroyed) on failure. Loop task only.
     uint8_t *LORAListener::uplink_decrypt_(EncUplink &up)
     {
       const hubframes::Sealed *enc = up.msg->encrypted;
-      size_t cipher_len = enc->ciphertext.len;
-
-      uint8_t *plaintext = static_cast<uint8_t *>(malloc(cipher_len));
-      if (!plaintext)
+      const size_t cipher_len = enc->ciphertext.len;
+      if (cipher_len > sizeof(this->uplink_pt_))
       {
-        ESP_LOGE(TAG, "Memory allocation failed for plaintext");
+        ESP_LOGE(TAG, "%u B ciphertext does not fit a LoRa frame — dropped", (unsigned) cipher_len);
         this->uplink_drop_candidate_(up);
         return nullptr;
       }
-
       if (!s_sec().decryptUplink(up.hdr, up.session_id, up.keys, enc->ciphertext.data, cipher_len,
-                                 plaintext))
+                                 this->uplink_pt_))
       {
         ESP_LOGE(TAG, "CTR decryption failed despite a verified CMAC — this should never happen");
         this->uplink_drop_candidate_(up);
-        free(plaintext);
         return nullptr;
       }
-      return plaintext;
+      return this->uplink_pt_;
     }
 
     // The frame is authentic and decrypted: commit it, install the candidate
     // session (if any), prove the node alive, confirm the session, and hand the
-    // inner payload on. Takes ownership of `plaintext`.
+    // inner payload on. `plaintext` is uplink_pt_.
     void LORAListener::uplink_accept_(EncUplink &up, uint8_t *plaintext)
     {
       // The tag verified: this frame is the node's, so its msgid is real and
@@ -1631,7 +1628,6 @@ namespace esphome
 
       // The body is the PDU (direction, PORT) names (spec 3).
       this->v1_deliver_decrypted_(up, plaintext, up.msg->encrypted->ciphertext.len);
-      free(plaintext);
     }
 
 
