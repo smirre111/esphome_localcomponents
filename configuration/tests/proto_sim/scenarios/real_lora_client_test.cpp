@@ -10690,7 +10690,8 @@ size_t count_handed_equal(const LORATracker &t, size_t from, const std::vector<u
         if (t.sent_raw[i] == bytes) ++n;
     return n;
 }
-void ack_like_node(LORAClient &rol, uint32_t base, uint32_t acked_fcnt) {
+void ack_like_node(LORAClient &rol, uint32_t base, uint32_t acked_fcnt,
+                   proto_sim::AckStatus status = proto_sim::AckStatus::ACK_OK) {
     proto_sim::LoraClientResponseMessage inner;
     inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
     inner.header.destSubnet    = 2;
@@ -10698,6 +10699,7 @@ void ack_like_node(LORAClient &rol, uint32_t base, uint32_t acked_fcnt) {
     inner.header.msgId         = rol.seq_.rxId() + 1;
     inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Ack;
     inner.ack.ack_msg_id       = acked_fcnt;
+    inner.ack.status           = status;
     auto enc = seal_uplink_like_node(base, inner);
     proto_sim::LoraClientResponseMessage outer;
     outer.header    = inner.header;
@@ -10756,6 +10758,32 @@ TEST(TrackedOpRetry, AnOtaWhoseFirstPackFailsIsNeverReplacedByAnOlderFrame) {
         << "the OTA's retry re-sent the earlier cover op's frame";
     EXPECT_FALSE(op.ctl().awaiting_ack)
         << "an at-most-once command that was never framed is abandoned, not retried";
+}
+
+// Review P3 (2026-10-25): the node now answers an Acked frame it cannot
+// dispatch with MacAck status ACK_ERROR instead of silence. The hub ignored the
+// status, so that read as "delivered". Now it fails the command at once: no
+// retries (the same bytes cannot change the answer) and no relogin (the node
+// just answered under the session).
+TEST(TrackedOpRetry, ACommandTheNodeRefusesFailsAtOnceWithoutTearingTheSessionDown) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
+    h.clock.tick(10);
+    auto &op = static_cast<TrackedOpProbe &>(h.rol);
+    ASSERT_TRUE(op.ctl().awaiting_ack) << "precondition: the command is in flight";
+    const auto cmd_frame = h.tracker.sent_raw.back();
+
+    ack_like_node(h.rol, base, op.ctl().last_msgid, proto_sim::AckStatus::ACK_ERROR);
+    EXPECT_FALSE(op.ctl().awaiting_ack) << "a refused command is not retried";
+    EXPECT_TRUE(h.rol.commandFailed()) << "a refused command is not shown as delivered";
+    const size_t handed = h.tracker.sent_raw.size();
+    h.clock.tick(15000);
+    EXPECT_EQ(count_handed_equal(h.tracker, handed, cmd_frame), 0u) << "the command was re-sent";
+    EXPECT_TRUE(h.rol.session_confirmed_) << "the session was torn down over a refusal";
 }
 
 // Review HB6: set_sleep_duration took a uint16_t, so the schema's own range

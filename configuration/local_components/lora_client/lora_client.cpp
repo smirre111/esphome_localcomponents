@@ -2026,7 +2026,7 @@ namespace esphome
         // refreshed at the one moment it is about to be read — without the
         // periodic per-node uplink §4.4 prices and rejects at 32 nodes.
         this->notePhaseReport_(msg->ack->phase);
-        this->handle_command_ack_(msg->ack->ack_msg_id);
+        this->handle_command_ack_(msg->ack->ack_msg_id, msg->ack->status);
       }
       // MAC-0: consumed here, never forwarded to a cover or a schedule.
       else if (msg->proto_case == hubframes::UL_MACCONTROL &&
@@ -3602,10 +3602,38 @@ namespace esphome
                (unsigned) this->ack_latency_.maxDelayMs((uint32_t) (now_us / 1000)));
     }
 
-    void LORAListener::handle_command_ack_(uint32_t ack_msg_id)
+    void LORAListener::handle_command_ack_(uint32_t ack_msg_id, AckStatus status)
     {
       this->acked_since_confirm_ = true;
-      this->dlv_ack_(ack_msg_id);
+      if (status == ACK_STATUS__ACK_OK)
+        this->dlv_ack_(ack_msg_id);
+      else
+        this->dlv_refused_(ack_msg_id, status);
+    }
+
+    // The node HEARD an Acked frame and answered that it will not execute it:
+    // ACK_ERROR for a body it cannot dispatch (a case newer than its firmware,
+    // review P3), ACK_BUSY reserved. Retrying the same bytes cannot change that,
+    // and the session is demonstrably alive, so the request fails at once:
+    // no retries, no relogin (unlike a ladder that ran out without any answer).
+    bool LORAListener::dlv_refused_(uint32_t ack_msg_id, AckStatus status)
+    {
+      for (uint8_t c = kDeliveryChannels; c-- > 0;)
+      {
+        DeliverySlot &s = this->slots_[c];
+        if (s.acks.find(ack_msg_id) < 0)
+          continue;
+        ESP_LOGE(TAG, "[%s] %s refused by the node (status %d, FCNT %u) — failed, not retried",
+                 this->get_name().c_str(), s.req.what, (int) status, (unsigned) ack_msg_id);
+        this->dlv_cancel_((DeliveryChannel) c);
+        if (s.req.on_abandon)
+          s.req.on_abandon();
+        else if (s.req.on_fail)
+          s.req.on_fail();
+        this->dlv_done_((DeliveryChannel) c);
+        return true;
+      }
+      return false;
     }
 
     void LORAListener::set_command_failed_(bool failed)

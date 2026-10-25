@@ -1845,7 +1845,9 @@ namespace esphome
       // is included BY lora_tracker.h, not the other way round), so an inline
       // body would need a complete type this header must not have.
       TxPolicy tracked_op_policy_() const;
-      void     handle_command_ack_(uint32_t ack_msg_id);
+      void     handle_command_ack_(uint32_t ack_msg_id, AckStatus status = ACK_STATUS__ACK_OK);
+      // An ack whose status says the node will not execute the request (P3).
+      bool     dlv_refused_(uint32_t ack_msg_id, AckStatus status);
       // Stages of handle_command_ack_: each returns true when it consumed the ack.
       void     record_ack_latency_();
       void     set_command_failed_(bool failed);
