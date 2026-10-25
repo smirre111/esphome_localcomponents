@@ -632,6 +632,7 @@ namespace esphome
         NoUplinkStamp = 2,  // never heard an uplink from it — burst
         WindowsPast   = 3,  // Class A, both windows closed: it is ASLEEP
         NotSendable   = 4,  // no tracker or no payload — send nothing
+        Dropped       = 5,  // aimed, but the transmit pool refused it (HB13)
       };
 
       // Place one copy in this node's next OPEN Class A window — RX1 if the

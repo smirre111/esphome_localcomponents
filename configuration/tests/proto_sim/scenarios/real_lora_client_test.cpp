@@ -804,6 +804,30 @@ TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
            "never aimed at a window; counting it would inflate the denominator";
 }
 
+// Review HB13: send_into_class_a_window_ ignored mac0_send_'s result, so a frame
+// the transmit pool refused still answered Placed and was counted as offered --
+// a lost TimeSync reported as sent and an inflated Class A denominator.
+TEST(RealLoraClient, AClassAReplyThePoolRefusesIsNeitherPlacedNorOffered) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    give_session(h.rol);
+    h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
+    h.tracker.last_rx_t0_us_v  = 100'000;
+    h.tracker.rx_uncertainty_v = 250;
+    auto from_self = real_helpers::serialize_avail(/*sender=*/18, /*msg_id=*/1);
+    feed_sealed(h.rol, from_self);
+    ASSERT_EQ(h.rol.last_uplink_t0_us_, 100'000) << "precondition: an origin for the windows";
+
+    std::vector<uint8_t> payload{1, 2, 3, 4};
+    h.tracker.drop_next_sends = 1;
+    EXPECT_EQ(h.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::Dropped);
+    EXPECT_EQ(h.rol.class_a_stats().offered, 0u) << "a refused frame was counted as offered";
+    EXPECT_EQ(h.rol.send_into_class_a_window_(payload.data(), payload.size()),
+              LORAClient::ClassAPlacement::Placed) << "and the next one is placed";
+    EXPECT_EQ(h.rol.class_a_stats().offered, 1u);
+}
+
 // A v1 uplink's on-air length is a T0 input as it stands (fixed header, tag
 // over the raw bytes): an admitted uplink becomes the node's Class A origin.
 TEST(RealLoraClient, AnAdmittedUplinkBecomesTheClassAOrigin) {

@@ -5826,7 +5826,15 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       p.earliest_us = target;
       p.priority    = 0;              // Immediate: a missed window is a lost
                                       // reply, and the next one is a wake away
-      this->mac0_send_(buf, len, p, seal);
+      if (!this->mac0_send_(buf, len, p, seal))
+      {
+        // The pool refused it: nothing was aimed at the window, so nothing is
+        // counted as offered (the hit rate divides by this), and the caller
+        // must not report the frame as sent (review HB13).
+        ESP_LOGW(TAG, "[%s] reply for %s dropped by the transmit queue", this->get_name().c_str(),
+                 window);
+        return ClassAPlacement::Dropped;
+      }
 
       ESP_LOGI(TAG, "[%s] reply aimed at %s: T0_uplink %lld, wanted T0 %lld, "
                     "fire %lld (hub stamp +/-%u us)",

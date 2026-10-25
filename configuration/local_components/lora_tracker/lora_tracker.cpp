@@ -968,11 +968,13 @@ namespace esphome
       ESP_LOGV(TAG, "Free buffers available: %u",
                (unsigned) uxQueueMessagesWaiting(free_buffer_queue));
 
-      // Ensure we don't overflow
-      if (len >= BUFFER_SIZE)
+      // A LoRa frame is at most 255 bytes. A longer one is refused, never
+      // truncated: a prefix of a frame is a corrupt frame with a broken tag
+      // (review HB17).
+      if (len > macwire::kMaxFrameBytes)
       {
-        ESP_LOGW(TAG, "Truncating %d bytes to %d", len, BUFFER_SIZE - 1);
-        len = BUFFER_SIZE - 1;
+        ESP_LOGW(TAG, "refusing a %zu-byte frame (max %u)", len, (unsigned) macwire::kMaxFrameBytes);
+        return false;
       }
 
       // Get a free buffer from pool
@@ -980,11 +982,9 @@ namespace esphome
 
       if (rx_buffer)
       {
-        // Safe copy with explicit size limit
-        size_t copy_len = (len < BUFFER_SIZE) ? len : BUFFER_SIZE - 1;
+        const size_t copy_len = len;   // <= 255 < BUFFER_SIZE, checked above
         memcpy(rx_buffer->data, data, copy_len);
         rx_buffer->length = copy_len;
-        rx_buffer->data[copy_len] = '\0'; // Null terminate for safety
 
         // The policy travels WITH the frame. Anything stored on the tracker
         // instead would be read by sendTask at dequeue, by which time the
@@ -1051,7 +1051,7 @@ namespace esphome
         return true;
       }
 
-      ESP_LOGW(TAG, "No free buffers, dropped %d bytes", len);
+      ESP_LOGW(TAG, "No free buffers, dropped %zu bytes", len);
       return false;
     }
 

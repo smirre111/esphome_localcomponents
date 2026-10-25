@@ -769,6 +769,21 @@ TEST(RealTrackerTx, PriorityDoesNotOverrideTheDeferral) {
     EXPECT_TRUE(t.serviceTxQueue(3'000'000));
 }
 
+// Review HB17 (2026-10-25): send() TRUNCATED a frame longer than the buffer to
+// a 255-byte prefix and queued that -- a corrupt frame with a broken tag on the
+// air. A LoRa frame is at most 255 bytes; anything longer is refused.
+TEST(RealTrackerTx, AnOversizedFrameIsRefusedNeverTruncated) {
+    lorahal::rec().reset();
+    TxProbe t;
+    t.init();
+    std::vector<uint8_t> big(300, 0x5A);
+    EXPECT_FALSE(t.send(big.data(), big.size(), TxPolicy{/*copies=*/1}));
+    EXPECT_FALSE(t.serviceTxQueue(0)) << "nothing was queued";
+    EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0);
+    std::vector<uint8_t> max(255, 0x5B);
+    EXPECT_TRUE(t.send(max.data(), max.size(), TxPolicy{/*copies=*/1})) << "255 B is a LoRa frame";
+}
+
 TEST(RealTrackerTx, TheDefaultPolicyIsSendNowAtNormalPriority) {
     // Every existing caller passes TxPolicy{} or nothing. If the defaults
     // changed behaviour, B1a would be a silent regression across the hub.
