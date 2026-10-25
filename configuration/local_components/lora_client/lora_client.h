@@ -300,7 +300,7 @@ namespace esphome
       void set_parent(LORATracker *parent) { parent_ = parent; }
       void set_short_address(uint8_t address) { this->short_address_ = address; }
       void set_subnet_address(uint8_t address) { this->subnet_address_ = address; }
-      // Seconds, 1..864000 (the YAML schema's range; 10 days).
+      // Seconds, 60..604800 (the YAML schema's range = the node's clamp).
       void set_sleep_duration(uint32_t sleep_duration) { this->sleep_duration_ = sleep_duration; }
       void set_battery_update_interval(uint32_t seconds) { this->battery_update_interval_ = seconds; }
       void enterSleep();

@@ -32,8 +32,8 @@
 // PERSISTENCE stays with the caller (the node's SessionManager owns the NVS
 // blob, unchanged). This class only decides WHEN a snapshot must be written
 // and calls the caller's PersistHook -- a plain function pointer + context, no
-// virtual call, no heap. The caller writes (txId(), rxId()) and, when the
-// write landed, calls notePersisted().
+// virtual call, no heap. The caller writes a (txId(), rxId()) snapshot and,
+// when the write landed, calls notePersisted(written_tx, written_rx).
 //
 // SHARED, NODE OWNS IT. Dependency-free (<stdint.h> only), so the GoogleTest
 // harness and the hub's ESPHome build compile it as is. The hub vendors a
@@ -194,7 +194,13 @@ public:
 
     // A new session starts both directions over. The bitmap goes with the mark:
     // bits under the OLD numbering would refuse the new session's first frames.
-    // The persisted marks are deliberately left alone (unchanged behaviour).
+    // The persisted marks are left alone. The caller normally writes a fresh
+    // snapshot right after a reset (the node's handleLogin), which resets them.
+    // If it cannot, the old marks only delay the next write: the new session's
+    // ids restart at 1 and stay below old mark + margin until that write, and a
+    // restore yields at least (stored >= old mark) + margin, which lies above
+    // every one of them. This relies on notePersisted() recording what was
+    // really written.
     void reset()
     {
         tx_ = 0;
@@ -219,6 +225,16 @@ public:
     {
         last_persisted_tx_ = tx_;
         last_persisted_rx_ = rx_;
+    }
+    // The caller's write of the snapshot (saved_tx, saved_rx) landed. Pass the
+    // values that were WRITTEN, not the live ones: a write is slow, and an id
+    // allocated while it ran is not in the snapshot. Recording the live value
+    // would mark that id persisted and let the next margin's worth of ids go
+    // out unpersisted (review N4).
+    void notePersisted(uint32_t saved_tx, uint32_t saved_rx)
+    {
+        last_persisted_tx_ = saved_tx;
+        last_persisted_rx_ = saved_rx;
     }
 
     // A full tx margin has passed since the last snapshot (throttled save).

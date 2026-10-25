@@ -10616,11 +10616,11 @@ TEST(TrackedOpRetry, AnOtaWhoseFirstPackFailsIsNeverReplacedByAnOlderFrame) {
 }
 
 // Review HB6: set_sleep_duration took a uint16_t, so the schema's own range
-// (0..864000 s, 10 days) and the header's 24 h default were cut to 16 bits on
+// (60..604800 s, 7 days) and the header's 24 h default were cut to 16 bits on
 // the way in: 86400 s reached the node as 20864 s.
 TEST(FireDelivery, AClientConfigCarriesASleepDurationWiderThanSixteenBits) {
     using namespace real_helpers;
-    for (const uint32_t secs : {86400u, 864000u}) {
+    for (const uint32_t secs : {86400u, 604800u}) {
         RealHubHarness h{18, kMacRol2};
         h.rol.set_sleep_duration(secs);
         h.rol.send_remote_config();

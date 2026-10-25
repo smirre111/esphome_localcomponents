@@ -4178,8 +4178,11 @@ namespace esphome
     bool LORAListener::persist_hook_(void *ctx)
     {
       auto *self = static_cast<LORAListener *>(ctx);
+      // Mark exactly the snapshot save_state_ writes as persisted (node N4(a)).
+      const uint32_t tx = self->seq_.txId();
+      const uint32_t rx = self->seq_.rxId();
       self->save_state_(true);
-      self->seq_.notePersisted();
+      self->seq_.notePersisted(tx, rx);
       return true;
     }
 
