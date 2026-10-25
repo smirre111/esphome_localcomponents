@@ -70,6 +70,14 @@ namespace esphome
       ~CallbackBusy() { busy.store(false); }
       std::atomic<bool> &busy;
     };
+
+    // Section 7: a Control command carries its identity, the slot's generation
+    // (per logical command, kept across retries and re-packs); nothing else does.
+    inline uint32_t s_v1_cmd_id(const hubframes::Down *op, uint32_t generation)
+    {
+      return (op->cmd_case == hubframes::DL_OPERATION ||
+              op->cmd_case == hubframes::DL_SYSOP) ? generation : 0u;
+    }
     }  // namespace
   }  // namespace lora_tracker
 }  // namespace esphome
