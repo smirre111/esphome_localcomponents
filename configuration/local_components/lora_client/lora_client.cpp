@@ -3805,11 +3805,12 @@ namespace esphome
 
     uint32_t LORAListener::incrTxMessageId()
     {
-      // The esp_timer callbacks (mode_test_timer_cb_/drift_timer_cb_) send
-      // frames prebuilt by build_*_frame_() and do not call this, so today
-      // every caller is on the ESPHome loop. The lock is kept as cheap
-      // insurance: a bare ++ from a second task could hand out the same
-      // tx_message_id twice.
+      // LOOP ONLY: allocating persists the counter through ESPHome
+      // preferences (persist_hook_ -> save_state_), which the loop task owns.
+      // The esp_timer streams (MAC ping, ModeTest marks, drift ticks) take
+      // their FCNTs from a block reserved on the loop (reserve_fcnt_block_)
+      // and never reach this. The lock guards the counter against
+      // take_reserved_fcnt_ running concurrently.
       uint32_t val = 0;
       bool exhausted = false;
       {
@@ -3879,6 +3880,30 @@ namespace esphome
     {
       std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
       this->mac_ping_fcnts_.invalidate();
+      this->mt_fcnts_.invalidate();
+      this->drift_fcnts_.invalidate();
+    }
+
+    // A test stream's frame: a fresh FCNT on the loop (block == nullptr: the
+    // START / STOP frames), or the next one of the run's reserved block (the
+    // marks and ticks, built on the esp_timer task -- no Sequencer, no persist).
+    // False when the block is spent, dropped, or the keys moved under the seal.
+    bool LORAListener::pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block,
+                                        MacFrame *f)
+    {
+      if (block == nullptr)
+        return this->mac_frame_(op, f);
+      const uint32_t fcnt = this->take_reserved_fcnt_(block);
+      if (fcnt == 0)
+        return false;
+      if (!this->mac_frame_(op, fcnt, this->session_confirmed_, f))
+        return false;
+      if (f->seal.sealed && !this->sealed_in_epoch_(*f, *block))
+      {
+        f->bytes.clear();
+        return false;
+      }
+      return true;
     }
 
     void LORAListener::requestMsgidRelogin_(const char *where)
@@ -4582,7 +4607,7 @@ namespace esphome
                        TxPolicy{/*copies=*/1, /*stride_ms=*/0}, self->drift_seal_);
 
       // Build the next one now, in the 99% of the period that is idle.
-      self->build_drift_frame_(true);
+      self->build_drift_frame_(true, &self->drift_fcnts_);
     }
 
     // ---- ModeTest ----------------------------------------------------
@@ -4596,7 +4621,7 @@ namespace esphome
     // when the test starts — a ~29 ms window every 500 ms — so it will miss
     // most of them. A frame that only said "tick" would leave a node that
     // missed the first one waiting for a repeat that never comes.
-    void LORAListener::build_mode_test_frame_(bool enable)
+    void LORAListener::build_mode_test_frame_(bool enable, mac1::FcntReservation *block)
     {
       hubframes::Down op_message {};
 
@@ -4631,7 +4656,7 @@ namespace esphome
       // node in a test mode. The node refuses to ARM without a session anyway
       // (ModeTestPolicy::armRefusal), so this is the second of two locks.
       MacFrame f;
-      if (this->mac_frame_(&op_message, &f))
+      if (this->pack_test_frame_(&op_message, block, &f))
       {
         if (f.bytes.size() <= sizeof(this->mt_frame_))
         {
@@ -4757,7 +4782,7 @@ namespace esphome
       self->mac0_send_(self->mt_frame_, self->mt_frame_len_, p, self->mt_seal_);
 
       // Build the next one now, in the idle part of the period.
-      self->build_mode_test_frame_(true);
+      self->build_mode_test_frame_(true, &self->mt_fcnts_);
     }
 
     void LORAListener::start_mode_test(uint32_t duration_s, uint32_t grid_ms,
@@ -4803,6 +4828,10 @@ namespace esphome
       this->build_mode_test_frame_(true);
       if (this->mt_frame_len_ > 0)
         this->mac0_send_(this->mt_frame_, this->mt_frame_len_, TxPolicy{}, this->mt_seal_);
+      // Every mark's FCNT, reserved here on the loop (HB1): the marks are built
+      // on the esp_timer task, which must not touch the Sequencer. The hub stops
+      // the run 5 s after duration_s; +4 covers the first mark and rounding.
+      this->reserve_fcnt_block_(((duration_s + 5) * 1000) / grid_ms + 4, &this->mt_fcnts_);
 
       if (this->mode_test_timer_ == nullptr)
       {
@@ -4827,7 +4856,7 @@ namespace esphome
       this->set_timeout("modetest_grid_arm", 3000, [this, grid_ms]() {
         if (!this->mode_test_active_)
           return;
-        this->build_mode_test_frame_(true);
+        this->build_mode_test_frame_(true, &this->mt_fcnts_);
         esp_timer_start_periodic(this->mode_test_timer_,
                                  (uint64_t) grid_ms * 1000);
       });
@@ -4869,7 +4898,7 @@ namespace esphome
                this->get_name().c_str(), (unsigned) this->mt_seq_);
     }
 
-    void LORAListener::build_drift_frame_(bool enable)
+    void LORAListener::build_drift_frame_(bool enable, mac1::FcntReservation *block)
     {
       hubframes::Down op_message {};
       // msgid is the ruler mark (mac_frame_ allocates it). The node indexes
@@ -4899,14 +4928,16 @@ namespace esphome
       // every drift frame was silently dropped and the test never started.
       // Exempting DriftTest would let an unauthenticated frame pin a node in
       // ~11 mA continuous RX — a battery-drain vector on a 1.2 mA device.
-      if (this->mac_frame_(&op_message, &f))
+      if (this->pack_test_frame_(&op_message, block, &f) &&
+          f.bytes.size() <= sizeof(this->drift_frame_))
       {
-        if (f.bytes.size() <= sizeof(this->drift_frame_))
-        {
-          memcpy(this->drift_frame_, f.bytes.data(), f.bytes.size());
-          this->drift_frame_len_ = f.bytes.size();
-          this->drift_seal_      = f.seal;
-        }
+        memcpy(this->drift_frame_, f.bytes.data(), f.bytes.size());
+        this->drift_frame_len_ = f.bytes.size();
+        this->drift_seal_      = f.seal;
+      }
+      else
+      {
+        this->drift_frame_len_ = 0;   // no FCNT left for this run: the ticks stop
       }
     }
 
@@ -4942,6 +4973,8 @@ namespace esphome
       this->build_drift_frame_(true);
       if (this->drift_frame_len_ > 0)
         this->mac0_send_(this->drift_frame_, this->drift_frame_len_, TxPolicy{}, this->drift_seal_);
+      // Every tick's FCNT, reserved on the loop (HB1); see start_mode_test.
+      this->reserve_fcnt_block_((duration_s * 1000) / grid_ms + 4, &this->drift_fcnts_);
 
       if (this->drift_timer_ == nullptr)
       {
@@ -4962,7 +4995,7 @@ namespace esphome
       this->set_timeout("drift_grid_arm", 3000, [this, grid_ms]() {
         if (!this->drift_test_active_)
           return;
-        this->build_drift_frame_(true);
+        this->build_drift_frame_(true, &this->drift_fcnts_);
         // Microsecond-resolution pacing — the entire point of this rewrite.
         esp_timer_start_periodic(this->drift_timer_, (uint64_t) grid_ms * 1000ULL);
       });

@@ -776,6 +776,7 @@ namespace esphome
       uint32_t ms_until_node_awake_for_test() const { return ms_until_node_awake_(); }
       // D4: fire one ModeTest mark exactly as the esp_timer would.
       void mode_test_tick_for_test() { mode_test_timer_cb_(this); }
+      void drift_tick_for_test() { drift_timer_cb_(this); }
       std::vector<uint8_t> mode_test_frame_for_test() const {
         return std::vector<uint8_t>(mt_frame_, mt_frame_ + mt_frame_len_);
       }
@@ -897,8 +898,10 @@ namespace esphome
      protected:
       // Builds the NEXT frame into drift_frame_, so the timer callback only
       // transmits. Packing must not happen inside the interval being measured.
-      void build_drift_frame_(bool enable);
-      void build_mode_test_frame_(bool enable);
+      // block == nullptr: a fresh FCNT (loop only); else the run's reserved
+      // block (any task). See pack_test_frame_.
+      void build_drift_frame_(bool enable, mac1::FcntReservation *block = nullptr);
+      void build_mode_test_frame_(bool enable, mac1::FcntReservation *block = nullptr);
       static void mode_test_timer_cb_(void *arg);
       void handle_mode_test_report_(const ::ModeTestReport *rep);
       static void drift_timer_cb_(void *arg);
@@ -1079,6 +1082,8 @@ namespace esphome
       // esp_timer, not set_interval: ESPHome's scheduler is millisecond and
       // tick-quantised, which is the error this whole rewrite exists to remove.
       esp_timer_handle_t drift_timer_{nullptr};
+      // The run's tick FCNTs (HB1), reserved on the loop; session_tx_mutex_.
+      mac1::FcntReservation drift_fcnts_{};
       uint8_t  drift_frame_[128]{};
       size_t   drift_frame_len_{0};
       mac2::FrameSeal drift_seal_{};
@@ -1103,6 +1108,8 @@ namespace esphome
       // last_placed_t0_us_, which belongs to the ESPHome loop.
       int64_t  mt_last_mark_t0_us_{0};
       esp_timer_handle_t mode_test_timer_{nullptr};
+      // The run's mark FCNTs (HB1), reserved on the loop; session_tx_mutex_.
+      mac1::FcntReservation mt_fcnts_{};
       uint8_t  mt_frame_[160]{};
       size_t   mt_frame_len_{0};
       mac2::FrameSeal mt_seal_{};
@@ -1436,16 +1443,15 @@ namespace esphome
       // Every counter restart / key change drops every block (loop).
       void invalidate_fcnt_reservations_();
       bool sealed_in_epoch_(const MacFrame &f, const mac1::FcntReservation &r);
+      bool pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block, MacFrame *f);
     public:
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
-      // Guards the Sequencer's tx allocation and this listener's
-      // entry in s_base_nonce_map. mode_test_timer_cb_/drift_timer_cb_
-      // increment tx_message_id and seal frames from the esp_timer ("Tmr
-      // Svc") task, concurrently with the ESPHome main loop doing the same
-      // for ordinary traffic — previously unsynchronized, which could hand
-      // out a duplicate (nonce, msgId) pair. mutable so it can be taken from
-      // const accessors if that's ever needed.
+      // Guards the Sequencer and the FCNT reservations (mac_ping_fcnts_,
+      // mt_fcnts_, drift_fcnts_). The Sequencer itself is loop-only (its
+      // allocation persists through ESPHome preferences); the esp_timer
+      // streams take FCNTs only from a reservation, under this lock. Never
+      // held while logging; keys_mutex_ is never taken inside it.
       mutable std::mutex session_tx_mutex_;
 
       // C2: when THIS node's most recent admitted uplink left the air (T0, the

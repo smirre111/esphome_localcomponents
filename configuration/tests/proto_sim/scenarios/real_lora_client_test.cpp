@@ -3034,6 +3034,95 @@ TEST(MacPing, AReservedFcntIsNeverSealedUnderTheNextSessionsKeys) {
     h.rol.stop_mac_ping();
 }
 
+// Review HB1 (2026-10-25). ModeTest marks and drift ticks are built on the
+// esp_timer task. They used to take each FCNT from the Sequencer there, and
+// with a persist margin of 1 every allocation called save_state_ ->
+// ESPHome preferences off the loop task (unsynchronised with the loop's own
+// saves). Now the run's FCNTs are reserved once on the loop.
+namespace {
+std::vector<uint32_t> sealed_fcnts_from(const LORATracker &t, size_t from) {
+    std::vector<uint32_t> out;
+    for (size_t i = from; i < t.sent_raw.size(); ++i) {
+        macwire::WireHdr hd;
+        size_t off = 0, blen = 0;
+        if (macwire::decode(t.sent_raw[i].data(), t.sent_raw[i].size(), &hd, &off, &blen))
+            out.push_back(hd.fcnt);
+    }
+    return out;
+}
+}  // namespace
+
+TEST(TestStreamFcnts, ATimerBuiltModeTestMarkNeverTouchesTheSequencer) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    drive_session(h.clock, h.radio, h.rol);
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+
+    h.rol.start_mode_test(/*duration_s=*/60, /*grid_ms=*/1500, /*mode=*/1, 1, true, false,
+                          false, false, 0);
+    h.clock.tick(3100);   // the grid arm builds the first mark (loop)
+    const uint32_t tx_after_reserve = h.rol.seq_.txId();
+    const size_t from = h.tracker.sent_raw.size();
+    for (int i = 0; i < 6; ++i)
+        h.rol.mode_test_tick_for_test();   // each tick sends a mark and builds the next
+    const auto fcnts = sealed_fcnts_from(h.tracker, from);
+    ASSERT_GE(fcnts.size(), 6u) << "precondition: the marks went out";
+
+    EXPECT_EQ(h.rol.seq_.txId(), tx_after_reserve)
+        << "a mark built on the esp_timer task allocated from the Sequencer (and persisted)";
+    for (size_t i = 0; i < fcnts.size(); ++i) {
+        EXPECT_LE(fcnts[i], tx_after_reserve) << "a mark's FCNT lies outside the reserved block";
+        if (i) EXPECT_GT(fcnts[i], fcnts[i - 1]) << "marks reuse or reorder FCNTs";
+    }
+    h.rol.stop_mode_test();
+}
+
+TEST(TestStreamFcnts, ATimerBuiltDriftTickNeverTouchesTheSequencer) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    drive_session(h.clock, h.radio, h.rol);
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+
+    h.rol.start_drift_test(/*duration_s=*/60, /*grid_ms=*/1000);
+    h.clock.tick(3100);
+    const uint32_t tx_after_reserve = h.rol.seq_.txId();
+    const size_t from = h.tracker.sent_raw.size();
+    for (int i = 0; i < 6; ++i)
+        h.rol.drift_tick_for_test();
+    ASSERT_GE(sealed_fcnts_from(h.tracker, from).size(), 6u) << "precondition: the ticks went out";
+    EXPECT_EQ(h.rol.seq_.txId(), tx_after_reserve)
+        << "a drift tick built on the esp_timer task allocated from the Sequencer";
+    h.rol.stop_drift_test();
+}
+
+// P1's rule for these blocks too: a re-LOGIN mid-run drops the block, so no
+// mark FCNT is ever sealed under the next session's keys.
+TEST(TestStreamFcnts, AReloginMidRunNeverSealsAMarkUnderTheNextSession) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    drive_session(h.clock, h.radio, h.rol);
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    h.rol.start_mode_test(300, 1500, /*mode=*/1, 1, true, false, false, false, 0);
+    h.clock.tick(3100);
+    h.rol.mode_test_tick_for_test();
+
+    const size_t relogin_at = h.radio.transcript().size();
+    h.rol.send_login();
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition: session 2 confirmed";
+    for (int i = 0; i < 16; ++i) {
+        h.rol.send_timesync();
+        h.rol.mode_test_tick_for_test();
+        h.clock.tick(50);
+    }
+    int sealed = 0;
+    EXPECT_EQ(count_fcnt_collisions(h.radio.transcript(), relogin_at, 18, &sealed), 0);
+    EXPECT_GE(sealed, 16) << "precondition: session 2's TimeSyncs were sealed";
+    h.rol.stop_mode_test();
+}
+
 // The reservation itself, as a unit: bound to the key epoch it was granted
 // under, dropped by invalidate(), and never revived.
 TEST(FcntReservation, HandsOutItsRangeOnceThenNothing) {
