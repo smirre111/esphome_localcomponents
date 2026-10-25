@@ -60,11 +60,19 @@ set(BLINDS_ESP_ROOT "${BLINDS_ESP_ROOT}" CACHE PATH "Path to the BlindsESP node 
 if(BLINDS_ESP_ROOT AND EXISTS ${BLINDS_ESP_ROOT}/main/include/FrameCrypto.h)
     get_filename_component(BLINDS_ESP_ROOT ${BLINDS_ESP_ROOT} ABSOLUTE)
     message(STATUS "BlindsESP node source: ${BLINDS_ESP_ROOT}")
+    set(NODE_TREE_FOUND ON)
 else()
+    set(NODE_TREE_FOUND OFF)
+    # Review P2: without the node tree every node-side target and every
+    # cross-repo drift gate is missing. In CI that is a failure, not a pass.
+    if(DEFINED ENV{CI})
+        message(FATAL_ERROR
+            "BlindsESP node source NOT found (CI is set). Pass -DBLINDS_ESP_ROOT=/path/to/BlindsESP.")
+    endif()
     message(WARNING
         "BlindsESP node source NOT found. Every node-side target and every "
-        "cross-repo drift gate will be SKIPPED, and the suite will still pass. "
-        "Pass -DBLINDS_ESP_ROOT=/path/to/BlindsESP to build them.")
+        "cross-repo drift gate is MISSING; ctest reports node_tree_present as "
+        "Skipped. Pass -DBLINDS_ESP_ROOT=/path/to/BlindsESP to build them.")
 endif()
 set(BLINDS_ESP_MAIN    ${BLINDS_ESP_ROOT}/main)
 set(BLINDS_ESP_INCLUDE ${BLINDS_ESP_ROOT}/main/include)
@@ -118,28 +126,41 @@ function(add_scenario name)
     gtest_discover_tests(${name})
 endfunction()
 
-# Schema-drift gates. Whitespace/comment-tolerant: both gates work by
-# regenerating .pb-c.{c,h} stubs and comparing the BINARY-compatible
-# generated output, so cosmetic differences in the .proto sources don't
-# trip the build.
-find_program(PROTOC_C_EXECUTABLE protoc-c)
-if(PROTOC_C_EXECUTABLE)
-    set(ESPHOME_STUB_DIR
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/blindsproto)
+# Schema-drift gates (review P2: a gate that cannot run says so -- CTest shows
+# it as Skipped, never Passed).
+#   stub_pair_hub_vs_node        the two COMMITTED stub sets are identical; no
+#                                compiler needed, so it always runs
+#   schema_drift_hub_vs_esphome  the node's blinds.proto regenerates the hub's
+#   schema_drift_hub_vs_node     ... and the node's committed stubs (needs the
+#                                protoc-c that generated them; Skipped otherwise)
+set(ESPHOME_STUB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/blindsproto)
+set(HUB_PROTO_DIR    ${BLINDS_ESP_ROOT}/proto)
+set(NODE_STUB_C_DIR  ${BLINDS_ESP_ROOT}/components/blinds/src)
+set(NODE_STUB_H_DIR  ${BLINDS_ESP_ROOT}/components/blinds/include)
+if(NOT NODE_TREE_FOUND)
+    add_test(NAME node_tree_present
+             COMMAND ${CMAKE_COMMAND} -E echo
+                     "SKIPPED: BlindsESP node tree not found; no cross-repo gate can run")
+    set_tests_properties(node_tree_present PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
+else()
+    add_test(NAME stub_pair_hub_vs_node
+             COMMAND ${CMAKE_COMMAND}
+                     "-DPAIRS=${ESPHOME_STUB_DIR}/blinds.pb-c.c|${NODE_STUB_C_DIR}/blinds.pb-c.c;${ESPHOME_STUB_DIR}/blinds.pb-c.h|${NODE_STUB_H_DIR}/blinds.pb-c.h"
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_files_equal.cmake)
+    set_tests_properties(stub_pair_hub_vs_node PROPERTIES LABELS "schema_drift")
 
-    # Gate 1 (ESPHome-side .proto regenerates to its own stubs) was REMOVED:
-    # the ESPHome-side copy local_components/lora_tracker/proto/blinds.proto was
-    # deleted in v1.0.12, leaving BlindsESP/proto/blinds.proto as the single
-    # source of truth.  The gate had been silently pointing at a non-existent
-    # directory ever since, so it failed rather than guarding anything.  Gate 2
-    # below now covers the same ground from the authoritative proto.
-
-    # Gate 2: the hub-authoritative .proto must regenerate stubs identical to
-    # ESPHome's committed ones. Catches BOTH "edited the proto but forgot to
-    # regenerate" and semantic drift (field number, type, oneof case),
-    # regardless of whitespace / comment formatting.
-    set(HUB_PROTO_DIR ${BLINDS_ESP_ROOT}/proto)
-    if(EXISTS ${HUB_PROTO_DIR}/blinds.proto)
+    find_program(PROTOC_C_EXECUTABLE protoc-c)
+    if(NOT PROTOC_C_EXECUTABLE)
+        add_test(NAME schema_drift_protoc_missing
+                 COMMAND ${CMAKE_COMMAND} -E echo
+                         "SKIPPED: protoc-c not found; the regenerate-and-compare gates did not run")
+        set_tests_properties(schema_drift_protoc_missing PROPERTIES
+            SKIP_REGULAR_EXPRESSION "SKIPPED:" LABELS "schema_drift")
+    else()
+        # The hub-authoritative .proto must regenerate stubs identical to the
+        # committed ones on both sides. Catches "edited the proto but forgot to
+        # regenerate" and semantic drift, whatever the formatting. Drift is not
+        # a build error: mismatched stubs compile and link and fail on the air.
         add_test(NAME schema_drift_hub_vs_esphome
                  COMMAND ${CMAKE_COMMAND}
                          -DPROTOC_C=${PROTOC_C_EXECUTABLE}
@@ -147,34 +168,16 @@ if(PROTOC_C_EXECUTABLE)
                          -DCOMPARE_AGAINST=${ESPHOME_STUB_DIR}
                          -DOUT_DIR=${CMAKE_BINARY_DIR}/stub_regen_hub
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_stub_drift.cmake)
-        set_tests_properties(schema_drift_hub_vs_esphome PROPERTIES
-            LABELS "schema_drift")
-
-        # Gate 3: the same proto must also regenerate the NODE's committed
-        # stubs. Six copies of these stubs used to exist across the two repos,
-        # kept in step by hand, and only the ESPHome one was ever checked — a
-        # node-side copy could drift while the whole suite stayed green. Three
-        # copies have since been deleted as redundant; this gate covers the one
-        # that genuinely must remain, because it lives in the other repo and is
-        # what the firmware actually links.
-        #
-        # Drift here is not a build error: mismatched stubs compile and link
-        # cleanly on both sides and fail only on the air, as a decode error on
-        # a field neither end agrees about.
-        set(NODE_STUB_C_DIR ${HUB_PROTO_DIR}/../components/blinds/src)
-        set(NODE_STUB_H_DIR ${HUB_PROTO_DIR}/../components/blinds/include)
-        if(EXISTS ${NODE_STUB_C_DIR}/blinds.pb-c.c)
-            add_test(NAME schema_drift_hub_vs_node
-                     COMMAND ${CMAKE_COMMAND}
-                             -DPROTOC_C=${PROTOC_C_EXECUTABLE}
-                             -DPROTO_DIR=${HUB_PROTO_DIR}
-                             -DCOMPARE_C_AGAINST=${NODE_STUB_C_DIR}
-                             -DCOMPARE_H_AGAINST=${NODE_STUB_H_DIR}
-                             -DOUT_DIR=${CMAKE_BINARY_DIR}/stub_regen_node
-                             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_stub_drift.cmake)
-            set_tests_properties(schema_drift_hub_vs_node PROPERTIES
-                LABELS "schema_drift")
-        endif()
+        add_test(NAME schema_drift_hub_vs_node
+                 COMMAND ${CMAKE_COMMAND}
+                         -DPROTOC_C=${PROTOC_C_EXECUTABLE}
+                         -DPROTO_DIR=${HUB_PROTO_DIR}
+                         -DCOMPARE_C_AGAINST=${NODE_STUB_C_DIR}
+                         -DCOMPARE_H_AGAINST=${NODE_STUB_H_DIR}
+                         -DOUT_DIR=${CMAKE_BINARY_DIR}/stub_regen_node
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_stub_drift.cmake)
+        set_tests_properties(schema_drift_hub_vs_esphome schema_drift_hub_vs_node PROPERTIES
+            LABELS "schema_drift" SKIP_REGULAR_EXPRESSION "SKIPPED:")
     endif()
 endif()
 
@@ -470,88 +473,55 @@ gtest_discover_tests(real_lora_cover_test)
 # the TX queue by hand.
 # ----------------------------------------------------------------------------
 
-# Gate 4: the AEAD wire format. FrameCrypto.h is the source of truth on the node;
-# the hub carries a vendored copy because the ESPHome build compiles only
-# local_components/ and cannot reach into the BlindsESP tree.
-#
-# Same reasoning as the protobuf stubs: a mismatch compiles and links cleanly on
-# both sides and fails only on the air. Before this header was shared, the AAD/IV
-# layout was written out FOUR separate times — including twice inside
-# lora_client.cpp, once for encrypting and once for decrypting.
-set(SCHEDTEXT_SRC  ${BLINDS_ESP_MAIN}/include/ScheduleText.h)
-set(SCHEDTEXT_VEND ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/ScheduleText.h)
-if(EXISTS ${SCHEDTEXT_SRC} AND EXISTS ${SCHEDTEXT_VEND})
-    add_test(NAME scheduletext_drift_hub_vs_node
-             COMMAND ${CMAKE_COMMAND}
-                     -DSOURCE_HEADER=${SCHEDTEXT_SRC}
-                     -DVENDORED_HEADER=${SCHEDTEXT_VEND}
-                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
-    set_tests_properties(scheduletext_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
-endif()
-
-set(FRAMECRYPTO_SRC ${BLINDS_ESP_MAIN}/include/FrameCrypto.h)
-set(FRAMECRYPTO_VENDORED
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/FrameCrypto.h)
-if(EXISTS ${FRAMECRYPTO_SRC} AND EXISTS ${FRAMECRYPTO_VENDORED})
-    add_test(NAME wire_format_drift_hub_vs_node
-             COMMAND ${CMAKE_COMMAND}
-                     -DSOURCE_HEADER=${FRAMECRYPTO_SRC}
-                     -DVENDORED_HEADER=${FRAMECRYPTO_VENDORED}
-                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
-    set_tests_properties(wire_format_drift_hub_vs_node PROPERTIES
-        LABELS "schema_drift")
-endif()
-
-# Gate 5: the scheduler. The hub predicts an auto-mode node's next wake so it
-# does not burst LoginMsg into a sleeping node — and that prediction must use
-# the NODE'S own next_occurrence(), or the hub transmits into silence with
-# confidence. Both the header and the .cpp are vendored, so both are gated.
-# The .cpp aligns on its first #include, having no `#pragma once`.
-set(SCHED_SRC_H   ${BLINDS_ESP_MAIN}/include/Scheduler.h)
-set(SCHED_SRC_C   ${BLINDS_ESP_MAIN}/Scheduler.cpp)
-set(SCHED_VEND_H  ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/Scheduler.h)
-set(SCHED_VEND_C  ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/Scheduler.cpp)
-if(EXISTS ${SCHED_SRC_H} AND EXISTS ${SCHED_VEND_H})
-    add_test(NAME scheduler_drift_hub_vs_node
-             COMMAND ${CMAKE_COMMAND}
-                     -DSOURCE_HEADER=${SCHED_SRC_H}
-                     -DVENDORED_HEADER=${SCHED_VEND_H}
-                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
-    set_tests_properties(scheduler_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
-endif()
-if(EXISTS ${SCHED_SRC_C} AND EXISTS ${SCHED_VEND_C})
-    add_test(NAME scheduler_impl_drift_hub_vs_node
-             COMMAND ${CMAKE_COMMAND}
-                     -DSOURCE_HEADER=${SCHED_SRC_C}
-                     -DVENDORED_HEADER=${SCHED_VEND_C}
-                     # QUOTED: an unquoted # starts a CMake comment, which
-                     # silently truncated this argument and everything after it.
-                     "-DALIGN_ON=#include"
-                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
-    set_tests_properties(scheduler_impl_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
-endif()
-# Gate 6: the shared timing/geometry headers. Same reasoning as FrameCrypto.h
-# and Scheduler.{h,cpp} — the node owns the file, the hub carries a vendored
-# copy because the ESPHome build compiles only local_components/ and cannot
-# reach into the BlindsESP tree.
-#
-# Drift here is worse than a compile error, because there is none: both sides
-# build cleanly and disagree about WHEN, which surfaces on the air as a window
-# armed at the wrong microsecond and gets attributed to the radio.
-foreach(shared_hdr LoraTiming.h TimedGrid.h TimedModePolicy.h ClassAWindows.h MacFunnel.h MacSublayers.h PhaseTracker.h GridState.h SweepAnalysis.h TxQueue.h AckCache.h ModeTestPolicy.h PendingData.h Mac1Freshness.h MacSap.h Sequencer.h MacWire.h MacWireVectors.h)
-    set(_src  ${BLINDS_ESP_MAIN}/include/${shared_hdr})
-    set(_vend ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client/${shared_hdr})
-    if(EXISTS ${_src} AND EXISTS ${_vend})
-        string(REGEX REPLACE "\\.h$" "" _stem ${shared_hdr})
+# Vendored-file drift gates. The node owns these files; the hub carries copies
+# under local_components/lora_client/ because the ESPHome build compiles only
+# local_components/. A mismatch compiles and links on both sides and fails only
+# on the air (or, for the timing headers, as a window armed at the wrong
+# microsecond). The list is cmake/vendored_shared_headers.txt; review P2: a
+# missing vendored copy is a configure error and a missing source a failing
+# gate -- neither silently drops its gate.
+set(LORA_CLIENT_VEND_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../local_components/lora_client)
+set(VENDORED_LIST ${CMAKE_CURRENT_SOURCE_DIR}/cmake/vendored_shared_headers.txt)
+if(NODE_TREE_FOUND)
+    file(STRINGS ${VENDORED_LIST} _vendored_lines)
+    foreach(_line ${_vendored_lines})
+        string(STRIP "${_line}" _line)
+        if(_line STREQUAL "" OR _line MATCHES "^#")
+            continue()
+        endif()
+        get_filename_component(_base ${_line} NAME)
+        set(_src  ${BLINDS_ESP_ROOT}/${_line})
+        set(_vend ${LORA_CLIENT_VEND_DIR}/${_base})
+        if(NOT EXISTS ${_vend})
+            message(FATAL_ERROR "vendored copy missing: ${_vend} (listed in ${VENDORED_LIST})")
+        endif()
+        string(REGEX REPLACE "\\.(h|cpp)$" "" _stem ${_base})
         string(TOLOWER ${_stem} _stem)
+        set(_align "")
+        if(_base MATCHES "\\.cpp$")
+            set(_stem "${_stem}_impl")
+            # QUOTED: an unquoted # starts a CMake comment.
+            set(_align "-DALIGN_ON=#include")
+        endif()
+        if(_stem STREQUAL "framecrypto")
+            set(_stem "wire_format")
+        endif()
         add_test(NAME ${_stem}_drift_hub_vs_node
                  COMMAND ${CMAKE_COMMAND}
                          -DSOURCE_HEADER=${_src}
                          -DVENDORED_HEADER=${_vend}
+                         "${_align}"
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_drift.cmake)
         set_tests_properties(${_stem}_drift_hub_vs_node PROPERTIES LABELS "schema_drift")
-    endif()
-endforeach()
+    endforeach()
+    # ...and regen_stubs.sh syncs exactly that list.
+    add_test(NAME vendor_list_hub_vs_node
+             COMMAND ${CMAKE_COMMAND}
+                     -DREGEN_SCRIPT=${BLINDS_ESP_ROOT}/proto/regen_stubs.sh
+                     -DHUB_LIST=${VENDORED_LIST}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_vendor_list.cmake)
+    set_tests_properties(vendor_list_hub_vs_node PROPERTIES LABELS "schema_drift")
+endif()
 
 
 # P3: the schedule arithmetic is dependency-free by design (only <stdint.h> and
@@ -812,6 +782,16 @@ if(EXISTS ${BLINDS_ESP_MAIN}/CmdDispatcher.cpp)
         PRIVATE real_cmd_dispatcher_seam real_lora_client proto_sim
                 GTest::gtest GTest::gtest_main)
     gtest_discover_tests(seam_test)
+
+    # Hand-kept mirrors that no drift gate sees (review P2.5 / P3): HubFrames.h
+    # vs NodeFrames.h, HubWire kRoutes vs PortMap.h, PortTable.h vs MacWirePdu.h.
+    add_executable(mirror_tables_test scenarios/mirror_tables_test.cpp)
+    # Node includes FIRST: the hub shims forward <MacWire.h> etc., which must
+    # resolve to the same file the node headers include (one #pragma once).
+    target_include_directories(mirror_tables_test BEFORE PRIVATE ${BLINDS_ESP_INCLUDE})
+    target_link_libraries(mirror_tables_test
+        PRIVATE real_lora_client proto_sim GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(mirror_tables_test)
 
     # ------------------------------------------------------------------
     # END TO END. The seam test asserts GEOMETRY — does the hub's frame land

@@ -1,0 +1,8 @@
+# Review P2: shell/python scripts must stay LF on every checkout (a CRLF
+# script fails in WSL bash at the first line), and the generated protobuf
+# stubs are compared across repos byte for byte.
+*.sh text eol=lf
+*.py text eol=lf
+*.proto text eol=lf
+local_components/blindsproto/blinds.pb-c.c text eol=lf
+local_components/blindsproto/blinds.pb-c.h text eol=lf

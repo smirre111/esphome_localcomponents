@@ -1,0 +1,28 @@
+# Files the node owns and the hub carries a vendored copy of, under
+# local_components/lora_client/<basename>. One line per file, path relative to
+# the node repo. Each gets a <stem>_drift_hub_vs_node gate (check_header_drift:
+# aligned on `#pragma once`, or on the first #include for a .cpp). The node's
+# proto/regen_stubs.sh must sync exactly this set: vendor_list_hub_vs_node
+# compares the two lists.
+main/include/FrameCrypto.h
+main/include/Scheduler.h
+main/Scheduler.cpp
+main/include/ScheduleText.h
+main/include/LoraTiming.h
+main/include/TimedGrid.h
+main/include/TimedModePolicy.h
+main/include/ClassAWindows.h
+main/include/MacFunnel.h
+main/include/MacSublayers.h
+main/include/PhaseTracker.h
+main/include/GridState.h
+main/include/SweepAnalysis.h
+main/include/TxQueue.h
+main/include/AckCache.h
+main/include/ModeTestPolicy.h
+main/include/PendingData.h
+main/include/Mac1Freshness.h
+main/include/MacSap.h
+main/include/Sequencer.h
+main/include/MacWire.h
+main/include/MacWireVectors.h

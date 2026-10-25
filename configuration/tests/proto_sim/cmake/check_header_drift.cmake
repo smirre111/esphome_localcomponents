@@ -38,8 +38,8 @@ string(REPLACE "\r\n" "\n" ven_body "${ven_body}")
 if(NOT src_body STREQUAL ven_body)
     message(FATAL_ERROR
         "${VENDORED_HEADER} has drifted from ${SOURCE_HEADER}.\n"
-        "The hub and the node must agree on the AEAD wire format byte for byte; "
-        "a mismatch compiles and links cleanly on both sides and fails only on "
-        "the air, as psa_aead_decrypt: -149.\n"
+        "The node owns this file and the hub's copy must match it byte for byte "
+        "(after the banner): a mismatch compiles and links cleanly on both sides "
+        "and fails only on the air.\n"
         "Fix with: BlindsESP/proto/regen_stubs.sh")
 endif()
