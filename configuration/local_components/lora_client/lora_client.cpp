@@ -168,6 +168,14 @@ namespace esphome
         this->registered_ = false;
       }
 
+      // A node restored as registered still holds its NVS session, but this hub
+      // has no keys until its first LOGIN (delayed by the stagger, the
+      // onboarding gate or the node's modelled wake). Until then commands are
+      // deferred, never packed plaintext for a node that refuses plaintext
+      // (review HB5); confirm_session_ clears this.
+      if (this->registered_ && !this->session_confirmed_)
+        this->relogin_pending_ = true;
+
       this->start_sleep_status_();
 
       // Initialise PSA Crypto (idempotent — safe from multiple instances) and

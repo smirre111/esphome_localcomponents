@@ -5212,6 +5212,61 @@ TEST(ConfigHashPersistence, AnUnchangedConfigSkipsRegisterAcrossAHubReboot) {
     esphome::shim_hooks::set_active_clock(nullptr);
 }
 
+// Review HB5 (2026-10-25): after a hub reboot a node restored as registered
+// holds its NVS session, but the hub has no keys until its first LOGIN, which
+// is delayed (5 s + stagger + onboarding gate, or the node's modelled wake).
+// relogin_pending_ defaulted to false, so a cover op in that window was packed
+// PLAINTEXT, refused by the node, and ended in FailRelogin after ~15 s.
+TEST(ConfigHashPersistence, ACommandAfterAHubRebootWaitsForTheSessionInsteadOfGoingPlaintext) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    {
+        LORATracker tracker1;
+        LORAClient  rol1;
+        rol1.set_name("rol");
+        rol1.set_short_address(18);
+        rol1.set_subnet_address(2);
+        rol1.set_address(kMacRol2);
+        tracker1.register_client(&rol1);
+        rol1.setup();
+        rol1.registered_ = true;
+        rol1.save_state_for_test();
+    }
+    {
+        LORATracker tracker2;
+        LORAClient  rol2;
+        rol2.set_name("rol");
+        rol2.set_short_address(18);
+        rol2.set_subnet_address(2);
+        rol2.set_address(kMacRol2);
+        tracker2.register_client(&rol2);
+        rol2.setup();
+        ASSERT_TRUE(rol2.registered_) << "precondition: restored as registered";
+        ASSERT_FALSE(rol2.session_confirmed_) << "precondition: no keys after the reboot";
+
+        const size_t before = tracker2.sent_raw.size();
+        rol2.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+        size_t plaintext_ops = 0;
+        for (size_t i = before; i < tracker2.sent_raw.size(); ++i) {
+            macwire::WireHdr w;
+            size_t off = 0, blen = 0;
+            if (macwire::decode(tracker2.sent_raw[i].data(), tracker2.sent_raw[i].size(), &w, &off,
+                                &blen) &&
+                w.auth() == macwire::Auth::None && w.port == macwire::kPortApp)
+                ++plaintext_ops;
+        }
+        EXPECT_EQ(plaintext_ops, 0u)
+            << "a command for a node that still holds its session went out plaintext";
+        EXPECT_TRUE(static_cast<TrackedOpProbe &>(static_cast<LORAClient &>(rol2)).ctl().deferred_until_login)
+            << "it waits for the session instead";
+    }
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
 TEST(ConfigHashPersistence, AConfigEditIsStillDetectedAndStillPushed) {
     proto_sim::SimClock clock;
     proto_sim::SimRadio radio;
