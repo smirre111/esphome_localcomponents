@@ -246,6 +246,7 @@ set(NODE_SHIM_DIR   ${CMAKE_CURRENT_SOURCE_DIR}/shims_node)
 # linked via proto_sim.
 add_library(real_lora_client STATIC
     ${LORA_CLIENT_DIR}/lora_client.cpp
+    ${LORA_CLIENT_DIR}/lora_client_bench.cpp      # stage 5: the bench streams (ModeTest, drift, MAC ping)
     # MAC-2 (stage S2): keys, KDF, Encrypt-then-CMAC, the session key store.
     ${LORA_CLIENT_DIR}/HubLinkSecurity.cpp
     # S8: the hub's MAC wire v1 bodies (compiled in both configurations).

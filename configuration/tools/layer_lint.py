@@ -38,12 +38,12 @@ BASELINE = os.path.join(ROOT, "tools", "layer_lint_baseline.json")
 
 TRACKER = ["lora_tracker/*.cpp", "lora_tracker/*.h"]   # the whole MAC-0 component
 TRACKER_H = "lora_tracker/lora_tracker.h"
-CLIENT = "lora_client/lora_client.cpp"
+CLIENT = "lora_client/lora_client*.cpp"   # the listener and its split-out TUs
 CLIENT_H = "lora_client/lora_client.h"
 CHILDREN = ["loracover/*/*.cpp", "loracover/*/*.h"]
 # Hub-owned sources outside MAC-2 (HubLinkSecurity.*) and the beacon tag
 # (mac_mgmt.cpp): none of them may include PSA.
-NON_MAC2 = ["lora_client/lora_client.cpp", "lora_client/lora_client.h", "lora_client/HubWire.*",
+NON_MAC2 = ["lora_client/lora_client*.cpp", "lora_client/lora_client.h", "lora_client/lora_client_internal.h", "lora_client/HubWire.*",
             "lora_client/lora_client_node.h", "lora_tracker/lora_tracker.cpp", TRACKER_H,
             "lora_tracker/automation.h", "loracover/*/*.cpp", "loracover/*/*.h"]
 RAW = True   # 4th tuple element: count in the raw source, not the stripped one
