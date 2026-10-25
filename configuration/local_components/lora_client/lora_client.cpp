@@ -3093,6 +3093,11 @@ namespace esphome
       s.req          = std::move(req);
       s.retry_count  = 0;
       s.awaiting_ack = false;
+      // The stored frame belongs to the request being replaced. A new request
+      // whose first pack fails must re-pack (or, at-most-once, be abandoned) on
+      // its retry, never re-send the previous command's bytes (review HB3).
+      s.frame        = MacFrame{};
+      s.frame_tag    = 0;
       if (s.req.policy.yields_warmup)
         this->mbs_yield_self_();
       this->dlv_tx_(ch, false);
@@ -3242,6 +3247,8 @@ namespace esphome
         s.req.place(f, DeliveryAttempt{retry, false, *tag});
       if (same_bytes)
       {
+        // Only a frame that was built is ever stored; a failed pack leaves the
+        // slot empty (deliver_ cleared it), so the retry re-packs or abandons.
         if (framed)
         {
           s.frame     = f;

@@ -10384,6 +10384,99 @@ TEST(FireDelivery, AClientConfigCarriesEveryFieldTheNodeIsProvisionedFrom) {
     EXPECT_EQ(seen, 1);
 }
 
+// Review HB3 (2026-10-25). The Control slot's stored frame was overwritten only
+// when a pack SUCCEEDED and was never cleared for a new request, so a new
+// command whose first pack failed (seal refused, no key, oversize) entered the
+// retry ladder and its first retry re-sent the PREVIOUS command's bytes -- an
+// earlier OPEN, a SLEEP or an OTA. The same stale frame defeated the OTA's
+// at-most-once check, which keys on the stored frame being empty.
+namespace {
+std::vector<uint8_t> last_downlink_of(const proto_sim::SimRadio &radio, uint32_t base,
+                                      proto_sim::LoraClientOperationMessage::Cmd cmd) {
+    std::vector<uint8_t> out;
+    for (const auto &f : radio.hub_to_node_frames()) {
+        auto m = decrypt_downlink(f, base);
+        if (m && m->cmd == cmd) out = f.bytes;
+    }
+    return out;
+}
+// What the listener HANDED the tracker (before the per-copy retag): a stale
+// frame is refused per copy by its key-epoch binding when the keys moved, so
+// the air alone would hide a resend the listener attempted.
+size_t count_handed_equal(const LORATracker &t, size_t from, const std::vector<uint8_t> &bytes) {
+    size_t n = 0;
+    for (size_t i = from; i < t.sent_raw.size(); ++i)
+        if (t.sent_raw[i] == bytes) ++n;
+    return n;
+}
+void ack_like_node(LORAClient &rol, uint32_t base, uint32_t acked_fcnt) {
+    proto_sim::LoraClientResponseMessage inner;
+    inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
+    inner.header.destSubnet    = 2;
+    inner.header.senderAddress = 18;
+    inner.header.msgId         = rol.seq_.rxId() + 1;
+    inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Ack;
+    inner.ack.ack_msg_id       = acked_fcnt;
+    auto enc = seal_uplink_like_node(base, inner);
+    proto_sim::LoraClientResponseMessage outer;
+    outer.header    = inner.header;
+    outer.proto     = proto_sim::LoraClientResponseMessage::Proto::Encrypted;
+    outer.encrypted = enc.payload();
+    auto frame = proto_sim::serialize_resp(outer);
+    rol.set_response(frame.data(), frame.size());
+}
+}  // namespace
+
+TEST(TrackedOpRetry, ANewCommandWhoseFirstPackFailsNeverResendsThePreviousOne) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
+    h.clock.tick(10);
+    ASSERT_FALSE(last_downlink_of(h.radio, base, OpCmd::Operation).empty())
+        << "precondition: the first command went out sealed";
+    const auto first = h.tracker.sent_raw.back();
+
+    // The keys go (the session id stays): every seal from here on is refused.
+    mac2::LinkSecurity::hub().store().clearKeys(18);
+    const size_t from = h.tracker.sent_raw.size();
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.90f);
+    h.clock.tick(5000);   // past the first retry
+
+    EXPECT_EQ(count_handed_equal(h.tracker, from, first), 0u)
+        << "the retry of a command that was never framed re-sent the PREVIOUS command";
+}
+
+TEST(TrackedOpRetry, AnOtaWhoseFirstPackFailsIsNeverReplacedByAnOlderFrame) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    const uint32_t base = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
+    h.clock.tick(10);
+    ASSERT_FALSE(last_downlink_of(h.radio, base, OpCmd::Operation).empty())
+        << "precondition: the first command went out sealed";
+    const auto first = h.tracker.sent_raw.back();
+    auto &op = static_cast<TrackedOpProbe &>(h.rol);
+    ack_like_node(h.rol, base, op.ctl().last_msgid);
+    ASSERT_FALSE(op.ctl().awaiting_ack) << "precondition: the cover op was acked";
+
+    mac2::LinkSecurity::hub().store().clearKeys(18);
+    const size_t from = h.tracker.sent_raw.size();
+    h.rol.triggerOTA();
+    h.clock.tick(5000);
+
+    EXPECT_EQ(count_handed_equal(h.tracker, from, first), 0u)
+        << "the OTA's retry re-sent the earlier cover op's frame";
+    EXPECT_FALSE(op.ctl().awaiting_ack)
+        << "an at-most-once command that was never framed is abandoned, not retried";
+}
+
 // Review HB6: set_sleep_duration took a uint16_t, so the schema's own range
 // (0..864000 s, 10 days) and the header's 24 h default were cut to 16 bits on
 // the way in: 86400 s reached the node as 20864 s.
