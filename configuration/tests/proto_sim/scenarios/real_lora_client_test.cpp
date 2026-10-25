@@ -33,6 +33,7 @@
 
 #include <gtest/gtest.h>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <algorithm>
 #include "esphome/components/switch/switch.h"
@@ -2954,6 +2955,125 @@ TEST(MacPing, APingIsNeverAnsweredByTheHub) {
     EXPECT_EQ(h.rol.mac_stats().echoes_rx, 0u);
     EXPECT_EQ(h.tracker.sent_copies.size(), before);
     h.rol.stop_mac_ping();
+}
+
+// Review P1 (2026-10-25). An encrypted MAC-ping run reserves a block of the
+// session's FCNTs on the loop and spends them from the esp_timer task. A
+// re-LOGIN restarts the hub's TX count at 0 and installs new keys while the
+// run keeps going, so without invalidation the remaining reserved FCNTs were
+// sealed under the NEW session's K_enc while the new session's own traffic
+// counted up through the same numbers: two plaintexts under one CTR block,
+// and the ping body is known plaintext.
+namespace {
+// Every AUTH=SESSION frame to `dst` from transcript index `from` on, keyed by
+// FCNT. A retry resends the same bytes, which is fine; different bytes under
+// one FCNT within one session is keystream reuse.
+int count_fcnt_collisions(const std::vector<proto_sim::AirFrame> &t, size_t from, uint8_t dst,
+                          int *sealed_out) {
+    std::map<uint32_t, std::vector<uint8_t>> by_fcnt;
+    int collisions = 0, sealed = 0;
+    for (size_t i = from; i < t.size(); ++i) {
+        const auto &f = t[i];
+        if (f.dir != proto_sim::AirFrame::Dir::HubToNode) continue;
+        macwire::WireHdr hd;
+        size_t off = 0, blen = 0;
+        if (!macwire::decode(f.bytes.data(), f.bytes.size(), &hd, &off, &blen)) continue;
+        if (hd.auth() != macwire::Auth::Session || hd.dst != dst) continue;
+        ++sealed;
+        auto it = by_fcnt.find(hd.fcnt);
+        if (it == by_fcnt.end())
+            by_fcnt.emplace(hd.fcnt, f.bytes);
+        else if (it->second != f.bytes)
+            ++collisions;
+    }
+    *sealed_out = sealed;
+    return collisions;
+}
+}  // namespace
+
+TEST(MacPing, AReservedFcntIsNeverSealedUnderTheNextSessionsKeys) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    auto nonces = std::make_shared<std::vector<uint32_t>>();
+    h.radio.add_sink([nonces](const proto_sim::AirFrame &f) {
+        if (f.dir != proto_sim::AirFrame::Dir::HubToNode) return;
+        auto m = proto_sim::as_op(f);
+        if (m && m->cmd == proto_sim::LoraClientOperationMessage::Cmd::Login)
+            nonces->push_back(m->login.nonce);
+    });
+    const uint32_t base1 = drive_session(h.clock, h.radio, h.rol);
+    ASSERT_NE(base1, 0u);
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition: session 1 confirmed";
+
+    h.rol.start_mac_ping(/*duration_s=*/300, /*grid_ms=*/1100, /*want_echo=*/false,
+                         /*pad_bytes=*/0, /*crypto=*/true);
+    proto_sim_timer_fire_all();   // encrypted pings under session 1
+
+    // A re-LOGIN: the attached login responder answers it at once, so session 2
+    // is confirmed while the ping run is still going.
+    const size_t relogin_at = h.radio.transcript().size();
+    h.rol.send_login();
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition: session 2 confirmed";
+    ASSERT_GE(nonces->size(), 2u);
+    ASSERT_NE(nonces->back(), base1) << "precondition: a NEW session id";
+
+    // Session 2's own traffic counts up from 1 while the ping timer keeps firing.
+    for (int i = 0; i < 16; ++i) {
+        h.rol.send_timesync();
+        proto_sim_timer_fire_all();
+        h.clock.tick(50);
+    }
+
+    int sealed = 0;
+    const int collisions = count_fcnt_collisions(h.radio.transcript(), relogin_at, 18, &sealed);
+    EXPECT_GE(sealed, 16) << "precondition: session 2's TimeSyncs were sealed";
+    EXPECT_EQ(collisions, 0)
+        << "an FCNT reserved under session 1 was sealed under session 2's keys "
+           "while session 2's own frames used it too: CTR keystream reuse";
+    h.rol.stop_mac_ping();
+}
+
+// The reservation itself, as a unit: bound to the key epoch it was granted
+// under, dropped by invalidate(), and never revived.
+TEST(FcntReservation, HandsOutItsRangeOnceThenNothing) {
+    mac1::FcntReservation r;
+    EXPECT_EQ(r.take(7), 0u) << "never granted";
+    r.grant(10, 12, 7);
+    EXPECT_EQ(r.remaining(), 3u);
+    EXPECT_EQ(r.take(7), 10u);
+    EXPECT_EQ(r.take(7), 11u);
+    EXPECT_EQ(r.take(7), 12u);
+    EXPECT_EQ(r.take(7), 0u) << "exhausted";
+    EXPECT_FALSE(r.valid());
+}
+
+TEST(FcntReservation, AMovedKeyEpochEndsTheBlockForGood) {
+    mac1::FcntReservation r;
+    r.grant(10, 20, 7);
+    EXPECT_EQ(r.take(8), 0u) << "the keys moved since the grant";
+    EXPECT_EQ(r.take(7), 0u) << "and an old epoch coming back does not revive it";
+    EXPECT_FALSE(r.valid());
+}
+
+TEST(FcntReservation, InvalidateDropsTheRest) {
+    mac1::FcntReservation r;
+    r.grant(10, 20, 7);
+    EXPECT_EQ(r.take(7), 10u);
+    r.invalidate();
+    EXPECT_EQ(r.take(7), 0u);
+    EXPECT_EQ(r.remaining(), 0u);
+}
+
+TEST(FcntReservation, AnEmptyOrInvertedRangeIsNoReservation) {
+    mac1::FcntReservation r;
+    r.grant(0, 5, 1);
+    EXPECT_FALSE(r.valid()) << "FCNT 0 is never handed out";
+    r.grant(9, 8, 1);
+    EXPECT_FALSE(r.valid());
+    r.grant(5, 5, 1);
+    EXPECT_EQ(r.take(1), 5u) << "a one-FCNT block";
+    EXPECT_EQ(r.take(1), 0u);
 }
 
 // ---------------------------------------------------------------------------

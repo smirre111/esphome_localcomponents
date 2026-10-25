@@ -24,6 +24,7 @@
 #include "esphome/components/lora_client/HubLinkSecurity.h"
 // MAC-1: the shared frame counter (node-owned, vendored, drift-gated; stage S3).
 #include "esphome/components/lora_client/Sequencer.h"
+#include "esphome/components/lora_client/FcntReservation.h"
 // S8: the MAC wire v1 fixed header (vendored from the node).
 #include "esphome/components/lora_client/MacWire.h"
 // S8 / W5c: the internal frame types and the v1 body codec.
@@ -1113,17 +1114,14 @@ namespace esphome
       uint32_t mac_ping_seq_{0};
       // Separate from the session TX id: see build_mac_ping_frame_().
       uint32_t mac_ping_msgid_{0};
-      // MAC-2: when a run asks for the ping to be encrypted, its msgids are a
-      // BLOCK of the real session tx-id space, reserved once in start_mac_ping
-      // (main-loop context, one NVS save) and consumed in RAM by the esp_timer
-      // callback — never incrTxMessageId() itself there, which would be an NVS
-      // write per frame off the ESPHome loop, hundreds per run. The whole range
-      // is reserved before the first frame, so within it a msgid can never also
-      // be used for ordinary traffic — reusing one would replay the IV under
-      // this node's base nonce.
+      // MAC-2: an encrypted run takes its FCNTs from a block of the session's
+      // own counter, reserved once in start_mac_ping on the loop
+      // (reserve_fcnt_block_) and spent by the esp_timer callback. The block
+      // is dropped on every counter restart / key change, so a reserved FCNT is
+      // never sealed under a later session's keys (FcntReservation.h).
+      // Guarded by session_tx_mutex_.
       bool     mac_ping_crypto_{false};
-      uint32_t mac_ping_crypto_next_msgid_{0};
-      uint32_t mac_ping_crypto_last_msgid_{0};   // 0 = range exhausted
+      mac1::FcntReservation mac_ping_fcnts_{};
       esp_timer_handle_t mac_ping_timer_{nullptr};
       uint8_t  mac_ping_frame_[192]{};
       size_t   mac_ping_frame_len_{0};
@@ -1428,6 +1426,15 @@ namespace esphome
       // has ever written by itself). Uses Sequencer::restore with the margins
       // of 1 subtracted, which is exact in uint32 arithmetic (0 - 1 + 1 == 0).
       void set_counters_no_write_(uint32_t tx, uint32_t rx) { this->seq_.restore(tx - 1u, rx - 1u); }
+      // FCNT blocks for the esp_timer streams (FcntReservation.h).
+      // reserve: loop only (one persist), n >= 1; false leaves *r invalid.
+      bool reserve_fcnt_block_(uint32_t n, mac1::FcntReservation *r);
+      // take: any task; the next FCNT of *r under this peer's current key
+      // epoch, or 0 when there is none.
+      uint32_t take_reserved_fcnt_(mac1::FcntReservation *r);
+      // Every counter restart / key change drops every block (loop).
+      void invalidate_fcnt_reservations_();
+      bool sealed_in_epoch_(const MacFrame &f, const mac1::FcntReservation &r);
     public:
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }

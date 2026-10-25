@@ -114,6 +114,13 @@ uint32_t SessionKeyStore::installedSessionId(mac::Addr peer) const
     return it == this->keys_.end() ? 0u : it->second.installed_session_id;
 }
 
+uint32_t SessionKeyStore::keyEpoch(mac::Addr peer) const
+{
+    std::lock_guard<std::mutex> lock(this->keys_mutex_);
+    auto it = this->keys_.find(peer);
+    return it == this->keys_.end() ? 0u : it->second.key_epoch;
+}
+
 void SessionKeyStore::setInstalledSessionIdForTest(mac::Addr peer, uint32_t session_id)
 {
     std::lock_guard<std::mutex> lock(this->keys_mutex_);

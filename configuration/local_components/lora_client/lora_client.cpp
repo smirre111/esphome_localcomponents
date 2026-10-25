@@ -1338,6 +1338,7 @@ namespace esphome
     {
       const mac::Addr peer = static_cast<mac::Addr>(this->short_address_);
       s_keys().install(peer, session_id, keys);
+      this->invalidate_fcnt_reservations_();
       ESP_LOGI(TAG, "[%s] Session keys installed (generation=%u)", this->get_name().c_str(),
                (unsigned) s_keys().generation(peer));
     }
@@ -1354,6 +1355,8 @@ namespace esphome
     void LORAListener::clearSessionKeys_()
     {
       s_keys().clearKeys(static_cast<mac::Addr>(this->short_address_));
+      // A reserved FCNT block belongs to the keys just destroyed (P1).
+      this->invalidate_fcnt_reservations_();
 
       // Invariant I3 (a): the ONE place a sealed ciphertext is stored and
       // re-sent later, across however much time passes — pack-once means a
@@ -1690,22 +1693,23 @@ namespace esphome
       // persists to NVS, and this runs in an esp_timer task while the ESPHome
       // main loop owns that backend — hundreds of writes per run, off-loop.
       //
-      // MAC-2 ON: the OUTER header's msgid is what the CTR counter block and the
-      // CMAC derive from (v1_frame_), so it MUST come from the reserved
-      // block start_mac_ping set aside — reusing the dedicated ping counter
-      // here would let a ping's msgid collide with an ordinary command's under
-      // the same base nonce, which is keystream reuse. See mac_ping_crypto_'s comment.
-      const bool encrypt_this_one =
-          this->mac_ping_crypto_ && this->session_confirmed_ &&
-          this->mac_ping_crypto_next_msgid_ <= this->mac_ping_crypto_last_msgid_;
-      if (encrypt_this_one)
-        msgid = this->mac_ping_crypto_next_msgid_++;
-      else
-        msgid = ++this->mac_ping_msgid_;
+      // MAC-2 ON: the FCNT is the CTR counter-block input, so it MUST come from
+      // the block start_mac_ping reserved for this session (mac_ping_fcnts_);
+      // the dedicated ping counter could collide with an ordinary command's
+      // FCNT, which is keystream reuse. A block that ran out, or was dropped by
+      // a re-LOGIN / key change, ends the encrypted pings: the rest of the run
+      // is plaintext (the node refuses those in session), never sealed.
+      uint32_t reserved = 0;
+      if (this->mac_ping_crypto_ && this->session_confirmed_)
+        reserved = this->take_reserved_fcnt_(&this->mac_ping_fcnts_);
+      const bool encrypt_this_one = reserved != 0;
+      msgid = encrypt_this_one ? reserved : ++this->mac_ping_msgid_;
       if (this->mac_ping_crypto_ && !encrypt_this_one)
-        ESP_LOGW(TAG, "[%s] MAC ping: reserved msgid range exhausted — this ping "
-                      "is plaintext (the run outran its own estimate)",
-                 this->get_name().c_str());
+      {
+        this->mac_ping_crypto_ = false;   // say it once
+        ESP_LOGW(TAG, "[%s] MAC ping: no reserved FCNT left for this session — the "
+                      "rest of the run is plaintext", this->get_name().c_str());
+      }
 
       MacControl mc = MAC_CONTROL__INIT;
       mc.kind     = MAC_CONTROL__KIND__MAC_PING;
@@ -1733,6 +1737,13 @@ namespace esphome
       if (!this->mac_frame_(&op_message, msgid, encrypt_this_one, &f))
       {
         ESP_LOGE(TAG, "[%s] MAC ping: failed to pack", this->get_name().c_str());
+        this->mac_ping_frame_len_ = 0;
+        return;
+      }
+      if (encrypt_this_one && !this->sealed_in_epoch_(f, this->mac_ping_fcnts_))
+      {
+        ESP_LOGW(TAG, "[%s] MAC ping: keys changed while sealing — frame dropped",
+                 this->get_name().c_str());
         this->mac_ping_frame_len_ = 0;
         return;
       }
@@ -1854,8 +1865,8 @@ namespace esphome
       // to keep meaning nothing.
       if (!this->mac_ping_crypto_)
       {
-        this->mac_ping_crypto_next_msgid_ = 0;
-        this->mac_ping_crypto_last_msgid_ = 0;
+        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+        this->mac_ping_fcnts_.invalidate();
       }
       else
       {
@@ -1863,14 +1874,7 @@ namespace esphome
         // +2: the START-to-first-tick delay and the ceiling division both round
         // down against the real cadence; the range is a floor, not a promise.
         const uint32_t frames = (duration_s * 1000UL) / ms + 2;
-        this->mac_ping_crypto_next_msgid_ = this->incrTxMessageId();       // one NVS save
-        {
-          std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-          this->set_counters_no_write_(this->seq_.txId() + (frames - 1),    // reserve the rest
-                                       this->seq_.rxId());
-          this->mac_ping_crypto_last_msgid_ = this->seq_.txId();
-        }
-        this->save_state_(true);                                          // ...and persist it
+        this->reserve_fcnt_block_(frames, &this->mac_ping_fcnts_);
       }
 
       if (this->mac_ping_timer_ == nullptr)
@@ -3825,6 +3829,51 @@ namespace esphome
       return val;
     }
 
+    bool LORAListener::reserve_fcnt_block_(uint32_t n, mac1::FcntReservation *r)
+    {
+      const mac::Addr peer = static_cast<mac::Addr>(this->short_address_);
+      const uint32_t first = (n > 0) ? this->incrTxMessageId() : 0;   // one persist
+      if (first == 0 || first >= framecrypto::kMsgidCtrLimit)
+      {
+        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+        r->invalidate();
+        return false;
+      }
+      uint32_t last = first + (n - 1);
+      if (last < first || last >= framecrypto::kMsgidCtrLimit)
+        last = framecrypto::kMsgidCtrLimit - 1;
+      const uint32_t epoch = s_keys().keyEpoch(peer);   // keys_mutex_ never nests inside ours
+      {
+        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+        this->set_counters_no_write_(last, this->seq_.rxId());   // skip the block
+        r->grant(first, last, epoch);
+      }
+      this->save_state_(true);   // ...and persist its end
+      return true;
+    }
+
+    uint32_t LORAListener::take_reserved_fcnt_(mac1::FcntReservation *r)
+    {
+      const uint32_t epoch = s_keys().keyEpoch(static_cast<mac::Addr>(this->short_address_));
+      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+      return r->take(epoch);
+    }
+
+    // A frame sealed from a reserved FCNT must carry the reservation's key
+    // epoch: otherwise the keys moved between take() and the seal and the
+    // ciphertext must never reach the air.
+    bool LORAListener::sealed_in_epoch_(const MacFrame &f, const mac1::FcntReservation &r)
+    {
+      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+      return f.seal.sealed && f.seal.key_epoch == r.keyEpoch();
+    }
+
+    void LORAListener::invalidate_fcnt_reservations_()
+    {
+      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+      this->mac_ping_fcnts_.invalidate();
+    }
+
     void LORAListener::requestMsgidRelogin_(const char *where)
     {
       // Once per exhaustion: the flag is cleared in send_login(), which is where
@@ -4119,6 +4168,9 @@ namespace esphome
         std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
         this->set_counters_no_write_(0, 0);   // a new session: both directions restart
       }
+      // ...so no FCNT reserved from the old count may be spent any more: the
+      // new session counts up through the same numbers (P1).
+      this->invalidate_fcnt_reservations_();
       this->msgid_relogin_pending_ = false;   // the msgid space restarts here
       this->dlv_forget_ids_();
       // New login challenge: the encrypted session is not confirmed until the

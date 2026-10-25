@@ -123,6 +123,9 @@ public:
     KeyPair  liveKeys(mac::Addr peer) const;
     uint32_t generation(mac::Addr peer) const;
     uint32_t installedSessionId(mac::Addr peer) const;
+    // The peer's current key epoch (0 when it has no entry). Moves on every
+    // install and clear; what a FrameSeal and an FCNT reservation bind to.
+    uint32_t keyEpoch(mac::Addr peer) const;
     // Burst copies refused because their frame was sealed under keys the peer
     // no longer holds (I3 / F4).
     uint32_t staleDrops(mac::Addr peer) const;
