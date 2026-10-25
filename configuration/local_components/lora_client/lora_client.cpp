@@ -796,12 +796,9 @@ namespace esphome
     }
 
 
-    // A REGISTER is accepted before ANY address or msgid filter, so a node
-    // whose address has just changed can still get through.
-    //
-    // TAKES OWNERSHIP: it frees the message before dispatching the raw bytes
-    // onward, because the child nodes re-parse those bytes independently.
-    // The frame's K_AUTH tag over every raw byte (spec 4.3).
+    // A REGISTER is accepted before any address or FCNT filter, so a node whose
+    // address has just changed can still get through. Its proof is the frame's
+    // K_AUTH tag over every raw byte (spec 4.3).
     bool LORAListener::register_authentic_(const hubframes::Up *rcv_message,
                                            const uint8_t *data, size_t len)
     {
@@ -930,14 +927,9 @@ namespace esphome
         this->login_retry_count_        = 0;
         this->relogin_pending_          = true;  // the node restarted: its old session is gone
         this->pending_login_nonce_      = 0;     // node just (re-)registered → mint fresh
-        // Same reasoning as send_login()'s mint-fresh-nonce branch: the node
-        // just told us (via REGISTER) that it rebooted, so whatever keys/
-        // in-flight tracked-op ciphertext we hold for the OLD session are
-        // for a session that, from the node's side, no longer exists either
-        // — there is no "retry" to preserve. Without this, clearSessionKeys_()
-        // only ran on the hub's NEXT send_login() mint-fresh-nonce call, not
-        // here, leaving op_frame_ holding ciphertext the rebooted node could
-        // never have decrypted anyway.
+        // The node rebooted (its REGISTER says so): the old session's keys and
+        // any stored ciphertext are void on both sides, so drop them now rather
+        // than at the next LOGIN challenge.
         this->clearSessionKeys_();
         this->startup_login_initiated_  = true;  // prevent NTP callback from cancelling this timer
         this->cancel_timeout("login_startup");
@@ -1334,18 +1326,10 @@ namespace esphome
       // A reserved FCNT block belongs to the keys just destroyed (P1).
       this->invalidate_fcnt_reservations_();
 
-      // Invariant I3 (a): the ONE place a sealed ciphertext is stored and
-      // re-sent later, across however much time passes — pack-once means a
-      // retry never re-encrypts. Across a re-login that ciphertext belongs
-      // to a session this listener is about to stop holding keys for, so
-      // retransmit_tracked_op_() must not be able to resend it: the first
-      // frame sealed under the NEW session would otherwise re-approve this
-      // STALE one too (both share one dest-keyed generation stamp), and a
-      // verified-CMAC-but-wrong-key decrypt would hand the garbage result
-      // straight to the response handlers. Dropping it here means the
-      // in-flight command is simply lost — the existing kOpMaxRetries/
-      // awaiting_ack machinery already handles "no ack arrived" as a
-      // user-visible failure, which is what this now also is.
+      // Invariant I3 (a): the Control channel's stored frame (pack once, retries
+      // re-send the bytes) is sealed under the keys just destroyed, so it must
+      // never be re-sent: the retry re-packs or, for an at-most-once command,
+      // is abandoned (dlv_resend_).
       this->ctl().frame     = MacFrame{};   // the delivery service's stored frame
       this->ctl().frame_tag = 0;
     }
@@ -1398,7 +1382,8 @@ namespace esphome
     // a session accepts). BaseNonceExchange, which used to offer a key in
     // plaintext, no longer exists on the wire.
     //
-    // This matters most after a HUB reboot: s_base_nonce_map lives in RAM,
+    // This matters most after a HUB reboot: the session ids live in RAM
+    // (SessionKeyStore),
     // so the hub comes back holding no nonce for any node while every node
     // still holds its own in NVS. Re-provisioning by a route the node
     // refuses would leave a whole provisioned fleet unreachable until it was
@@ -1438,34 +1423,14 @@ namespace esphome
       return false;
     }
 
-    // Tier 3 (mac-separation-implementation-plan.md section 2(b)): if
-    // this IS the session-opening uplink (sessionNonce present), derive
-    // a CANDIDATE K_enc/K_mac from it now — into fresh PSA key ids
-    // that are NOT installed as this listener's live keys yet.
-    //
-    // This is what lets the hub follow a node across ANY NUMBER of
-    // re-logins within one hub uptime, not just the first: the old code
-    // only derived "if this->k_enc_key_id_ == PSA_KEY_ID_NULL", so a
-    // node's SECOND-ever login in one hub uptime (a reflash, a REGISTER,
-    // a tracked-op giving up and re-logging in, ...) left the hub
-    // holding the FIRST session's keys forever — the session-opening
-    // uplink's real sessionNonce was simply never looked at again, and
-    // every uplink from the node failed CMAC until the hub itself
-    // rebooted. installed_session_id_ (set by installSessionKeys_)
-    // tracks which session_id the LIVE keys belong to, so a duplicate
-    // burst copy of a session-opening uplink ALREADY confirmed (same
-    // session_id) is recognised and skipped — it uses the live keys
-    // directly, with no new PSA import and no generation bump.
-    //
-    // Deriving before this frame is verified is safe PROVIDED the
-    // candidate is only ever used to try THIS frame, and only INSTALLED
-    // (replacing the live keys) if that verify succeeds — a
-    // forged sessionNonce then at most wastes one derivation, never
-    // pins attacker-chosen keys as live (the earlier version of this
-    // comment claimed deriving-and-installing immediately "doesn't
-    // move any committed state", which was wrong: it moved exactly the
-    // state — this->k_enc_key_id_/k_mac_key_id_ — that every later
-    // uplink's decrypt depends on).
+    // A session-opening uplink (SESSION_OPENING, carrying the NODE_NONCE)
+    // yields a CANDIDATE K_enc/K_mac in fresh PSA key ids, not yet live. It is
+    // used to verify THIS frame only and installed only if that verify
+    // succeeds, so a forged node nonce costs one derivation and never pins
+    // attacker-chosen keys. A copy of an opening uplink whose session id the
+    // live keys already belong to (SessionKeyStore::installedSessionId) uses
+    // the live keys: no new import, no generation bump. This is what lets the
+    // hub follow a node through any number of re-logins in one uptime.
     //
     // False = derivation failed, the frame is dropped.
     bool LORAListener::uplink_select_keys_(EncUplink &up)
@@ -2358,24 +2323,11 @@ namespace esphome
       // slot it did not occupy. It is now PLACED (tx_grid_sync_), so copy 0
       // really is at this slot's mark.
       //
-      // txround stays 0 while the frame goes out in some later round. That is
-      // sound for the ANCHOR, which is the thing the node solves: shifting the
-      // declared round by n shifts the solved anchor by n*kRoundUs, and the
-      // mark set is invariant modulo kRoundUs, so every mark lands in the same
-      // place. It is NOT sound for the round COUNTER, which beacon_every_rounds
-      // phases off — hub and node can disagree about which round is a beacon
-      // round. Pre-existing, unchanged here, and recorded in the plan.
-      // THE ROUND THIS FRAME ACTUALLY GOES OUT IN.
-      //
-      // It was hardcoded 0, and that was sound for the ANCHOR — shifting the
-      // declared round by n shifts the solved anchor by n*kRoundUs, and the
-      // mark set is invariant modulo kRoundUs — but not for the round
-      // COUNTER, which beacon_every_rounds phases off. With 0 declared, the
-      // node numbered its rounds from whenever this frame happened to land,
-      // so hub and node disagreed about which round is a beacon round by a
-      // random offset, and section 4.4's beacon window would have opened at
-      // the wrong time on every node. It is placed on `planned_t0` below, so
-      // the round is knowable here rather than approximated.
+      // THE ROUND THIS FRAME ACTUALLY GOES OUT IN. The anchor alone would not
+      // need it (marks repeat every kRoundUs), but the node's round COUNTER,
+      // which the beacon cadence phases off, does: with a wrong round the hub
+      // and the node disagree about which round is a beacon round. The frame
+      // is placed on planned_t0, so its round is known here.
       gs.txround = this->parent_->roundForSlotT0(this->grid_slot_, planned_t0);
       gs.txslot  = this->grid_slot_;
 
@@ -2638,24 +2590,10 @@ namespace esphome
     // Split out of send_aligned_ so a producer that must DECLARE its position
     // can ask the same question the placement will answer. Two computations of
     // "the next clear mark" would be two answers the moment either moved.
-    // BY INTERVAL, not by high-water mark (2026-09-20). This used to call the
-    // two-argument nextClearT0ForSlotUs, which floors the search at the END of
-    // the latest reservation — so a single-copy mark 1.4 s before a queued
-    // beacon was skipped although the air was free. Measured 2026-09-15: two of
-    // node 2's marks never sent around a beacon, two empty windows, one short of
-    // demotion. The five-argument form was written to replace it and says so in
-    // its own comment; only the ModeTest mark scheduler was ever converted.
-    //
-    // This is the production path — every placed downlink comes through here.
-    // A skipped mark costs a whole round of latency on a command someone is
-    // waiting for.
-    //
-    // It used to cost far more: three consecutive empty windows tripped
-    // kMaxMissedMarks and demoted the node from one window per round to Mode
-    // A's three plus the promotion trial's one, so the hub was causing the
-    // exact receive-duty cost Mode B exists to avoid. That demotion was retired
-    // on 2026-09-20 — it counted hub silence, not link health — so this fix now
-    // buys latency rather than rescuing the node's mode.
+    // Clear BY INTERVAL (the five-argument nextClearT0ForSlotUs), not after the
+    // end of the latest reservation: a single-copy mark before a queued beacon
+    // is free air. Every placed downlink comes through here, and a skipped
+    // mark costs a whole round of latency.
     int64_t LORAListener::nextPlacementT0_(int64_t now_us, int copies, size_t len,
                                            bool expects_reply) const
     {
@@ -3627,7 +3565,7 @@ namespace esphome
       // (belt and braces), but not sending it is what protects the session.
       if (this->auto_mode_)
       {
-        ESP_LOGI("LORAListener",
+        ESP_LOGI(TAG,
                  "Device %s is in automatic mode — skipping the nightly sleep "
                  "(it schedules its own; sending would discard the session)",
                  this->address_str());
@@ -3643,7 +3581,7 @@ namespace esphome
         return;
       }
 
-      ESP_LOGI("LORAListener", "Device %s entering sleep mode (tracked, effects on ack)",
+      ESP_LOGI(TAG, "Device %s entering sleep mode (tracked, effects on ack)",
                this->address_str());
       this->send_tracked_sysop_(CLIENT_OPERATION__CMD_SLEEP);
       this->arm_pending_sleep_expiry_();
@@ -3810,17 +3748,17 @@ namespace esphome
 
     void LORAListener::triggerOTA()
     {
-      ESP_LOGI("LORAListener", "Device %s triggering OTA", this->address_str());
+      ESP_LOGI(TAG, "Device %s triggering OTA", this->address_str());
       // P1: OTA is a one-shot sysop — send it through the tracked/acked path so a
       // dropped or replay-rejected frame is retransmitted until the node acks,
       // instead of being silently lost (the observed post-reboot OTA drop).  The
-      // sysop is encrypted in-session by tx_tracked_op_() so it cannot be forged.
+      // sysop is sealed in-session by the delivery service, so it cannot be forged.
       this->send_tracked_sysop_(CLIENT_OPERATION__CMD_OTA);
     }
 
     void LORAListener::sendDebugSysop(int32_t op)
     {
-      ESP_LOGI("LORAListener", "Device %s: debug sysop %d", this->address_str(), (int) op);
+      ESP_LOGI(TAG, "Device %s: debug sysop %d", this->address_str(), (int) op);
       // Same tracked/acked path as every other sysop -- a dropped toggle
       // recovers via the hub's own retransmit rather than silently not
       // taking effect. See DebugFlags.h (node repo) for what each op does.
@@ -4202,9 +4140,9 @@ namespace esphome
       //   * Mint a fresh esp_random() ONLY for the first send of a challenge.
       //   * On every retry (pending_login_nonce_ != 0) reuse the same value.
       // Rationale: the node rate-limits CMD_LOGIN to one accepted message per
-      // 5 s.  If the hub regenerates the nonce on retry, the node keeps the
+      // 5 s.  If the hub regenerated the nonce on retry, the node would keep the
       // FIRST nonce it saw (the rate-limited retry is silently dropped) while
-      // the hub overwrites its s_base_nonce_map with the LAST nonce — the two
+      // the hub's session id would be the LAST one — the two
       // sides then permanently disagree and every encrypted reply fails the
       // IV check.  pending_login_nonce_ is cleared in set_response() when the
       // node's first valid reply sets login_acked_, and in enterSleep().
@@ -5709,7 +5647,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
         return ClassAPlacement::NotClassA;
       }
 
-      // This node's own last uplink, captured in admit_frame_ — never the
+      // This node's own last uplink, committed in commit_rx_msgid_ — never the
       // tracker's live stamp, which by now belongs to whichever node
       // transmitted most recently.
       const int64_t t0_uplink = this->last_uplink_t0_us_;
@@ -5736,16 +5674,17 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // both windows hang off an absolute delay from the node's own transmit —
       // so the conversion below is not cosmetic.
       //
-      // T0 is 3136 us AFTER the first chirp leaves the antenna, and earliest_us
-      // is the instant lora_tx() is called. Handing the wanted T0 over as-is
-      // puts the frame 3136 us late at the node — 22 % of the 14080 us guard,
-      // spent before the link has done anything.
+      // T0 is kDownlinkPreambleToT0Us (4160 us) AFTER the first chirp leaves
+      // the antenna, and earliest_us is the instant lora_tx() is called.
+      // Handing the wanted T0 over as-is puts the frame 4160 us late at the
+      // node -- 30 % of the 14080 us guard, spent before the link has done
+      // anything.
       //
       // d_tx_ramp is passed as 0 on purpose. Its only provenance is a
       // commented-out delayMicroseconds(220) (section 12.1 lists it as
       // unmeasured), and fireInstantUs takes it as a parameter precisely so a
       // placeholder cannot be mistaken for a measurement. Correcting the known
-      // 3136 and leaving the unknown ~220 as residual is strictly better than
+      // 4160 and leaving the unknown ~220 as residual is strictly better than
       // correcting neither.
       //
       // A window is only reachable if the queue can still fire ON it: popDue

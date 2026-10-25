@@ -5,9 +5,8 @@
 // The management plane, out of the transmit engine: everything about the
 // GridBeacon that is not "put these bytes on this mark" lives here --
 //   * the fleet key and its id, minted with the grid anchor;
-//   * the beacon's AES-CMAC (beaconMac);
-//   * the beacon itself, built as today's protobuf GridBeacon (the APP schema
-//     until the wire stage, S8);
+//   * the beacon's AUTH = FLEET tag (fleetTagV1, spec 4.4);
+//   * the beacon itself, a MAC wire v1 frame (PORT 0, GridBeacon body);
 //   * the per-node inputs of the SHADOW pending mask, gathered from the
 //     registered listeners.
 // The tracker (MAC-0) asks buildBeacon() for one round and gets an OPAQUE frame

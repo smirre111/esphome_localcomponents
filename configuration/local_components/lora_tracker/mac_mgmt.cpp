@@ -28,8 +28,8 @@ static const char *const TAG = "lora_tracker";
 void HubMacManagement::mintFleetKey()
 {
     // PSA is initialised HERE, not left to whichever component happened to
-    // set up first. LORAListener::setup() calls psa_crypto_init() for the
-    // session keys, and the beacon MAC used to be able to free-ride on
+    // set up first. LORAListener::setup() initialises PSA too (through
+    // LinkSecurity::initAuthKey), and the beacon tag used to be able to free-ride on
     // that — but component setup order is not a contract, and the failure it
     // produces is psa_import_key: -137 (BAD_STATE) at beacon time, which
     // reads as a crypto fault rather than as an ordering one. The call is
@@ -147,7 +147,7 @@ bool HubMacManagement::fleetTagV1(const uint8_t *bytes, size_t n, uint8_t tag[8]
     psa_key_id_t kid = PSA_KEY_ID_NULL;
     if (psa_import_key(&attrs, this->net_key_, sizeof(this->net_key_), &kid) != PSA_SUCCESS)
         return false;
-    // Full width, then truncated (as beaconMac does): PSA refuses a short output.
+    // Full width, then truncated: PSA refuses a short output buffer.
     uint8_t full[16];
     size_t  full_len = 0;
     const psa_status_t st = psa_mac_compute(kid, PSA_ALG_CMAC, in, macwire::kMacInputPrefixBytes + n,

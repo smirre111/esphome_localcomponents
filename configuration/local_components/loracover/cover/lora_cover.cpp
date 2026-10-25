@@ -166,5 +166,5 @@ namespace esphome
       this->parent_->send_cover_config(coverconfig);
     }
 
-  } // namespace LoraCov
+  }  // namespace loracov
 } // namespace esphome

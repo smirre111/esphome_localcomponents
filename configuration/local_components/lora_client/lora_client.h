@@ -1173,15 +1173,6 @@ namespace esphome
       int32_t  clock_offset_s_{0};
       uint32_t last_beacon_reason_{0};
       uint32_t node_mode_{0};
-      // Duplicate suppression for plaintext frames that arrive on a CONFIRMED
-      // session — the ones commit_rx_msgid_ deliberately refuses to let move
-      // the authenticated counter. Deliberately separate from
-      // the MAC-1 rx mark (seq_.rxId()) and never persisted: it exists only to
-      // stop the same unauthenticated frame being replayed without limit.
-      // handle_register_ defers a provisioned node's config push to
-      // confirm_session_, which is the first moment it can be encrypted. The
-      // REGISTER frame is kept so the child components still get their
-      // dispatch (CoverConfig and friends) at the same time.
       // When the node's last phase report arrived. §4.6's confirmation freshness
       // is the age of that beacon; the explicit flag distinguishes "never" from
       // "at boot", which a zero timestamp cannot.
@@ -1193,9 +1184,15 @@ namespace esphome
       // "no answer yet" rather than a 0 that reads as a healthy link.
       uint32_t             node_rx_busy_skips_{0};
       bool                 have_rx_busy_skips_{false};
+      // handle_register_ defers a provisioned node's config push to
+      // confirm_session_, the first moment it can be encrypted.
       bool                 config_push_pending_{false};
       // A REGISTER whose children notice (on_register) waits for the session.
       bool pending_register_notice_{false};
+      // Duplicate suppression for PLAINTEXT uplinks before a session exists
+      // (accept_plaintext_uplink_, review HB4). Separate from the MAC-1 rx
+      // mark, which an unauthenticated frame never moves; never persisted;
+      // reset by every LOGIN and kept with the counter by commit_rx_msgid_.
       uint32_t plaintext_hwm_{0};
       bool     have_plaintext_hwm_{false};
       uint32_t node_sched_version_{0};
@@ -1736,8 +1733,7 @@ namespace esphome
       void     requestMsgidRelogin_(const char *where);
       bool     msgid_relogin_pending_{false};
       uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
-      // Arm a ONE-SHOT login retry that re-arms itself, mirroring
-      // schedule_op_retry_().  Uses set_timeout rather than set_interval: an
+      // Arm a ONE-SHOT login retry that re-arms itself.  Uses set_timeout rather than set_interval: an
       // interval's first firing is randomly phased within [0, interval), which
       // fired the "hourly" login retry within ~0.6 s of the challenge, stepping
       // on the node's burst-deferred login-ack and piling a redundant LoginMsg
@@ -1745,12 +1741,11 @@ namespace esphome
       void     schedule_login_retry_();
       void     login_retry_step_();
 
-      // ---- F-4 / P1: command ACK / retransmit state (cover ops AND sysops) ----
-      // One reusable tracked-delivery state machine backs BOTH cover operations
-      // and one-shot system operations (OTA etc.): (re)transmit with a fresh
-      // incrementing msgid until the node returns a MAC ACK, then mark failed
-      // + force re-login after kOpMaxRetries.  kind selects what tx_tracked_op_
-      // rebuilds on each retransmission.
+      // ---- command ACK / retransmit state (cover ops AND sysops) ----
+      // The Control channel of the delivery service carries both: the first
+      // attempt is packed once and every retry re-sends the same bytes (same
+      // FCNT, same cmd_id) until the node's MAC ACK, then the command is failed
+      // (and, unless it was a SLEEP, the session rebuilt) after kOpMaxRetries.
       using TrackedOpKind = DeliverySlot::Kind;
       // The per-channel request state (DeliverySlot above): ctl() is the tracked
       // cover-op / sysop slot, cfg() the schedule push, mac() the GridSync.

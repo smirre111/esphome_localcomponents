@@ -151,5 +151,5 @@ namespace esphome
         this->clock_offset_->publish_state(offset_s);
     }
 
-  } // namespace am43
+  }  // namespace loracov
 } // namespace esphome
