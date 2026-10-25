@@ -147,7 +147,14 @@ namespace esphome
           ind.msg->proto_case != hubframes::UL_POSITION ||
           ind.msg->position == nullptr)
         return;
-      this->position = ind.msg->position->position;
+      // The node reports ITS position; with invert_position the entity shows
+      // the mirror, exactly as control() mirrors a requested position on the
+      // way out (review HB20: the report was taken uninverted, so an inverted
+      // cover showed the opposite of where it stood).
+      float pos = ind.msg->position->position;
+      if (this->invert_position_)
+        pos = 1.0f - pos;
+      this->position = pos;
       this->publish_state(true);
     }
 

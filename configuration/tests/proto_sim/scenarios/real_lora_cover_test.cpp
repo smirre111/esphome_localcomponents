@@ -97,6 +97,25 @@ TEST(RealLoraCover, OpenForRol2RoutesToAddr18OnWire) {
     EXPECT_TRUE(found) << "control(set_position(OPEN)) must emit a CMD_OPERATION";
 }
 
+// Review HB20: control() mirrors a requested position for an inverted cover,
+// but a reported position was taken as is, so the entity showed the opposite.
+TEST(RealLoraCover, AnInvertedCoverMirrorsTheReportedPositionToo) {
+    for (const bool invert : {false, true}) {
+        CoverHarness h;
+        h.cover.set_invert_position(invert);
+        CoverPosition cp = COVER_POSITION__INIT;
+        cp.position = 0.2f;
+        hubframes::Up up;
+        up.proto_case = hubframes::UL_POSITION;
+        up.position   = &cp;
+        esphome::lora_tracker::AppIndication ind;
+        ind.msg       = &up;
+        ind.authentic = true;
+        h.cover.on_app_indication(ind);
+        EXPECT_FLOAT_EQ(h.cover.position, invert ? 0.8f : 0.2f) << "invert=" << invert;
+    }
+}
+
 TEST(RealLoraCover, StopEmitsStopOperation) {
     CoverHarness h;
     esphome::cover::CoverCall call;
