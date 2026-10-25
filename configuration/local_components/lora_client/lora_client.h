@@ -986,6 +986,10 @@ namespace esphome
 
       uint8_t  login_slot_{0};
       static uint8_t s_next_login_slot_;
+     public:
+      // Tests: a fresh boot's slot numbering (setup() claims slots in order).
+      static void resetLoginSlotsForTest() { s_next_login_slot_ = 0; }
+     protected:
 
       // ONBOARDING GATE. The hub has one downlink queue; bringing a node up
       // costs ~8 frames (~15 s), so two nodes started 3 s apart interleave and

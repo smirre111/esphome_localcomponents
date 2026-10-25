@@ -3451,6 +3451,30 @@ TEST(GridAligned, SlotsAreClaimedInDeclarationOrder) {
     EXPECT_LT(b.rol.grid_slot(), timedgrid::kSlotCount);
 }
 
+// Review HB12 (2026-10-25): every listener's setup() queued the identical
+// broadcast GridDemote burst, so N nodes meant N bursts at boot.
+TEST(GridAligned, TheStartupGridDemoteIsBroadcastOnceForTheWholeHub) {
+    using namespace real_helpers;
+    LORAClient::resetLoginSlotsForTest();
+    RealHubHarness a{2, kMacRol2};
+    RealHubHarness b{3, kMacRol2};
+    a.rol.setup();
+    b.rol.setup();
+    auto demotes = [](const LORATracker &t) {
+        size_t n = 0;
+        for (const auto &raw : t.sent_raw) {
+            macwire::WireHdr w;
+            size_t off = 0, blen = 0;
+            if (macwire::decode(raw.data(), raw.size(), &w, &off, &blen) &&
+                w.dst == macwire::kBroadcast && w.port == macwire::kPortMac0Mgmt)
+                ++n;
+        }
+        return n;
+    };
+    EXPECT_EQ(demotes(a.tracker) + demotes(b.tracker), 1u)
+        << "the broadcast demote must leave once per hub boot, not once per node";
+}
+
 TEST(GridAligned, SlotWrapsAtTheGridDepth) {
     // A 33rd client must share a slot rather than address one that does not
     // exist. Asserting the rule directly; the claim itself is above.

@@ -111,8 +111,12 @@ namespace esphome
       this->grid_slot_ = (uint8_t) (this->login_slot_ % timedgrid::kSlotCount);
 
       // B1/B3: withdraw any grid the nodes may still be holding, BEFORE
-      // anything else goes out. Our anchor is new; theirs is stale.
-      this->broadcast_grid_demote();
+      // anything else goes out. Our anchor is new; theirs is stale. It is a
+      // BROADCAST, so the first listener (slot 0) sends it once for the whole
+      // hub: one 17-copy burst per listener was ~45 s of air at 32 nodes and
+      // overran the 5-buffer pool at boot (review HB12).
+      if (this->login_slot_ == 0)
+        this->broadcast_grid_demote();
 
       // The compiled YAML seed has already been applied by now (codegen emits
       // add_schedule_entry() into main.cpp's setup(), which runs before
