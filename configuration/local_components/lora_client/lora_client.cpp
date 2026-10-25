@@ -3538,11 +3538,14 @@ namespace esphome
       s.acks.clear();
     }
 
-    // A new login restarts the msgid space, so ids on record would alias new ones.
-    // The requests themselves go on (the next attempt is sent under a new id).
+    // A new login restarts the msgid space, so ids on record would alias new ones
+    // -- on every channel, the Control channel included (review HB15: a command
+    // waiting behind the relogin kept old-session ids a new-session FCNT could
+    // match). The requests themselves go on (the next attempt is sent under a
+    // new id).
     void LORAListener::dlv_forget_ids_()
     {
-      for (uint8_t c = CH_CONFIG; c < kDeliveryChannels; ++c)
+      for (uint8_t c = 0; c < kDeliveryChannels; ++c)
         this->slots_[c].acks.clear();
     }
 

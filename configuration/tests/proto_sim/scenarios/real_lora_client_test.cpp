@@ -10808,6 +10808,25 @@ TEST(TrackedOpRetry, AnOtaWhoseFirstPackFailsIsNeverReplacedByAnOlderFrame) {
         << "an at-most-once command that was never framed is abandoned, not retried";
 }
 
+// Review HB15: send_login restarts the FCNT space but left the Control
+// channel's ack ids on record, so a new-session FCNT could match a command id
+// from the old session.
+TEST(TrackedOpRetry, ALoginForgetsTheControlChannelsOldAckIds) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    drive_session(h.clock, h.radio, h.rol);
+    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    h.rol.setCountersForTest(500, h.rol.seq_.rxId() + 1);   // old-session ids far from new ones
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
+    auto &op = static_cast<TrackedOpProbe &>(h.rol);
+    const uint32_t old_id = op.ctl().last_msgid;
+    ASSERT_GE(old_id, 500u) << "precondition";
+    ASSERT_GE(op.ctl().acks.find(old_id), 0) << "precondition: the id is on record";
+    h.rol.send_login();
+    EXPECT_LT(op.ctl().acks.find(old_id), 0) << "an old-session id survived the FCNT restart";
+}
+
 // Review P3 (2026-10-25): the node now answers an Acked frame it cannot
 // dispatch with MacAck status ACK_ERROR instead of silence. The hub ignored the
 // status, so that read as "delivered". Now it fails the command at once: no
