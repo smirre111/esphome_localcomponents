@@ -3,6 +3,7 @@
   "children.wire_unpack": 0,
   "client.app_arq_by_msgid": 0,
   "client.app_picks_encryption": 0,
+  "client.mac1_counter_writes": 9,
   "client.msgid_alloc_sites": 3,
   "client.pack_sites": 0,
   "client.psa_calls": 0,
@@ -11,8 +12,10 @@
   "client.raw_frame_counter": 0,
   "client.raw_parent_send": 1,
   "client.telemetry_completes_delivery": 0,
+  "psa_include_outside_mac2": 1,
   "tracker.app_cmd_cases": 0,
-  "tracker.client_iteration": 3,
-  "tracker.psa_calls": 0,
-  "tracker.seal_upcalls": 0
+  "tracker.client_iteration": 4,
+  "tracker.psa_calls": 9,
+  "tracker.seal_upcalls": 0,
+  "tracker_h.includes_app": 0
 }

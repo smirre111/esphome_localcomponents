@@ -1,7 +1,7 @@
 #pragma once
 
 #include "esphome/components/button/button.h"
-#include "esphome/components/lora_tracker/lora_tracker.h"
+#include "esphome/components/lora_client/lora_client.h"
 
 namespace esphome
 {

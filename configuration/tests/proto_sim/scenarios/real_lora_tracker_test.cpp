@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "esphome/components/lora_tracker/lora_tracker.h"
+#include "esphome/components/lora_client/lora_client.h"   // LORAClient, kHubAddress
 #include "lora_hal_recorder.h"
 #include "MacWire.h"
 #include "esphome/components/lora_client/HubFrames.h"

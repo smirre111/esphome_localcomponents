@@ -35,7 +35,6 @@
 #include <map>
 #include <memory>
 #include <cstring>
-#include "psa/crypto.h"
 #include <vector>
 #include "esphome/components/lora_client/TimedGrid.h"
 
@@ -186,7 +185,7 @@ namespace esphome
         ESP_LOGW(TAG, "[%s] NVS restore failed or version mismatch (expected v%u) — "
                  "starting fresh, waiting for REGISTER",
                  this->get_name().c_str(), (unsigned)kRestoreStateVersion);
-        this->set_counters_no_write_(0, 0);
+        this->mac1_restart_session_();
         this->registered_ = false;
       }
 
@@ -4192,7 +4191,7 @@ namespace esphome
 
       {
         std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-        this->set_counters_no_write_(0, 0);   // a new session: both directions restart
+        this->mac1_restart_session_();   // a new session: both directions restart
       }
       // ...so no FCNT reserved from the old count may be spent any more: the
       // new session counts up through the same numbers (P1).
@@ -5331,7 +5330,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       const int64_t now_us = esp_timer_get_time();
       this->last_boot_advance_us_ = (now_us > 0) ? now_us : 1;
       this->last_wake_key_        = b->prevbeaconfcnt;
-      this->set_counters_no_write_(this->seq_.txId() + modebsup::kTxBootMargin, this->seq_.rxId());
+      this->mac1_skip_tx_(modebsup::kTxBootMargin);
       ESP_LOGI(TAG, "[%s] Node reset (%s%s) — advancing tx_message_id by %u to %u",
                this->get_name().c_str(), s_reset_reason_name(b->resetreason),
                b->resetreason == modebsup::kResetDeepSleep ? ", resumed wake" : ", non-deep-sleep",

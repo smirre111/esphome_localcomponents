@@ -18,8 +18,15 @@ usage:
   layer_lint.py --show     print the counts, change nothing
 
 Kept independent of, but shaped like, the node repo's tools/layer_lint.py:
-one JSON baseline of {metric: count}, one regex per metric, per-file scope.
+one JSON baseline of {metric: count}, one regex per metric.
+
+Scope (review HB11): the tracker metrics cover the whole lora_tracker/
+component (every .cpp and .h), so moving a crossing into a sibling file
+(mac_mgmt.cpp) does not hide it. The include-direction metrics read the RAW
+source (an #include path is a string literal, which the counting strip would
+blank).
 """
+import glob
 import json
 import os
 import re
@@ -29,24 +36,31 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LC = os.path.join(ROOT, "local_components")
 BASELINE = os.path.join(ROOT, "tools", "layer_lint_baseline.json")
 
-TRACKER = "lora_tracker/lora_tracker.cpp"
+TRACKER = ["lora_tracker/*.cpp", "lora_tracker/*.h"]   # the whole MAC-0 component
+TRACKER_H = "lora_tracker/lora_tracker.h"
 CLIENT = "lora_client/lora_client.cpp"
 CLIENT_H = "lora_client/lora_client.h"
-CHILDREN = ["loracover/cover/lora_cover.cpp", "loracover/sensor/lora_sensor.cpp"]
+CHILDREN = ["loracover/*/*.cpp", "loracover/*/*.h"]
+# Hub-owned sources outside MAC-2 (HubLinkSecurity.*) and the beacon tag
+# (mac_mgmt.cpp): none of them may include PSA.
+NON_MAC2 = ["lora_client/lora_client.cpp", "lora_client/lora_client.h", "lora_client/HubWire.*",
+            "lora_client/lora_client_node.h", "lora_tracker/lora_tracker.cpp", TRACKER_H,
+            "lora_tracker/automation.h", "loracover/*/*.cpp", "loracover/*/*.h"]
+RAW = True   # 4th tuple element: count in the raw source, not the stripped one
 
-# metric -> (files, regex, what it means)
+# metric -> (files, regex, what it means[, RAW])
 METRICS = {
     # MAC-0/PHY (tracker) parsing or switching on the APP schema (V1, V2).
-    "tracker.app_cmd_cases": ([TRACKER], r"__CMD_\w+",
+    "tracker.app_cmd_cases": (TRACKER, r"__CMD_\w+",
                               "tracker branches on/builds APP oneof cases"),
     # MAC-0/PHY (tracker) doing MAC-2 crypto itself (V2: beacon CMAC).
-    "tracker.psa_calls": ([TRACKER], r"\bpsa_\w+\s*\(",
+    "tracker.psa_calls": (TRACKER, r"\bpsa_\w+\s*\(",
                           "PSA crypto calls inside the tracker"),
     # MAC-0 calling up into MAC-2 per copy (V1).
-    "tracker.seal_upcalls": ([TRACKER], r"(?<!::)\bsealBurstCopyTag\s*\(",
+    "tracker.seal_upcalls": (TRACKER, r"(?<!::)\bsealBurstCopyTag\s*\(",
                              "per-copy up-call into the listener's MAC-2"),
     # MAC-0 reading listener/client internals (V1 address lookup, V3 shadow).
-    "tracker.client_iteration": ([TRACKER], r"\b(?:listeners_|clients_)\b",
+    "tracker.client_iteration": (TRACKER, r"\b(?:listeners_|clients_)\b",
                                  "tracker iterates registered listeners/clients"),
     # Direct data requests that bypass one framing path (V15).
     "client.raw_parent_send": ([CLIENT], r"\bparent_->send\s*\(",
@@ -87,6 +101,21 @@ METRICS = {
     # APP children running their own MAC-0 address filter (V5).
     "children.sender_filter": (CHILDREN, r"\bsenderaddress\b",
                                "children filter on the header's sender address"),
+    # Include direction (review HB11): MAC-0's public header pulls in neither
+    # the application (lora_client.h) nor the APP schema (blinds.pb-c.h).
+    "tracker_h.includes_app": ([TRACKER_H],
+                               r'#include\s*[<"][^>"]*(?:lora_client/lora_client\.h|blinds\.pb-c\.h)[>"]',
+                               "lora_tracker.h includes lora_client.h or the protobuf stubs", RAW),
+    # PSA only in MAC-2 (HubLinkSecurity.*) and the beacon tag (mac_mgmt.cpp).
+    "psa_include_outside_mac2": (NON_MAC2, r'#include\s*[<"]psa/',
+                                 "a hub source outside MAC-2 includes PSA", RAW),
+    # The application moves MAC-1 counters only through the MAC-1 interface
+    # (mac1_restart_session_ / mac1_skip_tx_ / mac1_restore_, the allocation
+    # and the commit). This counts the raw writers; the interface's own
+    # definitions are the baseline.
+    "client.mac1_counter_writes": ([CLIENT, CLIENT_H],
+                                   r"\bset_counters_no_write_\s*\(|\bseq_\.(?:restore|reset|commit|allocate|seedTxForTest)\s*\(",
+                                   "raw MAC-1 counter writes in the listener"),
 }
 
 
@@ -123,17 +152,30 @@ def strip_comments_and_strings(src):
     return "".join(out)
 
 
+def expand(files):
+    out = []
+    for f in files:
+        hits = sorted(glob.glob(os.path.join(LC, f)))
+        if not hits:
+            raise SystemExit("layer_lint: no file matches %s" % f)
+        out.extend(h for h in hits if h not in out)
+    return out
+
+
 def counts():
     cache = {}
     res = {}
-    for name, (files, rx, _desc) in METRICS.items():
+    for name, spec in METRICS.items():
+        files, rx = spec[0], spec[1]
+        raw = len(spec) > 3 and spec[3]
         total = 0
-        for f in files:
-            p = os.path.join(LC, f)
-            if p not in cache:
+        for p in expand(files):
+            key = (p, raw)
+            if key not in cache:
                 with open(p, "rb") as fh:
-                    cache[p] = strip_comments_and_strings(fh.read().decode("utf-8"))
-            total += len(re.findall(rx, cache[p]))
+                    src = fh.read().decode("utf-8")
+                cache[key] = src if raw else strip_comments_and_strings(src)
+            total += len(re.findall(rx, cache[key], re.M))
         res[name] = total
     return res
 

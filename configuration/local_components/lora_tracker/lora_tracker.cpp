@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include "lora_tracker.h"
+#include "esphome/components/lora_client/lora_client.h"   // MAC-0 -> listener calls (fan-out, shadow gather)
 #include "esphome/core/application.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/hal.h"
@@ -22,10 +23,7 @@
 #include <nvs_flash.h>
 #include <cinttypes>
 #include <cstring>
-// Section 4.4's beacon MAC. PSA rather than a vendored AES: the same library
-// the session crypto already runs on, so there is one crypto implementation on this hub.
 #include <esp_random.h>
-#include <psa/crypto.h>
 
 // The grid geometry. Unconditional: startGrid() and nextT0ForSlotUs() use
 // timedgrid:: constants whatever the ESPHome config contains, so an include

@@ -2,7 +2,7 @@
 
 #include "esphome/core/component.h"
 
-#include "esphome/components/lora_tracker/lora_tracker.h"
+#include "esphome/components/lora_client/lora_client.h"
 #include "esphome/components/sensor/sensor.h"
 
 namespace esphome

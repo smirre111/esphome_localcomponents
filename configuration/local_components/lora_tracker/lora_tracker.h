@@ -15,9 +15,8 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <esp_err.h>
 
-#include "esphome/components/lora_client/lora_client.h"
-#include "esphome/components/blindsproto/blinds.pb-c.h"
 // mac::CopySealer: MAC-2's per-copy sealer travels with an encrypted frame (S4).
 #include "esphome/components/lora_client/MacSap.h"
 // B1a: the reordering transmit queue. Dependency-free (stdint only), so

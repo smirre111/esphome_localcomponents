@@ -1443,6 +1443,16 @@ namespace esphome
       // has ever written by itself). Uses Sequencer::restore with the margins
       // of 1 subtracted, which is exact in uint32 arithmetic (0 - 1 + 1 == 0).
       void set_counters_no_write_(uint32_t tx, uint32_t rx) { this->seq_.restore(tx - 1u, rx - 1u); }
+      // ---- the MAC-1 counter interface ------------------------------------
+      // The only operations the application uses to move the counters (the
+      // allocation and the commit are incrTxMessageId / setRxMessageId);
+      // tools/layer_lint.py counts every other writer. None writes NVS.
+      // A new session (or no persisted state): both directions restart at 0.
+      void mac1_restart_session_() { this->set_counters_no_write_(0, 0); }
+      // The node rebooted on a resumed session: skip n tx ids it may have seen.
+      void mac1_skip_tx_(uint32_t n) { this->set_counters_no_write_(this->seq_.txId() + n, this->seq_.rxId()); }
+      // Install a persisted (tx, rx) snapshot.
+      void mac1_restore_(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
       // FCNT blocks for the esp_timer streams (FcntReservation.h).
       // reserve: loop only (one persist), n >= 1; false leaves *r invalid.
       bool reserve_fcnt_block_(uint32_t n, mac1::FcntReservation *r);
@@ -1907,7 +1917,7 @@ namespace esphome
 
     inline void LORAClientRestoreState::apply(LORAListener *listener)
     {
-      listener->set_counters_no_write_(this->tx_message_id + 64, this->rx_message_id);
+      listener->mac1_restore_(this->tx_message_id + 64, this->rx_message_id);
       listener->registered_       = this->logged_in;
       listener->last_sleep_epoch_ = this->last_sleep_epoch;
     }

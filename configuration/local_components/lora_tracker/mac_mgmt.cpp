@@ -4,6 +4,7 @@
 #include "mac_mgmt.h"
 
 #include "lora_tracker.h"
+#include "esphome/components/lora_client/lora_client.h"   // MAC-0 -> listener calls (fan-out, shadow gather)
 #include "esphome/core/log.h"
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/lora_client/TimedGrid.h"
