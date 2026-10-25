@@ -2835,6 +2835,55 @@ TEST(MacPing, IsPlacedOnTheNodesMarkAsASingleCopy) {
     h.rol.stop_mac_ping();
 }
 
+// Review HB2 (2026-10-25): the MAC ping timer placed its frame through
+// send_aligned_, which writes last_placed_t0_us_ / last_placed_single_shot_ /
+// last_placed_optimistic_ -- loop-owned state that place_ctl_ reads right after
+// its own placement to record a tracked command's shape and mark. A ping tick
+// in between handed the command another frame's mark.
+namespace {
+struct PlacementProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::last_placed_t0_us_;
+    using esphome::lora_tracker::LORAListener::last_placed_single_shot_;
+};
+}  // namespace
+
+TEST(MacPing, APingTickLeavesTheLoopsPlacementStateAlone) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.tracker.gridStarted()) << "precondition: placement needs a running grid";
+    auto &probe = static_cast<PlacementProbe &>(h.rol);
+    const int64_t before = probe.last_placed_t0_us_;
+
+    h.rol.start_mac_ping(/*duration_s=*/300, /*grid_ms=*/1100);
+    h.rol.mac_ping_tick_for_test();
+    h.rol.mac_ping_tick_for_test();
+    ASSERT_GT(h.tracker.last_earliest_us, 0) << "precondition: the ping was placed";
+    ASSERT_TRUE(h.tracker.last_on_mark);
+
+    EXPECT_EQ(probe.last_placed_t0_us_, before)
+        << "a ping placed from the esp_timer task wrote the loop's last placed mark";
+    EXPECT_FALSE(probe.last_placed_single_shot_);
+    h.rol.stop_mac_ping();
+}
+
+TEST(MacPing, ConsecutivePingsGoToConsecutiveMarksNotTheSameOne) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    ensure_psa_ready();
+    h.rol.registered_ = true;
+    h.rol.enable_timed_mode(true);
+    ASSERT_TRUE(h.tracker.gridStarted());
+    h.rol.start_mac_ping(300, 1100);
+    h.rol.mac_ping_tick_for_test();
+    const int64_t first = h.tracker.last_earliest_us;
+    h.rol.mac_ping_tick_for_test();
+    EXPECT_GT(h.tracker.last_earliest_us, first) << "two pings aimed at one mark";
+    h.rol.stop_mac_ping();
+}
+
 TEST(MacPing, WithoutAGridThePingIsUnplacedRatherThanRefused) {
     // The other half of the contract, so the fallback is a decision rather than
     // an accident. send_aligned_ declines to place when the grid is not running

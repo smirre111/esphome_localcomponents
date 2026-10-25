@@ -1076,7 +1076,10 @@ namespace esphome
       // of on top of the first. 0 = nothing placed yet.
       int64_t  last_placed_t0_us_{0};
 
-      bool     drift_test_active_{false};
+      // Read by the esp_timer callback, written by the loop (HB2).
+      std::atomic<bool> drift_test_active_{false};
+      // True while drift_timer_cb_ runs; a stop waits for it (HB2).
+      std::atomic<bool> drift_cb_busy_{false};
       uint32_t drift_test_duration_s_{0};
       uint32_t drift_test_grid_ms_{0};
       // esp_timer, not set_interval: ESPHome's scheduler is millisecond and
@@ -1092,7 +1095,8 @@ namespace esphome
       // needs on every frame (the node arms on the first one it hears, so every
       // frame carries the full request — a node that missed the first is not
       // left waiting for a repeat that never comes).
-      bool     mode_test_active_{false};
+      std::atomic<bool> mode_test_active_{false};   // HB2: loop writes, timer reads
+      std::atomic<bool> mt_cb_busy_{false};         // mode_test_timer_cb_ running
       uint32_t mt_duration_s_{0};
       uint32_t mt_grid_ms_{0};
       uint32_t mt_mode_{0};
@@ -1116,7 +1120,11 @@ namespace esphome
       std::string last_mode_test_report_{};
       ModeTestSummary mode_test_summary_{};
 
-      bool     mac_ping_active_{false};
+      std::atomic<bool> mac_ping_active_{false};    // HB2: loop writes, timer reads
+      std::atomic<bool> mac_ping_cb_busy_{false};   // mac_ping_timer_cb_ running
+      // The last mark a ping was placed on. Owned by the esp_timer task, like
+      // mt_last_mark_t0_us_: last_placed_* belong to the loop (HB2).
+      int64_t  mac_ping_last_mark_t0_us_{0};
       bool     mac_ping_want_echo_{true};
       uint32_t mac_ping_pad_bytes_{0};
       uint32_t mac_ping_seq_{0};
@@ -1444,6 +1452,13 @@ namespace esphome
       void invalidate_fcnt_reservations_();
       bool sealed_in_epoch_(const MacFrame &f, const mac1::FcntReservation &r);
       bool pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block, MacFrame *f);
+      // Placement for a frame built on the esp_timer task with an explicit
+      // shape (MAC ping): touches no loop-owned state (last_placed_*, belief).
+      bool send_placed_from_timer_(const uint8_t *buf, size_t len, TxPolicy policy,
+                                   const mac2::FrameSeal &seal, int64_t *last_mark_t0_us);
+      // Spin until an esp_timer callback that may still be running has
+      // returned (its timer is already stopped and its active flag false).
+      static void wait_callback_idle_(const std::atomic<bool> &busy);
     public:
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }

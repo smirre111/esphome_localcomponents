@@ -1,3 +1,4 @@
+#include <thread>
 #include "esphome/components/lora_client/lora_client.h"
 // Shared with the node firmware — the AEAD wire format now lives in exactly
 // one place. See the banner in FrameCrypto.h.
@@ -53,6 +54,18 @@ namespace esphome
   namespace lora_tracker
   {
     static const char *const TAG = "lora_client";
+
+    namespace
+    {
+    // Marks an esp_timer callback as running for its whole body, so a stop on
+    // the loop can wait for it (LORAListener::wait_callback_idle_, HB2).
+    struct CallbackBusy
+    {
+      explicit CallbackBusy(std::atomic<bool> &b) : busy(b) { busy.store(true); }
+      ~CallbackBusy() { busy.store(false); }
+      std::atomic<bool> &busy;
+    };
+    }  // namespace
 
     void LORAListener::dump_config()
     {
@@ -1764,6 +1777,7 @@ namespace esphome
     void LORAListener::mac_ping_timer_cb_(void *arg)
     {
       auto *self = static_cast<LORAListener *>(arg);
+      const CallbackBusy busy(self->mac_ping_cb_busy_);
       if (!self->mac_ping_active_ || self->mac_ping_frame_len_ == 0)
         return;
 
@@ -1794,7 +1808,11 @@ namespace esphome
       p.copies        = 1;
       p.stride_ms     = 0;
       p.expects_reply = self->mac_ping_want_echo_;
-      if (self->send_aligned_(self->mac_ping_frame_, self->mac_ping_frame_len_, p, self->mac_ping_seal_))
+      // Placed by the timer's own placement (send_placed_from_timer_), never
+      // send_aligned_: that writes last_placed_* and reads the belief, which the
+      // loop owns and place_ctl_ reads right after its own placement (HB2).
+      if (self->send_placed_from_timer_(self->mac_ping_frame_, self->mac_ping_frame_len_, p,
+                                        self->mac_ping_seal_, &self->mac_ping_last_mark_t0_us_))
       {
         self->mac_stats_.pings_offered++;
         self->mac_stats_.last_seq_sent = self->mac_ping_seq_;
@@ -1933,6 +1951,7 @@ namespace esphome
       this->mac_ping_active_ = false;
       if (this->mac_ping_timer_ != nullptr)
         esp_timer_stop(this->mac_ping_timer_);
+      wait_callback_idle_(this->mac_ping_cb_busy_);
       this->cancel_timeout("mac_ping_end");
       this->mac_ping_frame_len_ = 0;
 
@@ -3906,6 +3925,34 @@ namespace esphome
       return true;
     }
 
+    bool LORAListener::send_placed_from_timer_(const uint8_t *buf, size_t len, TxPolicy policy,
+                                               const mac2::FrameSeal &seal,
+                                               int64_t *last_mark_t0_us)
+    {
+      if (!this->grid_aligned_ || !this->parent_->gridStarted())
+        return this->mac0_send_(buf, len, policy, seal);
+      const int64_t now = esp_timer_get_time();
+      int64_t t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now, policy.copies, len,
+                                                       policy.expects_reply);
+      if (t0 <= *last_mark_t0_us)
+        t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_, *last_mark_t0_us + 1,
+                                                 policy.copies, len, policy.expects_reply);
+      policy.earliest_us = loratiming::fireInstantUs(t0, 0);
+      policy.on_mark     = true;   // the node's own mark: a phase sample
+      if (!this->mac0_send_(buf, len, policy, seal))
+        return false;
+      *last_mark_t0_us = t0;
+      return true;
+    }
+
+    void LORAListener::wait_callback_idle_(const std::atomic<bool> &busy)
+    {
+      // The esp_timer task outranks the loop, so a callback that is running
+      // finishes while we yield; this returns at once when none is.
+      while (busy.load())
+        std::this_thread::yield();
+    }
+
     void LORAListener::requestMsgidRelogin_(const char *where)
     {
       // Once per exhaustion: the flag is cleared in send_login(), which is where
@@ -4588,6 +4635,7 @@ namespace esphome
     void LORAListener::drift_timer_cb_(void *arg)
     {
       auto *self = static_cast<LORAListener *>(arg);
+      const CallbackBusy busy(self->drift_cb_busy_);
       if (!self->drift_test_active_ || self->drift_frame_len_ == 0)
         return;
 
@@ -4680,6 +4728,7 @@ namespace esphome
     void LORAListener::mode_test_timer_cb_(void *arg)
     {
       auto *self = static_cast<LORAListener *>(arg);
+      const CallbackBusy busy(self->mt_cb_busy_);
       if (!self->mode_test_active_ || self->mt_frame_len_ == 0)
         return;
 
@@ -4884,6 +4933,9 @@ namespace esphome
       this->cancel_timeout("modetest_stop");
       if (this->mode_test_timer_ != nullptr)
         esp_timer_stop(this->mode_test_timer_);
+      // esp_timer_stop does not wait for a callback already running; one
+      // mid-build would race the STOP frame for mt_frame_ / mt_seq_ (HB2).
+      wait_callback_idle_(this->mt_cb_busy_);
 
       // One last frame with enable=false, so a node that is still running ends
       // now rather than at its own deadline.
@@ -5011,6 +5063,7 @@ namespace esphome
       this->drift_test_active_ = false;
       if (this->drift_timer_ != nullptr)
         esp_timer_stop(this->drift_timer_);
+      wait_callback_idle_(this->drift_cb_busy_);   // before the OFF frame reuses drift_frame_
       this->cancel_timeout("drift_end");
       this->cancel_timeout("drift_grid_arm");
 

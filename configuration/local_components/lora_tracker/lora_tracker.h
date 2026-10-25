@@ -8,6 +8,7 @@
 #include <esp_bt_defs.h> //For esp_bd_addr_t
 
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -527,7 +528,8 @@ namespace esphome
       // a slot the nodes have stopped listening in.
       uint32_t beacon_round_queued_{0xFFFFFFFFu};
       // Which generation is current for each node, so a frame that reaches the
-      // front can tell whether it is still wanted.
+      // front can tell whether it is still wanted. Noted by send() (loop and
+      // esp_timer tasks), read by sendTask: under reservations_mutex_ (HB2).
       txqueue::SupersedeTable supersede_;
       uint32_t tx_superseded_drops_{0};
       uint32_t beacons_sent_{0};
@@ -540,6 +542,11 @@ namespace esphome
       // node's already-encrypted GridSync, never sent in the clear), the beacon
       // build and the shadow-mask sources: the MAC management unit's (S5).
       macmgmt::HubMacManagement mgmt_;
+      // The channel-schedule state below (burst_busy_until_us_,
+      // placed_busy_until_us_, queued_air_end_us_, reservations_, supersede_) is
+      // written by send() on the loop and esp_timer tasks and by sendTask, and
+      // the 64-bit fields tear on the 32-bit core: every access holds
+      // reservations_mutex_ (HB2). Nothing logs or blocks under it.
       // When the hub's own burst stops occupying the channel, including the
       // post-burst response window sendTask holds the radio in.
       int64_t burst_busy_until_us_{0};
@@ -567,6 +574,7 @@ namespace esphome
       std::array<Reservation, kMaxReservations> reservations_{};
       mutable std::mutex reservations_mutex_;
       void reserve_(int64_t start_us, int64_t end_us);
+      void reserve_locked_(int64_t start_us, int64_t end_us);   // caller holds the mutex
       // The instant lora_tx() was called for the last copy, and how many copies
       // missed their stamped instant. See kStampLeadUs.
       int64_t last_fire_us_{0};
@@ -648,7 +656,7 @@ namespace esphome
 
 
       SemaphoreHandle_t radio_mutex_{nullptr};
-      bool lora_tx_busy_{false};
+      std::atomic<bool> lora_tx_busy_{false};   // sendTask writes, loop() reads
       uint8_t buf_[255]; // Maximum Payload size of SX1276/77/78/79 is 255
 
       // rx_buffer_t memory_pool[POOL_SIZE] {};
