@@ -1451,7 +1451,7 @@ TEST(RealTrackerTx, TheBufferOfADroppedFrameGoesBackToThePool) {
 // ---------------------------------------------------------------------------
 // T-2: the buffer pool against the queue it feeds
 //
-// The queue holds RX_QUEUE_SIZE (20) entries, but nothing can ENTER it without
+// The queue holds loratx::kQueueDepth (20) entries, but nothing can ENTER it without
 // a buffer from a pool of POOL_SIZE (5), and a PLACED frame holds its buffer
 // from send() until its mark. So the pool, not the queue, is the real depth —
 // and the scenario that finds out is a fleet-wide push, where each node's frame
@@ -1473,16 +1473,16 @@ TEST(RealTrackerTx, ThePoolIsTheRealQueueDepthNotTheQueueSize) {
     placed.earliest_us = 10'000'000;
 
     size_t accepted = 0;
-    for (int i = 0; i < RX_QUEUE_SIZE; ++i) {
+    for (int i = 0; i < loratx::kQueueDepth; ++i) {
         auto f = tagged((uint8_t) (0xC0 + i));
         if (t.send(f.data(), f.size(), placed)) ++accepted;
     }
 
-    EXPECT_EQ(accepted, (size_t) POOL_SIZE)
-        << "the queue advertises " << RX_QUEUE_SIZE << " slots and cannot use "
+    EXPECT_EQ(accepted, (size_t) loratx::kPoolSize)
+        << "the queue advertises " << loratx::kQueueDepth << " slots and cannot use "
            "them: a frame needs a buffer to enter it, and a placed frame holds "
            "its buffer until its mark";
-    EXPECT_LT(accepted, (size_t) RX_QUEUE_SIZE)
+    EXPECT_LT(accepted, (size_t) loratx::kQueueDepth)
         << "if these are ever equal the sizing has been reconciled and this "
            "test should be re-read rather than re-baselined";
     EXPECT_EQ(lorahal::rec().packets.size(), (size_t) 0)
@@ -1500,7 +1500,7 @@ TEST(RealTrackerTx, AnExhaustedPoolIsReportedRatherThanDroppedSilently) {
     TxPolicy placed;
     placed.copies      = 1;
     placed.earliest_us = 10'000'000;
-    for (int i = 0; i < POOL_SIZE; ++i) {
+    for (int i = 0; i < loratx::kPoolSize; ++i) {
         auto f = tagged((uint8_t) (0xD0 + i));
         ASSERT_TRUE(t.send(f.data(), f.size(), placed)) << "buffer " << i;
     }
@@ -1536,7 +1536,7 @@ TEST(RealTrackerTx, DrainingAPlacedFrameReturnsItsBufferForTheNextOne) {
     TxPolicy placed;
     placed.copies      = 1;
     placed.earliest_us = 1'000'000;
-    for (int i = 0; i < POOL_SIZE; ++i) {
+    for (int i = 0; i < loratx::kPoolSize; ++i) {
         auto f = tagged((uint8_t) (0xE0 + i));
         ASSERT_TRUE(t.send(f.data(), f.size(), placed));
     }
@@ -1706,7 +1706,7 @@ TEST(RealTrackerBeacon, ABeaconDroppedForWantOfABufferIsRetriedNotRecorded) {
     int placed = 0;
     while (placed < 32 && t.send(frame.data(), frame.size(), TxPolicy{/*copies=*/1}))
         ++placed;
-    ASSERT_EQ(placed, POOL_SIZE) << "precondition: the pool is exhausted";
+    ASSERT_EQ(placed, loratx::kPoolSize) << "precondition: the pool is exhausted";
 
     t.serviceBeacon();
     EXPECT_EQ(t.beaconsSent(), 0u) << "dropped, not queued";

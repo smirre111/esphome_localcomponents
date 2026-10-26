@@ -9,11 +9,6 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-#define CONFIG_CS_GPIO 19
-#define CONFIG_RST_GPIO 16
-#define CONFIG_MISO_GPIO 5
-#define CONFIG_MOSI_GPIO 18
-#define CONFIG_SCK_GPIO 17
 
 #include "lora.h"
 
@@ -51,11 +46,11 @@
 
 #undef TAG
 
-static rx_buffer_t memory_pool[POOL_SIZE];
+static tx_buffer_t memory_pool[loratx::kPoolSize];
 static QueueHandle_t free_buffer_queue;
 static QueueHandle_t data_queue;
 static SemaphoreHandle_t pool_mutex;
-static pool_stats_t pool_stats = {0};
+static pool_stats_t pool_stats = {};
 
 namespace esphome
 {
@@ -229,7 +224,7 @@ namespace esphome
       esphome::delay(10);
       // this->sendPacketBytes(txBuf, len);
 
-      // rx_buffer_t *rx_buffer;
+      // tx_buffer_t *rx_buffer;
 
       // ESP_LOGI(TAG, "Data processing task started");
 
@@ -245,10 +240,10 @@ namespace esphome
       //   }
 
       //   // Additional bounds check
-      //   if (rx_buffer->length > BUFFER_SIZE)
+      //   if (rx_buffer->length > loratx::kBufferSize)
       //   {
       //     ESP_LOGE(TAG, "Buffer length %d exceeds max %d",
-      //              rx_buffer->length, BUFFER_SIZE);
+      //              rx_buffer->length, loratx::kBufferSize);
       //     this->return_buffer_to_pool(rx_buffer);
       //     return;
       //   }
@@ -336,7 +331,7 @@ namespace esphome
     // ordering and eligibility are decided here.
     void LORATracker::drainHandoffQueue_()
     {
-      rx_buffer_t *rx_buffer = nullptr;
+      tx_buffer_t *rx_buffer = nullptr;
       while (xQueueReceive(data_queue, &rx_buffer, 0) == pdTRUE)
       {
         // Validate before scheduling. Use continue, NOT return: this runs on
@@ -347,16 +342,16 @@ namespace esphome
           ESP_LOGE(TAG, "Received invalid buffer, skipping");
           continue;
         }
-        if (rx_buffer->length > BUFFER_SIZE)
+        if (rx_buffer->length > loratx::kBufferSize)
         {
           ESP_LOGE(TAG, "Buffer length %u exceeds max %u",
-                   (unsigned) rx_buffer->length, (unsigned) BUFFER_SIZE);
+                   (unsigned) rx_buffer->length, (unsigned) loratx::kBufferSize);
           this->return_buffer_to_pool(rx_buffer);
           continue;
         }
 
         const uint8_t slot = (uint8_t) (rx_buffer - memory_pool);
-        if (slot >= POOL_SIZE)
+        if (slot >= loratx::kPoolSize)
         {
           // Not from the pool. Cannot be scheduled by index and cannot be
           // safely returned either; say so rather than corrupting the queue.
@@ -401,7 +396,7 @@ namespace esphome
       // interval later — which for a tracked command is the round it was placed
       // on.
       int64_t      fire_at_us = 0;
-      rx_buffer_t *rx_buffer  = nullptr;
+      tx_buffer_t *rx_buffer  = nullptr;
       for (;;)
       {
         fire_at_us = 0;
@@ -524,7 +519,7 @@ namespace esphome
                                        : pdMS_TO_TICKS(delta_us / 1000 + 1);
         }
 
-        rx_buffer_t *peeked = nullptr;
+        tx_buffer_t *peeked = nullptr;
         xQueuePeek(data_queue, &peeked, wait_ticks);
       }
     }
@@ -690,7 +685,7 @@ namespace esphome
       // The management plane builds the frame and gathers the shadow inputs
       // (mac_mgmt.h); MAC-0 only places the opaque bytes on the mark.
       macmgmt::BeaconFrame frame;
-      const macmgmt::BeaconBuild built = this->mgmt_.buildBeacon(round, now, BUFFER_SIZE, &frame);
+      const macmgmt::BeaconBuild built = this->mgmt_.buildBeacon(round, now, loratx::kBufferSize, &frame);
       if (built == macmgmt::BeaconBuild::Unsigned)
         return;
       if (built == macmgmt::BeaconBuild::TooBig)
@@ -965,11 +960,11 @@ namespace esphome
       }
 
       // Get a free buffer from pool
-      rx_buffer_t *rx_buffer = this->get_free_buffer(10 / portTICK_PERIOD_MS);
+      tx_buffer_t *rx_buffer = this->get_free_buffer(10 / portTICK_PERIOD_MS);
 
       if (rx_buffer)
       {
-        const size_t copy_len = len;   // <= 255 < BUFFER_SIZE, checked above
+        const size_t copy_len = len;   // <= 255 < loratx::kBufferSize, checked above
         memcpy(rx_buffer->data, data, copy_len);
         rx_buffer->length = copy_len;
 
@@ -1562,8 +1557,8 @@ namespace esphome
     esp_err_t LORATracker::init_memory_pool(void)
     {
       // Create queues - use queue registry for debugging
-      free_buffer_queue = xQueueCreate(POOL_SIZE, sizeof(rx_buffer_t *));
-      data_queue = xQueueCreate(RX_QUEUE_SIZE, sizeof(rx_buffer_t *));
+      free_buffer_queue = xQueueCreate(loratx::kPoolSize, sizeof(tx_buffer_t *));
+      data_queue = xQueueCreate(loratx::kQueueDepth, sizeof(tx_buffer_t *));
 
       if (!free_buffer_queue || !data_queue)
       {
@@ -1583,14 +1578,14 @@ namespace esphome
       }
 
       // Initialize all buffers in pool
-      for (int i = 0; i < POOL_SIZE; i++)
+      for (int i = 0; i < loratx::kPoolSize; i++)
       {
-        memset(&memory_pool[i], 0, sizeof(rx_buffer_t));
-        memory_pool[i].magic = MAGIC_NUMBER;
+        memset(&memory_pool[i], 0, sizeof(tx_buffer_t));
+        memory_pool[i].magic = loratx::kBufferMagic;
         memory_pool[i].in_use = 0;
         memory_pool[i].ref_count = 0;
 
-        rx_buffer_t *buffer = &memory_pool[i];
+        tx_buffer_t *buffer = &memory_pool[i];
         if (xQueueSend(free_buffer_queue, &buffer, 0) != pdTRUE)
         {
           ESP_LOGE(TAG, "Failed to initialize free buffer queue");
@@ -1598,7 +1593,7 @@ namespace esphome
         }
       }
 
-      ESP_LOGI(TAG, "Memory pool initialized with %d buffers", POOL_SIZE);
+      ESP_LOGI(TAG, "Memory pool initialized with %d buffers", loratx::kPoolSize);
       return ESP_OK;
     }
 
@@ -1610,9 +1605,9 @@ namespace esphome
       return pool_stats.allocation_failures;
     }
 
-    rx_buffer_t *LORATracker::get_free_buffer(TickType_t timeout)
+    tx_buffer_t *LORATracker::get_free_buffer(TickType_t timeout)
     {
-      rx_buffer_t *buffer = NULL;
+      tx_buffer_t *buffer = NULL;
 
       if (xQueueReceive(free_buffer_queue, &buffer, timeout) != pdTRUE)
       {
@@ -1644,7 +1639,7 @@ namespace esphome
         buffer->ref_count = 1;
         buffer->length = 0;
         buffer->timestamp = xTaskGetTickCount();
-        memset(buffer->data, 0, BUFFER_SIZE);
+        memset(buffer->data, 0, loratx::kBufferSize);
 
         pool_stats.buffers_allocated++;
 
@@ -1657,7 +1652,7 @@ namespace esphome
     }
 
     // Return a buffer to the free pool (thread-safe)
-    esp_err_t LORATracker::return_buffer_to_pool(rx_buffer_t *buffer)
+    esp_err_t LORATracker::return_buffer_to_pool(tx_buffer_t *buffer)
     {
       if (!this->validate_buffer(buffer))
       {
@@ -1693,7 +1688,7 @@ namespace esphome
         buffer->length = 0;
 
         // Clear sensitive data
-        memset(buffer->data, 0, BUFFER_SIZE);
+        memset(buffer->data, 0, loratx::kBufferSize);
 
         xSemaphoreGive(pool_mutex);
 
@@ -1715,7 +1710,7 @@ namespace esphome
     }
 
     // Increment reference count (for multiple consumers)
-    esp_err_t LORATracker::buffer_ref_inc(rx_buffer_t *buffer)
+    esp_err_t LORATracker::buffer_ref_inc(tx_buffer_t *buffer)
     {
       if (!this->validate_buffer(buffer))
       {
@@ -1740,7 +1735,7 @@ namespace esphome
     }
 
     // Validate buffer belongs to pool and has correct magic number
-    bool LORATracker::validate_buffer(rx_buffer_t *buffer)
+    bool LORATracker::validate_buffer(tx_buffer_t *buffer)
     {
       if (!buffer)
       {
@@ -1749,7 +1744,7 @@ namespace esphome
       }
 
       // Check if pointer is within pool bounds
-      if (buffer < memory_pool || buffer >= &memory_pool[POOL_SIZE])
+      if (buffer < memory_pool || buffer >= &memory_pool[loratx::kPoolSize])
       {
         ESP_LOGE(TAG, "Buffer pointer %p outside pool range", buffer);
         pool_stats.invalid_buffer_errors++;
@@ -1757,7 +1752,7 @@ namespace esphome
       }
 
       // Check magic number
-      if (buffer->magic != MAGIC_NUMBER)
+      if (buffer->magic != loratx::kBufferMagic)
       {
         ESP_LOGE(TAG, "Buffer %p has invalid magic: 0x%08lX", buffer, buffer->magic);
         pool_stats.invalid_buffer_errors++;

@@ -186,12 +186,11 @@ namespace esphome
         {
           // No time component configured — fall back to a fixed delay for radio
           // initialisation + per-node stagger (no sleep-window check possible).
-          static constexpr uint32_t LOGIN_STAGGER_MS = 3000;
           // Slot, not address — see the note in schedule_startup_login_().
           // This duplicate was missed when the address-based stagger was first
           // fixed; a second copy of a formula is a second chance to be wrong.
-          uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * LOGIN_STAGGER_MS;
-          uint32_t total_ms   = 5000 + stagger_ms;
+          uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * sleepmodel::kLoginStaggerMs;
+          uint32_t total_ms   = sleepmodel::kBootMarginMs + stagger_ms;
           ESP_LOGW(TAG, "[%s] No time component — login in %u s (5 s radio-init + %u s stagger, no sleep-window check)",
                    this->get_name().c_str(), total_ms / 1000, stagger_ms / 1000);
           this->startup_login_initiated_ = true;
@@ -837,25 +836,23 @@ namespace esphome
     }
 
     // Schedule a login challenge slightly after the node is expected to wake up.
-    // NODE_BOOT_MARGIN_MS gives the node time to complete its boot sequence and
+    // sleepmodel::kBootMarginMs gives the node time to complete its boot sequence and
     // send REGISTER, which cancels this timer (REGISTER-path is the primary path).
     // This timer is only the fallback for lost REGISTER packets.
-    // LOGIN_STAGGER_MS per SLOT prevents simultaneous login transmissions when
+    // sleepmodel::kLoginStaggerMs per SLOT prevents simultaneous login transmissions when
     // multiple nodes wake from sleep at roughly the same time. Slot, not
     // address — this is the site that produced the "51 s stagger" and
     // "54 s stagger" seen in the hub log for addresses 17 and 18.
     void LORAListener::arm_post_sleep_login_fallback_()
     {
-      static constexpr uint32_t NODE_BOOT_MARGIN_MS = 5000;
-      static constexpr uint32_t LOGIN_STAGGER_MS    = 3000;
-      uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * LOGIN_STAGGER_MS;
+      uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * sleepmodel::kLoginStaggerMs;
       uint32_t wake_ms = static_cast<uint32_t>(
           std::min<uint64_t>(this->sleep_duration_ * 1000ULL,
                              static_cast<uint64_t>(0xFFFFFFFFu)));
-      uint32_t total_ms = wake_ms + NODE_BOOT_MARGIN_MS + stagger_ms;
+      uint32_t total_ms = wake_ms + sleepmodel::kBootMarginMs + stagger_ms;
       ESP_LOGI(TAG, "[%s] Sleep acknowledged — login fallback timer in %u s (%u s sleep + %u s boot margin + %u s stagger)",
                this->get_name().c_str(), total_ms / 1000,
-               wake_ms / 1000, NODE_BOOT_MARGIN_MS / 1000, stagger_ms / 1000);
+               wake_ms / 1000, sleepmodel::kBootMarginMs / 1000, stagger_ms / 1000);
       this->fallback_rechecked_ = false;
       this->set_timeout("login_startup", total_ms, [this]() { this->post_sleep_fallback_fire_(); });
     }

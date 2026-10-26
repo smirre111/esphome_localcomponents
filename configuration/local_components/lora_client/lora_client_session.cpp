@@ -17,7 +17,7 @@ namespace esphome
       this->cancel_timeout("login_startup");
       this->cancel_timeout("login_retry");
 
-      // Per-node stagger: SLOT × LOGIN_STAGGER_MS, slot being this node's
+      // Per-node stagger: SLOT × sleepmodel::kLoginStaggerMs, slot being this node's
       // index in declaration order (see login_slot_).
       //
       // Prevents simultaneous login transmissions when all nodes happen to be
@@ -28,29 +28,27 @@ namespace esphome
       // SEPARATION but an absurd absolute OFFSET: addresses 17 and 18 meant
       // 51 s and 54 s of silence after every hub restart, delaying recovery
       // for both nodes by nearly a minute.
-      static constexpr uint32_t LOGIN_STAGGER_MS  = 3000;
-      static constexpr uint32_t NODE_BOOT_MARGIN_MS = 5000;
-      uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * LOGIN_STAGGER_MS;
+      uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * sleepmodel::kLoginStaggerMs;
 
       uint32_t delay_ms = this->ms_until_node_awake_();
       if (delay_ms == 0)
       {
         // Node is in its wake window — wait 5 s for radio init + per-node stagger.
-        uint32_t total_ms = 5000 + stagger_ms;
+        uint32_t total_ms = sleepmodel::kBootMarginMs + stagger_ms;
         ESP_LOGI(TAG, "[%s] Node awake — login challenge in %u s (5 s radio-init + %u s stagger)",
                  this->get_name().c_str(), total_ms / 1000, stagger_ms / 1000);
         this->set_timeout("login_startup", total_ms, [this]() { this->do_login_and_arm_retry_(); });
       }
       else
       {
-        // Add NODE_BOOT_MARGIN_MS beyond the calculated wake time so that REGISTER
+        // Add sleepmodel::kBootMarginMs beyond the calculated wake time so that REGISTER
         // (sent by the node ~1-3 s after deep-sleep wake-up) almost always arrives
         // before this timer fires and cancels it.  The startup timer is then purely
         // a fallback for lost REGISTER packets.
-        uint32_t total_ms = delay_ms + NODE_BOOT_MARGIN_MS + stagger_ms;
+        uint32_t total_ms = delay_ms + sleepmodel::kBootMarginMs + stagger_ms;
         ESP_LOGI(TAG, "[%s] Node asleep — login deferred %u s (%u s sleep + %u s boot margin + %u s stagger)",
                  this->get_name().c_str(), total_ms / 1000,
-                 delay_ms / 1000, NODE_BOOT_MARGIN_MS / 1000, stagger_ms / 1000);
+                 delay_ms / 1000, sleepmodel::kBootMarginMs / 1000, stagger_ms / 1000);
         this->set_timeout("login_startup", total_ms,
                           [this]() { this->do_login_and_arm_retry_(); });
       }

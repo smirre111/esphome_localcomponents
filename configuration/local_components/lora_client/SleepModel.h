@@ -42,8 +42,8 @@
 namespace sleepmodel
 {
 
-constexpr uint32_t kBootMarginMs   = 5000;   // = NODE_BOOT_MARGIN_MS of the login fallback
-constexpr uint32_t kLoginStaggerMs = 3000;   // = LOGIN_STAGGER_MS per YAML slot
+constexpr uint32_t kBootMarginMs   = 5000;   // node boot time; also the startup / post-sleep login delay
+constexpr uint32_t kLoginStaggerMs = 3000;   // login stagger per YAML slot (the one definition)
 
 constexpr uint32_t marginMs(uint8_t login_slot)
 {

@@ -32,24 +32,18 @@
 // S5: the MAC management unit (fleet key, beacon build, shadow inputs).
 #include "mac_mgmt.h"
 
-// Configuration
-#define POOL_SIZE 5
-#define BUFFER_SIZE 256
-#define UART_NUM UART_NUM_1
-#define RX_QUEUE_SIZE 20
-#define MAGIC_NUMBER 0xDEADBEEF
-
-// // Memory pool structure
-// typedef struct
-// {
-//   uint8_t data[BUFFER_SIZE];
-//   size_t length;
-//   uint32_t timestamp;
-// } rx_buffer_t;
+// The transmit buffer pool (review HB25: constants, not global macros).
+namespace loratx
+{
+static constexpr int      kPoolSize    = 5;            // buffers in the TX pool
+static constexpr size_t   kBufferSize  = 256;          // one LoRa frame (<= 255 B) fits
+static constexpr int      kQueueDepth  = 20;           // TX handoff queue entries
+static constexpr uint32_t kBufferMagic = 0xDEADBEEF;   // a pool buffer's integrity mark
+}  // namespace loratx
 // Memory pool structure with safety features
 typedef struct
 {
-  uint8_t data[BUFFER_SIZE];
+  uint8_t data[loratx::kBufferSize];
   size_t length;
   uint32_t timestamp;
   uint32_t magic;    // Magic number for validation
@@ -74,7 +68,7 @@ typedef struct
   mac::CopySealer tx_sealer;
   uint64_t        tx_seal_binding;
   uint8_t         tx_fire_stamp;  // TxPolicy::fire_stamp
-} rx_buffer_t;
+} tx_buffer_t;
 
 // Statistics
 typedef struct
@@ -286,8 +280,8 @@ namespace esphome
 
       // T-2: frames refused because the buffer pool was empty.
       //
-      // The pool (POOL_SIZE = 5) is the real depth of a queue that advertises
-      // RX_QUEUE_SIZE (20), because nothing enters the queue without a buffer
+      // The pool (loratx::kPoolSize = 5) is the real depth of a queue that advertises
+      // loratx::kQueueDepth (20), because nothing enters the queue without a buffer
       // and a PLACED frame holds its buffer from send() until its mark. A
       // fleet-wide push places one frame per node and all 32 marks fall inside
       // one round, so the sixth send onwards is refused.
@@ -565,12 +559,12 @@ namespace esphome
       void drainTxAnomalyReport_();
       // The send task's per-copy pack buffer (a frame is at most 255 B; the
       // STAMP extension is inserted per copy).
-      uint8_t copy_buf_[BUFFER_SIZE + 16]{};
+      uint8_t copy_buf_[loratx::kBufferSize + 16]{};
       // Whether the frame sendTask last sent is answered (see postTxHoldMs).
       bool last_tx_expects_reply_{true};
       // Every span the channel is spoken for: frames placed and not yet sent, and
       // the burst on the air. Written from send() (loop and esp_timer tasks) and
-      // sendTask, hence the mutex. Eight covers the pool (POOL_SIZE) plus the
+      // sendTask, hence the mutex. Eight covers the pool (loratx::kPoolSize) plus the
       // burst on air; a full table evicts the span that ends first.
       struct Reservation
       {
@@ -638,10 +632,10 @@ namespace esphome
       int64_t burstEndUs_(int64_t start_us, int copies, uint32_t stride_ms,
                           size_t len, bool expects_reply = true) const;
 
-      rx_buffer_t *get_free_buffer(TickType_t timeout);
-      esp_err_t return_buffer_to_pool(rx_buffer_t *buffer);
-      esp_err_t buffer_ref_inc(rx_buffer_t *buffer);
-      bool validate_buffer(rx_buffer_t *buffer);
+      tx_buffer_t *get_free_buffer(TickType_t timeout);
+      esp_err_t return_buffer_to_pool(tx_buffer_t *buffer);
+      esp_err_t buffer_ref_inc(tx_buffer_t *buffer);
+      bool validate_buffer(tx_buffer_t *buffer);
 
       // Group 1: Large objects (12+ bytes) - vectors and callback manager
       std::vector<LORAClient *> clients_;
