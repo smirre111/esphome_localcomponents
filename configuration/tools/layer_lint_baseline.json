@@ -14,7 +14,7 @@
   "client.telemetry_completes_delivery": 0,
   "psa_include_outside_mac2": 1,
   "tracker.app_cmd_cases": 0,
-  "tracker.client_iteration": 4,
+  "tracker.client_iteration": 3,
   "tracker.psa_calls": 9,
   "tracker.seal_upcalls": 0,
   "tracker_h.includes_app": 0

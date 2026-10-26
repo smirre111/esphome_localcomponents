@@ -298,6 +298,8 @@ namespace esphome
 
       void set_parent(LORATracker *parent) { parent_ = parent; }
       void set_short_address(uint8_t address) { this->short_address_ = address; }
+      // The address MAC-0 routes this node's uplinks by (UplinkDemux.h).
+      uint8_t short_address() const { return static_cast<uint8_t>(this->short_address_); }
       void set_subnet_address(uint8_t address) { this->subnet_address_ = address; }
       // Seconds, 60..604800 (the YAML schema's range = the node's clamp).
       void set_sleep_duration(uint32_t sleep_duration) { this->sleep_duration_ = sleep_duration; }

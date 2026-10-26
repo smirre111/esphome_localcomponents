@@ -232,6 +232,8 @@ add_header_test(single_shot_ack_wait_test)
 add_header_test(delivery_policy_test)
 add_header_test(mode_b_supervisor_test)
 add_header_test(sleep_model_test)
+add_header_test(uplink_demux_test)
+target_include_directories(uplink_demux_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shims)   # esphome/components/lora_client/MacWire.h
 
 # ----------------------------------------------------------------------------
 # Phase 3: compile the REAL production lora_client.cpp against host shims.

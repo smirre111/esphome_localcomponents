@@ -3,6 +3,7 @@
 #include <algorithm>
 #include "lora_tracker.h"
 #include "esphome/components/lora_client/lora_client.h"   // MAC-0 -> listener calls (fan-out, shadow gather)
+#include "esphome/components/lora_client/UplinkDemux.h"
 #include "esphome/core/application.h"
 #include "esphome/core/defines.h"
 #include "esphome/core/hal.h"
@@ -313,11 +314,16 @@ namespace esphome
         ESP_LOGD(TAG, "Received packet: %d B, RSSI %d, SNR %.2f, estimated strength %.2f dBm",
                  rxLen, (int) this->last_packet_rssi_, this->last_packet_snr_, packetStrength);
 
-        // ESP_LOGI(TAG, "%s byte packet received:[%.*s]", rxLen, rxLen, buf_);
-        for (int i = 0; i < this->clients_.size(); i++)
-        {
-          clients_[i]->set_response(buf_, rxLen);
-        }
+        // MAC-0 demultiplexes by SRC once (UplinkDemux.h, review HB23): the
+        // frame reaches only the listener it came from (a REGISTER, matched on
+        // the MAC in its body, reaches all of them), not every listener's full
+        // decode.
+        const size_t routed = uplinkdemux::dispatch(
+            buf_, (size_t) rxLen, this->clients_,
+            [](const LORAClient *c) { return c->short_address(); },
+            [this, rxLen](LORAClient *c) { c->set_response(buf_, rxLen); });
+        if (routed == 0)
+          this->rx_unrouted_++;
       }
     }
 
