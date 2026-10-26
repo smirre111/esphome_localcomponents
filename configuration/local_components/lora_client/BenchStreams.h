@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 #include <esp_timer.h>
 
@@ -54,6 +55,11 @@ namespace esphome
                                           const mac1::FcntReservation &r) = 0;
       // Drop a block under the lock that guards the reservations.
       virtual void stream_invalidate_fcnts(mac1::FcntReservation *r) = 0;
+      // The grid, for placing a mark on this node's slot (any task).
+      virtual bool stream_grid_started() const = 0;
+      virtual int64_t stream_next_t0(int64_t now_us) const = 0;
+      virtual int64_t stream_next_clear_t0(int64_t now_us, int copies, size_t len,
+                                           bool expects_reply) const = 0;
       // Hand one frame to MAC-0 as it is (any task).
       virtual bool stream_send(const uint8_t *buf, size_t len, const TxPolicy &policy,
                                const mac2::FrameSeal &seal) = 0;
@@ -133,6 +139,69 @@ namespace esphome
     // False when the block is spent or dropped, or the keys moved under the seal.
     bool pack_stream_frame(StreamHost &host, hubframes::Down *op, mac1::FcntReservation *block,
                            DeliveryFrame *f);
+
+    // ModeTest: the on-hardware validation mode. Every mark carries the full
+    // request; in Mode B / sweep the marks are placed on the node's own mark.
+    class ModeTestStream
+    {
+    public:
+      explicit ModeTestStream(StreamHost &host) : host_(host) {}
+      ~ModeTestStream();
+      ModeTestStream(const ModeTestStream &) = delete;
+      ModeTestStream &operator=(const ModeTestStream &) = delete;
+
+      void start(uint32_t duration_s, uint32_t grid_ms, uint32_t mode, uint32_t copies,
+                 bool keep_power_profile, bool enable_counter, bool enable_crypto,
+                 bool mac_echo, int32_t arm_offset_us);
+      void stop();
+      // send_stop = false is the supervisor's quiet abort.
+      void stop_(bool send_stop);
+      // One enable=false frame for a node that may still be running a test.
+      void send_stop_frame();
+      bool active() const { return this->active_; }
+      uint32_t marks_sent() const { return this->seq_; }
+      // The running test's request, as the node is told it on every mark.
+      uint32_t duration_s() const { return this->duration_s_; }
+      uint32_t grid_ms() const { return this->grid_ms_; }
+      uint32_t mode() const { return this->mode_; }
+      uint32_t copies() const { return this->copies_; }
+      bool keep_power_profile() const { return this->keep_power_profile_; }
+      bool enable_counter() const { return this->enable_counter_; }
+      bool mac_echo() const { return this->mac_echo_; }
+      mac1::FcntReservation *fcnts() { return &this->fcnts_; }
+      void tick_for_test() { timer_cb_(this); }
+      std::vector<uint8_t> frame_for_test() const
+      {
+        return std::vector<uint8_t>(this->frame_, this->frame_ + this->frame_len_);
+      }
+
+    private:
+      void build_frame_(bool enable, mac1::FcntReservation *block = nullptr);
+      static void timer_cb_(void *arg);
+
+      StreamHost &host_;
+      std::atomic<bool> active_{false};    // loop writes, timer reads
+      std::atomic<bool> cb_busy_{false};   // timer_cb_ running; a stop waits for it
+      uint32_t duration_s_{0};
+      uint32_t grid_ms_{0};
+      uint32_t mode_{0};
+      uint32_t copies_{1};
+      bool     keep_power_profile_{true};
+      bool     enable_counter_{false};
+      bool     enable_crypto_{false};
+      bool     mac_echo_{false};
+      int32_t  arm_offset_us_{0};
+      uint32_t seq_{0};
+      // The last grid mark a Mode B mark was aimed at (owned by the esp_timer
+      // task; the loop's last_placed_* are the listener's).
+      int64_t  last_mark_t0_us_{0};
+      esp_timer_handle_t timer_{nullptr};
+      // The run's mark FCNTs, reserved on the loop; guarded by the host's lock.
+      mac1::FcntReservation fcnts_{};
+      uint8_t  frame_[160]{};
+      size_t   frame_len_{0};
+      mac2::FrameSeal seal_{};
+    };
 
     // The drift test: a hardware-timed ruler, one frame per esp_timer tick.
     class DriftStream

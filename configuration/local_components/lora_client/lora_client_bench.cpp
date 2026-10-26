@@ -350,7 +350,7 @@ namespace esphome
       const uint32_t expected = (rep->seqlast >= rep->seqfirst)
                               ? (rep->seqlast - rep->seqfirst + 1) : 0;
 
-      // `expected` is the denominator, not this->mt_seq_. The hub's own count
+      // `expected` is the denominator, not mode_test_.marks_sent(). The hub's own count
       // includes marks it queued before the node started listening and after it
       // stopped; dividing by that would report the node's late arrival as
       // packet loss. Over the window the node actually observed, first..last is
@@ -494,7 +494,7 @@ namespace esphome
     {
       std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
       this->mac_ping_.fcnts()->invalidate();
-      this->mt_fcnts_.invalidate();
+      this->mode_test_.fcnts()->invalidate();
       this->drift_.fcnts()->invalidate();
     }
 
@@ -553,6 +553,20 @@ namespace esphome
 
     // ---- StreamHost --------------------------------------------------------
     const char *LORAListener::stream_name() const { return this->get_name().c_str(); }
+    bool LORAListener::stream_grid_started() const
+    {
+      return this->parent_ != nullptr && this->parent_->gridStarted();
+    }
+    int64_t LORAListener::stream_next_t0(int64_t now_us) const
+    {
+      return this->parent_->nextT0ForSlotUs(this->grid_slot_, now_us);
+    }
+    int64_t LORAListener::stream_next_clear_t0(int64_t now_us, int copies, size_t len,
+                                               bool expects_reply) const
+    {
+      return this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now_us, copies, len,
+                                                 expects_reply);
+    }
     bool LORAListener::stream_has_radio() const { return this->parent_ != nullptr; }
     bool LORAListener::stream_frame_fresh(hubframes::Down *op, DeliveryFrame *out)
     {
@@ -674,31 +688,31 @@ namespace esphome
     // when the test starts — a ~29 ms window every 500 ms — so it will miss
     // most of them. A frame that only said "tick" would leave a node that
     // missed the first one waiting for a repeat that never comes.
-    void LORAListener::build_mode_test_frame_(bool enable, mac1::FcntReservation *block)
+    void ModeTestStream::build_frame_(bool enable, mac1::FcntReservation *block)
     {
       hubframes::Down op_message {};
 
       ModeTest mt = MODE_TEST__INIT;
       mt.enable           = enable;
-      mt.durations        = this->mt_duration_s_;
-      mt.mode             = (ModeTest__Mode) this->mt_mode_;
-      mt.gridperiodms     = this->mt_grid_ms_;
-      mt.copies           = this->mt_copies_;
+      mt.durations        = this->duration_s_;
+      mt.mode             = (ModeTest__Mode) this->mode_;
+      mt.gridperiodms     = this->grid_ms_;
+      mt.copies           = this->copies_;
       // The hub's own knob keeps the human polarity — "keep the profile" is
       // what the button and the YAML argument mean — and the wire carries the
       // inverse, because proto3's zero has to be the safe answer. See the
       // reserved field 7 in blinds.proto.
-      mt.droppowerprofile = !this->mt_keep_power_profile_;
-      mt.enablecounter    = this->mt_enable_counter_;
-      mt.enablecrypto     = this->mt_enable_crypto_;
-      mt.macecho          = this->mt_mac_echo_;
-      mt.armoffsetus      = this->mt_arm_offset_us_;
+      mt.droppowerprofile = !this->keep_power_profile_;
+      mt.enablecounter    = this->enable_counter_;
+      mt.enablecrypto     = this->enable_crypto_;
+      mt.macecho          = this->mac_echo_;
+      mt.armoffsetus      = this->arm_offset_us_;
       // The ruler mark, separate from msgid. msgid is also the CTR counter-block input
       // and the replay-filter key, so the test must be able to retransmit
       // without touching either; seq is free to be a plain monotonic index, and
       // a frame lost to the air leaves a GAP in it rather than shifting every
       // later sample.
-      mt.seq              = this->mt_seq_++;
+      mt.seq              = this->seq_++;
 
       op_message.cmd_case = hubframes::DL_MODETEST;
       op_message.modetest = &mt;
@@ -708,38 +722,38 @@ namespace esphome
       // exists, and exempting this one would let an unauthenticated frame pin a
       // node in a test mode. The node refuses to ARM without a session anyway
       // (ModeTestPolicy::armRefusal), so this is the second of two locks.
-      MacFrame f;
-      if (this->pack_test_frame_(&op_message, block, &f))
+      DeliveryFrame f;
+      if (pack_stream_frame(this->host_, &op_message, block, &f))
       {
-        if (f.bytes.size() <= sizeof(this->mt_frame_))
+        if (f.bytes.size() <= sizeof(this->frame_))
         {
-          memcpy(this->mt_frame_, f.bytes.data(), f.bytes.size());
-          this->mt_frame_len_ = f.bytes.size();
-          this->mt_seal_      = f.seal;
+          memcpy(this->frame_, f.bytes.data(), f.bytes.size());
+          this->frame_len_ = f.bytes.size();
+          this->seal_      = f.seal;
         }
         else
         {
           ESP_LOGE(TAG, "[%s] ModeTest frame too large (%u B)",
-                   this->get_name().c_str(), (unsigned) f.bytes.size());
-          this->mt_frame_len_ = 0;
+                   this->host_.stream_name(), (unsigned) f.bytes.size());
+          this->frame_len_ = 0;
         }
       }
       else
       {
-        this->mt_frame_len_ = 0;
+        this->frame_len_ = 0;
       }
     }
 
-    void LORAListener::mode_test_timer_cb_(void *arg)
+    void ModeTestStream::timer_cb_(void *arg)
     {
-      auto *self = static_cast<LORAListener *>(arg);
-      const CallbackBusy busy(self->mt_cb_busy_);
-      if (!self->mode_test_active_ || self->mt_frame_len_ == 0)
+      auto *self = static_cast<ModeTestStream *>(arg);
+      const CallbackBusy busy(self->cb_busy_);
+      if (!self->active_ || self->frame_len_ == 0)
         return;
 
       // The normal transmit queue, with a per-frame copy count. Never
-      // sendPacketOnce() from here — see the banner on build_mode_test_frame_.
-      TxPolicy p{/*copies=*/(int) self->mt_copies_, /*stride_ms=*/0};
+      // sendPacketOnce() from here — see the banner on build_frame_.
+      TxPolicy p{/*copies=*/(int) self->copies_, /*stride_ms=*/0};
       // Nobody answers a mark: no response window held or reserved after it.
       p.expects_reply = false;
 
@@ -777,14 +791,14 @@ namespace esphome
       // slot T0, so ticks collapse onto ~one mark per round — which is what a
       // sweep needs. The period itself can stay incommensurate; it is the
       // PLACEMENT, not the period, that was missing.
-      if ((self->mt_mode_ == 2 || self->mt_mode_ == 4) && self->parent_->gridStarted())
+      if ((self->mode_ == 2 || self->mode_ == 4) && self->host_.stream_grid_started())
       {
         const int64_t now = esp_timer_get_time();
         // Kept for the log line below: mt_last_mark_t0_us_ is overwritten before
         // it runs, so the spacing between consecutive marks — the one number
         // that tells a placed run (~1500 ms) from an unplaced one (~1093 ms) —
         // would otherwise be gone by the time it is printed.
-        const int64_t prev_mark = self->mt_last_mark_t0_us_;
+        const int64_t prev_mark = self->last_mark_t0_us_;
         // By interval: a mark before a queued beacon is clear (2026-09-15).
         // HOLD a tick whose mark is already queued a whole round beyond the
         // grid's next mark. MEASURED 2026-10-18 (S0-S7 checkpoint): another
@@ -796,56 +810,54 @@ namespace esphome
         // were dropped and each dropped mark was a seq gap at the node. The
         // built frame is kept, so the next tick sends it: no seq gap.
         const int64_t round_us = (int64_t) timedgrid::kRoundUs;
-        const int64_t grid_t0  = self->parent_->nextT0ForSlotUs(self->grid_slot_, now);
-        if (self->mt_last_mark_t0_us_ >= grid_t0 + round_us)
+        const int64_t grid_t0  = self->host_.stream_next_t0(now);
+        if (self->last_mark_t0_us_ >= grid_t0 + round_us)
         {
           ESP_LOGI(TAG, "[%s] mark: mode %u held (last mark t0=%lld is a round ahead)",
-                   self->get_name().c_str(), (unsigned) self->mt_mode_,
-                   (long long) self->mt_last_mark_t0_us_);
+                   self->host_.stream_name(), (unsigned) self->mode_,
+                   (long long) self->last_mark_t0_us_);
           return;
         }
-        const int copies = (int) self->mt_copies_;
-        const size_t len = self->mt_frame_len_;
-        int64_t t0 = self->parent_->nextClearT0ForSlotUs(self->grid_slot_, now, copies,
-                                                         len, false);
-        if (t0 <= self->mt_last_mark_t0_us_)
-          t0 = self->parent_->nextClearT0ForSlotUs(self->grid_slot_,
-                                                   self->mt_last_mark_t0_us_ + 1,
-                                                   copies, len, false);
+        const int copies = (int) self->copies_;
+        const size_t len = self->frame_len_;
+        int64_t t0 = self->host_.stream_next_clear_t0(now, copies, len, false);
+        if (t0 <= self->last_mark_t0_us_)
+          t0 = self->host_.stream_next_clear_t0(self->last_mark_t0_us_ + 1, copies, len,
+                                              false);
         if (t0 > 0)
         {
           p.earliest_us = loratiming::fireInstantUs(t0, 0);
           p.on_mark     = true;   // the node's own mark: its phase sample
-          self->mt_last_mark_t0_us_ = t0;
+          self->last_mark_t0_us_ = t0;
         }
         // Placement is invisible from the hub otherwise: this path logs nothing,
         // and a sweep that reports a 1093 ms mark period cannot be told from a
         // placed one without it. Three separate theories were argued from
         // inference on 2026-09-19 before this line existed.
         ESP_LOGI(TAG, "[%s] mark: mode %u placed=%d t0=%lld dt=%lld ms",
-                 self->get_name().c_str(), (unsigned) self->mt_mode_,
+                 self->host_.stream_name(), (unsigned) self->mode_,
                  (int) (t0 > 0), (long long) t0,
                  (long long) ((t0 - prev_mark) / 1000));
       }
       else
       {
         ESP_LOGI(TAG, "[%s] mark: mode %u UNPLACED (gridStarted=%d)",
-                 self->get_name().c_str(), (unsigned) self->mt_mode_,
-                 (int) self->parent_->gridStarted());
+                 self->host_.stream_name(), (unsigned) self->mode_,
+                 (int) self->host_.stream_grid_started());
       }
-      self->mac0_send_(self->mt_frame_, self->mt_frame_len_, p, self->mt_seal_);
+      self->host_.stream_send(self->frame_, self->frame_len_, p, self->seal_);
 
       // Build the next one now, in the idle part of the period.
-      self->build_mode_test_frame_(true, &self->mt_fcnts_);
+      self->build_frame_(true, &self->fcnts_);
     }
 
-    void LORAListener::start_mode_test(uint32_t duration_s, uint32_t grid_ms,
+    void ModeTestStream::start(uint32_t duration_s, uint32_t grid_ms,
                                        uint32_t mode, uint32_t copies,
                                        bool keep_power_profile,
                                        bool enable_counter, bool enable_crypto,
                                        bool mac_echo, int32_t arm_offset_us)
     {
-      if (this->parent_ == nullptr)
+      if (!this->host_.stream_has_radio())
         return;
 
       if (grid_ms < 200)
@@ -853,24 +865,22 @@ namespace esphome
       if (copies < 1)  copies = 1;
       if (copies > 17) copies = 17;
 
-      this->mode_test_active_      = true;
-      this->mbs_owns_test_         = this->mbs_starting_;
-      this->mt_duration_s_         = duration_s;
-      this->mt_grid_ms_            = grid_ms;
-      this->mt_mode_               = mode;
-      this->mt_copies_             = copies;
-      this->mt_keep_power_profile_ = keep_power_profile;
-      this->mt_enable_counter_     = enable_counter;
-      this->mt_enable_crypto_      = enable_crypto;
-      this->mt_mac_echo_           = mac_echo;
-      this->mt_arm_offset_us_      = arm_offset_us;
-      this->mt_seq_                = 0;
-      this->mt_last_mark_t0_us_    = 0;
-      this->last_mode_test_report_.clear();
+      this->active_      = true;
+      this->duration_s_         = duration_s;
+      this->grid_ms_            = grid_ms;
+      this->mode_               = mode;
+      this->copies_             = copies;
+      this->keep_power_profile_ = keep_power_profile;
+      this->enable_counter_     = enable_counter;
+      this->enable_crypto_      = enable_crypto;
+      this->mac_echo_           = mac_echo;
+      this->arm_offset_us_      = arm_offset_us;
+      this->seq_                = 0;
+      this->last_mark_t0_us_    = 0;
 
       ESP_LOGI(TAG, "[%s] ModeTest START: %u s, mode %u, grid %u ms, %u copies, "
                     "counter %d crypto %d echo %d production-profile %d",
-               this->get_name().c_str(), (unsigned) duration_s, (unsigned) mode,
+               this->host_.stream_name(), (unsigned) duration_s, (unsigned) mode,
                (unsigned) grid_ms, (unsigned) copies, (int) enable_counter,
                (int) enable_crypto, (int) mac_echo, (int) keep_power_profile);
 
@@ -879,32 +889,32 @@ namespace esphome
       // every 500 ms, a 5.9 % duty cycle — so a single-copy START has roughly a
       // 6 % chance of being heard. The drift test learned this the hard way:
       // the node received nothing at all for eight minutes.
-      this->build_mode_test_frame_(true);
-      if (this->mt_frame_len_ > 0)
-        this->mac0_send_(this->mt_frame_, this->mt_frame_len_, TxPolicy{}, this->mt_seal_);
+      this->build_frame_(true);
+      if (this->frame_len_ > 0)
+        this->host_.stream_send(this->frame_, this->frame_len_, TxPolicy{}, this->seal_);
       // Every mark's FCNT, reserved here on the loop (HB1): the marks are built
       // on the esp_timer task, which must not touch the Sequencer. The hub stops
       // the run 5 s after duration_s; +4 covers the first mark and rounding.
-      this->reserve_fcnt_block_(((duration_s + 5) * 1000) / grid_ms + 4, &this->mt_fcnts_);
+      this->host_.stream_reserve_fcnts(((duration_s + 5) * 1000) / grid_ms + 4, &this->fcnts_);
 
-      if (this->mode_test_timer_ == nullptr)
+      if (this->timer_ == nullptr)
       {
         const esp_timer_create_args_t args = {
-            .callback = &LORAListener::mode_test_timer_cb_,
+            .callback = &ModeTestStream::timer_cb_,
             .arg      = this,
             .dispatch_method = ESP_TIMER_TASK,
             .name     = "modetestgrid",
             .skip_unhandled_events = true,
         };
-        if (esp_timer_create(&args, &this->mode_test_timer_) != ESP_OK)
+        if (esp_timer_create(&args, &this->timer_) != ESP_OK)
         {
-          ESP_LOGE(TAG, "[%s] ModeTest: timer create failed — no marks", this->get_name().c_str());
-          this->mode_test_timer_ = nullptr;
-          this->mode_test_active_ = false;
+          ESP_LOGE(TAG, "[%s] ModeTest: timer create failed — no marks", this->host_.stream_name());
+          this->timer_ = nullptr;
+          this->active_ = false;
           return;
         }
       }
-      esp_timer_stop(this->mode_test_timer_);
+      esp_timer_stop(this->timer_);
 
       // Let the bursted START land before the grid begins. One burst round is
       // 1.5 s; 3 s is comfortable margin.
@@ -913,52 +923,73 @@ namespace esphome
       // early mark and computes how much of the run is left from it
       // (modetest::kHubFirstMarkDelayMs in ModeTestPolicy.h). Change both or
       // neither.
-      this->set_timeout("modetest_grid_arm", 3000, [this, grid_ms]() {
-        if (!this->mode_test_active_)
+      this->host_.stream_set_timeout("modetest_grid_arm", 3000, [this, grid_ms]() {
+        if (!this->active_)
           return;
-        this->build_mode_test_frame_(true, &this->mt_fcnts_);
-        esp_timer_start_periodic(this->mode_test_timer_,
+        this->build_frame_(true, &this->fcnts_);
+        esp_timer_start_periodic(this->timer_,
                                  (uint64_t) grid_ms * 1000);
       });
 
       // The hub stops itself too. The node owns its own deadline and will end
       // the test regardless, but a hub that kept transmitting into a node that
       // had already stopped would look like a link failure in the next test.
-      this->set_timeout("modetest_stop", (duration_s + 5) * 1000,
-                        [this]() { this->stop_mode_test(); });
+      this->host_.stream_set_timeout("modetest_stop", (duration_s + 5) * 1000,
+                        [this]() { this->stop(); });
     }
 
-    void LORAListener::stop_mode_test()
+    void ModeTestStream::stop()
     {
-      this->stop_mode_test_(true);
+      this->stop_(true);
     }
 
     // send_stop = false is the supervisor's quiet abort (see mbs_abort_warmup_).
-    void LORAListener::stop_mode_test_(bool send_stop)
+    void ModeTestStream::stop_(bool send_stop)
     {
-      if (!this->mode_test_active_)
+      if (!this->active_)
         return;
-      this->mode_test_active_ = false;
+      this->active_ = false;
 
-      this->cancel_timeout("modetest_grid_arm");
-      this->cancel_timeout("modetest_stop");
-      if (this->mode_test_timer_ != nullptr)
-        esp_timer_stop(this->mode_test_timer_);
+      this->host_.stream_cancel_timeout("modetest_grid_arm");
+      this->host_.stream_cancel_timeout("modetest_stop");
+      if (this->timer_ != nullptr)
+        esp_timer_stop(this->timer_);
       // esp_timer_stop does not wait for a callback already running; one
-      // mid-build would race the STOP frame for mt_frame_ / mt_seq_ (HB2).
-      wait_callback_idle_(this->mt_cb_busy_);
+      // mid-build would race the STOP frame for frame_ / seq_ (HB2).
+      wait_until_idle(this->cb_busy_);
 
       // One last frame with enable=false, so a node that is still running ends
       // now rather than at its own deadline.
       if (send_stop)
       {
-        this->build_mode_test_frame_(false);
-        if (this->mt_frame_len_ > 0)
-          this->mac0_send_(this->mt_frame_, this->mt_frame_len_, TxPolicy{}, this->mt_seal_);
+        this->build_frame_(false);
+        if (this->frame_len_ > 0)
+          this->host_.stream_send(this->frame_, this->frame_len_, TxPolicy{}, this->seal_);
       }
 
       ESP_LOGI(TAG, "[%s] ModeTest STOP (%u marks sent)",
-               this->get_name().c_str(), (unsigned) this->mt_seq_);
+               this->host_.stream_name(), (unsigned) this->seq_);
+    }
+
+    // A stream must not call its host here: the host is already being destroyed.
+    ModeTestStream::~ModeTestStream()
+    {
+      this->active_ = false;
+      if (this->timer_ != nullptr)
+      {
+        esp_timer_stop(this->timer_);
+        esp_timer_delete(this->timer_);
+        this->timer_ = nullptr;
+      }
+      wait_until_idle(this->cb_busy_);
+    }
+
+    // The supervisor's quiet abort leaves the node to be told separately.
+    void ModeTestStream::send_stop_frame()
+    {
+      this->build_frame_(false);
+      if (this->frame_len_ > 0)
+        this->host_.stream_send(this->frame_, this->frame_len_, TxPolicy{}, this->seal_);
     }
 
     void DriftStream::build_frame_(bool enable, mac1::FcntReservation *block)

@@ -25,16 +25,6 @@ namespace esphome
       // The three esp_timer callbacks hold `this`: stop and delete them before
       // the object goes (review HB22; a real hub never destroys a listener,
       // the host harness does so constantly).
-      this->mode_test_active_ = false;
-      for (esp_timer_handle_t *t : {&this->mode_test_timer_})
-      {
-        if (*t == nullptr)
-          continue;
-        esp_timer_stop(*t);
-        esp_timer_delete(*t);
-        *t = nullptr;
-      }
-      wait_callback_idle_(this->mt_cb_busy_);
       s_onboarding_gate_.release(this);
       // Tier 3: this node's keys, otherwise never freed — fine for the
       // handful of LORAListener instances a real hub constructs once at
@@ -1828,7 +1818,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // Somebody else's measurement is on the air for this node.
     bool LORAListener::mbs_other_test_() const
     {
-      return (this->mode_test_active_ && !this->mbs_owns_test_) || this->mac_ping_.active() ||
+      return (this->mode_test_.active() && !this->mbs_owns_test_) || this->mac_ping_.active() ||
              this->drift_.active();
     }
 
@@ -1847,7 +1837,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       in.promoted       = this->have_phase_report_ && this->belief_.node_timed_rx;
       in.busy           = this->delivery_busy_();
       in.other_test     = this->mbs_other_test_();
-      in.warmup_running = this->mode_test_active_ && this->mbs_owns_test_;
+      in.warmup_running = this->mode_test_.active() && this->mbs_owns_test_;
       in.report_ok      = this->mbs_report_fresh_();
       return in;
     }
@@ -1914,7 +1904,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // started another test meanwhile).
     void LORAListener::mbs_abort_warmup_(bool send_stop)
     {
-      if (!this->mbs_owns_test_ || !this->mode_test_active_)
+      if (!this->mbs_owns_test_ || !this->mode_test_.active())
         return;
       this->stop_mode_test_(false);
       if (send_stop)
@@ -1923,11 +1913,9 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
 
     void LORAListener::mbs_send_stop_frame_()
     {
-      if (this->mode_test_active_ || this->parent_ == nullptr)
+      if (this->mode_test_.active() || this->parent_ == nullptr)
         return;
-      this->build_mode_test_frame_(false);
-      if (this->mt_frame_len_ > 0)
-        this->mac0_send_(this->mt_frame_, this->mt_frame_len_, TxPolicy{}, this->mt_seal_);
+      this->mode_test_.send_stop_frame();
     }
 
     // A cover op / sysop was just issued for this node: never fight it.
@@ -1963,7 +1951,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     void LORAListener::note_warmup_refusal_()
     {
       const ModeTestSummary &s = this->mode_test_summary_;
-      if (!this->mbs_owns_test_ || !this->mode_test_active_ || !s.valid ||
+      if (!this->mbs_owns_test_ || !this->mode_test_.active() || !s.valid ||
           s.arm_refusal != modebsup::kArmRefusalNoGrid)
         return;
       this->mbs_abort_warmup_(false);

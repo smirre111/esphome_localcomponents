@@ -446,9 +446,17 @@ namespace esphome
       void start_mode_test(uint32_t duration_s, uint32_t grid_ms, uint32_t mode,
                            uint32_t copies, bool keep_power_profile,
                            bool enable_counter, bool enable_crypto,
-                           bool mac_echo, int32_t arm_offset_us = 0);
-      void stop_mode_test();
-      bool mode_test_active() const { return this->mode_test_active_; }
+                           bool mac_echo, int32_t arm_offset_us = 0)
+      {
+        if (this->parent_ == nullptr)
+          return;
+        this->mbs_owns_test_ = this->mbs_starting_;
+        this->last_mode_test_report_.clear();
+        this->mode_test_.start(duration_s, grid_ms, mode, copies, keep_power_profile,
+                               enable_counter, enable_crypto, mac_echo, arm_offset_us);
+      }
+      void stop_mode_test() { this->mode_test_.stop(); }
+      bool mode_test_active() const { return this->mode_test_.active(); }
       // U-5: whether this node has missed a check-in it was predicted to make.
       // Published as a diagnostic because that is what an operator acts on; it
       // also gates single-shot through HubBelief::beacon_missed.
@@ -771,10 +779,10 @@ namespace esphome
       // (a'): the sleep model's answer, for tests.
       uint32_t ms_until_node_awake_for_test() const { return ms_until_node_awake_(); }
       // D4: fire one ModeTest mark exactly as the esp_timer would.
-      void mode_test_tick_for_test() { mode_test_timer_cb_(this); }
+      void mode_test_tick_for_test() { this->mode_test_.tick_for_test(); }
       void drift_tick_for_test() { this->drift_.tick_for_test(); }
       std::vector<uint8_t> mode_test_frame_for_test() const {
-        return std::vector<uint8_t>(mt_frame_, mt_frame_ + mt_frame_len_);
+        return this->mode_test_.frame_for_test();
       }
       void send_aligned_for_test(const uint8_t *buf, size_t len) {
         this->send_aligned_(buf, len);
@@ -894,8 +902,6 @@ namespace esphome
      protected:
       // block == nullptr: a fresh FCNT (loop only); else the run's reserved
       // block (any task). See pack_test_frame_.
-      void build_mode_test_frame_(bool enable, mac1::FcntReservation *block = nullptr);
-      static void mode_test_timer_cb_(void *arg);
       void handle_mode_test_report_(const ::ModeTestReport *rep);
 
       // Same shape as the drift frame, and for the same reason: the NEXT frame
@@ -939,6 +945,10 @@ namespace esphome
       // StreamHost: what the bench streams may ask of the listener
       // (lora_client_bench.cpp).
       const char *stream_name() const override;
+      bool stream_grid_started() const override;
+      int64_t stream_next_t0(int64_t now_us) const override;
+      int64_t stream_next_clear_t0(int64_t now_us, int copies, size_t len,
+                                   bool expects_reply) const override;
       bool stream_has_radio() const override;
       bool stream_frame_fresh(hubframes::Down *op, DeliveryFrame *out) override;
       bool stream_send(const uint8_t *buf, size_t len, const TxPolicy &policy,
@@ -1090,32 +1100,10 @@ namespace esphome
       // The drift test (BenchStreams.h): its state, timer and FCNT block.
       DriftStream drift_{*this};
 
-      // ModeTest state. Mirrors the drift test's, plus the parameters the node
-      // needs on every frame (the node arms on the first one it hears, so every
-      // frame carries the full request — a node that missed the first is not
-      // left waiting for a repeat that never comes).
-      std::atomic<bool> mode_test_active_{false};   // HB2: loop writes, timer reads
-      std::atomic<bool> mt_cb_busy_{false};         // mode_test_timer_cb_ running
-      uint32_t mt_duration_s_{0};
-      uint32_t mt_grid_ms_{0};
-      uint32_t mt_mode_{0};
-      uint32_t mt_copies_{1};
-      bool     mt_keep_power_profile_{true};
-      bool     mt_enable_counter_{false};
-      bool     mt_enable_crypto_{false};
-      bool     mt_mac_echo_{false};
-      int32_t  mt_arm_offset_us_{0};
-      uint32_t mt_seq_{0};
-      // D4: the last grid mark a Mode B test mark was aimed at. Owned by the
-      // esp_timer task that sends the marks — deliberately not
-      // last_placed_t0_us_, which belongs to the ESPHome loop.
-      int64_t  mt_last_mark_t0_us_{0};
-      esp_timer_handle_t mode_test_timer_{nullptr};
-      // The run's mark FCNTs (HB1), reserved on the loop; session_tx_mutex_.
-      mac1::FcntReservation mt_fcnts_{};
-      uint8_t  mt_frame_[160]{};
-      size_t   mt_frame_len_{0};
-      mac2::FrameSeal mt_seal_{};
+      // ModeTest (BenchStreams.h). Every frame carries the full request (the
+      // node arms on the first one it hears, so a node that missed the first is
+      // not left waiting for a repeat that never comes).
+      ModeTestStream mode_test_{*this};
       std::string last_mode_test_report_{};
       ModeTestSummary mode_test_summary_{};
 
@@ -1261,7 +1249,7 @@ namespace esphome
       bool mbs_grid_acked_() const;
       bool mbs_report_fresh_() const;
       void restore_timed_mode_at_boot_();
-      void stop_mode_test_(bool send_stop);
+      void stop_mode_test_(bool send_stop) { this->mode_test_.stop_(send_stop); }
       const modebsup::Supervisor &modeBSupervisor() const { return this->mbs_; }
       uint32_t      gridsync_requests_answered_{0};
       uint32_t      gridsync_requests_ignored_{0};
@@ -1450,7 +1438,7 @@ namespace esphome
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
       // Guards the Sequencer and the FCNT reservations (mac_ping_.fcnts(),
-      // mt_fcnts_, drift_.fcnts()). The Sequencer itself is loop-only (its
+      // mode_test_.fcnts(), drift_.fcnts()). The Sequencer itself is loop-only (its
       // allocation persists through ESPHome preferences); the esp_timer
       // streams take FCNTs only from a reservation, under this lock. Never
       // held while logging; keys_mutex_ is never taken inside it.

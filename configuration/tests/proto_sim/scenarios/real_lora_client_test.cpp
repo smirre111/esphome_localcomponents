@@ -6891,13 +6891,7 @@ namespace {
 constexpr std::time_t kModeBNow = 1787000000;
 
 struct ModeBProbe : LORAClient {
-    using esphome::lora_tracker::LORAListener::mt_mode_;
-    using esphome::lora_tracker::LORAListener::mt_duration_s_;
-    using esphome::lora_tracker::LORAListener::mt_grid_ms_;
-    using esphome::lora_tracker::LORAListener::mt_copies_;
-    using esphome::lora_tracker::LORAListener::mt_keep_power_profile_;
-    using esphome::lora_tracker::LORAListener::mt_mac_echo_;
-    using esphome::lora_tracker::LORAListener::mt_enable_counter_;
+    using esphome::lora_tracker::LORAListener::mode_test_;
     using esphome::lora_tracker::LORAListener::command_failed_;
     using esphome::lora_tracker::LORAListener::is_node_awake_;
     using esphome::lora_tracker::LORAListener::mode_test_summary_;
@@ -6973,13 +6967,13 @@ TEST(ModeBListener, SwitchOnThenLoginWarmsTheNodeUpExactlyOnce) {
     ASSERT_GE(r.untilWarmup(modebsup::kJitterMaxS + 3 * modebsup::kTickS), 0);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
     // The primitive: the bench's "Mode Test B - timed windows" ModeTest, shortened.
-    EXPECT_EQ(P(r.rol).mt_mode_, 2u);
-    EXPECT_EQ(P(r.rol).mt_duration_s_, modebsup::kWarmupS);
-    EXPECT_EQ(P(r.rol).mt_grid_ms_, 1500u);
-    EXPECT_EQ(P(r.rol).mt_copies_, 1u) << "single-copy placed marks, not bursts";
-    EXPECT_TRUE(P(r.rol).mt_keep_power_profile_);
-    EXPECT_TRUE(P(r.rol).mt_mac_echo_);
-    EXPECT_FALSE(P(r.rol).mt_enable_counter_);
+    EXPECT_EQ(P(r.rol).mode_test_.mode(), 2u);
+    EXPECT_EQ(P(r.rol).mode_test_.duration_s(), modebsup::kWarmupS);
+    EXPECT_EQ(P(r.rol).mode_test_.grid_ms(), 1500u);
+    EXPECT_EQ(P(r.rol).mode_test_.copies(), 1u) << "single-copy placed marks, not bursts";
+    EXPECT_TRUE(P(r.rol).mode_test_.keep_power_profile());
+    EXPECT_TRUE(P(r.rol).mode_test_.mac_echo());
+    EXPECT_FALSE(P(r.rol).mode_test_.enable_counter());
     EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Warming);
 
     // It ends by itself (the hub's stop timer: duration + 5 s) ...
