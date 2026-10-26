@@ -495,29 +495,35 @@ namespace esphome
       std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
       this->mac_ping_.fcnts()->invalidate();
       this->mt_fcnts_.invalidate();
-      this->drift_fcnts_.invalidate();
+      this->drift_.fcnts()->invalidate();
     }
 
     // A test stream's frame: a fresh FCNT on the loop (block == nullptr: the
     // START / STOP frames), or the next one of the run's reserved block (the
     // marks and ticks, built on the esp_timer task -- no Sequencer, no persist).
     // False when the block is spent, dropped, or the keys moved under the seal.
-    bool LORAListener::pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block,
-                                        MacFrame *f)
+    bool pack_stream_frame(StreamHost &host, hubframes::Down *op, mac1::FcntReservation *block,
+                           DeliveryFrame *f)
     {
       if (block == nullptr)
-        return this->mac_frame_(op, f);
-      const uint32_t fcnt = this->take_reserved_fcnt_(block);
+        return host.stream_frame_fresh(op, f);
+      const uint32_t fcnt = host.stream_take_fcnt(block);
       if (fcnt == 0)
         return false;
-      if (!this->mac_frame_(op, fcnt, this->session_confirmed_, f))
+      if (!host.stream_frame(op, fcnt, host.stream_session_confirmed(), f))
         return false;
-      if (f->seal.sealed && !this->sealed_in_epoch_(*f, *block))
+      if (f->seal.sealed && !host.stream_sealed_in_epoch(*f, *block))
       {
         f->bytes.clear();
         return false;
       }
       return true;
+    }
+
+    bool LORAListener::pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block,
+                                        MacFrame *f)
+    {
+      return pack_stream_frame(*this, op, block, f);
     }
 
     bool LORAListener::send_placed_from_timer_(const uint8_t *buf, size_t len, TxPolicy policy,
@@ -547,6 +553,16 @@ namespace esphome
 
     // ---- StreamHost --------------------------------------------------------
     const char *LORAListener::stream_name() const { return this->get_name().c_str(); }
+    bool LORAListener::stream_has_radio() const { return this->parent_ != nullptr; }
+    bool LORAListener::stream_frame_fresh(hubframes::Down *op, DeliveryFrame *out)
+    {
+      return this->mac_frame_(op, out);
+    }
+    bool LORAListener::stream_send(const uint8_t *buf, size_t len, const TxPolicy &policy,
+                                   const mac2::FrameSeal &seal)
+    {
+      return this->mac0_send_(buf, len, policy, seal);
+    }
     bool LORAListener::stream_session_confirmed() const { return this->session_confirmed_; }
     bool LORAListener::stream_grid_ready() const
     {
@@ -621,11 +637,11 @@ namespace esphome
     // time, so whatever latency remains is constant and affects the offset,
     // never the slope.
     // -----------------------------------------------------------------------
-    void LORAListener::drift_timer_cb_(void *arg)
+    void DriftStream::timer_cb_(void *arg)
     {
-      auto *self = static_cast<LORAListener *>(arg);
-      const CallbackBusy busy(self->drift_cb_busy_);
-      if (!self->drift_test_active_ || self->drift_frame_len_ == 0)
+      auto *self = static_cast<DriftStream *>(arg);
+      const CallbackBusy busy(self->cb_busy_);
+      if (!self->active_ || self->frame_len_ == 0)
         return;
 
       // Hand the PRE-BUILT frame to the normal transmit queue.
@@ -640,11 +656,11 @@ namespace esphome
       // proven path is reused rather than duplicated — and, unlike the old
       // global setBurstCopies(1), it cannot leak onto an ordinary command that
       // a user happens to send during the test.
-      self->mac0_send_(self->drift_frame_, self->drift_frame_len_,
-                       TxPolicy{/*copies=*/1, /*stride_ms=*/0}, self->drift_seal_);
+      self->host_.stream_send(self->frame_, self->frame_len_,
+                       TxPolicy{/*copies=*/1, /*stride_ms=*/0}, self->seal_);
 
       // Build the next one now, in the 99% of the period that is idle.
-      self->build_drift_frame_(true, &self->drift_fcnts_);
+      self->build_frame_(true, &self->fcnts_);
     }
 
     // ---- ModeTest ----------------------------------------------------
@@ -945,7 +961,7 @@ namespace esphome
                this->get_name().c_str(), (unsigned) this->mt_seq_);
     }
 
-    void LORAListener::build_drift_frame_(bool enable, mac1::FcntReservation *block)
+    void DriftStream::build_frame_(bool enable, mac1::FcntReservation *block)
     {
       hubframes::Down op_message {};
       // msgid is the ruler mark (mac_frame_ allocates it). The node indexes
@@ -954,13 +970,13 @@ namespace esphome
 
       DriftTest dt = DRIFT_TEST__INIT;
       dt.enable       = enable;
-      dt.durations    = this->drift_test_duration_s_;
-      dt.gridperiodms = this->drift_test_grid_ms_;
+      dt.durations    = this->duration_s_;
+      dt.gridperiodms = this->grid_ms_;
 
       op_message.cmd_case  = hubframes::DL_DRIFTTEST;
       op_message.drifttest = &dt;
 
-      MacFrame f;
+      DeliveryFrame f;
       // ENCRYPTED, like every other command.
       //
       // Plaintext was tried first, to keep variable-time crypto out of the
@@ -975,22 +991,22 @@ namespace esphome
       // every drift frame was silently dropped and the test never started.
       // Exempting DriftTest would let an unauthenticated frame pin a node in
       // ~11 mA continuous RX — a battery-drain vector on a 1.2 mA device.
-      if (this->pack_test_frame_(&op_message, block, &f) &&
-          f.bytes.size() <= sizeof(this->drift_frame_))
+      if (pack_stream_frame(this->host_, &op_message, block, &f) &&
+          f.bytes.size() <= sizeof(this->frame_))
       {
-        memcpy(this->drift_frame_, f.bytes.data(), f.bytes.size());
-        this->drift_frame_len_ = f.bytes.size();
-        this->drift_seal_      = f.seal;
+        memcpy(this->frame_, f.bytes.data(), f.bytes.size());
+        this->frame_len_ = f.bytes.size();
+        this->seal_      = f.seal;
       }
       else
       {
-        this->drift_frame_len_ = 0;   // no FCNT left for this run: the ticks stop
+        this->frame_len_ = 0;   // no FCNT left for this run: the ticks stop
       }
     }
 
-    void LORAListener::start_drift_test(uint32_t duration_s, uint32_t grid_ms)
+    void DriftStream::start(uint32_t duration_s, uint32_t grid_ms)
     {
-      if (this->parent_ == nullptr)
+      if (!this->host_.stream_has_radio())
         return;
 
       // One frame per tick is ~30 ms of airtime, so the grid can be far
@@ -999,12 +1015,12 @@ namespace esphome
       if (grid_ms < 200)
         grid_ms = 200;
 
-      this->drift_test_active_     = true;
-      this->drift_test_duration_s_ = duration_s;
-      this->drift_test_grid_ms_    = grid_ms;
+      this->active_     = true;
+      this->duration_s_ = duration_s;
+      this->grid_ms_    = grid_ms;
 
       ESP_LOGI(TAG, "[%s] drift test START: %u s, hw-timed grid %u ms, plaintext single frames",
-               this->get_name().c_str(), (unsigned) duration_s, (unsigned) grid_ms);
+               this->host_.stream_name(), (unsigned) duration_s, (unsigned) grid_ms);
 
       // The START command goes out as a NORMAL 17-copy burst.
       //
@@ -1017,67 +1033,80 @@ namespace esphome
       //
       // Only the TIMING frames are single copies, and by then the node is in
       // continuous RX and hears every one.
-      this->build_drift_frame_(true);
-      if (this->drift_frame_len_ > 0)
-        this->mac0_send_(this->drift_frame_, this->drift_frame_len_, TxPolicy{}, this->drift_seal_);
+      this->build_frame_(true);
+      if (this->frame_len_ > 0)
+        this->host_.stream_send(this->frame_, this->frame_len_, TxPolicy{}, this->seal_);
       // Every tick's FCNT, reserved on the loop (HB1); see start_mode_test.
-      this->reserve_fcnt_block_((duration_s * 1000) / grid_ms + 4, &this->drift_fcnts_);
+      this->host_.stream_reserve_fcnts((duration_s * 1000) / grid_ms + 4, &this->fcnts_);
 
-      if (this->drift_timer_ == nullptr)
+      if (this->timer_ == nullptr)
       {
         const esp_timer_create_args_t args = {
-            .callback = &LORAListener::drift_timer_cb_,
+            .callback = &DriftStream::timer_cb_,
             .arg      = this,
             .dispatch_method = ESP_TIMER_TASK,
             .name     = "driftgrid",
             .skip_unhandled_events = true,
         };
-        if (esp_timer_create(&args, &this->drift_timer_) != ESP_OK)
+        if (esp_timer_create(&args, &this->timer_) != ESP_OK)
         {
-          ESP_LOGE(TAG, "[%s] drift test: timer create failed — no ticks", this->get_name().c_str());
-          this->drift_timer_ = nullptr;
-          this->drift_test_active_ = false;
+          ESP_LOGE(TAG, "[%s] drift test: timer create failed — no ticks", this->host_.stream_name());
+          this->timer_ = nullptr;
+          this->active_ = false;
           return;
         }
       }
-      esp_timer_stop(this->drift_timer_);
+      esp_timer_stop(this->timer_);
 
       // Give the bursted START time to land and the node time to switch into
       // continuous RX before the single-copy grid begins. One burst round is
       // 1.5 s; 3 s is comfortable margin.
-      this->set_timeout("drift_grid_arm", 3000, [this, grid_ms]() {
-        if (!this->drift_test_active_)
+      this->host_.stream_set_timeout("drift_grid_arm", 3000, [this, grid_ms]() {
+        if (!this->active_)
           return;
-        this->build_drift_frame_(true, &this->drift_fcnts_);
+        this->build_frame_(true, &this->fcnts_);
         // Microsecond-resolution pacing — the entire point of this rewrite.
-        esp_timer_start_periodic(this->drift_timer_, (uint64_t) grid_ms * 1000ULL);
+        esp_timer_start_periodic(this->timer_, (uint64_t) grid_ms * 1000ULL);
       });
 
-      this->set_timeout("drift_end", duration_s * 1000,
-                        [this]() { this->stop_drift_test(); });
+      this->host_.stream_set_timeout("drift_end", duration_s * 1000,
+                        [this]() { this->stop(); });
     }
 
-    void LORAListener::stop_drift_test()
+    void DriftStream::stop()
     {
-      if (!this->drift_test_active_)
+      if (!this->active_)
         return;
-      this->drift_test_active_ = false;
-      if (this->drift_timer_ != nullptr)
-        esp_timer_stop(this->drift_timer_);
-      wait_callback_idle_(this->drift_cb_busy_);   // before the OFF frame reuses drift_frame_
-      this->cancel_timeout("drift_end");
-      this->cancel_timeout("drift_grid_arm");
+      this->active_ = false;
+      if (this->timer_ != nullptr)
+        esp_timer_stop(this->timer_);
+      wait_until_idle(this->cb_busy_);   // before the OFF frame reuses drift_frame_
+      this->host_.stream_cancel_timeout("drift_end");
+      this->host_.stream_cancel_timeout("drift_grid_arm");
 
       // The OFF command is bursted like every other command: the node may
       // already have left continuous RX on its own deadline, in which case a
       // single copy would very likely be missed. Nothing needs "restoring" any
       // more — the single-copy choice never left the frame it applied to.
-      this->build_drift_frame_(false);
-      if (this->drift_frame_len_ > 0)
-        this->mac0_send_(this->drift_frame_, this->drift_frame_len_, TxPolicy{}, this->drift_seal_);
-      this->drift_frame_len_ = 0;
+      this->build_frame_(false);
+      if (this->frame_len_ > 0)
+        this->host_.stream_send(this->frame_, this->frame_len_, TxPolicy{}, this->seal_);
+      this->frame_len_ = 0;
 
-      ESP_LOGI(TAG, "[%s] drift test STOP", this->get_name().c_str());
+      ESP_LOGI(TAG, "[%s] drift test STOP", this->host_.stream_name());
+    }
+
+    // A stream must not call its host here: the host is already being destroyed.
+    DriftStream::~DriftStream()
+    {
+      this->active_ = false;
+      if (this->timer_ != nullptr)
+      {
+        esp_timer_stop(this->timer_);
+        esp_timer_delete(this->timer_);
+        this->timer_ = nullptr;
+      }
+      wait_until_idle(this->cb_busy_);
     }
 
   }  // namespace lora_tracker

@@ -426,9 +426,12 @@ namespace esphome
       // The grid frame IS the DriftTest message, re-sent. That makes the test
       // self-limiting: each one re-arms the node deadline, so if the hub stops
       // or this component reboots, the node exits on its own.
-      void start_drift_test(uint32_t duration_s = 300, uint32_t grid_ms = 15000);
-      void stop_drift_test();
-      bool drift_test_active() const { return this->drift_test_active_; }
+      void start_drift_test(uint32_t duration_s = 300, uint32_t grid_ms = 15000)
+      {
+        this->drift_.start(duration_s, grid_ms);
+      }
+      void stop_drift_test() { this->drift_.stop(); }
+      bool drift_test_active() const { return this->drift_.active(); }
 
       // ModeTest — the on-hardware validation mode (test-plan.md section 10).
       //
@@ -769,7 +772,7 @@ namespace esphome
       uint32_t ms_until_node_awake_for_test() const { return ms_until_node_awake_(); }
       // D4: fire one ModeTest mark exactly as the esp_timer would.
       void mode_test_tick_for_test() { mode_test_timer_cb_(this); }
-      void drift_tick_for_test() { drift_timer_cb_(this); }
+      void drift_tick_for_test() { this->drift_.tick_for_test(); }
       std::vector<uint8_t> mode_test_frame_for_test() const {
         return std::vector<uint8_t>(mt_frame_, mt_frame_ + mt_frame_len_);
       }
@@ -889,15 +892,11 @@ namespace esphome
       }
 
      protected:
-      // Builds the NEXT frame into drift_frame_, so the timer callback only
-      // transmits. Packing must not happen inside the interval being measured.
       // block == nullptr: a fresh FCNT (loop only); else the run's reserved
       // block (any task). See pack_test_frame_.
-      void build_drift_frame_(bool enable, mac1::FcntReservation *block = nullptr);
       void build_mode_test_frame_(bool enable, mac1::FcntReservation *block = nullptr);
       static void mode_test_timer_cb_(void *arg);
       void handle_mode_test_report_(const ::ModeTestReport *rep);
-      static void drift_timer_cb_(void *arg);
 
       // Same shape as the drift frame, and for the same reason: the NEXT frame
       // is packed immediately after a send, in the 99 % of the period that is
@@ -940,6 +939,10 @@ namespace esphome
       // StreamHost: what the bench streams may ask of the listener
       // (lora_client_bench.cpp).
       const char *stream_name() const override;
+      bool stream_has_radio() const override;
+      bool stream_frame_fresh(hubframes::Down *op, DeliveryFrame *out) override;
+      bool stream_send(const uint8_t *buf, size_t len, const TxPolicy &policy,
+                       const mac2::FrameSeal &seal) override;
       bool stream_session_confirmed() const override;
       bool stream_grid_ready() const override;
       bool stream_frame(hubframes::Down *op, uint32_t fcnt, bool encrypt, DeliveryFrame *out) override;
@@ -1084,20 +1087,8 @@ namespace esphome
       // of on top of the first. 0 = nothing placed yet.
       int64_t  last_placed_t0_us_{0};
 
-      // Read by the esp_timer callback, written by the loop (HB2).
-      std::atomic<bool> drift_test_active_{false};
-      // True while drift_timer_cb_ runs; a stop waits for it (HB2).
-      std::atomic<bool> drift_cb_busy_{false};
-      uint32_t drift_test_duration_s_{0};
-      uint32_t drift_test_grid_ms_{0};
-      // esp_timer, not set_interval: ESPHome's scheduler is millisecond and
-      // tick-quantised, which is the error this whole rewrite exists to remove.
-      esp_timer_handle_t drift_timer_{nullptr};
-      // The run's tick FCNTs (HB1), reserved on the loop; session_tx_mutex_.
-      mac1::FcntReservation drift_fcnts_{};
-      uint8_t  drift_frame_[128]{};
-      size_t   drift_frame_len_{0};
-      mac2::FrameSeal drift_seal_{};
+      // The drift test (BenchStreams.h): its state, timer and FCNT block.
+      DriftStream drift_{*this};
 
       // ModeTest state. Mirrors the drift test's, plus the parameters the node
       // needs on every frame (the node arms on the first one it hears, so every
@@ -1459,7 +1450,7 @@ namespace esphome
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
       // Guards the Sequencer and the FCNT reservations (mac_ping_.fcnts(),
-      // mt_fcnts_, drift_fcnts_). The Sequencer itself is loop-only (its
+      // mt_fcnts_, drift_.fcnts()). The Sequencer itself is loop-only (its
       // allocation persists through ESPHome preferences); the esp_timer
       // streams take FCNTs only from a reservation, under this lock. Never
       // held while logging; keys_mutex_ is never taken inside it.

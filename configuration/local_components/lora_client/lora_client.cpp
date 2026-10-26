@@ -26,8 +26,7 @@ namespace esphome
       // the object goes (review HB22; a real hub never destroys a listener,
       // the host harness does so constantly).
       this->mode_test_active_ = false;
-      this->drift_test_active_ = false;
-      for (esp_timer_handle_t *t : {&this->mode_test_timer_, &this->drift_timer_})
+      for (esp_timer_handle_t *t : {&this->mode_test_timer_})
       {
         if (*t == nullptr)
           continue;
@@ -36,7 +35,6 @@ namespace esphome
         *t = nullptr;
       }
       wait_callback_idle_(this->mt_cb_busy_);
-      wait_callback_idle_(this->drift_cb_busy_);
       s_onboarding_gate_.release(this);
       // Tier 3: this node's keys, otherwise never freed — fine for the
       // handful of LORAListener instances a real hub constructs once at
@@ -1831,7 +1829,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     bool LORAListener::mbs_other_test_() const
     {
       return (this->mode_test_active_ && !this->mbs_owns_test_) || this->mac_ping_.active() ||
-             this->drift_test_active_;
+             this->drift_.active();
     }
 
     modebsup::Inputs LORAListener::mbs_inputs_() const

@@ -37,9 +37,13 @@ namespace esphome
     {
     public:
       virtual const char *stream_name() const = 0;
+      // A tracker to send through.
+      virtual bool stream_has_radio() const = 0;
       virtual bool stream_session_confirmed() const = 0;
       // The listener's placement precondition: grid-aligned and the grid running.
       virtual bool stream_grid_ready() const = 0;
+      // Frame `op` under a fresh FCNT from the Sequencer (loop only).
+      virtual bool stream_frame_fresh(hubframes::Down *op, DeliveryFrame *out) = 0;
       // Frame `op` under an explicit FCNT (any task).
       virtual bool stream_frame(hubframes::Down *op, uint32_t fcnt, bool encrypt,
                                 DeliveryFrame *out) = 0;
@@ -50,6 +54,9 @@ namespace esphome
                                           const mac1::FcntReservation &r) = 0;
       // Drop a block under the lock that guards the reservations.
       virtual void stream_invalidate_fcnts(mac1::FcntReservation *r) = 0;
+      // Hand one frame to MAC-0 as it is (any task).
+      virtual bool stream_send(const uint8_t *buf, size_t len, const TxPolicy &policy,
+                               const mac2::FrameSeal &seal) = 0;
       // Place one frame from the timer task with its own last-mark state.
       virtual bool stream_send_placed(const uint8_t *buf, size_t len, const TxPolicy &policy,
                                       const mac2::FrameSeal &seal, int64_t *last_mark_t0_us) = 0;
@@ -119,6 +126,45 @@ namespace esphome
       size_t   frame_len_{0};
       mac2::FrameSeal seal_{};
       Stats    stats_{};
+    };
+
+    // A stream frame: a fresh FCNT (block == nullptr: START / STOP frames, loop)
+    // or the next one of the run's reserved block (marks and ticks, any task).
+    // False when the block is spent or dropped, or the keys moved under the seal.
+    bool pack_stream_frame(StreamHost &host, hubframes::Down *op, mac1::FcntReservation *block,
+                           DeliveryFrame *f);
+
+    // The drift test: a hardware-timed ruler, one frame per esp_timer tick.
+    class DriftStream
+    {
+    public:
+      explicit DriftStream(StreamHost &host) : host_(host) {}
+      ~DriftStream();
+      DriftStream(const DriftStream &) = delete;
+      DriftStream &operator=(const DriftStream &) = delete;
+
+      void start(uint32_t duration_s, uint32_t grid_ms);
+      void stop();
+      bool active() const { return this->active_; }
+      mac1::FcntReservation *fcnts() { return &this->fcnts_; }
+      void tick_for_test() { timer_cb_(this); }
+
+    private:
+      // Builds the NEXT frame into frame_, so the timer callback only sends.
+      void build_frame_(bool enable, mac1::FcntReservation *block = nullptr);
+      static void timer_cb_(void *arg);
+
+      StreamHost &host_;
+      std::atomic<bool> active_{false};    // loop writes, timer reads
+      std::atomic<bool> cb_busy_{false};   // timer_cb_ running; a stop waits for it
+      uint32_t duration_s_{0};
+      uint32_t grid_ms_{0};
+      esp_timer_handle_t timer_{nullptr};
+      // The run's tick FCNTs, reserved on the loop; guarded by the host's lock.
+      mac1::FcntReservation fcnts_{};
+      uint8_t  frame_[128]{};
+      size_t   frame_len_{0};
+      mac2::FrameSeal seal_{};
     };
 
   }  // namespace lora_tracker
