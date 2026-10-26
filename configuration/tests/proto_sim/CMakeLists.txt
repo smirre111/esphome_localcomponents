@@ -249,6 +249,7 @@ add_library(real_lora_client STATIC
     ${LORA_CLIENT_DIR}/lora_client_bench.cpp      # stage 5: the bench streams (ModeTest, drift, MAC ping)
     ${LORA_CLIENT_DIR}/lora_client_delivery.cpp   # stage 5: the MAC delivery service
     ${LORA_CLIENT_DIR}/lora_client_session.cpp    # stage 5: receive pipeline, MAC-1/MAC-2 session, v1 framing
+    ${LORA_CLIENT_DIR}/lora_client_timing.cpp     # stage 5: per-node link timing and grid publication
     # MAC-2 (stage S2): keys, KDF, Encrypt-then-CMAC, the session key store.
     ${LORA_CLIENT_DIR}/HubLinkSecurity.cpp
     # S8: the hub's MAC wire v1 bodies (compiled in both configurations).
