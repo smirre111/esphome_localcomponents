@@ -1800,7 +1800,7 @@ const ProtobufCMessageDescriptor login_msg__descriptor =
   (ProtobufCMessageInit) login_msg__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor client_register__field_descriptors[2] =
+static const ProtobufCFieldDescriptor client_register__field_descriptors[3] =
 {
   {
     "mac_addr",
@@ -1826,15 +1826,29 @@ static const ProtobufCFieldDescriptor client_register__field_descriptors[2] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "register_seq",
+    4,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(ClientRegister, register_seq),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned client_register__field_indices_by_name[] = {
   0,   /* field[0] = mac_addr */
   1,   /* field[1] = needs_config */
+  2,   /* field[2] = register_seq */
 };
-static const ProtobufCIntRange client_register__number_ranges[1 + 1] =
+static const ProtobufCIntRange client_register__number_ranges[2 + 1] =
 {
   { 1, 0 },
-  { 0, 2 }
+  { 4, 2 },
+  { 0, 3 }
 };
 const ProtobufCMessageDescriptor client_register__descriptor =
 {
@@ -1844,10 +1858,10 @@ const ProtobufCMessageDescriptor client_register__descriptor =
   "ClientRegister",
   "",
   sizeof(ClientRegister),
-  2,
+  3,
   client_register__field_descriptors,
   client_register__field_indices_by_name,
-  1,  client_register__number_ranges,
+  2,  client_register__number_ranges,
   (ProtobufCMessageInit) client_register__init,
   NULL,NULL,NULL    /* reserved[123] */
 };

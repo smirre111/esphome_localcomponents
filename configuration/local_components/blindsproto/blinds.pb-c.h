@@ -373,10 +373,18 @@ struct  ClientRegister
    * the session is confirmed.
    */
   protobuf_c_boolean needs_config;
+  /*
+   * Freshness of this REGISTER (hub review HB14): strictly increasing per node,
+   * persisted in NVS before the frame is built, so it survives reboots. The
+   * K_AUTH tag covers it, so a replayed REGISTER carries an old value: the hub
+   * remembers the highest value per MAC and refuses one that is not higher
+   * (in its current boot). 0 = a node that predates the field.
+   */
+  uint32_t register_seq;
 };
 #define CLIENT_REGISTER__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&client_register__descriptor) \
-    , 0, 0 }
+    , 0, 0, 0 }
 
 
 typedef enum {
