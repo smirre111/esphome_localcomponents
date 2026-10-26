@@ -83,7 +83,7 @@ typedef enum _AckStatus {
    */
   ACK_STATUS__ACK_OK = 0,
   /*
-   * not dispatched (no known case) or failed
+   * not executed: no known case, or refused
    */
   ACK_STATUS__ACK_ERROR = 1,
   /*
@@ -317,10 +317,11 @@ struct  SysopCmd
 /*
  * node -> hub, PORT 0: the MAC ACK's body. The acknowledged FCNT travels in the
  * header (FLAGS.ACK + ACKED_FCNT). The node sends it only for a frame that
- * carried FLAGS.ACK_REQ: status ACK_OK = executed; ACK_ERROR = the frame had no
- * case this firmware can dispatch. A command the node knows but did not
- * execute is not acked. The phase report rides every ack (the hub's Mode B
- * evidence, see PhaseReport).
+ * carried FLAGS.ACK_REQ: status ACK_OK = executed; ACK_ERROR = not executed,
+ * because the frame had no case this firmware can dispatch or because the node
+ * refused a command it recognises (invalid cover target, unset/unknown sysop
+ * op, empty schedule). The hub fails the request at once on ACK_ERROR. The
+ * phase report rides every ack (the hub's Mode B evidence, see PhaseReport).
  */
 struct  MacAck
 {
@@ -782,8 +783,7 @@ struct  PhaseReport
  * crosses the link:
  *   anchor_node = T0_measured - txRound*roundUs - txSlot*pitchUs
  * The geometry is carried so a node can REFUSE a grid it disagrees with.
- * Accepted in the clear only by a node with no session, and then without the
- * fleet key.
+ * Never accepted in the clear: a new node gets it encrypted right after LOGIN.
  */
 struct  GridSync
 {
