@@ -12,6 +12,7 @@
 #include "esphome/components/lora_client/WakeClockFit.h"
 // One node's login-to-settled window at a time, over the hub's single downlink.
 #include "esphome/components/lora_client/OnboardingGate.h"
+#include "esphome/components/lora_client/RegisterFreshness.h"
 // How often an automatic-mode node needs its wall clock resynced.
 #include "esphome/components/lora_client/TimeSyncPolicy.h"
 // Hub-only: the first ack wait of an optimistic single shot, and the shadow
@@ -1388,6 +1389,8 @@ namespace esphome
       // handle_register_(). A monotonic msgid check doesn't work here since
       // every legitimate REGISTER's msgid is a small post-reboot value.
       int64_t  last_register_accepted_us_{0};
+      // HB14: the highest register_seq this node has sent (RegisterFreshness.h).
+      regfresh::Highest register_seq_{};
       static constexpr int64_t kRegisterRateLimitUs = 5000000; // 5 s, matches the node's LOGIN_RATE_LIMIT_MS
 
       // uint32_t rx_message_id_{0};

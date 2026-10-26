@@ -195,6 +195,17 @@ namespace esphome
           return;
         }
 
+        // HB14: a replayed REGISTER carries a register_seq the node has already
+        // used. Checked before the rate limit, so a genuine frame the limit
+        // drops still raises the bar for its own replay.
+        if (!this->register_seq_.admit(reg->register_seq))
+        {
+          ESP_LOGW(TAG, "%s: REGISTER replayed (register_seq %u, highest seen %u) — dropping",
+                   this->get_name().c_str(), (unsigned) reg->register_seq,
+                   (unsigned) this->register_seq_.highest());
+          return;
+        }
+
         // Security review finding 2: the MIC above stops forgery but not
         // replay — REGISTER carries no msgid/freshness check of its own
         // (it is routed around admit_frame_ for the unprovisioned-bootstrap

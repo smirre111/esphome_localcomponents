@@ -979,6 +979,87 @@ TEST(MacWireV1Listener, RegisterIsAcceptedOnlyUnderKAuth) {
     EXPECT_TRUE(hub.rol.registered_);
 }
 
+// HB14: the 5 s rate limit stops a fast REGISTER replay but not one captured
+// REGISTER replayed every 5 s. The node's register_seq (strictly increasing,
+// persisted, covered by the K_AUTH tag) lets the hub refuse any value not above
+// the highest it has seen for that MAC in its current boot.
+namespace {
+Bytes registerFrame(uint32_t register_seq, uint32_t fcnt = 1) {
+    ClientRegister reg = CLIENT_REGISTER__INIT;
+    reg.mac_addr = kMac;
+    reg.needs_config = true;
+    reg.register_seq = register_seq;
+    Bytes body(client_register__get_packed_size(&reg));
+    client_register__pack(&reg, body.data());
+    macwire::WireHdr h = uplinkHdr(fcnt, macwire::kPortSession, macwire::Auth::KAuth);
+    h.dst = macwire::kBroadcast;
+    return proto_sim::v1_kauth_frame(false, h, body);
+}
+// A REGISTER the listener takes (true) or refuses, past the rate limit.
+bool takesRegister(Hub &hub, Bytes f) {
+    proto_sim_timer_advance_us(6'000'000);
+    hub.rol.registered_ = false;
+    hub.rol.set_response(f.data(), f.size());
+    return hub.rol.registered_;
+}
+}  // namespace
+
+TEST(MacWireV1Listener, AReplayedRegisterIsRefusedEvenPastTheRateLimit) {
+    Hub hub;
+    const Bytes first = registerFrame(5);
+    EXPECT_TRUE(takesRegister(hub, first));
+    EXPECT_FALSE(takesRegister(hub, first)) << "the same register_seq again is a replay";
+    EXPECT_FALSE(takesRegister(hub, registerFrame(4))) << "an older register_seq is a replay";
+    EXPECT_TRUE(takesRegister(hub, registerFrame(6))) << "the node's next REGISTER";
+    EXPECT_TRUE(takesRegister(hub, registerFrame(100))) << "a gap is fine (lost frames)";
+}
+
+TEST(MacWireV1Listener, ALegacyRegisterWithoutASeqKeepsOnlyTheRateLimit) {
+    Hub hub;
+    Bytes legacy = registerFrame(0);
+    EXPECT_TRUE(takesRegister(hub, legacy));
+    EXPECT_TRUE(takesRegister(hub, legacy)) << "0 = a node that predates the field";
+    proto_sim_timer_advance_us(1'000'000);
+    hub.rol.registered_ = false;
+    hub.rol.set_response(legacy.data(), legacy.size());
+    proto_sim_timer_advance_us(1'000'000);
+    hub.rol.registered_ = false;
+    hub.rol.set_response(legacy.data(), legacy.size());
+    EXPECT_FALSE(hub.rol.registered_) << "within 5 s of the last one: rate-limited";
+}
+
+TEST(MacWireV1Listener, ALegacyRegisterAfterASeqIsRefused) {
+    // Once a node has shown it numbers its REGISTERs, an unnumbered one is an
+    // old capture (from before its update), not the node.
+    Hub hub;
+    EXPECT_TRUE(takesRegister(hub, registerFrame(3)));
+    EXPECT_FALSE(takesRegister(hub, registerFrame(0)));
+    EXPECT_TRUE(takesRegister(hub, registerFrame(4)));
+}
+
+TEST(MacWireV1Listener, ARateLimitedRegisterStillRaisesTheHighestSeq) {
+    // A genuine REGISTER dropped by the rate limit was still the node's; a
+    // later replay of it must not get through.
+    Hub hub;
+    EXPECT_TRUE(takesRegister(hub, registerFrame(7)));
+    Bytes limited = registerFrame(8);
+    proto_sim_timer_advance_us(1'000'000);
+    hub.rol.registered_ = false;
+    hub.rol.set_response(limited.data(), limited.size());
+    ASSERT_FALSE(hub.rol.registered_) << "rate-limited";
+    EXPECT_FALSE(takesRegister(hub, limited)) << "its replay later";
+    EXPECT_TRUE(takesRegister(hub, registerFrame(9)));
+}
+
+TEST(MacWireV1Listener, AForgedRegisterDoesNotMoveTheHighestSeq) {
+    Hub hub;
+    EXPECT_TRUE(takesRegister(hub, registerFrame(2)));
+    Bytes forged = registerFrame(1000);
+    forged[forged.size() - 2] ^= 0x10;
+    EXPECT_FALSE(takesRegister(hub, forged));
+    EXPECT_TRUE(takesRegister(hub, registerFrame(3))) << "the forgery's seq was never taken";
+}
+
 TEST(MacWireV1Listener, APlaintextUplinkBeforeTheSessionIsHeard) {
     Hub hub;
     const uint32_t before = hub.rol.last_heard_epoch_;
