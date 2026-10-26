@@ -25,6 +25,7 @@
 // MAC-1: the shared frame counter (node-owned, vendored, drift-gated; stage S3).
 #include "esphome/components/lora_client/Sequencer.h"
 #include "esphome/components/lora_client/FcntReservation.h"
+#include "esphome/components/lora_client/BenchStreams.h"
 // S8: the MAC wire v1 fixed header (vendored from the node).
 #include "esphome/components/lora_client/MacWire.h"
 // S8 / W5c: the internal frame types and the v1 body codec.
@@ -284,7 +285,7 @@ namespace esphome
       CH_NONE    = 0xFF
     };
 
-    class LORAListener : public EntityBase, public Component
+    class LORAListener : public EntityBase, public Component, private StreamHost
     {
     public:
       static constexpr size_t MAC_ADDR_STR_LEN = 18; // "AA:BB:CC:DD:EE:FF\0"
@@ -575,24 +576,16 @@ namespace esphome
       // Single copy per mark, expressible only since the per-frame TxPolicy
       // replaced the global setBurstCopies. A burst would defeat the purpose —
       // seventeen copies of one mark is not one mark.
+      // The stream itself is MacPingStream (BenchStreams.h); these forward.
       void start_mac_ping(uint32_t duration_s = 300, uint32_t grid_ms = 1100,
                           bool want_echo = true, uint32_t pad_bytes = 0,
-                          bool crypto = false);
-      void stop_mac_ping();
-      bool mac_ping_active() const { return this->mac_ping_active_; }
-
-      // Stage 0 of the funnel is the hub's alone: only the sender knows what it
-      // offered. The node can never compute its own frame-error rate, because
-      // it cannot know what it did not hear.
-      struct MacStats
+                          bool crypto = false)
       {
-        uint32_t pings_offered{0};   // marks handed to the transmit queue
-        uint32_t echoes_rx{0};
-        uint32_t echo_seq_gaps{0};   // marks with no echo, by seq
-        uint32_t last_seq_sent{0};
-        uint32_t last_seq_echoed{0};
-        bool     have_echo{false};
-      };
+        this->mac_ping_.start(duration_s, grid_ms, want_echo, pad_bytes, crypto);
+      }
+      void stop_mac_ping() { this->mac_ping_.stop(); }
+      bool mac_ping_active() const { return this->mac_ping_.active(); }
+      using MacStats = MacPingStream::Stats;
       // --- B1: grid-aligned downlink -------------------------------------
       //
       // DEFAULT OFF, and that is the whole point of shipping it this way.
@@ -793,7 +786,7 @@ namespace esphome
       // REGISTER/LOGIN exchange, for the reboot-persistence tests.
       void save_state_for_test() { this->save_state_(true); }
       // Fire one MAC ping exactly as the esp_timer would.
-      void mac_ping_tick_for_test() { mac_ping_timer_cb_(this); }
+      void mac_ping_tick_for_test() { this->mac_ping_.tick_for_test(); }
       // What confirm_session_ sets, without its pushes: for a test that needs a
       // confirmed session and will drive the follow-up traffic itself.
       void mark_session_confirmed_for_test() {
@@ -856,8 +849,8 @@ namespace esphome
       uint32_t node_phase_samples() const    { return this->belief_.phase_samples; }
       uint32_t node_phase_outside_guard() const { return this->belief_.phase_outside_guard; }
 
-      const MacStats &mac_stats() const { return this->mac_stats_; }
-      void reset_mac_stats() { this->mac_stats_ = MacStats{}; }
+      const MacStats &mac_stats() const { return this->mac_ping_.stats(); }
+      void reset_mac_stats() { this->mac_ping_.reset_stats(); }
 
       // --- Mode C's Class A ledger ------------------------------------------
       //
@@ -944,9 +937,20 @@ namespace esphome
       // B4: the exact bytes of the tracked op in flight, so a retry
       // retransmits them rather than re-packing from live state.
 
-      void build_mac_ping_frame_();
-      static void mac_ping_timer_cb_(void *arg);
-      void handle_mac_echo_(const ::MacControl *echo);
+      // StreamHost: what the bench streams may ask of the listener
+      // (lora_client_bench.cpp).
+      const char *stream_name() const override;
+      bool stream_session_confirmed() const override;
+      bool stream_grid_ready() const override;
+      bool stream_frame(hubframes::Down *op, uint32_t fcnt, bool encrypt, DeliveryFrame *out) override;
+      bool stream_reserve_fcnts(uint32_t n, mac1::FcntReservation *r) override;
+      uint32_t stream_take_fcnt(mac1::FcntReservation *r) override;
+      bool stream_sealed_in_epoch(const DeliveryFrame &f, const mac1::FcntReservation &r) override;
+      void stream_invalidate_fcnts(mac1::FcntReservation *r) override;
+      bool stream_send_placed(const uint8_t *buf, size_t len, const TxPolicy &policy,
+                              const mac2::FrameSeal &seal, int64_t *last_mark_t0_us) override;
+      void stream_set_timeout(const char *name, uint32_t ms, std::function<void()> fn) override;
+      void stream_cancel_timeout(const char *name) override;
 
       // Login stagger slot: 0, 1, 2 ... in YAML declaration order.
       //
@@ -1124,31 +1128,10 @@ namespace esphome
       std::string last_mode_test_report_{};
       ModeTestSummary mode_test_summary_{};
 
-      std::atomic<bool> mac_ping_active_{false};    // HB2: loop writes, timer reads
-      std::atomic<bool> mac_ping_cb_busy_{false};   // mac_ping_timer_cb_ running
-      // The last mark a ping was placed on. Owned by the esp_timer task, like
-      // mt_last_mark_t0_us_: last_placed_* belong to the loop (HB2).
-      int64_t  mac_ping_last_mark_t0_us_{0};
-      bool     mac_ping_want_echo_{true};
-      uint32_t mac_ping_pad_bytes_{0};
-      uint32_t mac_ping_seq_{0};
-      // Separate from the session TX id: see build_mac_ping_frame_().
-      uint32_t mac_ping_msgid_{0};
-      // MAC-2: an encrypted run takes its FCNTs from a block of the session's
-      // own counter, reserved once in start_mac_ping on the loop
-      // (reserve_fcnt_block_) and spent by the esp_timer callback. The block
-      // is dropped on every counter restart / key change, so a reserved FCNT is
-      // never sealed under a later session's keys (FcntReservation.h).
-      // Guarded by session_tx_mutex_.
-      bool     mac_ping_crypto_{false};
-      mac1::FcntReservation mac_ping_fcnts_{};
       // The decrypted body of the uplink being processed (loop only, HB8).
       uint8_t uplink_pt_[256]{};
-      esp_timer_handle_t mac_ping_timer_{nullptr};
-      uint8_t  mac_ping_frame_[192]{};
-      size_t   mac_ping_frame_len_{0};
-      mac2::FrameSeal mac_ping_seal_{};
-      MacStats mac_stats_{};
+      // MAC-0 ping / echo (BenchStreams.h): its state, timer and FCNT block.
+      MacPingStream mac_ping_{*this};
       // Mode C's Class A ledger; see class_a_stats().
       ClassAStats class_a_stats_{};
       // The prevbeaconfcnt whose funnel has already been added. Each beacon
@@ -1475,7 +1458,7 @@ namespace esphome
     public:
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
-      // Guards the Sequencer and the FCNT reservations (mac_ping_fcnts_,
+      // Guards the Sequencer and the FCNT reservations (mac_ping_.fcnts(),
       // mt_fcnts_, drift_fcnts_). The Sequencer itself is loop-only (its
       // allocation persists through ESPHome preferences); the esp_timer
       // streams take FCNTs only from a reservation, under this lock. Never

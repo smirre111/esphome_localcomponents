@@ -27,8 +27,7 @@ namespace esphome
       // the host harness does so constantly).
       this->mode_test_active_ = false;
       this->drift_test_active_ = false;
-      this->mac_ping_active_ = false;
-      for (esp_timer_handle_t *t : {&this->mode_test_timer_, &this->drift_timer_, &this->mac_ping_timer_})
+      for (esp_timer_handle_t *t : {&this->mode_test_timer_, &this->drift_timer_})
       {
         if (*t == nullptr)
           continue;
@@ -38,7 +37,6 @@ namespace esphome
       }
       wait_callback_idle_(this->mt_cb_busy_);
       wait_callback_idle_(this->drift_cb_busy_);
-      wait_callback_idle_(this->mac_ping_cb_busy_);
       s_onboarding_gate_.release(this);
       // Tier 3: this node's keys, otherwise never freed — fine for the
       // handful of LORAListener instances a real hub constructs once at
@@ -650,7 +648,7 @@ namespace esphome
       // MAC-0: consumed here, never forwarded to a cover or a schedule.
       else if (msg->proto_case == hubframes::UL_MACCONTROL &&
                msg->maccontrol)
-        this->handle_mac_echo_(msg->maccontrol);
+        this->mac_ping_.on_echo(msg->maccontrol);
       // ModeTest results. Also MAC-layer: never forwarded to a cover.
       else if (msg->proto_case == hubframes::UL_MODETESTREPORT &&
                msg->modetestreport)
@@ -1832,7 +1830,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // Somebody else's measurement is on the air for this node.
     bool LORAListener::mbs_other_test_() const
     {
-      return (this->mode_test_active_ && !this->mbs_owns_test_) || this->mac_ping_active_ ||
+      return (this->mode_test_active_ && !this->mbs_owns_test_) || this->mac_ping_.active() ||
              this->drift_test_active_;
     }
 

@@ -70,6 +70,14 @@ namespace esphome
       ~CallbackBusy() { busy.store(false); }
       std::atomic<bool> &busy;
     };
+    // Spin until an esp_timer callback that may still be running has returned
+    // (its timer stopped, its active flag false). The esp_timer task outranks
+    // the loop, so a running callback finishes while we yield.
+    inline void wait_until_idle(const std::atomic<bool> &busy)
+    {
+      while (busy.load())
+        std::this_thread::yield();
+    }
 
     // Section 7: a Control command carries its identity, the slot's generation
     // (per logical command, kept across retries and re-packs); nothing else does.

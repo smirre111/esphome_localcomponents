@@ -34,7 +34,7 @@ namespace esphome
     // one mark is not one mark, and until the per-frame TxPolicy existed there
     // was no way to say so.
     // -----------------------------------------------------------------------
-    void LORAListener::build_mac_ping_frame_()
+    void MacPingStream::build_frame_()
     {
       hubframes::Down op_message = {};
       uint32_t msgid = 0;
@@ -59,27 +59,27 @@ namespace esphome
       // a re-LOGIN / key change, ends the encrypted pings: the rest of the run
       // is plaintext (the node refuses those in session), never sealed.
       uint32_t reserved = 0;
-      if (this->mac_ping_crypto_ && this->session_confirmed_)
-        reserved = this->take_reserved_fcnt_(&this->mac_ping_fcnts_);
+      if (this->crypto_ && this->host_.stream_session_confirmed())
+        reserved = this->host_.stream_take_fcnt(&this->fcnts_);
       const bool encrypt_this_one = reserved != 0;
-      msgid = encrypt_this_one ? reserved : ++this->mac_ping_msgid_;
-      if (this->mac_ping_crypto_ && !encrypt_this_one)
+      msgid = encrypt_this_one ? reserved : ++this->msgid_;
+      if (this->crypto_ && !encrypt_this_one)
       {
-        this->mac_ping_crypto_ = false;   // say it once
+        this->crypto_ = false;   // say it once
         ESP_LOGW(TAG, "[%s] MAC ping: no reserved FCNT left for this session — the "
-                      "rest of the run is plaintext", this->get_name().c_str());
+                      "rest of the run is plaintext", this->host_.stream_name());
       }
 
       MacControl mc = MAC_CONTROL__INIT;
       mc.kind     = MAC_CONTROL__KIND__MAC_PING;
-      mc.seq      = ++this->mac_ping_seq_;
-      mc.wantecho = this->mac_ping_want_echo_;
+      mc.seq      = ++this->seq_;
+      mc.wantecho = this->want_echo_;
 
       // Padding sweeps time on air across the frame table. The FIFO read is per
       // byte on both ends, so a turnaround measured at one length says nothing
       // about another.
       uint8_t pad[128];
-      uint32_t pad_len = this->mac_ping_pad_bytes_;
+      uint32_t pad_len = this->pad_bytes_;
       if (pad_len > sizeof(pad))
         pad_len = sizeof(pad);
       if (pad_len)
@@ -92,39 +92,39 @@ namespace esphome
       op_message.cmd_case   = hubframes::DL_MACCONTROL;
       op_message.maccontrol = &mc;
 
-      MacFrame f;
-      if (!this->mac_frame_(&op_message, msgid, encrypt_this_one, &f))
+      DeliveryFrame f;
+      if (!this->host_.stream_frame(&op_message, msgid, encrypt_this_one, &f))
       {
-        ESP_LOGE(TAG, "[%s] MAC ping: failed to pack", this->get_name().c_str());
-        this->mac_ping_frame_len_ = 0;
+        ESP_LOGE(TAG, "[%s] MAC ping: failed to pack", this->host_.stream_name());
+        this->frame_len_ = 0;
         return;
       }
-      if (encrypt_this_one && !this->sealed_in_epoch_(f, this->mac_ping_fcnts_))
+      if (encrypt_this_one && !this->host_.stream_sealed_in_epoch(f, this->fcnts_))
       {
         ESP_LOGW(TAG, "[%s] MAC ping: keys changed while sealing — frame dropped",
-                 this->get_name().c_str());
-        this->mac_ping_frame_len_ = 0;
+                 this->host_.stream_name());
+        this->frame_len_ = 0;
         return;
       }
-      if (f.bytes.size() > sizeof(this->mac_ping_frame_))
+      if (f.bytes.size() > sizeof(this->frame_))
       {
         ESP_LOGE(TAG, "[%s] MAC ping frame too large (%u B) — not sent",
-                 this->get_name().c_str(), (unsigned) f.bytes.size());
-        this->mac_ping_frame_len_ = 0;
+                 this->host_.stream_name(), (unsigned) f.bytes.size());
+        this->frame_len_ = 0;
       }
       else
       {
-        memcpy(this->mac_ping_frame_, f.bytes.data(), f.bytes.size());
-        this->mac_ping_frame_len_ = f.bytes.size();
-        this->mac_ping_seal_      = f.seal;
+        memcpy(this->frame_, f.bytes.data(), f.bytes.size());
+        this->frame_len_ = f.bytes.size();
+        this->seal_      = f.seal;
       }
     }
 
-    void LORAListener::mac_ping_timer_cb_(void *arg)
+    void MacPingStream::timer_cb_(void *arg)
     {
-      auto *self = static_cast<LORAListener *>(arg);
-      const CallbackBusy busy(self->mac_ping_cb_busy_);
-      if (!self->mac_ping_active_ || self->mac_ping_frame_len_ == 0)
+      auto *self = static_cast<MacPingStream *>(arg);
+      const CallbackBusy busy(self->cb_busy_);
+      if (!self->active_ || self->frame_len_ == 0)
         return;
 
       // ONE copy, PLACED on this node's mark. This is the whole reason B-1 had
@@ -153,15 +153,15 @@ namespace esphome
       TxPolicy p;
       p.copies        = 1;
       p.stride_ms     = 0;
-      p.expects_reply = self->mac_ping_want_echo_;
+      p.expects_reply = self->want_echo_;
       // Placed by the timer's own placement (send_placed_from_timer_), never
       // send_aligned_: that writes last_placed_* and reads the belief, which the
       // loop owns and place_ctl_ reads right after its own placement (HB2).
-      if (self->send_placed_from_timer_(self->mac_ping_frame_, self->mac_ping_frame_len_, p,
-                                        self->mac_ping_seal_, &self->mac_ping_last_mark_t0_us_))
+      if (self->host_.stream_send_placed(self->frame_, self->frame_len_, p, self->seal_,
+                                         &self->last_mark_t0_us_))
       {
-        self->mac_stats_.pings_offered++;
-        self->mac_stats_.last_seq_sent = self->mac_ping_seq_;
+        self->stats_.pings_offered++;
+        self->stats_.last_seq_sent = self->seq_;
       }
       else
       {
@@ -171,66 +171,64 @@ namespace esphome
         // the same reason serviceBeacon logs a drop rather than recording the
         // round as queued.
         ESP_LOGW(TAG, "[%s] MAC ping seq %u was not queued — pool exhausted?",
-                 self->get_name().c_str(), (unsigned) self->mac_ping_seq_);
+                 self->host_.stream_name(), (unsigned) self->seq_);
       }
 
-      self->build_mac_ping_frame_();
+      self->build_frame_();
     }
 
-    void LORAListener::handle_mac_echo_(const ::MacControl *echo)
+    void MacPingStream::on_echo(const ::MacControl *echo)
     {
       if (echo == nullptr || echo->kind != MAC_CONTROL__KIND__MAC_ECHO)
         return;
 
-      this->mac_stats_.echoes_rx++;
+      this->stats_.echoes_rx++;
 
       // Count marks that were offered and never came back. Keyed on seq, which
       // is exact and gap-tolerant: a frame lost to the air leaves a hole rather
       // than shifting every later sample.
-      if (this->mac_stats_.have_echo && echo->seq > this->mac_stats_.last_seq_echoed + 1)
-        this->mac_stats_.echo_seq_gaps +=
-            echo->seq - this->mac_stats_.last_seq_echoed - 1;
+      if (this->stats_.have_echo && echo->seq > this->stats_.last_seq_echoed + 1)
+        this->stats_.echo_seq_gaps +=
+            echo->seq - this->stats_.last_seq_echoed - 1;
 
-      this->mac_stats_.last_seq_echoed = echo->seq;
-      this->mac_stats_.have_echo = true;
+      this->stats_.last_seq_echoed = echo->seq;
+      this->stats_.have_echo = true;
 
       ESP_LOGD(TAG, "[%s] MAC echo seq=%u (offered %u, echoed %u, gaps %u)",
-               this->get_name().c_str(), (unsigned) echo->seq,
-               (unsigned) this->mac_stats_.pings_offered,
-               (unsigned) this->mac_stats_.echoes_rx,
-               (unsigned) this->mac_stats_.echo_seq_gaps);
+               this->host_.stream_name(), (unsigned) echo->seq,
+               (unsigned) this->stats_.pings_offered,
+               (unsigned) this->stats_.echoes_rx,
+               (unsigned) this->stats_.echo_seq_gaps);
     }
 
-    void LORAListener::start_mac_ping(uint32_t duration_s, uint32_t grid_ms,
-                                      bool want_echo, uint32_t pad_bytes,
-                                      bool crypto)
+    void MacPingStream::start(uint32_t duration_s, uint32_t grid_ms, bool want_echo,
+                              uint32_t pad_bytes, bool crypto)
     {
-      if (this->mac_ping_active_)
+      if (this->active_)
         return;
 
-      this->mac_ping_active_    = true;
-      this->mac_ping_want_echo_ = want_echo;
-      this->mac_ping_pad_bytes_ = pad_bytes;
-      this->reset_mac_stats();
+      this->active_    = true;
+      this->want_echo_ = want_echo;
+      this->pad_bytes_ = pad_bytes;
+      this->reset_stats();
 
       // MAC-2: reserve the whole run's msgids from the SESSION's own tx-id
       // space, here, in this (main-loop, button-press) call, with exactly one
       // NVS save — never per-frame from the esp_timer callback. Without a
       // session there is no base nonce to seal anything under, so crypto
       // silently falls back to plaintext, matching every other downlink here.
-      this->mac_ping_crypto_ = crypto && this->session_confirmed_;
-      if (crypto && !this->session_confirmed_)
+      this->crypto_ = crypto && this->host_.stream_session_confirmed();
+      if (crypto && !this->host_.stream_session_confirmed())
         ESP_LOGW(TAG, "[%s] MAC ping: no confirmed session — crypto requested but "
-                      "pings will be plaintext", this->get_name().c_str());
+                      "pings will be plaintext", this->host_.stream_name());
       // A run that does not want crypto must not inherit a PREVIOUS run's
       // unused reserved range: build_mac_ping_frame_'s encrypt_this_one already
       // gates on mac_ping_crypto_ first, but clearing the range here removes
       // the stale values outright rather than leaving them for that gate alone
       // to keep meaning nothing.
-      if (!this->mac_ping_crypto_)
+      if (!this->crypto_)
       {
-        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-        this->mac_ping_fcnts_.invalidate();
+        this->host_.stream_invalidate_fcnts(&this->fcnts_);
       }
       else
       {
@@ -238,30 +236,30 @@ namespace esphome
         // +2: the START-to-first-tick delay and the ceiling division both round
         // down against the real cadence; the range is a floor, not a promise.
         const uint32_t frames = (duration_s * 1000UL) / ms + 2;
-        this->reserve_fcnt_block_(frames, &this->mac_ping_fcnts_);
+        this->host_.stream_reserve_fcnts(frames, &this->fcnts_);
       }
 
-      if (this->mac_ping_timer_ == nullptr)
+      if (this->timer_ == nullptr)
       {
         const esp_timer_create_args_t args = {
-            .callback              = &LORAListener::mac_ping_timer_cb_,
+            .callback              = &MacPingStream::timer_cb_,
             .arg                   = this,
             .dispatch_method       = ESP_TIMER_TASK,
             .name                  = "mac_ping",
             .skip_unhandled_events = true,
         };
-        if (esp_timer_create(&args, &this->mac_ping_timer_) != ESP_OK)
+        if (esp_timer_create(&args, &this->timer_) != ESP_OK)
         {
-          ESP_LOGE(TAG, "[%s] MAC ping: timer create failed", this->get_name().c_str());
-          this->mac_ping_active_ = false;
+          ESP_LOGE(TAG, "[%s] MAC ping: timer create failed", this->host_.stream_name());
+          this->active_ = false;
           return;
         }
       }
 
-      this->build_mac_ping_frame_();
-      esp_timer_start_periodic(this->mac_ping_timer_, (uint64_t) grid_ms * 1000ULL);
-      this->set_timeout("mac_ping_end", duration_s * 1000,
-                        [this]() { this->stop_mac_ping(); });
+      this->build_frame_();
+      esp_timer_start_periodic(this->timer_, (uint64_t) grid_ms * 1000ULL);
+      this->host_.stream_set_timeout("mac_ping_end", duration_s * 1000,
+                                     [this]() { this->stop(); });
 
       // PRECONDITION, said out loud rather than discovered in the numbers.
       //
@@ -271,13 +269,12 @@ namespace esphome
       // window) but it silently turns a Mode B run into the ~2 % lottery this
       // path was just fixed to escape. A whole run's worth of numbers is an
       // expensive way to learn the grid was off.
-      if (!this->grid_aligned_ || this->parent_ == nullptr ||
-          !this->parent_->gridStarted())
+      if (!this->host_.stream_grid_ready())
       {
         ESP_LOGW(TAG, "[%s] MAC ping: grid not aligned/started — pings will be "
                       "UNPLACED. Fine for Mode A; against a Mode B node this "
                       "measures the send path, not reception.",
-                 this->get_name().c_str());
+                 this->host_.stream_name());
       }
 
       // The ping msgids are their own sequence and will not satisfy the node's
@@ -286,27 +283,39 @@ namespace esphome
       // a reception problem.
       ESP_LOGI(TAG, "[%s] MAC ping START: %u s, grid %u ms, single copy, "
                     "echo %s, pad %u B (requires MAC-1 disabled on the node)",
-               this->get_name().c_str(), (unsigned) duration_s, (unsigned) grid_ms,
+               this->host_.stream_name(), (unsigned) duration_s, (unsigned) grid_ms,
                want_echo ? "on" : "off", (unsigned) pad_bytes);
     }
 
-    void LORAListener::stop_mac_ping()
+    void MacPingStream::stop()
     {
-      if (!this->mac_ping_active_)
+      if (!this->active_)
         return;
-      this->mac_ping_active_ = false;
-      if (this->mac_ping_timer_ != nullptr)
-        esp_timer_stop(this->mac_ping_timer_);
-      wait_callback_idle_(this->mac_ping_cb_busy_);
-      this->cancel_timeout("mac_ping_end");
-      this->mac_ping_frame_len_ = 0;
+      this->active_ = false;
+      if (this->timer_ != nullptr)
+        esp_timer_stop(this->timer_);
+      wait_until_idle(this->cb_busy_);
+      this->host_.stream_cancel_timeout("mac_ping_end");
+      this->frame_len_ = 0;
 
       // The two sides of the funnel, reported together. A yield computed from
       // one end alone is not a measurement.
       ESP_LOGI(TAG, "[%s] MAC ping STOP: offered %u, echoed %u, gaps %u",
-               this->get_name().c_str(), (unsigned) this->mac_stats_.pings_offered,
-               (unsigned) this->mac_stats_.echoes_rx,
-               (unsigned) this->mac_stats_.echo_seq_gaps);
+               this->host_.stream_name(), (unsigned) this->stats_.pings_offered,
+               (unsigned) this->stats_.echoes_rx,
+               (unsigned) this->stats_.echo_seq_gaps);
+    }
+    // A stream must not call its host here: the host is already being destroyed.
+    MacPingStream::~MacPingStream()
+    {
+      this->active_ = false;
+      if (this->timer_ != nullptr)
+      {
+        esp_timer_stop(this->timer_);
+        esp_timer_delete(this->timer_);
+        this->timer_ = nullptr;
+      }
+      wait_until_idle(this->cb_busy_);
     }
 
     // The report is RECOMPUTED here, not on the node.
@@ -484,7 +493,7 @@ namespace esphome
     void LORAListener::invalidate_fcnt_reservations_()
     {
       std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-      this->mac_ping_fcnts_.invalidate();
+      this->mac_ping_.fcnts()->invalidate();
       this->mt_fcnts_.invalidate();
       this->drift_fcnts_.invalidate();
     }
@@ -533,11 +542,48 @@ namespace esphome
 
     void LORAListener::wait_callback_idle_(const std::atomic<bool> &busy)
     {
-      // The esp_timer task outranks the loop, so a callback that is running
-      // finishes while we yield; this returns at once when none is.
-      while (busy.load())
-        std::this_thread::yield();
+      wait_until_idle(busy);
     }
+
+    // ---- StreamHost --------------------------------------------------------
+    const char *LORAListener::stream_name() const { return this->get_name().c_str(); }
+    bool LORAListener::stream_session_confirmed() const { return this->session_confirmed_; }
+    bool LORAListener::stream_grid_ready() const
+    {
+      return this->grid_aligned_ && this->parent_ != nullptr && this->parent_->gridStarted();
+    }
+    bool LORAListener::stream_frame(hubframes::Down *op, uint32_t fcnt, bool encrypt,
+                                    DeliveryFrame *out)
+    {
+      return this->mac_frame_(op, fcnt, encrypt, out);
+    }
+    bool LORAListener::stream_reserve_fcnts(uint32_t n, mac1::FcntReservation *r)
+    {
+      return this->reserve_fcnt_block_(n, r);
+    }
+    uint32_t LORAListener::stream_take_fcnt(mac1::FcntReservation *r)
+    {
+      return this->take_reserved_fcnt_(r);
+    }
+    bool LORAListener::stream_sealed_in_epoch(const DeliveryFrame &f, const mac1::FcntReservation &r)
+    {
+      return this->sealed_in_epoch_(f, r);
+    }
+    void LORAListener::stream_invalidate_fcnts(mac1::FcntReservation *r)
+    {
+      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+      r->invalidate();
+    }
+    bool LORAListener::stream_send_placed(const uint8_t *buf, size_t len, const TxPolicy &policy,
+                                          const mac2::FrameSeal &seal, int64_t *last_mark_t0_us)
+    {
+      return this->send_placed_from_timer_(buf, len, policy, seal, last_mark_t0_us);
+    }
+    void LORAListener::stream_set_timeout(const char *name, uint32_t ms, std::function<void()> fn)
+    {
+      this->set_timeout(name, ms, std::move(fn));
+    }
+    void LORAListener::stream_cancel_timeout(const char *name) { this->cancel_timeout(name); }
 
     // -----------------------------------------------------------------------
     // Drift test (bench only)
