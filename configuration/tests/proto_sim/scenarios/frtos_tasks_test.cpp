@@ -971,7 +971,7 @@ TEST_F(Irq, AnAdoptedNodeListensAtItsOwnMarkWhileStillInModeA) {
     // the node caught a mark about every 23 s and promoted after 192.8 s; in Mode B
     // it caught one every round. The promotion trial gives the unpromoted node one
     // window per round at its mark, beside its Mode A windows.
-    adoptGridUnpromoted(*this);
+    adoptGridUnpromoted(*this, /*with_session=*/true);   // node 7820192: GridSync needs a session
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_FALSE(disp.timedRxActive()) << "precondition: no phase evidence yet";
 

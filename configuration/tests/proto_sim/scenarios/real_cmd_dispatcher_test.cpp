@@ -3265,6 +3265,7 @@ TEST_F(RealNodeFixture, NodeStartsWithNoGrid) {
 }
 
 TEST_F(RealNodeFixture, AnAgreeingGridIsAdoptedAndAnchored) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto bytes = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/600);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
 
@@ -3275,6 +3276,7 @@ TEST_F(RealNodeFixture, AnAgreeingGridIsAdoptedAndAnchored) {
 }
 
 TEST_F(RealNodeFixture, AGridWeDisagreeWithIsRefusedNotHalfAdopted) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // Different pitch: a node that adopted this would miss every window and
     // look like a dead radio.
     auto bytes = build_grid_sync(true, 4, 610, timedgrid::kSlotCount, 31250);
@@ -3297,6 +3299,7 @@ int64_t rxOnMark(const CmdDispatcher &d, size_t len, int64_t near_us, int64_t er
 }  // namespace
 
 TEST_F(RealNodeFixture, WithdrawalIsUnconditionalAndClearsPhase) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto on = build_grid_sync(true, 4, 620);
     disp.onReceiveNew(on.data(), static_cast<int>(on.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -3356,6 +3359,7 @@ TEST_F(RealNodeFixture, TimedRxNeedsAGridEvenWhenEnabled) {
 }
 
 TEST_F(RealNodeFixture, TimedRxNeedsTheCrystal) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     disp.setTimedRxEnabled(true);
     auto g = build_grid_sync(true, 4, 700);
     disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
@@ -3370,6 +3374,7 @@ TEST_F(RealNodeFixture, TimedRxNeedsTheCrystal) {
 }
 
 TEST_F(RealNodeFixture, ALaterBurstCopyAnchorsWhereCopyZeroWas) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // A GridSync declares the position of COPY 0, and it is sent as a 17-copy
     // burst one stride apart. The node adopts from whichever copy it decodes
     // first — and it is in Mode A when it is told about the grid, sweeping a
@@ -3427,6 +3432,7 @@ TEST_F(RealNodeFixture, TimedRxNeedsATrustworthyPhase) {
 }
 
 TEST_F(RealNodeFixture, ArmInstantLeadsTheMarkByTheArmLead) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto g = build_grid_sync(true, 4, 720);
     disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -3438,6 +3444,7 @@ TEST_F(RealNodeFixture, ArmInstantLeadsTheMarkByTheArmLead) {
 }
 
 TEST_F(RealNodeFixture, MissedMarksCountButNeitherDemoteNorCostTheGrid) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // This asserted, until 2026-09-20, that three missed marks demote.
     //
     // They no longer do. The hub publishes pending::allListening() in both
@@ -3464,6 +3471,7 @@ TEST_F(RealNodeFixture, MissedMarksCountButNeitherDemoteNorCostTheGrid) {
 }
 
 TEST_F(RealNodeFixture, AMarkThatHeardNothingForThisNodeIsMissedAtTheNextMark) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // Review finding 5 (2026-09-15). A mark window that received a CRC failure or a
     // neighbour's frame was neither hit nor closed empty, so it was never counted —
     // and a node hearing its neighbour instead of its own frame every round never
@@ -3512,6 +3520,7 @@ TEST_F(RealNodeFixture, AWindowThatIsNotTheMarksOwnCannotHitIt) {
 }
 
 TEST_F(RealNodeFixture, ABroadcastFrameDoesNotBookAMarkHit) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // The beacon half of finding 13. GridBeacon and GridDemote are addressed to
     // the BROADCAST address, and the node's "is this mine" test accepts
     // broadcast — so every beacon used to close whatever grid mark was open,
@@ -3584,6 +3593,7 @@ TEST_F(RealNodeFixture, AWindowThatIsNotTheMarksOwnCannotMissIt) {
 }
 
 TEST_F(RealNodeFixture, MissedMarksKeyOnAddressedFramesNotOnSilence) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto g = build_grid_sync(true, 4, 730);
     disp.onReceiveNew(g.data(), static_cast<int>(g.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -3610,6 +3620,7 @@ TEST_F(RealNodeFixture, MarkOutcomesAreTheOnlySourceOfWmr) {
 }
 
 TEST_F(RealNodeFixture, NoteMarkOutcomeCountsMissesWithoutDemoting) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // The one-call counting path, beside noteMarkArmed/Hit/Missed. It demoted
     // after kMaxMissedMarks until 2026-09-20 — see
     // MissedMarksCountButNeitherDemoteNorCostTheGrid for why that went.
@@ -3664,6 +3675,7 @@ TEST_F(RealNodeFixture, AnAcceptedSysopIsAcked) {
 // never re-sent; the node sat in Mode A for 13 minutes. The hub now re-publishes
 // until the node confirms, so the node must confirm — once per GridSync.
 TEST_F(RealNodeFixture, AnAdoptedGridSyncIsAckedOnce) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/800);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -3795,6 +3807,7 @@ TEST_F(RealNodeFixture, TheArmedCacheWouldReAckOnceTheBurstSpanHasPassed) {
 // ---------------------------------------------------------------------------
 
 TEST_F(RealNodeFixture, AdoptingAGridEnablesTimedRx) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // setTimedRxEnabled() had no caller anywhere, so timed_rx_enabled_ was
     // permanently false and timedRxActive() returned false BEFORE consulting
     // the grid at all. A node could accept a GridSync, solve its anchor, and
@@ -4082,6 +4095,7 @@ TEST_F(RealNodeFixture, ClassAWindowsOnlyOpenForAnAutomaticModeNode) {
 }
 
 TEST_F(RealNodeFixture, AGridBeatsClassAWindows) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // Mode B's marks ARE the schedule. Both mechanisms drive the same one-shot,
     // so letting an uplink activate Class A while a grid is adopted means
     // whichever ran last wins and the node's mark rate collapses for reasons no
@@ -4916,6 +4930,7 @@ int64_t rx_for_beacon(const gridstate::State &st, uint32_t round, int64_t err_us
 }  // namespace
 
 TEST_F(RealNodeFixture, ABeaconCorrectsDriftWithoutTouchingTheGeometry) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/1000);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -4944,6 +4959,7 @@ TEST_F(RealNodeFixture, ABeaconCorrectsDriftWithoutTouchingTheGeometry) {
 // lands kDrift late moves the anchor by exactly that. (The v0 half of this test,
 // a padded beacon that must NOT re-anchor, cannot be built in v1: see above.)
 TEST_F(RealNodeFixture, ABeaconReAnchorsByItsOwnLengthsT0) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/1000);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -4964,6 +4980,7 @@ TEST_F(RealNodeFixture, ABeaconReAnchorsByItsOwnLengthsT0) {
 // closes it: a round at or behind the last one accepted is never fresher,
 // authenticated or not.
 TEST_F(RealNodeFixture, AReplayedOlderBeaconDoesNotReAnchor) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/1000);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -5160,6 +5177,7 @@ TEST_F(RealNodeFixture, ANodeOffTheGridNeverAims) {
 }
 
 TEST_F(RealNodeFixture, AnAnchorTheNodeDoesNotTrustIsNotAimedFrom) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // Adoption enables timed RX immediately, but the phase evidence takes ten
     // frames. In between, aiming would be worse than not aiming: a random
     // backoff lands somewhere harmless, while a confident wrong instant lands
@@ -5192,11 +5210,11 @@ TEST_F(RealNodeFixture, AnAnchorTheNodeDoesNotTrustIsNotAimedFrom) {
 TEST_F(RealNodeFixture, TheFleetKeyIsAdoptedOnlyFromAnAuthenticatedGridSync) {
     // A plaintext GridSync carrying a key would make the whole construction
     // decorative: anything in radio range could install the key it then signs
-    // its own beacons with. This is the §11a lesson — a deny-by-default rule is
-    // only shipped when the legitimate sender satisfies it — in a new place.
+    // its own beacons with. Since node 7820192 a node without a session refuses
+    // a plaintext GridSync outright: neither the grid nor the key is taken.
     auto plain = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/601);
     disp.onReceiveNew(plain.data(), static_cast<int>(plain.size()));
-    ASSERT_TRUE(disp.gridState().active) << "the grid itself is still adopted";
+    EXPECT_FALSE(disp.gridState().active) << "a plaintext GridSync is refused before a session";
     EXPECT_FALSE(disp.hasNetKey())
         << "a plaintext frame may not install the key the beacon rests on";
 
@@ -5633,6 +5651,7 @@ TEST_F(RealNodeFixture, ABeaconUnderAnUnknownKeyIdIsRefused) {
 }
 
 TEST_F(RealNodeFixture, ANodeWithNoKeyKeepsTheBehaviourThatShipped) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // The other half of the ratchet, and what makes this safe to ship ahead of
     // the hubs: a node that never receives a key still corrects its anchor from
     // a beacon, bounded by the guard, and still refuses the mask. No regression
@@ -5704,6 +5723,7 @@ TEST_F(RealNodeFixture, DroppingThePowerProfileIsAnExplicitAct) {
 }
 
 TEST_F(RealNodeFixture, ABeaconCommitsOneSampleAndItIsInsideTheGuard) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // The beacon exists to be "the sample an idle node's phase tracking
     // otherwise never gets". It was doing the opposite.
     //
@@ -5733,6 +5753,7 @@ TEST_F(RealNodeFixture, ABeaconCommitsOneSampleAndItIsInsideTheGuard) {
 }
 
 TEST_F(RealNodeFixture, AGridOrBeaconUpdateBringsTheReceiveTaskRoundToReArm) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // Measured 2026-09-14 on node 2: the receive task re-armed as a beacon window
     // closed, before this dispatcher had processed that beacon, so it aimed at the
     // NEXT beacon under the old mask and slept 350 s through the new one.
@@ -5854,6 +5875,7 @@ TEST_F(RealNodeFixture, ASampleFurtherThanHalfAPitchIsNotCountedAgainstPromotion
 }
 
 TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // Measured 2026-09-14: a GridSync placed on slot 4's mark went out ~320 ms
     // late; solving the anchor from its placement moved every mark by 320 ms.
     constexpr uint32_t kSlot  = 4;
@@ -6661,11 +6683,16 @@ TEST_F(RealNodeFixture, ANodeWithAStaleAnchorAsksTheHubForItsGrid) {
 }
 
 TEST_F(RealNodeFixture, WithoutASessionTheNodeDoesNotAskForItsGrid) {
+    // Since node 7820192 a node without a session cannot even hold a grid (a
+    // plaintext GridSync is refused), so the property becomes: whatever
+    // plaintext grid it is offered, a sessionless node never sends a
+    // GridSyncRequest -- a plaintext request is one anybody could send, and it
+    // spends a hub burst.
     disp.setTimedRxEnabled(true);
     proto_sim_timer_set_now_us(1'000'000);
     auto g = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/720);
     disp.onReceiveNew(g.data(), static_cast<int>(g.size()), 1'000'000);
-    ASSERT_TRUE(disp.gridState().active);
+    ASSERT_FALSE(disp.gridState().active) << "a plaintext GridSync is refused before a session";
     drainTx(disp);
 
     proto_sim_timer_set_now_us(esp_timer_get_time() + 351LL * 1'000'000);
@@ -6704,6 +6731,7 @@ TEST_F(RealNodeFixture, SamplesRefusedAsTooFarOffMakeTheNodeAsk) {
 }
 
 TEST_F(RealNodeFixture, ABaselineOneSampleShortStaysInModeA) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // The node's own threshold: phaseTrustworthy wants kPromotionPhaseSamples.
     bringNodeToTheEdgeOfPromotion(disp, /*samples=*/timedmode::kPromotionPhaseSamples - 1);
     EXPECT_FALSE(disp.timedRxActive());
@@ -6970,6 +6998,7 @@ int64_t rx_for_truth(const gridstate::State &truth, uint32_t round, uint32_t len
 }  // namespace
 
 TEST_F(RealNodeFixture, ANodeLearnsItsClockRateFromBeaconsAndComesBackInsideTheGuard) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/100);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -7046,6 +7075,7 @@ TEST_F(RealNodeFixture, LearningTheClockRateDoesNotThrowANodeOutOfModeB) {
 }
 
 TEST_F(RealNodeFixture, ALearnedRateSurvivesAGridWithdrawalAndReadoption) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(true, 4, 100);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     // Precondition. Without it a GridSync dropped by the replay window leaves no
@@ -7117,6 +7147,7 @@ gridstate::State truthAt(const CmdDispatcher &disp, int32_t rate_ppb) {
 }  // namespace
 
 TEST_F(RealNodeFixture, AStampedGridSyncStartsTheRateSpanSoTheFirstBeaconLearnsTheRate) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     deliverStampedGridSync(disp, 760, /*err_us=*/0);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kRefAnchor);
@@ -7131,6 +7162,7 @@ TEST_F(RealNodeFixture, AStampedGridSyncStartsTheRateSpanSoTheFirstBeaconLearnsT
 }
 
 TEST_F(RealNodeFixture, AGridSyncOnAnUnsettledClockDoesNotStartTheRateSpan) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     // Its anchor carries the boot-minute error: counted as drift it would teach
     // the node -23 ppm from nothing.
     nodeclock::setSettledForTest(false);
@@ -7169,6 +7201,7 @@ TEST_F(RealNodeFixture, TheBootMinuteReSolveStartsTheRateSpan) {
 }
 
 TEST_F(RealNodeFixture, ABeaconBeyondHalfASlotPitchChangesNothing) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(true, 4, 100);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     // Precondition, and the reason it is here: with msgid 2200 this test used to
@@ -7937,6 +7970,7 @@ TEST_F(RealNodeFixture, AdmitFrame_OnlyAPlacedUnicastFrameIsAPhaseSample) {
 }
 
 TEST_F(RealNodeFixture, AdmitFrame_AFrameWithoutAnArrivalStampIsNotEvenAttempted) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/810);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);
@@ -7968,6 +8002,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AFrameHalfARoundOffTheMarkBelongsToTheNextMar
 // --- the provisional re-solve needs a STAMPED frame ---------------------------
 
 TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnchor) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     constexpr uint32_t kSlot       = 4;
     constexpr int64_t  kTrueAnchor = 90'000'000;
     constexpr int64_t  kBootError  = 8'000;
@@ -8158,6 +8193,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ANodeWithNoGridNeverAttemptsAPhaseSample) {
 }
 
 TEST_F(RealNodeFixture, AdmitFrame_ABeaconIsNotAPhaseSampleEvenWhenAddressedAndPlaced) {
+    useSession();   // node N10 (7820192): no plaintext GridSync before a session
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/860);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
     ASSERT_TRUE(disp.gridState().active);

@@ -248,6 +248,7 @@ TEST_F(Seam, ANodeToldAboutTheGridIsNotToldToStopListening) {
     // for two beacon intervals (1611 s to ~2067 s) while the hub sent a ModeTest
     // mark every round. The real hub's frame, the real node's decision.
     proto_sim_timer_set_now_us(1'000'000);
+    bringUpSession();   // node 7820192: the GridSync is accepted only sealed, in a session
     tracker.startGrid();
     rol.enable_timed_mode(true);
     ASSERT_TRUE(tracker.gridStarted());
@@ -292,6 +293,7 @@ TEST_F(Seam, AnUnplacedGridSyncDisplacesEveryMarkTheNodeWillEverArm) {
                                        // round, and three times the guard band
 
     proto_sim_timer_set_now_us(1'000'000);
+    bringUpSession();   // node 7820192: the GridSync is accepted only sealed, in a session
     tracker.startGrid();
     rol.enable_timed_mode(true);
     ASSERT_TRUE(tracker.gridStarted());

@@ -282,6 +282,34 @@ TEST_F(E2E, ACoverCommandIsExecutedAndAcknowledged) {
     EXPECT_FALSE(rol.commandFailed());
 }
 
+// Review P3 follow-up (node 7820192 + hub b53650f): a command the REAL node
+// recognises but refuses (a target outside 0..1) is answered with MacAck
+// ACK_ERROR, and the REAL hub fails it at once: nothing executed, no retry, no
+// relogin.
+TEST_F(E2E, ACommandTheNodeRefusesFailsAtOnceOnTheHub) {
+    bringUpSession();
+    drainNodeOps();
+    ASSERT_TRUE(rol.session_confirmed_) << "precondition";
+
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 1.5f);
+    ASSERT_TRUE(rol.awaitingAck()) << "precondition: the hub is tracking it";
+    const auto cmd = radio.hub_to_node_frames().back().bytes;   // the command just sent
+    settle();
+
+    EXPECT_TRUE(drainNodeOps().empty()) << "the node must not move to 150 %";
+    EXPECT_FALSE(rol.awaitingAck()) << "the refusal closed the command";
+    EXPECT_TRUE(rol.commandFailed()) << "and it is shown as failed, not delivered";
+    const size_t before = radio.hub_to_node_frames().size();
+    tick(20000);
+    settle();
+    size_t resent = 0;
+    const auto &frames = radio.hub_to_node_frames();
+    for (size_t i = before; i < frames.size(); ++i)
+        if (frames[i].bytes == cmd) ++resent;
+    EXPECT_EQ(resent, 0u) << "no retry of the refused command";
+    EXPECT_TRUE(rol.session_confirmed_) << "no relogin over a refusal";
+}
+
 TEST_F(E2E, ACloseIsNotAnOpen) {
     // The cheapest possible way for the two ends to disagree, and one nothing
     // checked: an enum that survives the wire in the wrong direction would look
