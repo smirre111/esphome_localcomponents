@@ -9,19 +9,24 @@ pins exact frames for both implementations. Written 2026-10-18 against hub `e0a1
 node `1db0151`; refreshed 2026-10-25 against node `6d83b28` (2026-10-25 review, P9).
 
 > **Deviations as built** (the sections below are corrected; this box lists them):
-> - §2.5: the node acks **iff the frame carries `ACK_REQ`** and the command executed
->   (the header is authoritative); an authenticated `ACK_REQ`'d frame with no body case
->   the node knows gets a MacAck with `status = ACK_ERROR`. ACKED_FCNT is honoured by
->   the hub only on a MacAck body; v1 never piggybacks.
+> - §2.5: the node acks **iff the frame carries `ACK_REQ`** (the header is
+>   authoritative): `ACK_OK` when the command executed, `ACK_ERROR` when the body has no
+>   case the node knows OR the node recognises the command and refuses it (cover target
+>   outside 0..1 / NaN, unset or unknown sysop op, empty ScheduleConfig). The hub fails
+>   the request at once on a non-OK status. ACKED_FCNT is honoured by the hub only on a
+>   MacAck body; v1 never piggybacks.
 > - §3: the sysop is `SysopCmd {op, cmd_id}`; the hub's uplink port table
 >   (`PortTable.h`) is a switch, the node keeps `PortMap.h` (case → port, expected ACK_REQ).
 > - §4.1: the hub runs the MAC-1 `check` before the tag; the node verifies, decrypts
 >   and decodes first and runs check + commit in its admission pipeline (still after the
 >   tag, so a forged frame never touches the window).
 > - §4.2: `RxTicket.timing_trusted` is always true (the tag covers the length).
-> - §4.5: before a session the node accepts in the clear only ClientConfig, CoverConfig
->   and GridSync (grid only, no fleet key), plus LOGIN (K_AUTH), GridBeacon, GridDemote;
->   FLEET is valid only for a GridBeacon body; there is no sealed broadcast.
+> - §4.5: before a session the node accepts in the clear only ClientConfig and
+>   CoverConfig (provisioning), plus LOGIN (K_AUTH tag), GridBeacon (FLEET tag) and
+>   GridDemote; GridSync is refused in the clear (it comes encrypted after LOGIN). FLEET
+>   is valid only for a GridBeacon body; there is no sealed broadcast. The hub ignores
+>   pre-session plaintext MAC frames from a node: no receive counter, timing, MacAck,
+>   PhaseReport or beacon handling.
 > - §6: the shared vector `cover_op` is 35 B (9-byte body, unstamped); the 46 B row is a
 >   stamped cover op with a larger body.
 > - §7: the node's cmd_id guard is one RAM slot whose scope is a **hub boot** (cleared by
@@ -128,14 +133,19 @@ ARQ lives in the MAC header (v0's App `CommandAck.ack_msg_id` is gone):
   OPERATION, SYSOP, SCHEDULE, GRIDSYNC — `HubWire.cpp kRoutes`);
 - the receiver acks **iff `ACK_REQ` is set**: the node answers an executed command with
   an uplink carrying `FLAGS.ACK` + `ACKED_FCNT` = the request's FCNT and the body
-  `MacAck { AckStatus status; PhaseReport phase; }` on PORT 0, `status = ACK_OK`. An
-  authenticated `ACK_REQ`'d frame whose body has no case the node knows (a newer peer's
-  new command) is answered with `status = ACK_ERROR`, so the sender can fail fast
-  instead of retrying into a session teardown. A known command the node did not execute
-  is not acked. The node's `PortMap.h` keeps the ACK_REQ it expects per case; the hub's
+  `MacAck { AckStatus status; PhaseReport phase; }` on PORT 0, `status = ACK_OK`;
+- `status = ACK_ERROR` answers an authenticated `ACK_REQ`'d frame the node will not
+  execute: its body has no case the node knows (a newer peer's new command), or the node
+  recognises the command and refuses it (cover target outside 0..1 or NaN, sysop op 0 =
+  unset or unknown, ScheduleConfig without payload). The hub fails the request at once
+  on a non-OK status instead of retrying into a session teardown. A refused command is
+  never executed and does not enter the node's cmd_id guard, so a re-pack of the same
+  command (same cmd_id, new FCNT) is refused again with ACK_ERROR; a duplicate copy
+  (same FCNT) of a refused frame is re-answered ACK_ERROR (bounded like the re-acks),
+  never ACK_OK. The node's `PortMap.h` keeps the ACK_REQ it expects per case; the hub's
   `mirror_tables_test` pins it against `kRoutes`;
-- a duplicate (same FCNT, already executed) is re-acked from the node's AckCache, keyed
-  on FCNT;
+- a duplicate (same FCNT, already executed) is re-acked OK from the node's AckCache,
+  keyed on FCNT;
 - the hub's delivery service matches `ACKED_FCNT` against its slots (S7's `dlv_ack_`).
 The format would allow an ACK to piggyback on any uplink, but v1 sends it as its own
 frame, and the hub honours `ACKED_FCNT` only on a MacAck body.
@@ -221,7 +231,7 @@ Replaces `buildBeaconMacInput` and `GridBeacon.mac`; the burst index (today the
 | session-opening uplink | ↑ | any | SESSION | `SESSION_OPENING` + NODE_NONCE; hub derives the candidate keys from it |
 | GridBeacon | ↓ bcast | 0 | FLEET | FCNT 0, BURST 0/1, never STAMPED (fits kBeaconPayloadBytes); FLEET is valid for this body only — the node drops any other body under FLEET |
 | GridDemote | ↓ bcast | 0 | NONE | unauthenticated by design (its only effect is to listen more) |
-| GridSync | ↓ | 0 | SESSION | NONE accepted only by a node without a session, and then without the fleet key |
+| GridSync | ↓ | 0 | SESSION | never accepted in the clear; a new node gets its grid encrypted after LOGIN |
 | ModeTest, DriftTest | ↓ | 0 | SESSION | arming requires an authenticated frame (and a bench node) |
 | MacControl ping | ↓ | 0 | SESSION, or NONE while MAC-2 is switched off for control during an authenticated ModeTest (bench) | MAC-2-off pings use the dedicated counter |
 | MacControl echo, ModeTestReport, GridSyncRequest, MacAck | ↑ | 0 | SESSION | |
@@ -230,6 +240,16 @@ Replaces `buildBeaconMacInput` and `GridBeacon.mac`; the burst index (today the
 
 There is no sealed broadcast: a SESSION frame must be unicast (session keys and the CTR
 block are per node).
+
+**Before a session** (no restored or proven session on the node; no confirmed session
+for that node on the hub) the accepted plaintext set is:
+- node, downlink: ClientConfig and CoverConfig (provisioning, PORT 2, AUTH = NONE), plus
+  LOGIN (K_AUTH), GridBeacon (FLEET) and GridDemote (NONE, broadcast). Everything else in
+  the clear is refused (not executed, not acked).
+- hub, uplink: REGISTER (K_AUTH) and the plaintext application uplinks of an
+  unprovisioned node. The hub **ignores pre-session plaintext MAC frames** (PORT 0) from
+  a node: they do not move its receive counter, feed no timing, and are not handled as a
+  MacAck, a PhaseReport or a beacon.
 
 ## 5. Per-copy burst restamp
 
