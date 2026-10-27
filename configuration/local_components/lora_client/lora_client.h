@@ -20,6 +20,7 @@
 #include "esphome/components/lora_client/SingleShotAckWait.h"
 #include "esphome/components/lora_client/DeliveryPolicy.h"
 #include "esphome/components/lora_client/DeliveryService.h"
+#include "esphome/components/lora_client/HubSession.h"
 #include "esphome/components/lora_client/ModeBSupervisor.h"
 #include "esphome/components/lora_client/SleepModel.h"
 // MAC-2: keys, KDF, Encrypt-then-CMAC and the session key store (stage S2).
@@ -128,7 +129,7 @@ namespace esphome
  
 
     class LORAListener : public EntityBase, public Component, private StreamHost,
-                         private DeliveryHost
+                         private DeliveryHost, private SessionHost
     {
     public:
       static constexpr size_t MAC_ADDR_STR_LEN = 18; // "AA:BB:CC:DD:EE:FF\0"
@@ -326,25 +327,31 @@ namespace esphome
 
       // For tests: how many times this listener's session keys have been
       // (re)derived — mirrors CmdDispatcher::sessionGenerationForTest().
-      uint32_t sessionGenerationForTest() const;
+      uint32_t sessionGenerationForTest() const { return this->session_.generation(); }
       // For tests: install a session directly (sets the base nonce AND
       // derives K_enc/K_mac from it), without a real LOGIN/uplink round
       // trip. Mirrors CmdDispatcher's setBaseNonceForTest reasoning: some
       // tests need "a second, DIFFERENT session now exists" as a precise,
       // one-line precondition rather than a second full handshake.
-      bool deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce);
+      bool deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce)
+      {
+        return this->session_.derive_keys_for_test(session_id, node_nonce);
+      }
       // For tests: the 16-byte K_root every K_auth/K_enc/K_mac is derived from
       // (SHA-256(fleet key phrase)[0:16]). A wrong byte here is invisible to
       // anything that derives and compares on the SAME side, so a test pins it.
       static bool deriveRootKeyForTest(uint8_t out[16]);
       // For tests: the msgid / CTR-space guard (see requestMsgidRelogin_).
-      bool msgidReloginPendingForTest() const { return this->msgid_relogin_pending_; }
-      uint32_t msgidReloginRequestsForTest() const { return this->msgid_relogin_requests_; }
-      void clearMsgidReloginForTest() { this->msgid_relogin_pending_ = false; }
+      bool msgidReloginPendingForTest() const { return this->session_.msgid_relogin_pending(); }
+      uint32_t msgidReloginRequestsForTest() const { return this->session_.msgid_relogin_requests(); }
+      void clearMsgidReloginForTest() { this->session_.clear_msgid_relogin(); }
       // For tests: encrypt a block under this listener's CURRENT K_enc with
       // CTR — the only way to prove the hub and node landed on bit-IDENTICAL
       // session keys, since opaque PSA key ids can't be compared directly.
-      bool ctrEncryptForTest(const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out);
+      bool ctrEncryptForTest(const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out)
+      {
+        return this->session_.ctr_encrypt_for_test(iv, in, len, out);
+      }
 
       // U-2: the node's radio-busy skip count, as of its last PhaseReport.
       //
@@ -950,8 +957,6 @@ namespace esphome
       std::string last_mode_test_report_{};
       ModeTestSummary mode_test_summary_{};
 
-      // The decrypted body of the uplink being processed (loop only, HB8).
-      uint8_t uplink_pt_[256]{};
       // MAC-0 ping / echo (BenchStreams.h): its state, timer and FCNT block.
       MacPingStream mac_ping_{*this};
       // Mode C's Class A ledger; see class_a_stats().
@@ -1213,7 +1218,7 @@ namespace esphome
       // another node, or a tag buffer of the wrong size).
       // For tests: how many burst copies of this node's frames were refused as
       // stale (sealed under keys the node no longer holds).
-      uint32_t staleSessionDropsForTest() const;
+      uint32_t staleSessionDropsForTest() const { return this->session_.stale_drops(); }
 
       uint8_t  short_address_{0};
       uint8_t  subnet_address_{0};
@@ -1398,32 +1403,16 @@ namespace esphome
       void handle_register_(hubframes::Up *rcv_message, uint8_t *data, size_t len);
       bool admit_frame_(hubframes::Up *rcv_message);
       void handle_encrypted_(hubframes::Up *rcv_message, uint8_t *data, size_t len);
-      // Working state of one encrypted-uplink receive: the ordered stages of
-      // handle_encrypted_ share it instead of a dozen locals.
-      struct EncUplink
-      {
-        hubframes::Up *msg{nullptr};
-        uint32_t     sender{0};
-        uint32_t      session_id{0};
-        mac2::KeyPair keys{};        // the keys this frame is tried under (live, or the candidate)
-        mac2::KeyPair candidate{};   // an unverified candidate; destroyed unless installed
-        mac::MacHdr   hdr{};         // the outer header, decoded for MAC-2
-        bool          needs_candidate{false};
-        uint32_t     msgid{0};
-      };
-      bool     uplink_check_base_nonce_(const EncUplink &up);
-      bool     uplink_select_keys_(EncUplink &up);
-      bool     uplink_verify_(EncUplink &up);
-      uint8_t *uplink_decrypt_(EncUplink &up);
+      // The node's MAC-2 link (HubSession.h): keys, v1 framing and seal, the
+      // uplink's security stages, the msgid guard.
+      HubSession session_{*this};
+      // The last stage of handle_encrypted_ (the frame is authentic and decrypted).
       void     uplink_accept_(EncUplink &up, uint8_t *plaintext);
-      void     uplink_drop_candidate_(EncUplink &up);
-      // ---- MAC wire v1 (S8, docs/mac-wire-format.md) -------------------------
-      // Downlink: the v1 frame for `op` under FCNT `fcnt` -- HubMacPdu or
-      // HubAppPdu behind the fixed header (hubwire::routeDownlink picks PORT and
-      // ACK_REQ), sealed (AUTH = SESSION) exactly when encrypt && a session id
-      // exists for the node.
-      bool v1_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt, MacFrame *out);
-      bool v1_seal_(MacFrame *f, size_t hdr_len, size_t body_len);
+      // ---- MAC wire v1 (S8, docs/mac-wire-format.md): HubSession's, forwarded ----
+      bool v1_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt, MacFrame *out)
+      {
+        return this->session_.frame(op, fcnt, encrypt, out);
+      }
       // The v1 LOGIN path of send_login (frame, send, log).
       void send_login_v1_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base);
       // The REGISTER's authentication: the K_AUTH tag over the raw frame.
@@ -1431,54 +1420,27 @@ namespace esphome
                                size_t len);
       // The v1 shape check + decoded view (set_response's first step).
       std::unique_ptr<hubwire::Uplink> unpack_uplink_(uint8_t *data, size_t len);
-      // uplink_verify_'s tag check over the raw frame.
-      mac2::LinkSecurity::Verify uplink_tag_verdict_(EncUplink &up);
-      // LOGIN (PORT 1, AUTH = K_AUTH; the tag replaces LoginMsg.mic).
-      bool v1_login_frame_(const ::LoginMsg &login, uint32_t fcnt, MacFrame *out);
-      // GridDemote (broadcast, PORT 0, AUTH = NONE, FCNT 0).
-      bool v1_demote_frame_(MacFrame *out);
-      // Uplink: shape-check the frame and return the decoded view the rest of
-      // set_response walks (hubframes::Up, owned), or nullptr (dropped). Keeps
-      // the raw frame and its header for the verify/accept stages below.
-      std::unique_ptr<hubwire::Uplink> v1_receive_(uint8_t *data, size_t len);
-      bool v1_verify_uplink_(EncUplink &up);
+      bool v1_login_frame_(const ::LoginMsg &login, uint32_t fcnt, MacFrame *out)
+      {
+        return this->session_.login_frame(login, fcnt, out);
+      }
+      bool v1_demote_frame_(MacFrame *out) { return this->session_.demote_frame(out); }
       void v1_deliver_decrypted_(EncUplink &up, const uint8_t *pt, size_t len);
-      macwire::WireHdr v1_rx_hdr_{};
-      const uint8_t   *v1_rx_frame_{nullptr};
-      size_t           v1_rx_len_{0};
 
       // Two stages of set_response(): the length re-encode check, and the
       // plaintext-uplink gate (true = the frame may be acted on).
       bool accept_plaintext_uplink_(hubframes::Up *rcv_message);
-      // Tier 3: derive this listener's K_enc/K_mac from (K_root, session_id,
-      // node_nonce, hub/node addresses) and install them immediately,
-      // destroying whatever was there before only on success — mirrors
-      // CmdDispatcher::deriveSessionKeys_() on the node. Used by the test
-      // hook and anywhere else that doesn't need the verify-before-install
-      // gating handle_encrypted_ uses (see deriveSessionKeyCandidate_()).
-      bool deriveSessionKeys_(uint32_t session_id, uint32_t node_nonce);
-      // Derives candidate K_enc/K_mac into freshly-imported PSA key ids
-      // WITHOUT installing them — safe to call on an UNVERIFIED frame's
-      // sessionNonce, since nothing committed is touched. The caller must
-      // either installSessionKeys_() these ids after verifying a frame
-      // under them, or destroy both ids itself if it does not.
-      bool deriveSessionKeyCandidate_(uint32_t session_id, uint32_t node_nonce, mac2::KeyPair *out);
-      // Installs a previously-derived candidate as this listener's LIVE
-      // session keys: destroys whatever was live before, bumps the store's
-      // generation for this node, and records session_id so
-      // a later duplicate of the same session-opening uplink is recognised
-      // and skipped rather than re-derived.
-      void installSessionKeys_(uint32_t session_id, const mac2::KeyPair &keys);
-      // Destroys whatever session keys are live (and the seal snapshot) in the
-      // store — called when send_login() mints a FRESH challenge
-      // nonce (a genuinely new session), so a stale key from the session
-      // just superseded cannot be used to (mis)encrypt a downlink in the
-      // window before the new session-opening uplink arrives; the hub
-      // correctly drops with "no session keys" instead. NOT called on a
-      // bare RETRY of the same pending nonce — that could destroy keys a
-      // session-opening uplink already installed for THIS challenge while
-      // the retry timer raced it.
-      void clearSessionKeys_();
+      // HubSession's key lifecycle (see HubSession.h for the rules).
+      void clearSessionKeys_() { this->session_.clear_keys(); }
+      // SessionHost (lora_client_session.cpp).
+      const char *session_name() const override;
+      uint8_t session_peer() const override;
+      uint8_t session_subnet() const override;
+      uint32_t session_cmd_generation() const override;
+      void session_keys_installed() override;
+      void session_keys_cleared() override;
+      void session_relogin() override;
+      void session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn) override;
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
       void commit_rx_msgid_(const hubframes::Up *rcv_message);
@@ -1542,13 +1504,8 @@ namespace esphome
       void     schedule_startup_login_();
       void     do_login_and_arm_retry_();
 
-      // Msgid / CTR-space guard (framecrypto::kMsgidCtrLimit). requestMsgidRelogin_
-      // starts a fresh session ONCE per exhaustion (flag cleared in send_login(),
-      // where both counters restart); v1_seal_ requests it when the seal was
-      // refused for the FCNT alone.
-      void     requestMsgidRelogin_(const char *where);
-      bool     msgid_relogin_pending_{false};
-      uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
+      // Msgid / CTR-space guard: HubSession::request_msgid_relogin.
+      void     requestMsgidRelogin_(const char *where) { this->session_.request_msgid_relogin(where); }
       // Arm a ONE-SHOT login retry that re-arms itself.  Uses set_timeout rather than set_interval: an
       // interval's first firing is randomly phased within [0, interval), which
       // fired the "hourly" login retry within ~0.6 s of the challenge, stepping

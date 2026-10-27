@@ -666,56 +666,49 @@ namespace esphome
     // this listener's K_enc/K_mac from (K_root, session_id, node_nonce,
     // hub/node addresses) — never installed here. Mirrors
     // CmdDispatcher::deriveSessionKeys_() on the node. MAC-2: LinkSecurity.
-    bool LORAListener::deriveSessionKeyCandidate_(uint32_t session_id, uint32_t node_nonce,
+    bool HubSession::derive_candidate(uint32_t session_id, uint32_t node_nonce,
                                                   mac2::KeyPair *out)
     {
       return s_sec().deriveCandidate(static_cast<mac::Addr>(kHubAddress),
-                                     static_cast<mac::Addr>(this->short_address_), session_id,
+                                     static_cast<mac::Addr>(this->host_.session_peer()), session_id,
                                      node_nonce, out);
     }
 
     // Invariant I3 (c): the store installs under its key lock, racing the
     // tracker task's retag safely. Logged after the lock is released.
-    void LORAListener::installSessionKeys_(uint32_t session_id, const mac2::KeyPair &keys)
+    void HubSession::install_keys(uint32_t session_id, const mac2::KeyPair &keys)
     {
-      const mac::Addr peer = static_cast<mac::Addr>(this->short_address_);
+      const mac::Addr peer = static_cast<mac::Addr>(this->host_.session_peer());
       s_keys().install(peer, session_id, keys);
-      this->invalidate_fcnt_reservations_();
-      ESP_LOGI(TAG, "[%s] Session keys installed (generation=%u)", this->get_name().c_str(),
+      this->host_.session_keys_installed();
+      ESP_LOGI(TAG, "[%s] Session keys installed (generation=%u)", this->host_.session_name(),
                (unsigned) s_keys().generation(peer));
     }
 
-    bool LORAListener::deriveSessionKeys_(uint32_t session_id, uint32_t node_nonce)
+    bool HubSession::derive_keys(uint32_t session_id, uint32_t node_nonce)
     {
       mac2::KeyPair keys;
-      if (!this->deriveSessionKeyCandidate_(session_id, node_nonce, &keys))
+      if (!this->derive_candidate(session_id, node_nonce, &keys))
         return false;
-      this->installSessionKeys_(session_id, keys);
+      this->install_keys(session_id, keys);
       return true;
     }
 
-    void LORAListener::clearSessionKeys_()
+    void HubSession::clear_keys()
     {
-      s_keys().clearKeys(static_cast<mac::Addr>(this->short_address_));
+      s_keys().clearKeys(static_cast<mac::Addr>(this->host_.session_peer()));
       // A reserved FCNT block belongs to the keys just destroyed (P1).
-      this->invalidate_fcnt_reservations_();
-
-      // Invariant I3 (a): the Control channel's stored frame (pack once, retries
-      // re-send the bytes) is sealed under the keys just destroyed, so it must
-      // never be re-sent: the retry re-packs or, for an at-most-once command,
-      // is abandoned (dlv_resend_).
-      this->ctl().frame     = MacFrame{};   // the delivery service's stored frame
-      this->ctl().frame_tag = 0;
+      this->host_.session_keys_cleared();
     }
 
-    uint32_t LORAListener::sessionGenerationForTest() const
+    uint32_t HubSession::generation() const
     {
-      return s_keys().generation(static_cast<mac::Addr>(this->short_address_));
+      return s_keys().generation(static_cast<mac::Addr>(this->host_.session_peer()));
     }
 
-    bool LORAListener::ctrEncryptForTest(const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out)
+    bool HubSession::ctr_encrypt_for_test(const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out)
     {
-      return s_sec().ctrEncryptForTest(static_cast<mac::Addr>(this->short_address_), iv, in, len, out);
+      return s_sec().ctrEncryptForTest(static_cast<mac::Addr>(this->host_.session_peer()), iv, in, len, out);
     }
 
     bool LORAListener::deriveRootKeyForTest(uint8_t out[16])
@@ -723,20 +716,20 @@ namespace esphome
       return mac2::LinkSecurity::deriveRootKey(out);
     }
 
-    bool LORAListener::deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce)
+    bool HubSession::derive_keys_for_test(uint32_t session_id, uint32_t node_nonce)
     {
-      s_keys().setSessionId(static_cast<mac::Addr>(this->short_address_), session_id);
-      return this->deriveSessionKeys_(session_id, node_nonce);
+      s_keys().setSessionId(static_cast<mac::Addr>(this->host_.session_peer()), session_id);
+      return this->derive_keys(session_id, node_nonce);
     }
 
-    uint32_t LORAListener::staleSessionDropsForTest() const
+    uint32_t HubSession::stale_drops() const
     {
-      return s_keys().staleDrops(static_cast<mac::Addr>(this->short_address_));
+      return s_keys().staleDrops(static_cast<mac::Addr>(this->host_.session_peer()));
     }
 
     // A candidate not yet installed must be destroyed on every exit that is not
     // the install call at the end of a successful verify+decrypt.
-    void LORAListener::uplink_drop_candidate_(EncUplink &up)
+    void HubSession::drop_candidate_(EncUplink &up)
     {
       mac2::LinkSecurity::destroy(up.candidate);
     }
@@ -773,7 +766,7 @@ namespace esphome
     // a hub reboot (see above). Do not "harden" this by checking a tag first.
     //
     // False = the frame is discarded (a login was started).
-    bool LORAListener::uplink_check_base_nonce_(const EncUplink &up)
+    bool HubSession::check_base_nonce(const EncUplink &up)
     {
       uint32_t unused_session_id = 0;
       if (up.sender <= 0xFF &&
@@ -787,7 +780,7 @@ namespace esphome
       // no retry, so a dropped re-provisioning LoginMsg had no recovery
       // until this node happened to send another encrypted uplink.
       ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", up.sender);
-      this->do_login_and_arm_retry_();
+      this->host_.session_relogin();
       return false;
     }
 
@@ -801,11 +794,11 @@ namespace esphome
     // hub follow a node through any number of re-logins in one uptime.
     //
     // False = derivation failed, the frame is dropped.
-    bool LORAListener::uplink_select_keys_(EncUplink &up)
+    bool HubSession::select_keys(EncUplink &up)
     {
       // uplink_check_base_nonce_ ran first: the sender has a session id.
       s_keys().sessionId(static_cast<mac::Addr>(up.sender), &up.session_id);
-      const mac::Addr self = static_cast<mac::Addr>(this->short_address_);
+      const mac::Addr self = static_cast<mac::Addr>(this->host_.session_peer());
       up.keys = s_keys().liveKeys(self);
       const hubframes::Hdr *hdr = up.msg->header;
       const bool is_session_opening = hdr && hdr->sessionnonce != 0;
@@ -814,7 +807,7 @@ namespace esphome
           (!up.keys.hasEnc() || s_keys().installedSessionId(self) != up.session_id);
       if (!up.needs_candidate)
         return true;
-      if (!this->deriveSessionKeyCandidate_(up.session_id, hdr->sessionnonce, &up.candidate))
+      if (!this->derive_candidate(up.session_id, hdr->sessionnonce, &up.candidate))
       {
         ESP_LOGE(TAG, "Session key candidate derivation failed for peer %u", up.sender);
         return false;
@@ -824,34 +817,34 @@ namespace esphome
     }
 
     // The tag check alone: CMAC over the raw frame (spec 4.1).
-    mac2::LinkSecurity::Verify LORAListener::uplink_tag_verdict_(EncUplink &up)
+    mac2::LinkSecurity::Verify HubSession::tag_verdict_(EncUplink &up)
     {
-      return this->v1_verify_uplink_(up) ? mac2::LinkSecurity::Verify::Ok
+      return this->verify_uplink_(up) ? mac2::LinkSecurity::Verify::Ok
                                          : mac2::LinkSecurity::Verify::BadTag;
     }
 
     // Authenticate the frame: keys present, CMAC verifies, and the authentic
     // msgid is inside the CTR space. Every failure destroys the candidate.
-    bool LORAListener::uplink_verify_(EncUplink &up)
+    bool HubSession::verify(EncUplink &up)
     {
       if (!up.keys.complete())
       {
         ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", up.sender);
-        this->uplink_drop_candidate_(up);
+        this->drop_candidate_(up);
         return false;
       }
 
-      const mac2::LinkSecurity::Verify verdict = this->uplink_tag_verdict_(up);
+      const mac2::LinkSecurity::Verify verdict = this->tag_verdict_(up);
       if (verdict == mac2::LinkSecurity::Verify::NoMem)
       {
         ESP_LOGE(TAG, "Memory allocation failed for MAC input");
-        this->uplink_drop_candidate_(up);
+        this->drop_candidate_(up);
         return false;
       }
       if (verdict != mac2::LinkSecurity::Verify::Ok)
       {
         ESP_LOGE(TAG, "Encrypt-then-CMAC verification failed");
-        this->uplink_drop_candidate_(up);
+        this->drop_candidate_(up);
         return false;
       }
 
@@ -864,9 +857,9 @@ namespace esphome
       if (!framecrypto::msgidFitsCtr(up.msgid))
       {
         ESP_LOGW(TAG, "[%s] Authentic uplink with msgid %u beyond the CTR space — refusing it",
-                 this->get_name().c_str(), (unsigned) up.msgid);
-        this->uplink_drop_candidate_(up);
-        this->requestMsgidRelogin_("uplink");
+                 this->host_.session_name(), (unsigned) up.msgid);
+        this->drop_candidate_(up);
+        this->request_msgid_relogin("uplink");
         return false;
       }
       return true;
@@ -875,21 +868,21 @@ namespace esphome
     // CTR-decrypt the verified ciphertext into the listener's own buffer (no
     // heap on the receive path, HB8). Returns it, or nullptr (candidate
     // destroyed) on failure. Loop task only.
-    uint8_t *LORAListener::uplink_decrypt_(EncUplink &up)
+    uint8_t *HubSession::decrypt(EncUplink &up)
     {
       const hubframes::Sealed *enc = up.msg->encrypted;
       const size_t cipher_len = enc->ciphertext.len;
       if (cipher_len > sizeof(this->uplink_pt_))
       {
         ESP_LOGE(TAG, "%u B ciphertext does not fit a LoRa frame — dropped", (unsigned) cipher_len);
-        this->uplink_drop_candidate_(up);
+        this->drop_candidate_(up);
         return nullptr;
       }
       if (!s_sec().decryptUplink(up.hdr, up.session_id, up.keys, enc->ciphertext.data, cipher_len,
                                  this->uplink_pt_))
       {
         ESP_LOGE(TAG, "CTR decryption failed despite a verified CMAC — this should never happen");
-        this->uplink_drop_candidate_(up);
+        this->drop_candidate_(up);
         return nullptr;
       }
       return this->uplink_pt_;
@@ -910,7 +903,7 @@ namespace esphome
       // newly-derived candidate; every early return above destroyed it
       // instead.
       if (up.needs_candidate)
-        this->installSessionKeys_(up.session_id, up.candidate);
+        this->session_.install_keys(up.session_id, up.candidate);
 
       // A successful decrypt proves the node holds the matching base nonce —
       // the encrypted session is confirmed both ways.  Only now do we treat
@@ -944,13 +937,13 @@ namespace esphome
       up.msg    = rcv_message;
       up.sender = rcv_message->header ? rcv_message->header->senderaddress : 0;
 
-      if (!this->uplink_check_base_nonce_(up))
+      if (!this->session_.check_base_nonce(up))
         return;
-      if (!this->uplink_select_keys_(up))
+      if (!this->session_.select_keys(up))
         return;
-      if (!this->uplink_verify_(up))
+      if (!this->session_.verify(up))
         return;
-      uint8_t *plaintext = this->uplink_decrypt_(up);
+      uint8_t *plaintext = this->session_.decrypt(up);
       if (plaintext == nullptr)
         return;
       this->uplink_accept_(up, plaintext);
@@ -960,7 +953,7 @@ namespace esphome
     // set_response walks; anything else (a frame whose VER is not 0x01) is dropped.
     std::unique_ptr<hubwire::Uplink> LORAListener::unpack_uplink_(uint8_t *data, size_t len)
     {
-      return this->v1_receive_(data, len);
+      return this->session_.receive(data, len);
     }
 
     void LORAListener::set_response(uint8_t *data, size_t len)
@@ -1050,6 +1043,29 @@ namespace esphome
       return false;
     }
 
+    // ---- SessionHost: what the node's MAC-2 link may ask of the listener ----
+    const char *LORAListener::session_name() const { return this->get_name().c_str(); }
+    uint8_t LORAListener::session_peer() const { return this->short_address_; }
+    uint8_t LORAListener::session_subnet() const { return this->subnet_address_; }
+    uint32_t LORAListener::session_cmd_generation() const { return this->ctl().generation; }
+    void LORAListener::session_keys_installed() { this->invalidate_fcnt_reservations_(); }
+    void LORAListener::session_keys_cleared()
+    {
+      this->invalidate_fcnt_reservations_();
+
+      // Invariant I3 (a): the Control channel's stored frame (pack once, retries
+      // re-send the bytes) is sealed under the keys just destroyed, so it must
+      // never be re-sent: the retry re-packs or, for an at-most-once command,
+      // is abandoned (DeliveryService::resend_).
+      this->ctl().frame     = MacFrame{};   // the delivery service's stored frame
+      this->ctl().frame_tag = 0;
+    }
+    void LORAListener::session_relogin() { this->do_login_and_arm_retry_(); }
+    void LORAListener::session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn)
+    {
+      this->set_timeout(name, ms, std::move(fn));
+    }
+
     uint32_t LORAListener::incrTxMessageId()
     {
       // LOOP ONLY: allocating persists the counter through ESPHome
@@ -1084,7 +1100,7 @@ namespace esphome
       return val;
     }
 
-    void LORAListener::requestMsgidRelogin_(const char *where)
+    void HubSession::request_msgid_relogin(const char *where)
     {
       // Once per exhaustion: the flag is cleared in send_login(), which is where
       // both msgid counters restart. Until then every refusal is silent.
@@ -1093,10 +1109,10 @@ namespace esphome
       this->msgid_relogin_pending_ = true;
       ++this->msgid_relogin_requests_;
       ESP_LOGE(TAG, "[%s] msgid space exhausted (%s): the CTR keystream would repeat — "
-                    "starting a fresh session", this->get_name().c_str(), where);
+                    "starting a fresh session", this->host_.session_name(), where);
       // Deferred, not inline: callers sit inside frame building and the
       // admission path, and a login from there would re-enter them.
-      this->set_timeout("msgid_relogin", 0, [this]() { this->do_login_and_arm_retry_(); });
+      this->host_.session_set_timeout("msgid_relogin", 0, [this]() { this->host_.session_relogin(); });
     }
 
     bool LORAListener::mac0_send_(const uint8_t *buf, size_t len, TxPolicy policy,
@@ -1109,8 +1125,8 @@ namespace esphome
       return this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
     }
 
-    bool LORAListener::v1_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt,
-                                 MacFrame *out)
+    bool HubSession::frame(hubframes::Down *op, uint32_t fcnt, bool encrypt,
+                                 DeliveryFrame *out)
     {
       out->msgid = fcnt;
       out->bytes.clear();
@@ -1120,45 +1136,45 @@ namespace esphome
       // frames), whose stack is 3.5 KB (StackWatch.h).
       std::vector<uint8_t> body(macwire::kMaxFrameBytes);
       size_t  body_len = 0;
-      if (!r.ok || !hubwire::packDownlinkBody(op, s_v1_cmd_id(op, this->ctl().generation), body.data(),
+      if (!r.ok || !hubwire::packDownlinkBody(op, s_v1_cmd_id(op, this->host_.session_cmd_generation()), body.data(),
                                               body.size(), &body_len))
       {
-        ESP_LOGE(TAG, "[%s] no v1 body for command case %d", this->get_name().c_str(),
+        ESP_LOGE(TAG, "[%s] no v1 body for command case %d", this->host_.session_name(),
                  op ? (int) op->cmd_case : -1);
         return false;
       }
       // Seal only in session and only with a session id for the node.
       uint32_t unused_session_id = 0;
-      const bool seal = encrypt && s_keys().sessionId(static_cast<mac::Addr>(this->short_address_),
+      const bool seal = encrypt && s_keys().sessionId(static_cast<mac::Addr>(this->host_.session_peer()),
                                                       &unused_session_id);
       macwire::WireHdr h;
       h.flags  = macwire::withAuth(r.ack_req ? macwire::kFlagAckReq : 0,
                                    seal ? macwire::Auth::Session : macwire::Auth::None);
-      h.dst    = static_cast<uint8_t>(this->short_address_);
+      h.dst    = static_cast<uint8_t>(this->host_.session_peer());
       h.src    = static_cast<uint8_t>(kHubAddress);
-      h.subnet = static_cast<uint8_t>(this->subnet_address_);
+      h.subnet = static_cast<uint8_t>(this->host_.session_subnet());
       h.fcnt   = fcnt;
       h.port   = r.port;
       if (!hubwire::assemble(h, body.data(), body_len, &out->bytes))
       {
-        ESP_LOGE(TAG, "[%s] v1 frame would not fit (%u B body)", this->get_name().c_str(),
+        ESP_LOGE(TAG, "[%s] v1 frame would not fit (%u B body)", this->host_.session_name(),
                  (unsigned) body_len);
         return false;
       }
-      return !seal || this->v1_seal_(out, macwire::headerLen(h), body_len);
+      return !seal || this->seal_(out, macwire::headerLen(h), body_len);
     }
 
     // AUTH = SESSION: encrypt + tag in place; a spent FCNT asks for a session.
-    bool LORAListener::v1_seal_(MacFrame *f, size_t hdr_len, size_t body_len)
+    bool HubSession::seal_(DeliveryFrame *f, size_t hdr_len, size_t body_len)
     {
       const mac2::LinkSecurity::Seal sealed =
           s_sec().sealFrameV1(f->bytes.data(), hdr_len, body_len, &f->seal);
       if (sealed == mac2::LinkSecurity::Seal::MsgidSpent)
-        this->requestMsgidRelogin_("seal");
+        this->request_msgid_relogin("seal");
       if (sealed != mac2::LinkSecurity::Seal::Ok)
       {
         ESP_LOGE(TAG, "[%s] v1 seal refused for FCNT %u (%d) — dropping the downlink",
-                 this->get_name().c_str(), (unsigned) f->msgid, (int) sealed);
+                 this->host_.session_name(), (unsigned) f->msgid, (int) sealed);
         f->bytes.clear();
         f->seal = mac2::FrameSeal{};
         return false;
@@ -1166,7 +1182,7 @@ namespace esphome
       return true;
     }
 
-    bool LORAListener::v1_login_frame_(const LoginMsg &login, uint32_t fcnt, MacFrame *out)
+    bool HubSession::login_frame(const LoginMsg &login, uint32_t fcnt, DeliveryFrame *out)
     {
       out->msgid = fcnt;
       out->seal  = mac2::FrameSeal{};
@@ -1177,9 +1193,9 @@ namespace esphome
       login_msg__pack(&login, body.data());
       macwire::WireHdr h;
       h.flags  = macwire::withAuth(0, macwire::Auth::KAuth);
-      h.dst    = static_cast<uint8_t>(this->short_address_);
+      h.dst    = static_cast<uint8_t>(this->host_.session_peer());
       h.src    = static_cast<uint8_t>(kHubAddress);
-      h.subnet = static_cast<uint8_t>(this->subnet_address_);
+      h.subnet = static_cast<uint8_t>(this->host_.session_subnet());
       h.fcnt   = fcnt;
       h.port   = macwire::kPortSession;
       return hubwire::assemble(h, body.data(), body_len, &out->bytes) &&
@@ -1199,7 +1215,7 @@ namespace esphome
                (int) login.request_register);
     }
 
-    bool LORAListener::v1_demote_frame_(MacFrame *out)
+    bool HubSession::demote_frame(DeliveryFrame *out)
     {
       out->msgid = 0;
       out->seal  = mac2::FrameSeal{};
@@ -1222,19 +1238,19 @@ namespace esphome
     // AUTH = SESSION walks the encrypted pipeline (verify over the raw frame,
     // then decrypt); K_AUTH is REGISTER (verified in handle_register_); NONE is
     // the plaintext bootstrap path. FLEET is never an uplink.
-    std::unique_ptr<hubwire::Uplink> LORAListener::v1_receive_(uint8_t *data, size_t len)
+    std::unique_ptr<hubwire::Uplink> HubSession::receive(uint8_t *data, size_t len)
     {
       size_t body_off = 0, body_len = 0;
       macwire::WireHdr h;
-      this->v1_rx_frame_ = nullptr;
+      this->rx_frame_ = nullptr;
       if (!macwire::decode(data, len, &h, &body_off, &body_len))
       {
-        ESP_LOGW(TAG, "%s: not a v1 frame (len %u) — dropping", this->get_name().c_str(), (unsigned) len);
+        ESP_LOGW(TAG, "%s: not a v1 frame (len %u) — dropping", this->host_.session_name(), (unsigned) len);
         return nullptr;
       }
-      this->v1_rx_hdr_   = h;
-      this->v1_rx_frame_ = data;
-      this->v1_rx_len_   = len;
+      this->rx_hdr_   = h;
+      this->rx_frame_ = data;
+      this->rx_len_   = len;
       const macwire::Auth a = h.auth();
       std::unique_ptr<hubwire::Uplink> u(new hubwire::Uplink());
       if (a == macwire::Auth::Session)
@@ -1250,12 +1266,12 @@ namespace esphome
       return u;
     }
 
-    bool LORAListener::v1_verify_uplink_(EncUplink &up)
+    bool HubSession::verify_uplink_(EncUplink &up)
     {
-      machdr::fromWireHdr(this->v1_rx_hdr_, &up.hdr);
+      machdr::fromWireHdr(this->rx_hdr_, &up.hdr);
       up.msgid = up.hdr.fcnt;
-      return this->v1_rx_frame_ != nullptr &&
-             s_sec().verifyUplinkV1(up.session_id, up.keys, this->v1_rx_frame_, this->v1_rx_len_) ==
+      return this->rx_frame_ != nullptr &&
+             s_sec().verifyUplinkV1(up.session_id, up.keys, this->rx_frame_, this->rx_len_) ==
                  mac2::LinkSecurity::Verify::Ok;
     }
 
@@ -1264,7 +1280,8 @@ namespace esphome
     void LORAListener::v1_deliver_decrypted_(EncUplink &up, const uint8_t *pt, size_t len)
     {
       hubwire::Uplink u;
-      if (this->v1_rx_hdr_.port == macwire::kPortSession || !u.parse(this->v1_rx_hdr_, pt, len))
+      if (this->session_.rx_hdr().port == macwire::kPortSession ||
+          !u.parse(this->session_.rx_hdr(), pt, len))
       {
         ESP_LOGW(TAG, "%s: authentic v1 uplink whose body does not decode as its port's PDU",
                  this->get_name().c_str());
@@ -1354,7 +1371,7 @@ namespace esphome
       // ...so no FCNT reserved from the old count may be spent any more: the
       // new session counts up through the same numbers (P1).
       this->invalidate_fcnt_reservations_();
-      this->msgid_relogin_pending_ = false;   // the msgid space restarts here
+      this->session_.clear_msgid_relogin();   // the msgid space restarts here
       this->dlv_forget_ids_();
       // New login challenge: the encrypted session is not confirmed until the
       // node proves it by sending a frame we can decrypt.  Until then the hub
