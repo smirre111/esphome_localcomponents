@@ -19,6 +19,7 @@
 // pending-data mask (computed and logged, never transmitted).
 #include "esphome/components/lora_client/SingleShotAckWait.h"
 #include "esphome/components/lora_client/DeliveryPolicy.h"
+#include "esphome/components/lora_client/DeliveryService.h"
 #include "esphome/components/lora_client/ModeBSupervisor.h"
 #include "esphome/components/lora_client/SleepModel.h"
 // MAC-2: keys, KDF, Encrypt-then-CMAC and the session key store (stage S2).
@@ -125,168 +126,9 @@ namespace esphome
     } __attribute__((packed));
 
  
-    // A request for the generic delivery glue (LORAListener::deliver_): what to
-    // send, what to do when it is acknowledged, what to do when it is given up.
-    // The retry rules are the Policy (DeliveryPolicy.h); the callbacks are the
-    // only part that knows what the frame is.
-    // ---- S7: the MAC-0 delivery service's contract with the application ----
-    //
-    // The service (deliver_ / dlv_* in lora_client.cpp, policy in DeliveryPolicy.h)
-    // owns everything ARQ: the msgid of every attempt, the header and the frame,
-    // the pack-once copy a Resend::SameBytes request re-sends byte for byte, the
-    // ack matching, the retry ladder and the timers. The application only says
-    // what an attempt carries (encode), where it goes on the air (place), and is
-    // told the outcome (on_delivered / on_fail / on_abandon).
 
-    // One framed attempt, as the service hands it to `place`. `msgid` is the
-    // frame's id; the application may print it, never keep or compare it.
-    struct DeliveryFrame
-    {
-      std::vector<uint8_t> bytes;
-      mac2::FrameSeal      seal{};    // sealed=false: plaintext
-      uint32_t             msgid{0};  // set even when packing failed (it was allocated)
-    };
-    struct DeliveryAttempt
-    {
-      bool     retry{false};          // a retry of the request (counted or a burst fallback)
-      bool     resent_stored{false};  // the stored first frame again (Resend::SameBytes)
-      uint32_t tag{0};                // what encode said the attempt stands for
-    };
-    // The node answered an attempt. `tag` is that attempt's tag; `log_id` the id
-    // the node acknowledged, for log lines only.
-    struct DeliveryConfirm
-    {
-      uint32_t tag{0};
-      uint32_t log_id{0};
-    };
-
-    struct DeliveryRequest
-    {
-      const char *what{"request"};          // for the log
-      const char *resend_verb{"resending"}; // how a counted retry is logged; nullptr: the service's SameBytes lines
-      // Resend::SameBytes only: "<label> sent (msgid=N) — awaiting ack" on the first attempt.
-      const char *sent_label{nullptr};
-      deliverypolicy::Policy policy{};
-      // Say what ONE attempt carries: fill a message on YOUR stack (payload only)
-      // and hand it to `frame`, which adds the header and a fresh msgid, packs and
-      // seals it; return what `frame` returned (false: nothing was framed). `*tag`
-      // names what the attempt stands for (a ScheduleConfig's version) and comes
-      // back in on_delivered. Asked for every attempt, except that a
-      // Resend::SameBytes request's retries re-send its first frame unchanged.
-      using FrameFn = std::function<bool(hubframes::Down *op)>;
-      std::function<bool(bool retry, uint32_t *tag, const FrameFn &frame)> encode;
-      // Put a framed attempt on the air (placement, shape, the bookkeeping that
-      // depends on where it went). Empty: framed but not transmitted.
-      std::function<void(const DeliveryFrame &f, const DeliveryAttempt &a)> place;
-      // The node answered an attempt. True when that completes the request
-      // (false: it answered a superseded attempt and the newer one is still awaited).
-      std::function<bool(const DeliveryConfirm &c)> on_delivered;
-      // The ladder is spent.
-      std::function<void()> on_fail;
-      // The request has left its channel (acked, or given up). Runs last.
-      std::function<void()> on_done;
-      // Whether a retry may go out at all (an at-most-once request that can no
-      // longer be re-sent byte for byte must be failed instead). Empty: always.
-      std::function<bool()> resendable;
-      // resendable() said no: the request is failed WITHOUT another send. Empty:
-      // on_fail runs instead.
-      std::function<void()> on_abandon;
-      // ---- Fire requests only (Policy::mode == Fire): sent once, no ack ----
-      // Whether the frame is wanted at all, asked after the relogin deferral and
-      // before a msgid is taken. False: dropped (the callback logs why).
-      std::function<bool()> admit;
-      // Fill in the command (cmd_case and its payload); the header and the msgid
-      // are the mechanism's. The payload must outlive the call (own it in a capture).
-      std::function<void(hubframes::Down *op)> fill;
-      // The frame is on the air (or queued for it); `log_id` is its id, for log lines only.
-      std::function<void(uint32_t log_id)> on_sent;
-    };
-
-    // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
-    // delivery refactor). Everything the tracked-command machinery used to keep
-    // as loose op_* members on the listener. One request per channel at a time
-    // (Control: cover operations and sysops, with a small line of what waits
-    // behind it; Config: ScheduleConfig; Mac: GridSync).
-    struct DeliverySlot
-    {
-      // What encode_ctl_ builds the command from.
-      enum class Kind : uint8_t { COVER, SYSOP };
-      Kind     kind{Kind::COVER};
-      bool     awaiting_ack{false};
-      uint32_t first_msgid{0};   // first msgid used for the current logical command
-      uint32_t last_msgid{0};    // msgid of the most recent (re)transmission
-      // Which LOGICAL command this is, for txqueue::SupersedeTable. Bumped once
-      // per command from Home Assistant — never per retransmission, which must
-      // stay under the generation it belongs to.
-      //
-      // Deliberately NOT msgid, even though msgid is also monotonic: a LoginMsg
-      // ZEROES the message counters, so a generation taken from msgid would go
-      // backwards after a re-login and the first command afterwards would be
-      // dropped as stale by frames queued before it. Starts at 1 because 0 is
-      // the table's "takes no part in this" value.
-      uint32_t generation{1};
-      uint8_t  retry_count{0};
-      // Stored operation, replayed on each retransmission with a fresh msgid.
-      uint32_t covop_case{0};
-      int32_t  operation{0};
-      float    position{0.0f};
-      int32_t  sysop{0};         // ClientOperation value when kind == SYSOP
-      // Resend::SameBytes: the first attempt's frame (bytes, msgid, and the keys
-      // it was sealed under -- a retry hands the SAME binding to the tracker, so
-      // a frame sealed before a re-key is never re-tagged, F4), and its tag.
-      // Owned by the delivery service (S7).
-      DeliveryFrame        frame{};
-      uint32_t             frame_tag{0};
-      // Security review finding 1: a cover op / sysop issued while
-      // relogin_pending_ is true would otherwise pack plaintext (session not
-      // confirmed yet) and get stored — then every retry is rejected by the
-      // node's own plaintext-gate (it already holds a session), and after
-      // kOpMaxRetries the hub tears down the session it just rebuilt. Set by
-      // send_cover_operation()/send_tracked_sysop_() when deferring instead
-      // of sending; consumed by confirm_session_(), which actually sends it
-      // once encryption is possible.
-      bool     deferred_until_login{false};
-      // Whether the frame currently awaiting an ack went out as a single copy.
-      // Rule 4 bounds the exposure to ONE frame: the first retry of a single
-      // shot puts the node back on bursts until it is confirmed again.
-      bool     sent_single_shot{false};
-      // The command's first shot was an optimistic single shot, so its first ack
-      // wait is the short one (SingleShotAckWait.h).
-      bool     sent_optimistic{false};
-      // The short wait has been used for this command. It is used at most once,
-      // and is never counted against kOpMaxRetries.
-      bool     short_wait_spent{false};
-      // The mark the command's FIRST frame was placed on, 0 when that frame was
-      // not a single placed copy. Captured at send time: other placements move
-      // last_placed_t0_us_ before the ack arrives.
-      int64_t  mark_us{0};
-      // The tail (ms after the mark) the first ack wait used; 0 = none.
-      uint32_t first_tail_ms{0};
-      // True from "retries exhausted, no ack" until the node is next heard
-      // (CMD_SLEEP only; see on_sleep_unconfirmed_).
-      bool     sleep_unconfirmed{false};
-      // ---- the generic glue (step 3): Config and Mac channels ----
-      // awaiting_ack / retry_count above are shared with it. The ids are every
-      // msgid the current AND earlier requests went out under, with the tag of
-      // the attempt: an ack for any of them is recognised.
-      DeliveryRequest        req;
-      deliverypolicy::AckIds acks;
-    };
-
-    // The delivery channels. A request occupies one channel until it is acked,
-    // fails, or is superseded; channels do not block each other.
-    enum DeliveryChannel : uint8_t
-    {
-      CH_CONTROL = 0,   // cover operations and sysops
-      CH_CONFIG  = 1,   // ScheduleConfig
-      CH_MAC     = 2,   // GridSync (enable)
-      kDeliveryChannels = 3,
-      // A Fire request (TimeSync, ClientConfig, CoverConfig) occupies no channel: it
-      // is sent once and forgotten, and never touches a slot.
-      CH_NONE    = 0xFF
-    };
-
-    class LORAListener : public EntityBase, public Component, private StreamHost
+    class LORAListener : public EntityBase, public Component, private StreamHost,
+                         private DeliveryHost
     {
     public:
       static constexpr size_t MAC_ADDR_STR_LEN = 18; // "AA:BB:CC:DD:EE:FF\0"
@@ -1186,13 +1028,13 @@ namespace esphome
       // means the node never enters auto mode, never sleeps, never wakes, never
       // beacons — and the beacon is what would have triggered a re-push.
       // Retransmit until the node's MAC ACK confirms delivery.
-      // The push is the Config channel's request (slots_[CH_CONFIG], deliver_).
+      // The push is the Config channel's request (dlv_.slot(CH_CONFIG), deliver_).
       // A GridSync is re-published until the node's MAC ACK names one of its
       // msgids. Measured 2026-09-15 on node 2: the single GridSync sent after a
       // login was lost (the node spent the burst in CAD retries) and nothing
       // re-sent it — 13 minutes in Mode A with Timed Mode ON. Exact msgids, not a
       // range: a tracked op sent in between must not be mistaken for it.
-      // It is the Mac channel's request (slots_[CH_MAC], deliver_): the ids are
+      // It is the Mac channel's request (dlv_.slot(CH_MAC), deliver_): the ids are
       // its ack-id SET, the ladder is deliverypolicy::kGridSyncPolicy.
       static constexpr uint8_t  kGridSyncMaxRepublishes = deliverypolicy::kGridSyncPolicy.max_retries;
       static constexpr uint32_t kGridSyncRetryMs        = deliverypolicy::kGridSyncPolicy.base_wait_ms;
@@ -1257,15 +1099,12 @@ namespace esphome
       uint32_t      plaintext_refused_{0};
       static constexpr uint8_t  kSchedMaxRetries   = deliverypolicy::kSchedulePolicy.max_retries;
       static constexpr uint32_t kSchedRetryMs      = deliverypolicy::kSchedulePolicy.base_wait_ms;
-      // The most an ack timer is stretched by the transmit backlog. A ceiling
-      // rather than trust: the drain estimate is written from two cores without
-      // a lock, and a torn read must not park a retry for hours.
-      static constexpr uint32_t kMaxAckBacklogMs   = 60000;
+      static constexpr uint32_t kMaxAckBacklogMs   = DeliveryService::kMaxAckBacklogMs;
       // `base_ms` from NOW is when an ack should have arrived if the frame just
       // handed to the tracker were on the air already. It is not: it waits behind
       // whatever is queued, so the timer is the queue's drain time PLUS the base.
       // Call it after send(), so the frame just sent is counted as well.
-      uint32_t ack_wait_ms_(uint32_t base_ms) const;
+      uint32_t ack_wait_ms_(uint32_t base_ms) const { return this->dlv_.ack_wait_ms(base_ms); }
       virtual void send_remote_config();
       uint32_t incrTxMessageId();
       void setRxMessageId(uint32_t msg_id);
@@ -1724,49 +1563,46 @@ namespace esphome
       // FCNT, same cmd_id) until the node's MAC ACK, then the command is failed
       // (and, unless it was a SLEEP, the session rebuilt) after kOpMaxRetries.
       using TrackedOpKind = DeliverySlot::Kind;
-      // The per-channel request state (DeliverySlot above): ctl() is the tracked
-      // cover-op / sysop slot, cfg() the schedule push, mac() the GridSync.
-      DeliverySlot slots_[kDeliveryChannels];
-      DeliverySlot       &ctl()       { return this->slots_[CH_CONTROL]; }
-      const DeliverySlot &ctl() const { return this->slots_[CH_CONTROL]; }
-      DeliverySlot       &cfg()       { return this->slots_[CH_CONFIG]; }
-      const DeliverySlot &cfg() const { return this->slots_[CH_CONFIG]; }
-      DeliverySlot       &mac()       { return this->slots_[CH_MAC]; }
-      const DeliverySlot &mac() const { return this->slots_[CH_MAC]; }
+      // The delivery service (DeliveryService.h): the channels' slots, ack ids,
+      // ladders and timers. ctl() is the tracked cover-op / sysop slot, cfg() the
+      // schedule push, mac() the GridSync.
+      DeliveryService dlv_{*this};
+      DeliverySlot       &ctl()       { return this->dlv_.slot(CH_CONTROL); }
+      const DeliverySlot &ctl() const { return this->dlv_.slot(CH_CONTROL); }
+      DeliverySlot       &cfg()       { return this->dlv_.slot(CH_CONFIG); }
+      const DeliverySlot &cfg() const { return this->dlv_.slot(CH_CONFIG); }
+      DeliverySlot       &mac()       { return this->dlv_.slot(CH_MAC); }
+      const DeliverySlot &mac() const { return this->dlv_.slot(CH_MAC); }
 
-      // ---- the generic delivery glue (Control, Config and Mac channels) ----
-      // Start `req` on channel `ch`, superseding one already in flight there (its
-      // ack ids stay recognised). The decisions are deliverypolicy::.
-      void     deliver_(DeliveryChannel ch, DeliveryRequest req);
-      // A Fire request (step 6): the one transmission, with no slot, timer or ack
-      // involved. True when the frame went out. Reached only through deliver_.
-      bool     dlv_fire_(DeliveryRequest &req);
+      // ---- the delivery service, as the listener uses it ----
+      void deliver_(DeliveryChannel ch, DeliveryRequest req) { this->dlv_.deliver(ch, std::move(req)); }
+      bool dlv_ack_(uint32_t ack_msg_id) { return this->dlv_.ack(ack_msg_id); }
+      void dlv_cancel_(DeliveryChannel ch) { this->dlv_.cancel(ch); }
+      void dlv_forget_ids_() { this->dlv_.forget_ids(); }
+      void arm_dlv_timer_(DeliveryChannel ch) { this->dlv_.arm_timer(ch); }
+      // DeliveryHost (lora_client_delivery.cpp).
+      const char *dlv_name() const override;
+      bool dlv_has_radio() const override;
+      bool dlv_relogin_pending() const override;
+      bool dlv_frame(hubframes::Down *op, DeliveryFrame *out) override;
+      bool dlv_place_fire(deliverypolicy::Shape shape, const DeliveryFrame &f,
+                          const char *what) override;
+      void dlv_yield_warmup() override;
+      int64_t dlv_tx_drain_us() const override;
+      int64_t dlv_last_placed_t0_us() const override;
+      singleshotwait::AckLatency &dlv_ack_latency() override;
+      bool dlv_single_shot_unacked() const override;
+      void dlv_mark_single_shot_unacked() override;
+      void dlv_drop_session() override;
+      void dlv_relogin() override;
+      void dlv_set_timeout(const char *name, uint32_t ms, std::function<void()> fn) override;
+      void dlv_cancel_timeout(const char *name) override;
       // Put the packed frame on the air the way `shape` says. True when it went out.
       bool     fire_place_(deliverypolicy::Shape shape, const MacFrame &f, const char *what);
       bool     fire_class_a_(const MacFrame &f, const char *what);
       // TimeSync / ClientConfig, as Fire requests.
       void     fill_timesync_(hubframes::Down *op, ::TimeSync *ts);
       void     fill_client_config_(hubframes::Down *op, ::ClientConfig *cc);
-      // One attempt, and the ack wait that follows it. False: could not be built.
-      bool     dlv_tx_(DeliveryChannel ch, bool retry);
-      void     on_dlv_timeout_(DeliveryChannel ch, bool short_wait);
-      void     arm_dlv_timer_(DeliveryChannel ch);
-      // A counted retry: Rule 4, then one more attempt.
-      void     dlv_resend_(DeliveryChannel ch);
-      // A retry is due but the request may not be re-sent (at-most-once, and the
-      // bytes it went out as are gone): fail it, send nothing.
-      void     dlv_abandon_(DeliveryChannel ch);
-      // The optimistic single shot's short first wait elapsed unanswered.
-      void     dlv_short_wait_missed_(DeliveryChannel ch);
-      uint32_t dlv_short_wait_ms_(DeliveryChannel ch);
-      void     dlv_give_up_(DeliveryChannel ch);
-      // The node acknowledged `ack_msg_id`: true when a Config / Mac request owns it.
-      bool     dlv_ack_(uint32_t ack_msg_id);
-      // Forget the request on `ch`: its timer, its wait and its ack ids.
-      void     dlv_cancel_(DeliveryChannel ch);
-      // A new session restarts the msgid space: ids on record would alias new ones.
-      void     dlv_forget_ids_();
-      static const char *dlv_timer_(DeliveryChannel ch);
       // ScheduleConfig, as a request.
       bool     encode_schedule_(bool retry, uint32_t *version, const DeliveryRequest::FrameFn &frame);
       void     place_schedule_(const MacFrame &f, const DeliveryAttempt &a);
@@ -1785,7 +1621,7 @@ namespace esphome
       void     fill_grid_sync_(::GridSync *gs, int64_t planned_t0);
       // Something is being delivered to this node that a Mode B warm-up must not
       // run into: a cover op / sysop, a ScheduleConfig, a GridSync.
-      bool     delivery_busy_() const;
+      bool     delivery_busy_() const { return this->dlv_.busy(); }
       bool     command_failed_{false};
       binary_sensor::BinarySensor *command_failed_bsensor_{nullptr};
       switch_::Switch             *auto_mode_switch_{nullptr};
@@ -1821,7 +1657,10 @@ namespace esphome
       TxPolicy tracked_op_policy_() const;
       void     handle_command_ack_(uint32_t ack_msg_id, AckStatus status = ACK_STATUS__ACK_OK);
       // An ack whose status says the node will not execute the request (P3).
-      bool     dlv_refused_(uint32_t ack_msg_id, AckStatus status);
+      bool     dlv_refused_(uint32_t ack_msg_id, AckStatus status)
+      {
+        return this->dlv_.refused(ack_msg_id, status);
+      }
       // Stages of handle_command_ack_: each returns true when it consumed the ack.
       void     record_ack_latency_();
       void     set_command_failed_(bool failed);
@@ -1831,10 +1670,6 @@ namespace esphome
       DeliveryRequest ctl_request_();
       // Send the slot's command now (a fresh one, or the one a relogin deferred).
       void     ctl_send_();
-      // S7: one attempt of a channel's request (re-send the stored frame, or
-      // encode + frame + place a new one) and the SameBytes attempt log lines.
-      uint32_t dlv_attempt_(DeliverySlot &s, bool retry, uint32_t *tag);
-      void     dlv_log_attempt_(const DeliverySlot &s, bool retry, uint32_t msgid);
       bool     on_ctl_acked_(uint32_t ack_msg_id);
       void     on_ctl_failed_();
       void     on_ctl_abandoned_();
@@ -1857,8 +1692,6 @@ namespace esphome
       bool     sleep_pending_() const;
       // Drop a sleep that has waited too long for a session (in flight, or queued).
       bool     drop_stale_sleep_();
-      // Run the channel's on_done (a copy: it may start the channel's next request).
-      void     dlv_done_(DeliveryChannel ch);
 
       // ---- Nightly sleep (enterSleep): a tracked sysop whose hub-side effects
       // are applied only when the node ACKNOWLEDGES it. See lora_client.cpp. ----

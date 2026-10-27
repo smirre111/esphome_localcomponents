@@ -923,7 +923,7 @@ namespace esphome
       if (this->sleep_op_in_flight_())
       {
         this->ctl().deferred_until_login = false;
-        this->cancel_timeout(dlv_timer_(CH_CONTROL));
+        this->cancel_timeout(DeliveryService::timer_name(CH_CONTROL));
         this->on_sleep_unconfirmed_();
         this->ctl_next_();
         return true;

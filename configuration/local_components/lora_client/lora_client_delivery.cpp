@@ -276,20 +276,50 @@ namespace esphome
       return p;
     }
 
-    const char *LORAListener::dlv_timer_(DeliveryChannel ch)
+    // ---- DeliveryHost: what the delivery service may ask of the listener ----
+    const char *LORAListener::dlv_name() const { return this->get_name().c_str(); }
+    bool LORAListener::dlv_has_radio() const { return this->parent_ != nullptr; }
+    bool LORAListener::dlv_relogin_pending() const { return this->relogin_pending_; }
+    bool LORAListener::dlv_frame(hubframes::Down *op, DeliveryFrame *out)
+    {
+      return this->mac_frame_(op, out);
+    }
+    bool LORAListener::dlv_place_fire(deliverypolicy::Shape shape, const DeliveryFrame &f,
+                                      const char *what)
+    {
+      return this->fire_place_(shape, f, what);
+    }
+    void LORAListener::dlv_yield_warmup() { this->mbs_yield_self_(); }
+    int64_t LORAListener::dlv_tx_drain_us() const
+    {
+      return (this->parent_ != nullptr) ? this->parent_->txDrainUs() : 0;
+    }
+    int64_t LORAListener::dlv_last_placed_t0_us() const { return this->last_placed_t0_us_; }
+    singleshotwait::AckLatency &LORAListener::dlv_ack_latency() { return this->ack_latency_; }
+    bool LORAListener::dlv_single_shot_unacked() const { return this->belief_.single_shot_unacked; }
+    void LORAListener::dlv_mark_single_shot_unacked() { this->belief_.single_shot_unacked = true; }
+    void LORAListener::dlv_drop_session() { this->session_confirmed_ = false; }
+    void LORAListener::dlv_relogin() { this->do_login_and_arm_retry_(); }
+    void LORAListener::dlv_set_timeout(const char *name, uint32_t ms, std::function<void()> fn)
+    {
+      this->set_timeout(name, ms, std::move(fn));
+    }
+    void LORAListener::dlv_cancel_timeout(const char *name) { this->cancel_timeout(name); }
+
+    const char *DeliveryService::timer_name(DeliveryChannel ch)
     {
       static const char *const kNames[kDeliveryChannels] = {"dlv_ctl", "dlv_cfg", "dlv_mac"};
       return kNames[ch];
     }
 
-    void LORAListener::deliver_(DeliveryChannel ch, DeliveryRequest req)
+    void DeliveryService::deliver(DeliveryChannel ch, DeliveryRequest req)
     {
       // A Fire request is sent once and occupies no channel: it never reaches the
       // slot below, so it cannot cancel, replace or delay a request in flight on any
       // channel (a TimeSync goes out between a ScheduleConfig's attempts).
       if (req.policy.mode == deliverypolicy::Mode::Fire)
       {
-        this->dlv_fire_(req);
+        this->fire_(req);
         return;
       }
       if (ch >= kDeliveryChannels)
@@ -306,11 +336,11 @@ namespace esphome
       // The stored frame belongs to the request being replaced. A new request
       // whose first pack fails must re-pack (or, at-most-once, be abandoned) on
       // its retry, never re-send the previous command's bytes (review HB3).
-      s.frame        = MacFrame{};
+      s.frame        = DeliveryFrame{};
       s.frame_tag    = 0;
       if (s.req.policy.yields_warmup)
-        this->mbs_yield_self_();
-      this->dlv_tx_(ch, false);
+        this->host_.dlv_yield_warmup();
+      this->tx_(ch, false);
     }
 
     // THE one transmission of a Fire request (step 6): TimeSync, ClientConfig,
@@ -319,15 +349,15 @@ namespace esphome
     // encryption decision (v1_frame_: sealed whenever a session is confirmed,
     // plaintext only before one exists), the shape and the failure log. What the
     // frame SAYS, and when it is wanted at all, is the request's.
-    bool LORAListener::dlv_fire_(DeliveryRequest &req)
+    bool DeliveryService::fire_(DeliveryRequest &req)
     {
-      if (this->parent_ == nullptr || !req.fill)
+      if (!this->host_.dlv_has_radio() || !req.fill)
         return false;   // no radio, or nothing to say
       // See relogin_pending_. Checked before the msgid is taken, so a deferred
       // frame does not burn one; confirm_session_ sends it again.
-      if (deliverypolicy::fireDeferred(req.policy, this->relogin_pending_))
+      if (deliverypolicy::fireDeferred(req.policy, this->host_.dlv_relogin_pending()))
       {
-        ESP_LOGD(TAG, "[%s] %s deferred — session being rebuilt", this->get_name().c_str(),
+        ESP_LOGD(TAG, "[%s] %s deferred — session being rebuilt", this->host_.dlv_name(),
                  req.what);
         return false;
       }
@@ -337,13 +367,13 @@ namespace esphome
       hubframes::Down op_message {};
       req.fill(&op_message);
 
-      MacFrame f;
-      if (!this->mac_frame_(&op_message, &f))
+      DeliveryFrame f;
+      if (!this->host_.dlv_frame(&op_message, &f))
       {
-        ESP_LOGE(TAG, "[%s] Failed to pack %s", this->get_name().c_str(), req.what);
+        ESP_LOGE(TAG, "[%s] Failed to pack %s", this->host_.dlv_name(), req.what);
         return false;
       }
-      const bool sent = this->fire_place_(req.policy.shape, f, req.what);
+      const bool sent = this->host_.dlv_place_fire(req.policy.shape, f, req.what);
       if (sent && req.on_sent)
         req.on_sent(f.msgid);
       return sent;
@@ -433,7 +463,7 @@ namespace esphome
     // cleared it) is re-packed: a NEW command, so its id range moves with it
     // (security review finding 1: the old range would reject the node's ack).
     // Returns the msgid, 0 when nothing was framed.
-    uint32_t LORAListener::dlv_attempt_(DeliverySlot &s, bool retry, uint32_t *tag)
+    uint32_t DeliveryService::attempt_(DeliverySlot &s, bool retry, uint32_t *tag)
     {
       const bool same_bytes = s.req.policy.resend == deliverypolicy::Resend::SameBytes;
       if (retry && same_bytes && !s.frame.bytes.empty())
@@ -444,11 +474,11 @@ namespace esphome
         return s.frame.msgid;
       }
       if (retry && same_bytes)
-        ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing", this->get_name().c_str());
-      MacFrame f;
+        ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing", this->host_.dlv_name());
+      DeliveryFrame f;
       bool framed = false;
       const DeliveryRequest::FrameFn frame = [this, &f, &framed](hubframes::Down *op) {
-        framed = this->mac_frame_(op, &f);
+        framed = this->host_.dlv_frame(op, &f);
         return framed;
       };
       if (s.req.encode)
@@ -472,30 +502,30 @@ namespace esphome
     }
 
     // The attempt lines of a Resend::SameBytes request (the Control channel).
-    void LORAListener::dlv_log_attempt_(const DeliverySlot &s, bool retry, uint32_t msgid)
+    void DeliveryService::log_attempt_(const DeliverySlot &s, bool retry, uint32_t msgid)
     {
       if (s.req.policy.resend != deliverypolicy::Resend::SameBytes)
         return;
       if (!retry)
       {
         if (s.req.sent_label != nullptr)
-          ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->get_name().c_str(),
+          ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->host_.dlv_name(),
                    s.req.sent_label, (unsigned) msgid);
       }
       else if (s.short_wait_spent && s.retry_count == 0)
-        ESP_LOGW(TAG, "[%s] %s burst fallback (msgid=%u)", this->get_name().c_str(), s.req.what,
+        ESP_LOGW(TAG, "[%s] %s burst fallback (msgid=%u)", this->host_.dlv_name(), s.req.what,
                  (unsigned) msgid);
       else
-        ESP_LOGW(TAG, "[%s] %s retransmit %u/%u (msgid=%u)", this->get_name().c_str(), s.req.what,
+        ESP_LOGW(TAG, "[%s] %s retransmit %u/%u (msgid=%u)", this->host_.dlv_name(), s.req.what,
                  (unsigned) s.retry_count, (unsigned) s.req.policy.max_retries, (unsigned) msgid);
     }
 
-    bool LORAListener::dlv_tx_(DeliveryChannel ch, bool retry)
+    bool DeliveryService::tx_(DeliveryChannel ch, bool retry)
     {
       DeliverySlot &s = this->slots_[ch];
       uint32_t tag = 0;
-      const uint32_t msgid = this->dlv_attempt_(s, retry, &tag);
-      this->dlv_log_attempt_(s, retry, msgid);
+      const uint32_t msgid = this->attempt_(s, retry, &tag);
+      this->log_attempt_(s, retry, msgid);
       if (msgid != 0)
       {
         s.acks.add(msgid, tag);
@@ -508,12 +538,12 @@ namespace esphome
       if (s.req.policy.mode == deliverypolicy::Mode::Acked && (msgid != 0 || retry))
       {
         s.awaiting_ack = true;
-        this->arm_dlv_timer_(ch);
+        this->arm_timer(ch);
       }
       return msgid != 0;
     }
 
-    void LORAListener::arm_dlv_timer_(DeliveryChannel ch)
+    void DeliveryService::arm_timer(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
       // The FIRST wait of an optimistic single shot is the short, adaptive one
@@ -522,47 +552,47 @@ namespace esphome
       const bool short_wait = deliverypolicy::isShortFirstWait(
           s.sent_optimistic, s.retry_count, s.short_wait_spent);
       s.first_tail_ms = 0;
-      const uint32_t wait_ms = short_wait ? this->dlv_short_wait_ms_(ch)
-                                          : this->ack_wait_ms_(s.req.policy.base_wait_ms);
-      this->set_timeout(dlv_timer_(ch), wait_ms,
-                        [this, ch, short_wait]() { this->on_dlv_timeout_(ch, short_wait); });
+      const uint32_t wait_ms = short_wait ? this->short_wait_ms_(ch)
+                                          : this->ack_wait_ms(s.req.policy.base_wait_ms);
+      this->host_.dlv_set_timeout(timer_name(ch), wait_ms,
+                                  [this, ch, short_wait]() { this->on_timeout_(ch, short_wait); });
     }
 
     // The short first ack wait of an optimistic single shot, in ms from NOW.
     // Records the node's mark->ack tail in first_tail_ms.
-    uint32_t LORAListener::dlv_short_wait_ms_(DeliveryChannel ch)
+    uint32_t DeliveryService::short_wait_ms_(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
       // From NOW: whichever is later of the placed mark and the queue's drain
       // (they estimate the same instant; ack_wait_ms_ must NOT be added on top,
       // it would count the time to the mark twice), plus THIS node's measured
       // mark->ack tail.
-      const int64_t  us_to_t0 = ((s.mark_us != 0) ? s.mark_us : this->last_placed_t0_us_) -
-                                esp_timer_get_time();
-      int64_t drain_ms = (this->parent_ != nullptr) ? this->parent_->txDrainUs() / 1000 : 0;
+      const int64_t  us_to_t0 =
+          ((s.mark_us != 0) ? s.mark_us : this->host_.dlv_last_placed_t0_us()) - esp_timer_get_time();
+      int64_t drain_ms = this->host_.dlv_tx_drain_us() / 1000;
       if (drain_ms < 0)
         drain_ms = 0;
       if (drain_ms > (int64_t) kMaxAckBacklogMs)
         drain_ms = kMaxAckBacklogMs;
       const uint32_t now_ms = (uint32_t) (esp_timer_get_time() / 1000);
-      const uint32_t tail   = this->ack_latency_.tailMs(now_ms);
+      const uint32_t tail   = this->host_.dlv_ack_latency().tailMs(now_ms);
       s.first_tail_ms = tail;
       const uint32_t wait_ms = singleshotwait::firstAckWaitMs(us_to_t0, (uint32_t) drain_ms, tail);
       ESP_LOGI(TAG, "[%s] optimistic single shot: ack deadline %u ms from now "
                     "(mark in %d ms, queue drain %d ms, tail %u ms; node history %u "
                     "samples, max %u ms)",
-               this->get_name().c_str(), (unsigned) wait_ms,
+               this->host_.dlv_name(), (unsigned) wait_ms,
                (int) (us_to_t0 / 1000), (int) drain_ms, (unsigned) tail,
-               (unsigned) this->ack_latency_.count(now_ms),
-               (unsigned) this->ack_latency_.maxDelayMs(now_ms));
+               (unsigned) this->host_.dlv_ack_latency().count(now_ms),
+               (unsigned) this->host_.dlv_ack_latency().maxDelayMs(now_ms));
       return wait_ms;
     }
 
-    void LORAListener::on_dlv_timeout_(DeliveryChannel ch, bool short_wait)
+    void DeliveryService::on_timeout_(DeliveryChannel ch, bool short_wait)
     {
       DeliverySlot &s = this->slots_[ch];
       const deliverypolicy::TimeoutDecision d = deliverypolicy::onAckTimeout(
-          {s.awaiting_ack, this->relogin_pending_, short_wait, s.retry_count, s.req.policy.max_retries});
+          {s.awaiting_ack, this->host_.dlv_relogin_pending(), short_wait, s.retry_count, s.req.policy.max_retries});
       s.retry_count = d.retries_spent;
       switch (d.action)
       {
@@ -573,65 +603,65 @@ namespace esphome
         // flight, and clears the stored frame): a frame sent now would be a
         // plaintext one the node, still holding its old session, rejects. Wait for
         // confirm_session_(), charge nothing.
-        ESP_LOGD(TAG, "[%s] %s retry deferred — session being rebuilt", this->get_name().c_str(),
+        ESP_LOGD(TAG, "[%s] %s retry deferred — session being rebuilt", this->host_.dlv_name(),
                  s.req.what);
-        this->arm_dlv_timer_(ch);
+        this->arm_timer(ch);
         return;
       case deliverypolicy::TimeoutAction::ShortWaitMissed:
-        this->dlv_short_wait_missed_(ch);
+        this->short_wait_missed_(ch);
         return;
       case deliverypolicy::TimeoutAction::GiveUp:
-        this->dlv_give_up_(ch);
+        this->give_up_(ch);
         return;
       case deliverypolicy::TimeoutAction::Retransmit:
         break;
       }
-      this->dlv_resend_(ch);
+      this->resend_(ch);
     }
 
-    void LORAListener::dlv_resend_(DeliveryChannel ch)
+    void DeliveryService::resend_(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
       if (s.req.resendable && !s.req.resendable())
       {
-        this->dlv_abandon_(ch);
+        this->abandon_(ch);
         return;
       }
       // Rule 4: a single shot that went unacked puts this node back on bursts
       // immediately, and stays that way until a fresh in-slot uplink. One frame is
       // the whole exposure -- the retry below is already a burst.
-      if (deliverypolicy::marksSingleShotUnacked(s.sent_single_shot, this->belief_.single_shot_unacked))
+      if (deliverypolicy::marksSingleShotUnacked(s.sent_single_shot, this->host_.dlv_single_shot_unacked()))
       {
-        this->belief_.single_shot_unacked = true;
+        this->host_.dlv_mark_single_shot_unacked();
         ESP_LOGW(TAG, "[%s] single shot unacked — back to bursts until "
-                      "the node is confirmed again", this->get_name().c_str());
+                      "the node is confirmed again", this->host_.dlv_name());
       }
       if (s.req.resend_verb != nullptr)
-        ESP_LOGW(TAG, "[%s] %s not acknowledged — %s (%u/%u)", this->get_name().c_str(),
+        ESP_LOGW(TAG, "[%s] %s not acknowledged — %s (%u/%u)", this->host_.dlv_name(),
                  s.req.what, s.req.resend_verb, (unsigned) s.retry_count,
                  (unsigned) s.req.policy.max_retries);
-      this->dlv_tx_(ch, true);
+      this->tx_(ch, true);
     }
 
-    void LORAListener::dlv_done_(DeliveryChannel ch)
+    void DeliveryService::done_(DeliveryChannel ch)
     {
       const std::function<void()> done = this->slots_[ch].req.on_done;
       if (done)
         done();
     }
 
-    void LORAListener::dlv_abandon_(DeliveryChannel ch)
+    void DeliveryService::abandon_(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
       s.awaiting_ack = false;
       ESP_LOGE(TAG, "[%s] %s may already have been heard and can no longer be re-sent as the "
                     "same command (its session changed) — failed, NOT re-sent",
-               this->get_name().c_str(), s.req.what);
+               this->host_.dlv_name(), s.req.what);
       if (s.req.on_abandon)
         s.req.on_abandon();
       else if (s.req.on_fail)
         s.req.on_fail();
-      this->dlv_done_(ch);
+      this->done_(ch);
     }
 
     // The optimistic guess missed. Burst NOW (Rule 4 marks the node unacked, so
@@ -639,22 +669,22 @@ namespace esphome
     // budget that ends in "command failed, tear the session down", and a guess the
     // operator opted into is not evidence the session is dead. The normal waits and
     // the full budget follow unchanged.
-    void LORAListener::dlv_short_wait_missed_(DeliveryChannel ch)
+    void DeliveryService::short_wait_missed_(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
       s.short_wait_spent = true;
-      this->belief_.single_shot_unacked = true;
+      this->host_.dlv_mark_single_shot_unacked();
       // The tail just proven too short is a lower bound on this node's delay:
       // remember it, so the next deadline is longer instead of the same mistake
       // (and a node that never answers climbs to the normal wait, no further).
-      this->ack_latency_.note((uint32_t) (esp_timer_get_time() / 1000), s.first_tail_ms);
+      this->host_.dlv_ack_latency().note((uint32_t) (esp_timer_get_time() / 1000), s.first_tail_ms);
       ESP_LOGW(TAG, "[%s] optimistic single shot unacked — bursting now "
                     "(not counted against the retry budget)",
-               this->get_name().c_str());
-      this->dlv_tx_(ch, true);
+               this->host_.dlv_name());
+      this->tx_(ch, true);
     }
 
-    void LORAListener::dlv_give_up_(DeliveryChannel ch)
+    void DeliveryService::give_up_(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
       s.awaiting_ack = false;
@@ -668,17 +698,17 @@ namespace esphome
         // 2026-07-11: node 1 failed 4x without recovering because session_confirmed_
         // was still true). Clear the confirmation and force an immediate fresh login
         // so the next command rebuilds the session in seconds.
-        this->session_confirmed_ = false;
+        this->host_.dlv_drop_session();
         ESP_LOGW(TAG, "[%s] Command failed after retries — clearing session, forcing re-login",
-                 this->get_name().c_str());
-        this->do_login_and_arm_retry_();
+                 this->host_.dlv_name());
+        this->host_.dlv_relogin();
       }
-      this->dlv_done_(ch);
+      this->done_(ch);
     }
 
     // The node acknowledged `ack_msg_id`. A request that owns it is told which
     // attempt was answered (its tag) and says whether that completes it.
-    bool LORAListener::dlv_ack_(uint32_t ack_msg_id)
+    bool DeliveryService::ack(uint32_t ack_msg_id)
     {
       // Highest channel first: a GridSync takes an id before a schedule push would.
       for (uint8_t c = kDeliveryChannels; c-- > 0;)
@@ -689,18 +719,18 @@ namespace esphome
           continue;
         if (!s.req.on_delivered || s.req.on_delivered(DeliveryConfirm{s.acks.tag[i], ack_msg_id}))
         {
-          this->dlv_cancel_((DeliveryChannel) c);
-          this->dlv_done_((DeliveryChannel) c);
+          this->cancel((DeliveryChannel) c);
+          this->done_((DeliveryChannel) c);
         }
         return true;
       }
       return false;
     }
 
-    void LORAListener::dlv_cancel_(DeliveryChannel ch)
+    void DeliveryService::cancel(DeliveryChannel ch)
     {
       DeliverySlot &s = this->slots_[ch];
-      this->cancel_timeout(dlv_timer_(ch));
+      this->host_.dlv_cancel_timeout(timer_name(ch));
       s.awaiting_ack = false;
       s.retry_count  = 0;
       s.acks.clear();
@@ -711,16 +741,16 @@ namespace esphome
     // waiting behind the relogin kept old-session ids a new-session FCNT could
     // match). The requests themselves go on (the next attempt is sent under a
     // new id).
-    void LORAListener::dlv_forget_ids_()
+    void DeliveryService::forget_ids()
     {
       for (uint8_t c = 0; c < kDeliveryChannels; ++c)
         this->slots_[c].acks.clear();
     }
 
-    bool LORAListener::delivery_busy_() const
+    bool DeliveryService::busy() const
     {
-      return this->ctl().awaiting_ack || this->ctl().deferred_until_login ||
-             this->cfg().awaiting_ack || this->mac().awaiting_ack;
+      return this->slots_[CH_CONTROL].awaiting_ack || this->slots_[CH_CONTROL].deferred_until_login ||
+             this->slots_[CH_CONFIG].awaiting_ack || this->slots_[CH_MAC].awaiting_ack;
     }
 
     // Mark -> ack, for every command whose FIRST frame was a single placed
@@ -758,7 +788,7 @@ namespace esphome
     // review P3), ACK_BUSY reserved. Retrying the same bytes cannot change that,
     // and the session is demonstrably alive, so the request fails at once:
     // no retries, no relogin (unlike a ladder that ran out without any answer).
-    bool LORAListener::dlv_refused_(uint32_t ack_msg_id, AckStatus status)
+    bool DeliveryService::refused(uint32_t ack_msg_id, AckStatus status)
     {
       for (uint8_t c = kDeliveryChannels; c-- > 0;)
       {
@@ -766,21 +796,21 @@ namespace esphome
         if (s.acks.find(ack_msg_id) < 0)
           continue;
         ESP_LOGE(TAG, "[%s] %s refused by the node (status %d, FCNT %u) — failed, not retried",
-                 this->get_name().c_str(), s.req.what, (int) status, (unsigned) ack_msg_id);
-        this->dlv_cancel_((DeliveryChannel) c);
+                 this->host_.dlv_name(), s.req.what, (int) status, (unsigned) ack_msg_id);
+        this->cancel((DeliveryChannel) c);
         if (s.req.on_abandon)
           s.req.on_abandon();
         else if (s.req.on_fail)
           s.req.on_fail();
-        this->dlv_done_((DeliveryChannel) c);
+        this->done_((DeliveryChannel) c);
         return true;
       }
       return false;
     }
 
-    uint32_t LORAListener::ack_wait_ms_(uint32_t base_ms) const
+    uint32_t DeliveryService::ack_wait_ms(uint32_t base_ms) const
     {
-      int64_t drain_ms = (this->parent_ != nullptr) ? this->parent_->txDrainUs() / 1000 : 0;
+      int64_t drain_ms = this->host_.dlv_tx_drain_us() / 1000;
       if (drain_ms < 0)
         drain_ms = 0;
       if (drain_ms > (int64_t) kMaxAckBacklogMs)
