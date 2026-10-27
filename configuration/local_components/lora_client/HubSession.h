@@ -28,6 +28,7 @@
 #include "esphome/components/lora_client/HubLinkSecurity.h"
 #include "esphome/components/lora_client/HubWire.h"
 #include "esphome/components/lora_client/MacWire.h"
+#include "esphome/components/lora_client/OnboardingGate.h"
 #include "esphome/components/lora_client/Sequencer.h"
 
 namespace esphome
@@ -54,6 +55,11 @@ namespace esphome
       virtual void session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn) = 0;
       // Write the listener's persisted state (the counters among it) now.
       virtual void session_save_state() = 0;
+      virtual void session_cancel_timeout(const char *name) = 0;
+      // The transmit queue's drain estimate (0 without a radio).
+      virtual int64_t session_tx_drain_us() const = 0;
+      // A schedule push that can still be retried is outstanding.
+      virtual bool session_schedule_outstanding() const = 0;
 
     protected:
       ~SessionHost() = default;
@@ -160,6 +166,31 @@ namespace esphome
       // CTR-decrypt into the session's own buffer; nullptr on failure.
       uint8_t *decrypt(EncUplink &up);
 
+      // ---- the onboarding gate (OnboardingGate.h) ----
+      // The hub has one downlink queue; bringing a node up costs ~8 frames
+      // (~15 s), so two nodes started 3 s apart interleave and every ack timer
+      // in both fires on frames still queued. A node may begin a login
+      // challenge only while its session holds this process-wide gate.
+      // True when this session holds the gate, taking it if it is free and
+      // this session is first in line. False = someone else is onboarding.
+      bool acquire_onboarding();
+      void release_onboarding(const char *why);
+      bool onboarding_held() const { return this->onboarding_held_; }
+      // The settle clock starts at the session's confirmation.
+      void note_onboarding_confirmed()
+      {
+        if (this->onboarding_held_ && !this->onboarding_confirmed_)
+        {
+          this->onboarding_confirmed_        = true;
+          this->onboarding_since_confirm_ms_ = 0;
+        }
+      }
+      // The node was heard (it answered its login).
+      void note_onboarding_heard() { this->onboarding_heard_ = true; }
+      // A session that goes away must not leave the gate held or its place in line.
+      void leave_onboarding_gate() { onboarding_gate_.release(this); }
+      static void reset_onboarding_gate_for_test() { onboarding_gate_.reset(); }
+
       // ---- msgid / CTR-space guard (framecrypto::kMsgidCtrLimit) ----
       // Starts a fresh session ONCE per exhaustion (cleared by send_login(),
       // where both counters restart).
@@ -173,6 +204,7 @@ namespace esphome
       static bool persist_hook_(void *ctx);
       mac1::PersistHook persist_() { return mac1::PersistHook{&HubSession::persist_hook_, this}; }
       bool seal_(DeliveryFrame *f, size_t hdr_len, size_t body_len);
+      void onboarding_poll_();
       bool verify_uplink_(EncUplink &up);
       mac2::LinkSecurity::Verify tag_verdict_(EncUplink &up);
       void drop_candidate_(EncUplink &up);
@@ -187,6 +219,13 @@ namespace esphome
       uint8_t uplink_pt_[256]{};
       bool     msgid_relogin_pending_{false};
       uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
+      static onboarding::Gate onboarding_gate_;
+      bool     onboarding_held_{false};
+      bool     onboarding_waiting_logged_{false};   // log the wait once, not per poll
+      bool     onboarding_confirmed_{false};
+      bool     onboarding_heard_{false};
+      uint32_t onboarding_age_ms_{0};
+      uint32_t onboarding_since_confirm_ms_{0};
     };
 
   }  // namespace lora_tracker

@@ -641,8 +641,8 @@ namespace esphome
       }
       // The onboarding gate is process-wide, so a test must be able to start
       // from a free one and see who holds it.
-      static void reset_onboarding_gate_for_test() { s_onboarding_gate_.reset(); }
-      bool onboarding_held_for_test() const { return this->onboarding_held_; }
+      static void reset_onboarding_gate_for_test() { HubSession::reset_onboarding_gate_for_test(); }
+      bool onboarding_held_for_test() const { return this->session_.onboarding_held(); }
       int64_t last_timesync_sent_us_for_test() const { return this->last_timesync_sent_us_; }
       void reset_timesync_policy_for_test() { this->last_timesync_sent_us_ = 0; }
       // Simulates the config-confirmed-and-saved moment without driving a full
@@ -859,25 +859,12 @@ namespace esphome
       static void resetLoginSlotsForTest() { s_next_login_slot_ = 0; }
      protected:
 
-      // ONBOARDING GATE. The hub has one downlink queue; bringing a node up
-      // costs ~8 frames (~15 s), so two nodes started 3 s apart interleave and
-      // every ack timer in both fires on frames still queued. A node may begin a
-      // login challenge only while it holds this gate. See OnboardingGate.h.
-      static onboarding::Gate s_onboarding_gate_;
       // TimeSyncPolicy: when this node last received one, esp_timer time.
       // 0 = never (the sentinel every other "last X" field in this class uses).
       int64_t  last_timesync_sent_us_{0};
-      bool     onboarding_held_{false};
-      bool     onboarding_waiting_logged_{false};   // log the wait once, not per poll
-      bool     onboarding_confirmed_{false};
-      bool     onboarding_heard_{false};
-      uint32_t onboarding_age_ms_{0};
-      uint32_t onboarding_since_confirm_ms_{0};
-      // True when this listener holds the gate, taking it if it is free and this
-      // listener is first in line. False = someone else is onboarding: try later.
-      bool     acquire_onboarding_();
-      void     release_onboarding_(const char *why);
-      void     onboarding_poll_();
+      // The onboarding gate: HubSession's (see HubSession.h).
+      bool     acquire_onboarding_() { return this->session_.acquire_onboarding(); }
+      void     release_onboarding_(const char *why) { this->session_.release_onboarding(why); }
 
       // True from the moment the hub learns a node has restarted (its REGISTER) or
       // starts a login challenge, until the node proves the new key. The session
@@ -1429,6 +1416,9 @@ namespace esphome
       void session_relogin() override;
       void session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn) override;
       void session_save_state() override;
+      void session_cancel_timeout(const char *name) override;
+      int64_t session_tx_drain_us() const override;
+      bool session_schedule_outstanding() const override;
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
       void commit_rx_msgid_(const hubframes::Up *rcv_message);

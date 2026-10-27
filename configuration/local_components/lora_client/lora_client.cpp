@@ -18,14 +18,13 @@ namespace esphome
     }
 
     uint8_t LORAListener::s_next_login_slot_ = 0;
-    onboarding::Gate LORAListener::s_onboarding_gate_;
 
     LORAListener::~LORAListener()
     {
       // The three esp_timer callbacks hold `this`: stop and delete them before
       // the object goes (review HB22; a real hub never destroys a listener,
       // the host harness does so constantly).
-      s_onboarding_gate_.release(this);
+      this->session_.leave_onboarding_gate();
       // Tier 3: this node's keys, otherwise never freed — fine for the
       // handful of LORAListener instances a real hub constructs once at
       // boot, but the host test harness constructs many short-lived ones
@@ -371,7 +370,7 @@ namespace esphome
         ESP_LOGW(TAG, "[%s] Node heard again after an UNCONFIRMED sleep command — treating it as awake",
                  this->get_name().c_str());
       }
-      this->onboarding_heard_ = true;
+      this->session_.note_onboarding_heard();
       this->last_heard_us_ = esp_timer_get_time();
       if (this->time != nullptr && this->time->now().is_valid())
         this->last_heard_epoch_ = static_cast<uint32_t>(this->time->now().timestamp);

@@ -533,11 +533,7 @@ namespace esphome
 
       // The settle clock for the onboarding gate starts here: the pushes that
       // follow a confirmation are queued over the next ~2 s.
-      if (this->onboarding_held_ && !this->onboarding_confirmed_)
-      {
-        this->onboarding_confirmed_        = true;
-        this->onboarding_since_confirm_ms_ = 0;
-      }
+      this->session_.note_onboarding_confirmed();
 
       // The deferred config push from handle_register_. This is the first
       // moment it can be encrypted, and a provisioned node will not accept it
@@ -1062,6 +1058,12 @@ namespace esphome
     }
     void LORAListener::session_relogin() { this->do_login_and_arm_retry_(); }
     void LORAListener::session_save_state() { this->save_state_(true); }
+    void LORAListener::session_cancel_timeout(const char *name) { this->cancel_timeout(name); }
+    int64_t LORAListener::session_tx_drain_us() const
+    {
+      return (this->parent_ != nullptr) ? this->parent_->txDrainUs() : 0;
+    }
+    bool LORAListener::session_schedule_outstanding() const { return this->sched_push_outstanding_(); }
     void LORAListener::session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn)
     {
       this->set_timeout(name, ms, std::move(fn));
@@ -1486,18 +1488,20 @@ namespace esphome
       this->send_login_v1_(login, fcnt, base);
     }
 
-    bool LORAListener::acquire_onboarding_()
+    onboarding::Gate HubSession::onboarding_gate_;
+
+    bool HubSession::acquire_onboarding()
     {
       if (this->onboarding_held_)
         return true;
-      if (!s_onboarding_gate_.tryAcquire(this))
+      if (!onboarding_gate_.tryAcquire(this))
       {
         if (!this->onboarding_waiting_logged_)
         {
           this->onboarding_waiting_logged_ = true;
           ESP_LOGI(TAG, "[%s] Another node is being brought up — waiting for it to finish "
                         "(%u in line)",
-                   this->get_name().c_str(), (unsigned) s_onboarding_gate_.waiting());
+                   this->host_.session_name(), (unsigned) onboarding_gate_.waiting());
         }
         return false;
       }
@@ -1507,22 +1511,22 @@ namespace esphome
       this->onboarding_heard_            = false;
       this->onboarding_age_ms_           = 0;
       this->onboarding_since_confirm_ms_ = 0;
-      this->set_timeout("onboarding_poll", onboarding::kPollMs, [this]() { this->onboarding_poll_(); });
+      this->host_.session_set_timeout("onboarding_poll", onboarding::kPollMs, [this]() { this->onboarding_poll_(); });
       return true;
     }
 
-    void LORAListener::release_onboarding_(const char *why)
+    void HubSession::release_onboarding(const char *why)
     {
       if (!this->onboarding_held_)
         return;
       this->onboarding_held_ = false;
-      this->cancel_timeout("onboarding_poll");
-      s_onboarding_gate_.release(this);
+      this->host_.session_cancel_timeout("onboarding_poll");
+      onboarding_gate_.release(this);
       ESP_LOGI(TAG, "[%s] Onboarding done (%s, %u s) — next node may start",
-               this->get_name().c_str(), why, (unsigned) (this->onboarding_age_ms_ / 1000));
+               this->host_.session_name(), why, (unsigned) (this->onboarding_age_ms_ / 1000));
     }
 
-    void LORAListener::onboarding_poll_()
+    void HubSession::onboarding_poll_()
     {
       if (!this->onboarding_held_)
         return;
@@ -1535,29 +1539,29 @@ namespace esphome
       s.confirmed        = this->onboarding_confirmed_;
       s.since_confirm_ms = this->onboarding_since_confirm_ms_;
       s.node_heard       = this->onboarding_heard_;
-      s.tx_drain_us      = (this->parent_ != nullptr) ? this->parent_->txDrainUs() : 0;
+      s.tx_drain_us      = this->host_.session_tx_drain_us();
       // A schedule push is part of bringing the node up while it can still be
       // retried. Once the ladder is spent nothing more will be sent, so the
       // stale msgid (kept to recognise a late ack) must not hold the gate.
-      s.schedule_outstanding = this->sched_push_outstanding_();
+      s.schedule_outstanding = this->host_.session_schedule_outstanding();
 
       switch (onboarding::assess(s))
       {
       case onboarding::Verdict::Keep:
-        this->set_timeout("onboarding_poll", onboarding::kPollMs, [this]() { this->onboarding_poll_(); });
+        this->host_.session_set_timeout("onboarding_poll", onboarding::kPollMs, [this]() { this->onboarding_poll_(); });
         return;
       case onboarding::Verdict::Settled:
-        this->release_onboarding_("settled");
+        this->release_onboarding("settled");
         return;
       case onboarding::Verdict::NodeSilent:
         ESP_LOGW(TAG, "[%s] Node did not answer its login — letting the other nodes go first",
-                 this->get_name().c_str());
-        this->release_onboarding_("node silent");
+                 this->host_.session_name());
+        this->release_onboarding("node silent");
         return;
       case onboarding::Verdict::Capped:
         ESP_LOGW(TAG, "[%s] Onboarding held the gate for %u s without settling — releasing it",
-                 this->get_name().c_str(), (unsigned) (this->onboarding_age_ms_ / 1000));
-        this->release_onboarding_("capped");
+                 this->host_.session_name(), (unsigned) (this->onboarding_age_ms_ / 1000));
+        this->release_onboarding("capped");
         return;
       }
     }
