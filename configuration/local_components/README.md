@@ -9,7 +9,7 @@ contract described in `docs/mac-wire-format.md`.
 | component | layer | what it is |
 |---|---|---|
 | `lora_tracker/` | PHY + MAC-0 | The radio. `lora.cpp` is the SX1278 driver. `LORATracker` owns the transmit pool and queue, the send task, burst/placed transmission with per-copy stamping and tagging (`burst_frame.h`), the RX poll and the fan-out to listeners, and the grid (anchor, rounds, beacon timing). `mac_mgmt.*` is the MAC management unit: the fleet key, the GridBeacon and its FLEET tag, the shadow pending mask. |
-| `lora_client/` | MAC-1, MAC-2, delivery, APP | One `LORAClient` (a `LORAListener`) per node. MAC-1: `Sequencer.h` (FCNT, replay window) and `FcntReservation.h`. MAC-2: `HubLinkSecurity.*` (`SessionKeyStore`, seal, retag, verify). The delivery service (`deliver_` / `dlv_*`, policy in `DeliveryPolicy.h`). The wire: `MacWire.h` (header codec), `HubWire.*` (bodies, routes), `PortTable.h`. The application: covers, schedules, sleep model, auto mode, Mode B supervisor. Most `*.h` here are pure, host-tested policy headers. |
+| `lora_client/` | MAC-1, MAC-2, delivery, APP | One `LORAClient` (a `LORAListener`) per node. MAC-1: `Sequencer.h` (FCNT, replay window) and `FcntReservation.h`. MAC-2: `HubLinkSecurity.*` (`SessionKeyStore`, seal, retag, verify). The delivery service (`DeliveryService.h`, policy in `DeliveryPolicy.h`). The bench streams (`BenchStreams.h`: MAC ping, drift test, ModeTest). The wire: `MacWire.h` (header codec), `HubWire.*` (bodies, routes), `PortTable.h`. The application: covers, schedules, sleep model, auto mode, Mode B supervisor. Most `*.h` here are pure, host-tested policy headers. |
 | `loracover/` | APP children | The Home Assistant entities of a node (cover, sensors, switches, buttons, text, ...). They receive decoded `AppIndication`s from their listener and send through its public API; they never see wire bytes. |
 | `blindsproto/` | schema | The generated protobuf-c stubs of `BlindsESP/proto/blinds.proto`. Never edit by hand: `BlindsESP/proto/regen_stubs.sh` writes both repos' copies. |
 | `rika_stove/` | -- | Unrelated component. |
@@ -31,8 +31,21 @@ drift gate. Change them in the node repo and re-vendor; never edit them here.
 5. `docs/threading-model.md` -- which task owns what (loop, esp_timer, send task) and the locks.
 6. In `lora_client.cpp`: the receive path `set_response` -> `admit_frame_` ->
    `handle_encrypted_` -> `deliver_uplink_`, and the send path `deliver_` ->
-   `dlv_tx_` -> `place_ctl_` -> `send_aligned_` -> `mac0_send_`.
+   `DeliveryService::tx_` -> `place_ctl_` -> `send_aligned_` -> `mac0_send_`.
 7. In `lora_tracker.cpp`: `send` -> `serviceTxQueue` -> `sendPacketBurst`.
+
+## Security notes
+
+- **REGISTER replay (review HB14, `lora_client/RegisterFreshness.h`).** REGISTER
+  bypasses the session replay window, so the node numbers it
+  (`ClientRegister.register_seq`, strictly increasing, persisted, under the
+  K_AUTH tag). Each listener keeps the highest value seen since the hub booted
+  (RAM only) and drops any REGISTER whose value is not above it, before the 5 s
+  rate limit. `register_seq = 0` (firmware older than node 82a7658) gets the
+  rate limit only, but once a node has sent a numbered REGISTER an unnumbered
+  one is refused as an old capture. Side effect: a node DOWNGRADED by OTA to
+  firmware without the field cannot REGISTER again until the hub reboots
+  (press 'Hub Restart').
 
 ## Tests and checks
 
