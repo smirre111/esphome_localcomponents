@@ -296,7 +296,7 @@ namespace esphome
         if (this->parent_ == nullptr)
           return;
         this->mbs_owns_test_ = this->mbs_starting_;
-        this->last_mode_test_report_.clear();
+        this->mode_test_.clear_last_report();
         this->mode_test_.start(duration_s, grid_ms, mode, copies, keep_power_profile,
                                enable_counter, enable_crypto, mac_echo, arm_offset_us);
       }
@@ -390,44 +390,15 @@ namespace esphome
       // `help` entity fell into. The NUMBERS below are what belongs in HA, one
       // per sensor, because B3's gate ("reception >= Mode A over a week") is a
       // week of history and a string cannot be graphed.
-      const std::string &last_mode_test_report() const {
-        return this->last_mode_test_report_;
-      }
+      const std::string &last_mode_test_report() const { return this->mode_test_.last_report(); }
 
       // --- The last ModeTest report, as numbers ---------------------------
       //
       // Recomputed by the hub from the node's RAW counters (I1: the node never
       // grades itself), stored so HA can plot them rather than have an operator
       // read them out of an ESPHome log line.
-      struct ModeTestSummary
-      {
-        bool     valid{false};        // false until a report has arrived
-        uint32_t mode{0};             // what the node ACTUALLY ran — see
-                                      // modetest::modeApplied
-        uint32_t arm_refusal{0};
-        uint32_t elapsed_s{0};
-        uint32_t windows_armed{0};
-        uint32_t windows_hit{0};
-        uint32_t fer_link_ppm{0};
-        uint32_t wmr_ppm{0};
-        uint32_t dup_ppm{0};
-        uint32_t mic_fail_ppm{0};
-        int32_t  phase_p50_us{0};
-        int32_t  phase_p99_us{0};
-        int32_t  turnaround_p99_us{0};
-        bool     power_profile_production{true};
-        // The run's clock rate, node against hub. Mode B's pass criterion is
-        // stated in these; see implementation-plan.md §12a.
-        int32_t  ppm_estimate{0};
-        uint32_t ppm_samples{0};
-        int32_t  measured_period_us{0};
-        // Residual rate after the node clock discipline: Mode B pass line.
-        int32_t  residual_ppm{0};
-        uint32_t residual_samples{0};
-      };
-      const ModeTestSummary &mode_test_summary() const {
-        return this->mode_test_summary_;
-      }
+      using ModeTestSummary = lora_tracker::ModeTestSummary;   // BenchStreams.h
+      const ModeTestSummary &mode_test_summary() const { return this->mode_test_.summary(); }
 
       // --- MAC-0 ping / echo (mac-layer.md sections 5 and 6) --------------
       //
@@ -752,7 +723,7 @@ namespace esphome
      protected:
       // block == nullptr: a fresh FCNT (loop only); else the run's reserved
       // block (any task). See pack_test_frame_.
-      void handle_mode_test_report_(const ::ModeTestReport *rep);
+      void handle_mode_test_report_(const ::ModeTestReport *rep) { this->mode_test_.on_report(rep); }
 
       // Same shape as the drift frame, and for the same reason: the NEXT frame
       // is packed immediately after a send, in the 99 % of the period that is
@@ -935,8 +906,6 @@ namespace esphome
       // node arms on the first one it hears, so a node that missed the first is
       // not left waiting for a repeat that never comes).
       ModeTestStream mode_test_{*this};
-      std::string last_mode_test_report_{};
-      ModeTestSummary mode_test_summary_{};
 
       // MAC-0 ping / echo (BenchStreams.h): its state, timer and FCNT block.
       MacPingStream mac_ping_{*this};

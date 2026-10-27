@@ -326,7 +326,7 @@ namespace esphome
     // MacFunnel.h owns that arithmetic and is compiled into both ends, so the
     // rates here are the same function the node would have used — just not the
     // node's opinion of them.
-    void LORAListener::handle_mode_test_report_(const ::ModeTestReport *rep)
+    void ModeTestStream::on_report(const ::ModeTestReport *rep)
     {
       if (rep == nullptr)
         return;
@@ -445,10 +445,10 @@ namespace esphome
       sum.measured_period_us       = rep->measuredperiodus;
       sum.residual_ppm             = rep->residualppm;
       sum.residual_samples         = rep->residualsamples;
-      this->mode_test_summary_     = sum;
+      this->summary_ = sum;
 
-      this->last_mode_test_report_ = buf;
-      ESP_LOGW(TAG, "[%s] ModeTest REPORT: %s", this->get_name().c_str(), buf);
+      this->last_report_ = buf;
+      ESP_LOGW(TAG, "[%s] ModeTest REPORT: %s", this->host_.stream_name(), buf);
     }
 
     void LORAListener::invalidate_fcnt_reservations_()

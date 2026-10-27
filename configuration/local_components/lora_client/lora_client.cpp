@@ -1887,7 +1887,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // promote in 13.6 s; the node then holds Mode B on its own.
     void LORAListener::mbs_start_warmup_()
     {
-      this->mbs_summary_before_ = this->mode_test_summary_;
+      this->mbs_summary_before_ = this->mode_test_.summary();
       this->mbs_starting_  = true;
       this->start_mode_test(modebsup::kWarmupS, 1500, 2, 1, true, false, false, true);
       this->mbs_starting_  = false;
@@ -1949,7 +1949,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // Stop the warm-up (quietly) and publish the grid; the failure backoff stays.
     void LORAListener::note_warmup_refusal_()
     {
-      const ModeTestSummary &s = this->mode_test_summary_;
+      const ModeTestSummary &s = this->mode_test_.summary();
       if (!this->mbs_owns_test_ || !this->mode_test_.active() || !s.valid ||
           s.arm_refusal != modebsup::kArmRefusalNoGrid)
         return;
@@ -1973,7 +1973,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // carries no timestamp, and clearing it would blank an operator's last result.
     bool LORAListener::mbs_report_fresh_() const
     {
-      const ModeTestSummary &s = this->mode_test_summary_;
+      const ModeTestSummary &s = this->mode_test_.summary();
       const ModeTestSummary &b = this->mbs_summary_before_;
       const bool changed = s.valid && (!b.valid || s.elapsed_s != b.elapsed_s ||
                                        s.windows_armed != b.windows_armed ||

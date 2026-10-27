@@ -6891,7 +6891,6 @@ struct ModeBProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::mode_test_;
     using esphome::lora_tracker::LORAListener::command_failed_;
     using esphome::lora_tracker::LORAListener::is_node_awake_;
-    using esphome::lora_tracker::LORAListener::mode_test_summary_;
 };
 ModeBProbe &P(LORAClient &c) { return static_cast<ModeBProbe &>(c); }
 
@@ -7144,7 +7143,7 @@ TEST(ModeBListener, AReportShowingModeBWindowsEndsTheVerification) {
     // An OLD report (from before this warm-up) must not count ...
     EXPECT_FALSE(r.rol.mbs_report_fresh_());
     // ... the warm-up's own must.
-    auto &sum = P(r.rol).mode_test_summary_;
+    auto &sum = P(r.rol).mode_test_.summary_for_test();
     sum.valid = true; sum.mode = 2; sum.elapsed_s = 60; sum.windows_armed = 38; sum.windows_hit = 38;
     EXPECT_TRUE(r.rol.mbs_report_fresh_());
     r.secs(2 * modebsup::kTickS);
@@ -7159,7 +7158,7 @@ TEST(ModeBListener, AReportFromAModeARunDoesNotCount) {
     r.rol.enable_timed_mode(true);
     r.ackGrid();
     ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
-    auto &sum = P(r.rol).mode_test_summary_;
+    auto &sum = P(r.rol).mode_test_.summary_for_test();
     sum.valid = true; sum.mode = 1; sum.elapsed_s = 60; sum.windows_armed = 0; sum.windows_hit = 0;
     EXPECT_FALSE(r.rol.mbs_report_fresh_()) << "mode=2 windows 0/0 and Mode A runs are not promotions";
     sum.mode = 2;
@@ -7442,7 +7441,7 @@ TEST(ModeBListener, AnOlderModeBReportDoesNotCountForThisWarmup) {
     r.session();
     r.rol.enable_timed_mode(true);
     r.ackGrid();
-    auto &sum = P(r.rol).mode_test_summary_;     // an operator's earlier run, Mode B and good
+    auto &sum = P(r.rol).mode_test_.summary_for_test();     // an operator's earlier run, Mode B and good
     sum.valid = true; sum.mode = 2; sum.elapsed_s = 300; sum.windows_armed = 190; sum.windows_hit = 190;
     ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
     EXPECT_FALSE(r.rol.mbs_report_fresh_())

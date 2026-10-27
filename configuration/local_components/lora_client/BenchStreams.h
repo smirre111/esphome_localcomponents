@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include <esp_timer.h>
@@ -140,6 +141,36 @@ namespace esphome
     bool pack_stream_frame(StreamHost &host, hubframes::Down *op, mac1::FcntReservation *block,
                            DeliveryFrame *f);
 
+    // The last ModeTest report, as numbers. Recomputed by the hub from the
+    // node's RAW counters (I1: the node never grades itself), stored so HA can
+    // plot them rather than have an operator read them out of a log line.
+    struct ModeTestSummary
+    {
+      bool     valid{false};        // false until a report has arrived
+      uint32_t mode{0};             // what the node ACTUALLY ran — see
+                                    // modetest::modeApplied
+      uint32_t arm_refusal{0};
+      uint32_t elapsed_s{0};
+      uint32_t windows_armed{0};
+      uint32_t windows_hit{0};
+      uint32_t fer_link_ppm{0};
+      uint32_t wmr_ppm{0};
+      uint32_t dup_ppm{0};
+      uint32_t mic_fail_ppm{0};
+      int32_t  phase_p50_us{0};
+      int32_t  phase_p99_us{0};
+      int32_t  turnaround_p99_us{0};
+      bool     power_profile_production{true};
+      // The run's clock rate, node against hub. Mode B's pass criterion is
+      // stated in these; see implementation-plan.md §12a.
+      int32_t  ppm_estimate{0};
+      uint32_t ppm_samples{0};
+      int32_t  measured_period_us{0};
+      // Residual rate after the node clock discipline: Mode B pass line.
+      int32_t  residual_ppm{0};
+      uint32_t residual_samples{0};
+    };
+
     // ModeTest: the on-hardware validation mode. Every mark carries the full
     // request; in Mode B / sweep the marks are placed on the node's own mark.
     class ModeTestStream
@@ -174,6 +205,12 @@ namespace esphome
       {
         return std::vector<uint8_t>(this->frame_, this->frame_ + this->frame_len_);
       }
+      // The node's REPORT: logged, kept as text and as numbers.
+      void on_report(const ::ModeTestReport *rep);
+      const ModeTestSummary &summary() const { return this->summary_; }
+      ModeTestSummary &summary_for_test() { return this->summary_; }
+      const std::string &last_report() const { return this->last_report_; }
+      void clear_last_report() { this->last_report_.clear(); }
 
     private:
       void build_frame_(bool enable, mac1::FcntReservation *block = nullptr);
@@ -201,6 +238,8 @@ namespace esphome
       uint8_t  frame_[160]{};
       size_t   frame_len_{0};
       mac2::FrameSeal seal_{};
+      std::string     last_report_{};
+      ModeTestSummary summary_{};
     };
 
     // The drift test: a hardware-timed ruler, one frame per esp_timer tick.
