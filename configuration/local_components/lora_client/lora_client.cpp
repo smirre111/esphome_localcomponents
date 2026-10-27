@@ -407,7 +407,7 @@ namespace esphome
       // downlink placed for it (that mark, once past, is the last time it was
       // addressed).
       in.since_last_traffic_us = pendingshadow::sinceLastTrafficUs(
-          this->last_heard_us_, this->last_placed_t0_us_, now_us);
+          this->last_heard_us_, this->link_.last_placed_t0_us(), now_us);
       return in;
     }
 
@@ -425,7 +425,7 @@ namespace esphome
     // this node that has not fired yet, or anything draining on the air.
     bool LORAListener::frames_queued_(int64_t now_us) const
     {
-      return (this->last_placed_t0_us_ > now_us) ||
+      return (this->link_.last_placed_t0_us() > now_us) ||
              (this->parent_ != nullptr && this->parent_->txDrainUs() > 0);
     }
 
@@ -1456,11 +1456,11 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       // the next. The stamp is used only when it belongs to this frame: a
       // plaintext frame on a confirmed session does not refresh
       // last_uplink_t0_us_, and pairing a stale stamp would bias the rate.
-      if (this->parent_ != nullptr && this->last_uplink_t0_us_ > 0 &&
-          this->last_uplink_t0_us_ == this->parent_->last_rx_t0_us())
+      if (this->parent_ != nullptr && this->link_.last_uplink_t0_us() > 0 &&
+          this->link_.last_uplink_t0_us() == this->parent_->last_rx_t0_us())
       {
         const bool sampled = this->wake_fit_.addReported(b->prevbeaconfcnt, b->prevbeacont0ticks);
-        this->wake_fit_.noteHeard(this->last_uplink_msgid_, this->last_uplink_t0_us_);
+        this->wake_fit_.noteHeard(this->last_uplink_msgid_, this->link_.last_uplink_t0_us());
         if (sampled)
           ESP_LOGW(TAG, "[%s] Wake clock: n %u span %u s ppm %d | crystal period %u Q19 -> %d ppm "
                         "| prev wake: windows %u hits %u detected %u crcValid %u",
@@ -1716,7 +1716,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // Same counter the hub keeps as a diagnostic (noteUplinkPlacement_), not
       // a second measurement — one definition, and the node's view of it can
       // only ever be this one's echo.
-      ts->inslotuplinks = this->belief_.in_slot_acks;
+      ts->inslotuplinks = this->link_.belief().in_slot_acks;
 
       // TIER 1: tell the node whether it may sleep immediately.
       //
@@ -1833,7 +1833,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
               : 0xFFFFFFFFu;
       // The node's own word (PhaseReport.timedRxActive), and only since the last
       // session: a login clears have_phase_report_.
-      in.promoted       = this->have_phase_report_ && this->belief_.node_timed_rx;
+      in.promoted       = this->link_.have_phase_report() && this->link_.belief().node_timed_rx;
       in.busy           = this->delivery_busy_();
       in.other_test     = this->mbs_other_test_();
       in.warmup_running = this->mode_test_.active() && this->mbs_owns_test_;
@@ -1868,7 +1868,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
           break;
         case modebsup::Event::Succeeded:
           ESP_LOGW(TAG, "[%s] Mode B RE-ESTABLISHED (node phase report %d, ModeTest report %d)",
-                   who, (int) (this->have_phase_report_ && this->belief_.node_timed_rx),
+                   who, (int) (this->link_.have_phase_report() && this->link_.belief().node_timed_rx),
                    (int) this->mbs_report_fresh_());
           break;
         case modebsup::Event::Failed:
@@ -1991,9 +1991,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     {
       this->timed_mode_enabled_ = true;
       this->set_grid_aligned(true);
-      this->belief_               = timedmode::HubBelief{};
-      this->last_in_slot_us_      = 0;
-      this->have_in_slot_confirm_ = false;
+      this->link_.reset_belief();
       this->start_mode_b_supervisor_();
       ESP_LOGW(TAG, "[%s] timed mode RESTORED ON at boot — nothing sent yet; the grid is "
                     "published at this node's first confirmed session, then Mode B is warmed up",

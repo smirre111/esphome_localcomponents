@@ -245,14 +245,9 @@ namespace esphome
         // again: after the first confirmation it was false for the lifetime of
         // the hub process, and the rule it implements never fired. A rebooted
         // node has lost its grid phase and must re-earn the hub's confidence.
-        this->belief_.rebooted_since_confirm = true;
-        this->belief_.in_slot_acks           = 0;
-        this->have_in_slot_confirm_          = false;
         // The node's last phase report described a grid it held before it
         // restarted. It is not evidence about the node in front of us now.
-        this->belief_.phase_reported = false;
-        this->belief_.phase_samples  = 0;
-        this->have_phase_report_     = false;
+        this->link_.note_node_rebooted();
 
         // Only (re)push configuration when the node reports it is unprovisioned
         // (needs_config), or when this hub boot has not yet pushed to the node
@@ -444,11 +439,9 @@ namespace esphome
     {
       if (this->parent_ == nullptr)
         return;
-      this->last_uplink_t0_us_  = rx.ticket.t0_us;
-      this->last_uplink_unc_us_ = rx.unc_us;
       // §4.6: the same stamp answers a second question — did this uplink land
       // where the grid says this node transmits?
-      this->noteUplinkPlacement_(this->last_uplink_t0_us_);
+      this->link_.commit_uplink_stamp(rx.ticket.t0_us, rx.unc_us);
     }
 
     // Advance the replay counter, once the frame has earned it.
@@ -1390,14 +1383,9 @@ namespace esphome
       // untouched — so a node that had earned single-shot before re-keying got
       // it back after one observation instead of kPromotionUplinks. Earning it
       // back from observation means starting the count again.
-      this->belief_.session_changed = true;
-      this->belief_.in_slot_acks    = 0;
-      this->have_in_slot_confirm_   = false;
       // Same reasoning as the reboot path: a measurement from the previous
       // session is not evidence about this one.
-      this->belief_.phase_reported  = false;
-      this->belief_.phase_samples   = 0;
-      this->have_phase_report_      = false;
+      this->link_.note_session_changed();
       this->last_gridsync_ack_us_   = 0;
       this->mbs_restart_();
 

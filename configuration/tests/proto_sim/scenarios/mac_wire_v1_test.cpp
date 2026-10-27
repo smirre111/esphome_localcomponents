@@ -1225,7 +1225,7 @@ TEST(MacWireV1Listener, AnAuthenticV1FramesStampIsTheNodesUplinkOrigin) {
     macwire::WireHdr h = uplinkHdr(2, macwire::kPortApp, macwire::Auth::Session);
     Bytes up = proto_sim::v1_session_frame(session, kNodeNonce, kHub, kNode, false, h, positionBody(0.2f));
     hub.rol.set_response(up.data(), up.size());
-    EXPECT_EQ(hub.rol.last_uplink_t0_us_, 123'456) << "the frame's T0 stamp is committed as is";
+    EXPECT_EQ(hub.rol.link_timing().last_uplink_t0_us(), 123'456) << "the frame's T0 stamp is committed as is";
 }
 
 TEST(MacWireV1Listener, TheStartupDemoteIsAPlainBroadcastOnPortZero) {

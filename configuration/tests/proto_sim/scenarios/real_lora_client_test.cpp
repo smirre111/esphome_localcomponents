@@ -766,7 +766,7 @@ TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
     // increment outright. The mode check is what the order of the ladder makes
     // load-bearing.
     h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
-    ASSERT_EQ(h.rol.last_uplink_t0_us_, 0);
+    ASSERT_EQ(h.rol.link_timing().last_uplink_t0_us(), 0);
     ASSERT_EQ(h.rol.send_into_class_a_window_(payload.data(), payload.size()),
               LORAClient::ClassAPlacement::NoUplinkStamp);
     EXPECT_EQ(h.rol.class_a_stats().offered, 0u)
@@ -781,7 +781,7 @@ TEST(RealLoraClient, TheClassALedgerCountsOnlyFramesActuallyPlaced) {
     h.tracker.rx_uncertainty_v = 250;
     auto from_self = real_helpers::serialize_avail(/*sender=*/18, /*msg_id=*/1);
     feed_sealed(h.rol, from_self);
-    ASSERT_EQ(h.rol.last_uplink_t0_us_, kT0)
+    ASSERT_EQ(h.rol.link_timing().last_uplink_t0_us(), kT0)
         << "the node's OWN uplink is the origin — precondition, not the claim";
 
     ASSERT_EQ(h.rol.send_into_class_a_window_(payload.data(), payload.size()),
@@ -816,7 +816,7 @@ TEST(RealLoraClient, AClassAReplyThePoolRefusesIsNeitherPlacedNorOffered) {
     h.tracker.rx_uncertainty_v = 250;
     auto from_self = real_helpers::serialize_avail(/*sender=*/18, /*msg_id=*/1);
     feed_sealed(h.rol, from_self);
-    ASSERT_EQ(h.rol.last_uplink_t0_us_, 100'000) << "precondition: an origin for the windows";
+    ASSERT_EQ(h.rol.link_timing().last_uplink_t0_us(), 100'000) << "precondition: an origin for the windows";
 
     std::vector<uint8_t> payload{1, 2, 3, 4};
     h.tracker.drop_next_sends = 1;
@@ -837,7 +837,7 @@ TEST(RealLoraClient, AnAdmittedUplinkBecomesTheClassAOrigin) {
     h.tracker.last_rx_t0_us_v = 100'000;
     auto f = real_helpers::serialize_avail(18, 1);
     feed_sealed(h.rol, f);
-    EXPECT_EQ(h.rol.last_uplink_t0_us_, 100'000);
+    EXPECT_EQ(h.rol.link_timing().last_uplink_t0_us(), 100'000);
 }
 
 
@@ -1005,7 +1005,7 @@ TEST(RealLoraClient, PlaintextBeforeASessionIsAcceptedButNeverTrusted) {
 
     EXPECT_EQ(h.rol.plaintextRefused(), 0u) << "refusing here would close the bootstrap";
     EXPECT_EQ(h.rol.sequencer().rxId(), 0u) << "an unauthenticated FCNT moved the MAC-1 counter";
-    EXPECT_EQ(h.rol.last_uplink_t0_us_, 0) << "an unauthenticated frame moved the timing";
+    EXPECT_EQ(h.rol.link_timing().last_uplink_t0_us(), 0) << "an unauthenticated frame moved the timing";
     EXPECT_TRUE(op.ctl().awaiting_ack) << "a plaintext ack retired a tracked command";
     EXPECT_FALSE(h.rol.hubBelief().phase_reported) << "a plaintext PhaseReport reached the belief";
 }
@@ -1779,7 +1779,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrig
     rol.enable_timed_mode(true);
     ASSERT_TRUE(tracker.gridStarted());
 
-    const int64_t origin_before = rol.last_uplink_t0_us_;
+    const int64_t origin_before = rol.link_timing().last_uplink_t0_us();
     uint32_t msgid = rol.sequencer().rxId();
 
     // Three PLAINTEXT uplinks placed perfectly at this node's mark — the exact
@@ -1794,7 +1794,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrig
 
     EXPECT_EQ(rol.txPolicyNow(), timedmode::TxPolicy::Burst)
         << "unauthenticated frames must not earn a node single-shot";
-    EXPECT_EQ(rol.last_uplink_t0_us_, origin_before)
+    EXPECT_EQ(rol.link_timing().last_uplink_t0_us(), origin_before)
         << "and must not become this node's Class A window origin";
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
@@ -1838,7 +1838,7 @@ TEST(RealLoraClient, APlaintextFrameOnAConfirmedSessionCannotBeReplayedWithoutLi
     // The first copy is admitted — this path stays open by design, because a
     // plaintext status frame from a live node is still worth acting on.
     rol.set_response(forged.data(), forged.size());
-    const int64_t first_seen = rol.last_uplink_t0_us_;
+    const int64_t first_seen = rol.link_timing().last_uplink_t0_us();
 
     // Move the tracker's stamp so a SECOND admission would be visible.
     tracker.last_rx_t0_us_v = first_seen + 777'000;
@@ -1848,7 +1848,7 @@ TEST(RealLoraClient, APlaintextFrameOnAConfirmedSessionCannotBeReplayedWithoutLi
 
     EXPECT_EQ(rol.sequencer().rxId(), rx)
         << "still no ratchet — that fix must not regress";
-    EXPECT_EQ(rol.last_uplink_t0_us_, first_seen)
+    EXPECT_EQ(rol.link_timing().last_uplink_t0_us(), first_seen)
         << "a replayed plaintext frame must be dropped as a duplicate, not "
            "re-admitted without limit";
 
@@ -1967,9 +1967,9 @@ TEST(RealLoraClient, RX1IsAimedAtThisNodesOwnUplinkNotTheTrackersLastFrame) {
     feed_sealed(rol_1, from_18);
     feed_sealed(rol_2, from_18);
 
-    EXPECT_EQ(rol_1.last_uplink_t0_us_, kT0Node17)
+    EXPECT_EQ(rol_1.link_timing().last_uplink_t0_us(), kT0Node17)
         << "a frame from another node must not become this node's window origin";
-    EXPECT_EQ(rol_2.last_uplink_t0_us_, kT0Node18);
+    EXPECT_EQ(rol_2.link_timing().last_uplink_t0_us(), kT0Node18);
 
     // A node the hub has never heard from is MODE_INTERACTIVE, and an
     // interactive node opens no Class A window at all — it sweeps a free-running
@@ -2165,7 +2165,7 @@ TEST(RealLoraClient, AReplyTooLateForRx1GoesToRx2RatherThanToABurst) {
     std::vector<uint8_t> payload{1, 2, 3, 4};
 
     constexpr int64_t kT0Uplink = 1'000'000;
-    n.rol.last_uplink_t0_us_ = kT0Uplink;
+    n.rol.link_timing().set_last_uplink_t0_for_test(kT0Uplink);
 
     // Now is past RX1's fire instant and well before RX2's. Before this change
     // that was the "falling back" branch.
@@ -2201,7 +2201,7 @@ TEST(RealLoraClient, AWindowTooCloseToFireOnIsNotAWindow) {
     std::vector<uint8_t> payload{1, 2, 3, 4};
 
     constexpr int64_t kT0Uplink = 1'000'000;
-    n.rol.last_uplink_t0_us_ = kT0Uplink;
+    n.rol.link_timing().set_last_uplink_t0_for_test(kT0Uplink);
 
     const int64_t rx1_fire =
         loratiming::fireInstantUs(kT0Uplink + (int64_t) classa::kRx1DelayUs, 0);
@@ -2225,7 +2225,7 @@ TEST(RealLoraClient, OnceBothWindowsArePastTheHubDeclines) {
     std::vector<uint8_t> payload{1, 2, 3, 4};
 
     constexpr int64_t kT0Uplink = 1'000'000;
-    n.rol.last_uplink_t0_us_ = kT0Uplink;
+    n.rol.link_timing().set_last_uplink_t0_for_test(kT0Uplink);
     proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx2DelayUs + 1);
 
     EXPECT_EQ(n.rol.send_into_class_a_window_(payload.data(), payload.size()),
@@ -2244,7 +2244,7 @@ TEST(RealLoraClient, AnInteractiveNodeGetsNeitherWindow) {
     std::vector<uint8_t> payload{1, 2, 3, 4};
 
     constexpr int64_t kT0Uplink = 1'000'000;
-    n.rol.last_uplink_t0_us_ = kT0Uplink;
+    n.rol.link_timing().set_last_uplink_t0_for_test(kT0Uplink);
     proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx1DelayUs + 50'000);
 
     EXPECT_EQ(n.rol.send_into_class_a_window_(payload.data(), payload.size()),
@@ -2948,8 +2948,6 @@ TEST(MacPing, IsPlacedOnTheNodesMarkAsASingleCopy) {
 // in between handed the command another frame's mark.
 namespace {
 struct PlacementProbe : LORAClient {
-    using esphome::lora_tracker::LORAListener::last_placed_t0_us_;
-    using esphome::lora_tracker::LORAListener::last_placed_single_shot_;
 };
 }  // namespace
 
@@ -2961,7 +2959,7 @@ TEST(MacPing, APingTickLeavesTheLoopsPlacementStateAlone) {
     h.rol.enable_timed_mode(true);
     ASSERT_TRUE(h.tracker.gridStarted()) << "precondition: placement needs a running grid";
     auto &probe = static_cast<PlacementProbe &>(h.rol);
-    const int64_t before = probe.last_placed_t0_us_;
+    const int64_t before = probe.link_timing().last_placed_t0_us();
 
     h.rol.start_mac_ping(/*duration_s=*/300, /*grid_ms=*/1100);
     h.rol.mac_ping_tick_for_test();
@@ -2969,9 +2967,9 @@ TEST(MacPing, APingTickLeavesTheLoopsPlacementStateAlone) {
     ASSERT_GT(h.tracker.last_earliest_us, 0) << "precondition: the ping was placed";
     ASSERT_TRUE(h.tracker.last_on_mark);
 
-    EXPECT_EQ(probe.last_placed_t0_us_, before)
+    EXPECT_EQ(probe.link_timing().last_placed_t0_us(), before)
         << "a ping placed from the esp_timer task wrote the loop's last placed mark";
-    EXPECT_FALSE(probe.last_placed_single_shot_);
+    EXPECT_FALSE(probe.link_timing().last_placed_single_shot());
     h.rol.stop_mac_ping();
 }
 
@@ -3947,7 +3945,7 @@ TEST(PlacedDownlinks, ATimeSyncIsDroppedRatherThanBurstAtASleepingNode) {
     h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
 
     constexpr int64_t kT0Uplink = 1'000'000;
-    h.rol.last_uplink_t0_us_ = kT0Uplink;
+    h.rol.link_timing().set_last_uplink_t0_for_test(kT0Uplink);
     proto_sim_timer_set_now_us(kT0Uplink + (int64_t) classa::kRx2DelayUs + 1);
 
     const size_t before = h.tracker.sent_earliest_us.size();
@@ -5669,7 +5667,6 @@ namespace {
 // The listener's tracked-op bookkeeping is protected; same probe pattern as
 // AckProbe above, adding no state.
 struct OptProbe : LORAClient {
-    using esphome::lora_tracker::LORAListener::last_placed_t0_us_;
     using esphome::lora_tracker::LORAListener::ctl;
     using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::last_timesync_sent_us_;
@@ -5696,7 +5693,7 @@ void sendOpen(real_helpers::RealHubHarness &h) {
 
 // Microseconds from now to the mark the last command was placed on.
 int64_t usToPlacedMark(real_helpers::RealHubHarness &h) {
-    return P(h).last_placed_t0_us_ - esp_timer_get_time();
+    return P(h).link_timing().last_placed_t0_us() - esp_timer_get_time();
 }
 
 uint32_t nowMs() { return (uint32_t) (esp_timer_get_time() / 1000); }
@@ -5981,7 +5978,7 @@ TEST(AdaptiveAckWait, AnAckAtTheMeasuredFieldLatencyDoesNotBurst) {
         if (with_history) seedLatency(h, 2100);
         sendOpen(h);
         ASSERT_EQ(h.tracker.last_copies, 1);
-        const int64_t mark = P(h).last_placed_t0_us_;
+        const int64_t mark = P(h).link_timing().last_placed_t0_us();
         const size_t sends = h.tracker.sent_copies.size();
 
         // The old deadline (to mark + 500 ms, plus the double-counted drain)
@@ -6061,7 +6058,7 @@ TEST(AdaptiveAckWait, TheDeadlineNeverUndercutsTheObservedLatency) {
         sendOpen(h);
         ASSERT_EQ(h.tracker.last_copies, 1);
         const size_t sends = h.tracker.sent_copies.size();
-        proto_sim_timer_set_now_us(P(h).last_placed_t0_us_ + (int64_t) lat * 1000);
+        proto_sim_timer_set_now_us(P(h).link_timing().last_placed_t0_us() + (int64_t) lat * 1000);
         h.clock.tick(1);
         EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "latency " << lat;
         EXPECT_FALSE(h.rol.op_short_wait_spent_for_test()) << "latency " << lat;
@@ -6108,7 +6105,7 @@ TEST(AdaptiveAckWait, OnlyACleanSinglePlacedCopyFeedsTheHistory) {
         sendOpen(h);
         ASSERT_EQ(h.tracker.last_copies, 1);
         ASSERT_FALSE(h.rol.op_sent_optimistic_for_test());
-        proto_sim_timer_set_now_us(P(h).last_placed_t0_us_ + 1'650'000);
+        proto_sim_timer_set_now_us(P(h).link_timing().last_placed_t0_us() + 1'650'000);
         deliverAck(h.rol, P(h).ctl().first_msgid);
         EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), 1u);
         EXPECT_EQ(h.rol.ack_latency_for_test().maxDelayMs(nowMs()), 1650u);
@@ -6346,17 +6343,17 @@ TEST(PendingShadowInputs, TrafficAgeComesFromHearingAndFromAddressingTheNode) {
     EXPECT_EQ(in.since_last_traffic_us, 400'000'000);
 
     // A downlink placed for it counts, once its mark has passed.
-    P(h).last_placed_t0_us_ = esp_timer_get_time() - 5'000'000;
+    P(h).link_timing().set_last_placed_t0_for_test(esp_timer_get_time() - 5'000'000);
     in = h.rol.pending_shadow_inputs(esp_timer_get_time());
     EXPECT_EQ(in.since_last_traffic_us, 5'000'000);
 
     // ...and while its mark is still ahead it is a QUEUED frame.
-    P(h).last_placed_t0_us_ = esp_timer_get_time() + 800'000;
+    P(h).link_timing().set_last_placed_t0_for_test(esp_timer_get_time() + 800'000);
     in = h.rol.pending_shadow_inputs(esp_timer_get_time());
     EXPECT_TRUE(in.queued_frames);
 
     // The hub's own air being busy also counts, for every node.
-    P(h).last_placed_t0_us_ = 0;
+    P(h).link_timing().set_last_placed_t0_for_test(0);
     h.tracker.tx_drain_us = 1'000'000;
     EXPECT_TRUE(h.rol.pending_shadow_inputs(esp_timer_get_time()).queued_frames);
 }
@@ -6649,7 +6646,7 @@ TEST(OpRetry, TheShortWaitIsMeasuredFromTheOpMarkWhenThereIsOneElseFromTheLastPl
         sendOpen(h);
         ASSERT_EQ(h.tracker.last_copies, 1);
         const int64_t now = esp_timer_get_time();
-        P(h).last_placed_t0_us_ = now + 900'000;
+        P(h).link_timing().set_last_placed_t0_for_test(now + 900'000);
         AP(h).ctl().mark_us       = have_op_mark ? now + 400'000 : 0;
         static_cast<ReArmProbe &>(h.rol).arm_dlv_timer_(esphome::lora_tracker::CH_CONTROL);   // re-arm the first wait
         const int64_t to_mark_us = have_op_mark ? 400'000 : 900'000;
@@ -9915,8 +9912,6 @@ namespace {
 struct RegridProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::dispatch_mac_payload_;
     using esphome::lora_tracker::LORAListener::relogin_pending_;
-    using esphome::lora_tracker::LORAListener::belief_;
-    using esphome::lora_tracker::LORAListener::have_in_slot_confirm_;
     using esphome::lora_tracker::LORAListener::on_sleep_acknowledged_;
     using esphome::lora_tracker::LORAListener::confirm_session_;
     using esphome::lora_tracker::LORAListener::acked_since_confirm_;
@@ -10176,8 +10171,8 @@ TEST(RebootRegrid, ANoGridRefusalOutweighsEverythingTheHubBelievedAboutTheNodesG
     ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
     // Whatever earlier reports said, a refusal for want of a grid is the newest word.
     r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, /*node_timed_rx=*/true);
-    RP(r.rol).belief_.in_slot_acks = 5;
-    RP(r.rol).have_in_slot_confirm_ = true;
+    RP(r.rol).link_timing().belief_for_test().in_slot_acks = 5;
+    RP(r.rol).link_timing().set_in_slot_confirm_for_test(true);
     ASSERT_TRUE(r.rol.hubBeliefNow_().node_timed_rx);
     deliverArmRefusal(r.rol, modebsup::kArmRefusalNoGrid);
     const timedmode::HubBelief b = r.rol.hubBeliefNow_();
@@ -10185,7 +10180,7 @@ TEST(RebootRegrid, ANoGridRefusalOutweighsEverythingTheHubBelievedAboutTheNodesG
     EXPECT_FALSE(b.phase_reported);
     EXPECT_EQ(b.phase_samples, 0u);
     EXPECT_EQ(b.in_slot_acks, 0u);
-    EXPECT_FALSE(RP(r.rol).have_in_slot_confirm_);
+    EXPECT_FALSE(RP(r.rol).link_timing().have_in_slot_confirm_for_test());
     EXPECT_EQ(b.confirmation_age_s, 0xFFFFFFFFu);
 }
 
@@ -10610,7 +10605,7 @@ TEST(FireDelivery, ATimeSyncForAClassANodeIsOneCopyAimedAtItsOpenWindow) {
     h.rol.registered_ = true;
     h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
     constexpr int64_t kT0 = 100'000;
-    h.rol.last_uplink_t0_us_ = kT0;
+    h.rol.link_timing().set_last_uplink_t0_for_test(kT0);
     proto_sim_timer_set_now_us(kT0 + 50'000);
     const size_t sends0 = h.tracker.sent_copies.size();
 
@@ -10632,7 +10627,7 @@ TEST(FireDelivery, ATimeSyncForAClassANodeWhoseWindowsHaveClosedIsDroppedAndSays
     h.rol.registered_ = true;
     h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
     constexpr int64_t kT0 = 100'000;
-    h.rol.last_uplink_t0_us_ = kT0;
+    h.rol.link_timing().set_last_uplink_t0_for_test(kT0);
     proto_sim_timer_set_now_us(kT0 + (int64_t) classa::kRx2DelayUs + 1);
     const size_t sends0 = h.tracker.sent_copies.size();
     const uint32_t id0 = FP(h).txId();
@@ -10656,7 +10651,7 @@ TEST(FireDelivery, ATimeSyncForAClassANodeTheHubHasNeverHeardIsABurstToo) {
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     h.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;
-    ASSERT_EQ(h.rol.last_uplink_t0_us_, 0);
+    ASSERT_EQ(h.rol.link_timing().last_uplink_t0_us(), 0);
     const size_t sends0 = h.tracker.sent_copies.size();
 
     testing::internal::CaptureStderr();
@@ -12299,22 +12294,22 @@ TEST(Mac0TimingS5, TheCommittedOriginIsThisFramesStampAndUncertainty) {
     h.tracker.rx_uncertainty_v = 250;
     auto a = serialize_avail(18, 1);
     feed_sealed(h.rol, a);
-    EXPECT_EQ(h.rol.last_uplink_t0_us_, 123'000);
-    EXPECT_EQ(h.rol.last_uplink_unc_us_, 250u);
+    EXPECT_EQ(h.rol.link_timing().last_uplink_t0_us(), 123'000);
+    EXPECT_EQ(h.rol.link_timing().last_uplink_unc_us(), 250u);
 
     // A refused frame (stale id) commits nothing: the origin stays.
     h.tracker.last_rx_t0_us_v  = 456'000;
     h.tracker.rx_uncertainty_v = 999;
     auto stale = serialize_avail(18, 1);
     feed_sealed(h.rol, stale);
-    EXPECT_EQ(h.rol.last_uplink_t0_us_, 123'000);
-    EXPECT_EQ(h.rol.last_uplink_unc_us_, 250u);
+    EXPECT_EQ(h.rol.link_timing().last_uplink_t0_us(), 123'000);
+    EXPECT_EQ(h.rol.link_timing().last_uplink_unc_us(), 250u);
 
     // The next admitted one moves both.
     auto b = serialize_avail(18, 2);
     feed_sealed(h.rol, b);
-    EXPECT_EQ(h.rol.last_uplink_t0_us_, 456'000);
-    EXPECT_EQ(h.rol.last_uplink_unc_us_, 999u);
+    EXPECT_EQ(h.rol.link_timing().last_uplink_t0_us(), 456'000);
+    EXPECT_EQ(h.rol.link_timing().last_uplink_unc_us(), 999u);
 }
 
 // =============================================================================

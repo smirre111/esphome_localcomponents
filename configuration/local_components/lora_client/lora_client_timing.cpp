@@ -315,9 +315,7 @@ namespace esphome
         this->send_grid_sync(true);
         // Confidence starts at zero every time the grid is (re)published: the
         // node has to earn single-shot again from observed uplinks.
-        this->belief_               = timedmode::HubBelief{};
-        this->last_in_slot_us_      = 0;
-        this->have_in_slot_confirm_ = false;
+        this->link_.reset_belief();
         ESP_LOGW(TAG, "[%s] timed mode ON — grid published, slot %u, alignment on",
                  this->get_name().c_str(), (unsigned) this->grid_slot_);
       }
@@ -372,9 +370,9 @@ namespace esphome
                this->get_name().c_str(), (unsigned) f.bytes.size());
     }
 
-    bool LORAListener::send_aligned_(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
+    bool NodeLinkTiming::send_aligned(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
     {
-      return this->send_aligned_(buf, len, TxPolicy{}, seal);
+      return this->send_aligned(buf, len, TxPolicy{}, seal);
     }
 
     // The mark a placed frame for this node would go out on.
@@ -386,19 +384,17 @@ namespace esphome
     // end of the latest reservation: a single-copy mark before a queued beacon
     // is free air. Every placed downlink comes through here, and a skipped
     // mark costs a whole round of latency.
-    int64_t LORAListener::nextPlacementT0_(int64_t now_us, int copies, size_t len,
+    int64_t NodeLinkTiming::next_placement_t0(int64_t now_us, int copies, size_t len,
                                            bool expects_reply) const
     {
-      int64_t t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now_us,
-                                                       copies, len, expects_reply);
+      int64_t t0 = this->host_.link_next_clear_t0(now_us, copies, len, expects_reply);
       if (t0 <= this->last_placed_t0_us_)
-        t0 = this->parent_->nextClearT0ForSlotUs(this->grid_slot_,
-                                                 this->last_placed_t0_us_ + 1,
-                                                 copies, len, expects_reply);
+        t0 = this->host_.link_next_clear_t0(this->last_placed_t0_us_ + 1, copies, len,
+                                             expects_reply);
       return t0;
     }
 
-    bool LORAListener::send_aligned_(const uint8_t *buf, size_t len,
+    bool NodeLinkTiming::send_aligned(const uint8_t *buf, size_t len,
                                      const TxPolicy &in_policy, const mac2::FrameSeal &seal)
     {
       if (buf == nullptr || len == 0)
@@ -413,16 +409,16 @@ namespace esphome
       // burst it always was — the policy is written as a list of reasons to
       // fall BACK, so a state nobody thought about costs airtime, not a command.
       TxPolicy policy = in_policy;
-      const timedmode::HubBelief belief = this->hubBeliefNow_();
+      const timedmode::HubBelief belief = this->belief_now();
       const bool single_shot =
           (policy.copies == 0) &&    // the caller has not asked for a shape
-          (this->txPolicyNow() == timedmode::TxPolicy::SingleShot);
+          (this->tx_policy_now() == timedmode::TxPolicy::SingleShot);
       if (single_shot)
       {
         policy.copies = 1;
         ESP_LOGI(TAG, "[%s] single shot: phase %+d +/-%d us over %u samples, "
                       "reported %us ago",
-                 this->get_name().c_str(), (int) belief.phase_err_us,
+                 this->host_.link_name(), (int) belief.phase_err_us,
                  (int) belief.phase_spread_us, (unsigned) belief.phase_samples,
                  (unsigned) belief.confirmation_age_s);
       }
@@ -450,13 +446,13 @@ namespace esphome
         this->last_placed_optimistic_ =
             single_shot &&
             timedmode::txRefusalFor(strict, timedgrid::kGuardUs,
-                                    this->published_resync_max_s_) ==
+                                    this->host_.link_resync_max_s()) ==
                 timedmode::TxRefusal::ConfirmationStale;
       }
 
-      if (!this->grid_aligned_ || !this->parent_->gridStarted())
+      if (!this->host_.link_grid_aligned() || !this->host_.link_grid_started())
       {
-        return this->mac0_send_(buf, len, policy, seal);
+        return this->host_.link_send(buf, len, policy, seal);
       }
 
       // The next mark that is CLEAR of the hub's own burst, not simply the next
@@ -487,7 +483,7 @@ namespace esphome
       // passing it through is both correct and the conservative reading.
       const int64_t t0 = (policy.earliest_us != 0)
                              ? loratiming::t0FromFireInstantUs(policy.earliest_us, 0)
-                             : this->nextPlacementT0_(now, policy.copies, len,
+                             : this->next_placement_t0(now, policy.copies, len,
                                                       policy.expects_reply);
       // earliest_us is a FIRE instant; t0 is where the node expects the frame's
       // reference to land. They differ by kDownlinkPreambleToT0Us, and the node's
@@ -497,14 +493,14 @@ namespace esphome
       policy.earliest_us = loratiming::fireInstantUs(t0, 0);
       policy.on_mark     = true;   // t0 IS this node's mark: a phase measurement
       ESP_LOGD(TAG, "[%s] placing %u B at slot %u T0, %lld ms out",
-               this->get_name().c_str(), (unsigned) len,
-               (unsigned) this->grid_slot_, (long long) ((t0 - now) / 1000));
+               this->host_.link_name(), (unsigned) len,
+               (unsigned) this->host_.link_slot(), (long long) ((t0 - now) / 1000));
 
       // The mark is spent only if the frame actually entered the queue. send()
       // drops silently when the buffer pool is exhausted or the handoff queue
       // is full; recording the mark anyway would push the NEXT command for this
       // node a further round out to make room for a frame that does not exist.
-      if (this->mac0_send_(buf, len, policy, seal))
+      if (this->host_.link_send(buf, len, policy, seal))
       {
         this->last_placed_t0_us_ = t0;
         return true;
@@ -512,7 +508,7 @@ namespace esphome
 
       ESP_LOGW(TAG, "[%s] placed frame dropped by the transmit queue — mark "
                     "%lld not consumed",
-               this->get_name().c_str(), (long long) t0);
+               this->host_.link_name(), (long long) t0);
       return false;
     }
 
@@ -529,20 +525,102 @@ namespace esphome
     // uplink offset the hub itself published in GridSync — and the tolerance is
     // the same guard the node's phase tracking uses, so "in slot" means the
     // same thing at both ends.
-    void LORAListener::noteUplinkPlacement_(int64_t t0_uplink_us)
+    // The stamp is captured with the frame and committed once the frame earned
+    // it (MAC-1's commit, commit_rx_msgid_); the same stamp answers whether
+    // the uplink landed where the grid says this node transmits.
+    void NodeLinkTiming::commit_uplink_stamp(int64_t t0_us, uint32_t unc_us)
     {
-      if (this->parent_ == nullptr || t0_uplink_us <= 0)
+      this->last_uplink_t0_us_  = t0_us;
+      this->last_uplink_unc_us_ = unc_us;
+      this->note_uplink_placement(this->last_uplink_t0_us_);
+    }
+
+    // §4.6 rule 3: a REGISTER says the node restarted. It has lost its grid
+    // phase and must re-earn the hub's confidence; its last phase report
+    // described a grid it held before it restarted.
+    void NodeLinkTiming::note_node_rebooted()
+    {
+      this->belief_.rebooted_since_confirm = true;
+      this->belief_.in_slot_acks           = 0;
+      this->have_in_slot_confirm_          = false;
+      this->belief_.phase_reported = false;
+      this->belief_.phase_samples  = 0;
+      this->have_phase_report_     = false;
+    }
+
+    // §4.6: a new session invalidates the hub's confidence; it earns single
+    // shot back from observation, counting from zero.
+    void NodeLinkTiming::note_session_changed()
+    {
+      this->belief_.session_changed = true;
+      this->belief_.in_slot_acks    = 0;
+      this->have_in_slot_confirm_   = false;
+      this->belief_.phase_reported  = false;
+      this->belief_.phase_samples   = 0;
+      this->have_phase_report_      = false;
+    }
+
+    void NodeLinkTiming::forget_grid()
+    {
+      this->belief_.rebooted_since_confirm = true;
+      this->belief_.in_slot_acks           = 0;
+      this->have_in_slot_confirm_          = false;
+      this->belief_.phase_reported         = false;
+      this->belief_.phase_samples          = 0;
+      this->belief_.node_timed_rx          = false;
+      this->have_phase_report_             = false;
+    }
+
+    void NodeLinkTiming::reset_belief()
+    {
+      this->belief_               = timedmode::HubBelief{};
+      this->last_in_slot_us_      = 0;
+      this->have_in_slot_confirm_ = false;
+    }
+
+    // ---- LinkTimingHost: what the node's link timing may ask of the listener ----
+    const char *LORAListener::link_name() const { return this->get_name().c_str(); }
+    bool LORAListener::link_has_radio() const { return this->parent_ != nullptr; }
+    bool LORAListener::link_grid_aligned() const { return this->grid_aligned_; }
+    bool LORAListener::link_grid_started() const { return this->parent_->gridStarted(); }
+    uint32_t LORAListener::link_slot() const { return this->grid_slot_; }
+    int64_t LORAListener::link_next_t0(int64_t now_us) const
+    {
+      return this->parent_->nextT0ForSlotUs(this->grid_slot_, now_us);
+    }
+    int64_t LORAListener::link_next_clear_t0(int64_t now_us, int copies, size_t len,
+                                             bool expects_reply) const
+    {
+      return this->parent_->nextClearT0ForSlotUs(this->grid_slot_, now_us, copies, len,
+                                                 expects_reply);
+    }
+    bool LORAListener::link_send(const uint8_t *buf, size_t len, const TxPolicy &policy,
+                                 const mac2::FrameSeal &seal)
+    {
+      return this->mac0_send_(buf, len, policy, seal);
+    }
+    bool LORAListener::link_timed_mode_enabled() const { return this->timed_mode_enabled_; }
+    bool LORAListener::link_optimistic_single_shot() const { return this->optimistic_single_shot_; }
+    uint32_t LORAListener::link_resync_max_s() const { return this->published_resync_max_s_; }
+    bool LORAListener::link_beacon_overdue() const { return this->beacon_overdue_(); }
+    bool LORAListener::link_firmware_known() const { return this->node_fw_version_ != 0; }
+    uint32_t LORAListener::link_node_mode() const { return this->node_mode_; }
+    void LORAListener::link_class_a_offered() { this->class_a_stats_.offered++; }
+
+    void NodeLinkTiming::note_uplink_placement(int64_t t0_uplink_us)
+    {
+      if (!this->host_.link_has_radio() || t0_uplink_us <= 0)
         return;
       // No grid, nothing to be in slot of. Deliberately does NOT reset the
       // count: a node that has not been given a grid is not failing to hit it.
-      if (!this->grid_aligned_ || !this->parent_->gridStarted())
+      if (!this->host_.link_grid_aligned() || !this->host_.link_grid_started())
         return;
 
       // Where the node's mark for this uplink was. Subtract the offset first,
       // then find the nearest mark: an uplink a hair early belongs to the mark
       // ahead of it, and taking the NEXT mark would charge it a whole round.
-      const int64_t mark_x = t0_uplink_us - (int64_t) LORAListener::kUplinkOffsetUs;
-      const int64_t next   = this->parent_->nextT0ForSlotUs(this->grid_slot_, mark_x);
+      const int64_t mark_x = t0_uplink_us - (int64_t) NodeLinkTiming::kUplinkOffsetUs;
+      const int64_t next   = this->host_.link_next_t0(mark_x);
       const int64_t prev   = next - (int64_t) timedgrid::kRoundUs;
       const int64_t mark   = ((next - mark_x) <= (mark_x - prev)) ? next : prev;
       const int64_t err    = mark_x - mark;
@@ -554,8 +632,8 @@ namespace esphome
       {
         if (this->belief_.in_slot_acks != 0)
           ESP_LOGW(TAG, "[%s] uplink %lld us out of slot %u — confidence reset",
-                   this->get_name().c_str(), (long long) err,
-                   (unsigned) this->grid_slot_);
+                   this->host_.link_name(), (long long) err,
+                   (unsigned) this->host_.link_slot());
         this->belief_.in_slot_acks = 0;
         return;
       }
@@ -569,7 +647,7 @@ namespace esphome
       this->belief_.session_changed        = false;
       this->belief_.single_shot_unacked    = false;
       ESP_LOGD(TAG, "[%s] uplink in slot %u (err %lld us), %u consecutive",
-               this->get_name().c_str(), (unsigned) this->grid_slot_,
+               this->host_.link_name(), (unsigned) this->host_.link_slot(),
                (long long) err, (unsigned) this->belief_.in_slot_acks);
     }
 
@@ -597,7 +675,7 @@ namespace esphome
       this->notePhaseReport_(&pr);
     }
 
-    void LORAListener::notePhaseReport_(const ::PhaseReport *pr)
+    void NodeLinkTiming::note_phase_report(const ::PhaseReport *pr)
     {
       // ABSENT IS NOT EMPTY, the same rule the pending mask is built on. A node
       // whose firmware predates the field sends no PhaseReport at all, and
@@ -647,18 +725,18 @@ namespace esphome
       this->belief_.single_shot_unacked    = false;
     }
 
-    timedmode::HubBelief LORAListener::hubBeliefNow_() const
+    timedmode::HubBelief NodeLinkTiming::belief_now() const
     {
       timedmode::HubBelief b = this->belief_;
-      b.grid_enabled   = this->timed_mode_enabled_ && this->grid_aligned_;
+      b.grid_enabled   = this->host_.link_timed_mode_enabled() && this->host_.link_grid_aligned();
       // U-5: computed here rather than stored, for the same reason
       // confirmation_age_s is — it is a fact about the passage of time, and a
       // stored copy would be right only at the instant it was written. It was
       // a txPolicyFor guard that nothing ever set, so single-shot was decided
       // without the one question that asks whether the node is still there.
-      b.beacon_missed  = this->beacon_overdue_();
+      b.beacon_missed  = this->host_.link_beacon_overdue();
       // Known only once the node has told us, in a beacon we decrypted.
-      b.firmware_known = (this->node_fw_version_ != 0);
+      b.firmware_known = this->host_.link_firmware_known();
 
       // The confirmation is the node's PHASE REPORT, not an observed uplink
       // placement — see TimedModePolicy.h's kPromotionPhaseSamples for why the
@@ -679,7 +757,7 @@ namespace esphome
       // What it permits is narrow: ConfirmationStale, and nothing else. See
       // HubBelief::optimistic_single_shot for the arithmetic and for why
       // NoPhaseReport is deliberately NOT bypassable.
-      b.optimistic_single_shot = this->optimistic_single_shot_;
+      b.optimistic_single_shot = this->host_.link_optimistic_single_shot();
       return b;
     }
 
@@ -703,10 +781,10 @@ namespace esphome
     // Returns false when the hub has no usable stamp for this node's uplink, in
     // which case the caller must fall back to today's behaviour rather than
     // guess an origin.
-    LORAListener::ClassAPlacement
-    LORAListener::send_into_class_a_window_(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
+    ClassAPlacement
+    NodeLinkTiming::send_into_class_a_window(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
     {
-      if (this->parent_ == nullptr || buf == nullptr || len == 0)
+      if (!this->host_.link_has_radio() || buf == nullptr || len == 0)
         return ClassAPlacement::NotSendable;
 
       // Does this node actually OPEN a Class A window? Aiming one copy at a
@@ -729,13 +807,13 @@ namespace esphome
       // Declining is not a failure: the caller falls back to the burst, which
       // is what this path did before C2 existed.
       const bool node_is_class_a =
-          (this->node_mode_ == (uint32_t) NODE_MODE__MODE_AUTO) &&
-          !(this->timed_mode_enabled_ && this->grid_aligned_);
+          (this->host_.link_node_mode() == (uint32_t) NODE_MODE__MODE_AUTO) &&
+          !(this->host_.link_timed_mode_enabled() && this->host_.link_grid_aligned());
       if (!node_is_class_a)
       {
         ESP_LOGD(TAG, "[%s] not a Class A node (mode %u, grid %d) — burst",
-                 this->get_name().c_str(), (unsigned) this->node_mode_,
-                 (int) (this->timed_mode_enabled_ && this->grid_aligned_));
+                 this->host_.link_name(), (unsigned) this->host_.link_node_mode(),
+                 (int) (this->host_.link_timed_mode_enabled() && this->host_.link_grid_aligned()));
         return ClassAPlacement::NotClassA;
       }
 
@@ -805,7 +883,7 @@ namespace esphome
         wanted_t0 = t0_uplink + (int64_t) classa::kRx2DelayUs;
         window    = "RX2";
         ESP_LOGD(TAG, "[%s] RX1 unreachable by %lld us — aiming at RX2",
-                 this->get_name().c_str(),
+                 this->host_.link_name(),
                  (long long) (earliest_usable - rx1_target));
       }
       else
@@ -817,7 +895,7 @@ namespace esphome
         // opposite answer.
         ESP_LOGW(TAG, "[%s] both Class A windows past (RX2 by %lld us) — "
                       "the node is asleep",
-                 this->get_name().c_str(),
+                 this->host_.link_name(),
                  (long long) (earliest_usable - rx2_target));
         return ClassAPlacement::WindowsPast;
       }
@@ -828,19 +906,19 @@ namespace esphome
       p.earliest_us = target;
       p.priority    = 0;              // Immediate: a missed window is a lost
                                       // reply, and the next one is a wake away
-      if (!this->mac0_send_(buf, len, p, seal))
+      if (!this->host_.link_send(buf, len, p, seal))
       {
         // The pool refused it: nothing was aimed at the window, so nothing is
         // counted as offered (the hit rate divides by this), and the caller
         // must not report the frame as sent (review HB13).
-        ESP_LOGW(TAG, "[%s] reply for %s dropped by the transmit queue", this->get_name().c_str(),
+        ESP_LOGW(TAG, "[%s] reply for %s dropped by the transmit queue", this->host_.link_name(),
                  window);
         return ClassAPlacement::Dropped;
       }
 
       ESP_LOGI(TAG, "[%s] reply aimed at %s: T0_uplink %lld, wanted T0 %lld, "
                     "fire %lld (hub stamp +/-%u us)",
-               this->get_name().c_str(), window, (long long) t0_uplink,
+               this->host_.link_name(), window, (long long) t0_uplink,
                (long long) wanted_t0, (long long) target,
                (unsigned) this->last_uplink_unc_us_);
 
@@ -848,7 +926,7 @@ namespace esphome
       // open. Counted here rather than in send_timesync so every caller of this
       // path is counted, present and future — the question is "was a frame
       // placed", not "which feature placed it".
-      this->class_a_stats_.offered++;
+      this->host_.link_class_a_offered();
 
       return ClassAPlacement::Placed;
     }
@@ -858,14 +936,8 @@ namespace esphome
     // two the supervisor reads (mbs_inputs_).
     void LORAListener::forget_node_grid_()
     {
-      this->last_gridsync_ack_us_          = 0;
-      this->belief_.rebooted_since_confirm = true;
-      this->belief_.in_slot_acks           = 0;
-      this->have_in_slot_confirm_          = false;
-      this->belief_.phase_reported         = false;
-      this->belief_.phase_samples          = 0;
-      this->belief_.node_timed_rx          = false;
-      this->have_phase_report_             = false;
+      this->last_gridsync_ack_us_ = 0;
+      this->link_.forget_grid();
     }
 
     bool LORAListener::regrid_due_() const

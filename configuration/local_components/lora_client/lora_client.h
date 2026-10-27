@@ -21,6 +21,7 @@
 #include "esphome/components/lora_client/DeliveryPolicy.h"
 #include "esphome/components/lora_client/DeliveryService.h"
 #include "esphome/components/lora_client/HubSession.h"
+#include "esphome/components/lora_client/NodeLinkTiming.h"
 #include "esphome/components/lora_client/ModeBSupervisor.h"
 #include "esphome/components/lora_client/SleepModel.h"
 // MAC-2: keys, KDF, Encrypt-then-CMAC and the session key store (stage S2).
@@ -129,7 +130,7 @@ namespace esphome
  
 
     class LORAListener : public EntityBase, public Component, private StreamHost,
-                         private DeliveryHost, private SessionHost
+                         private DeliveryHost, private SessionHost, private LinkTimingHost
     {
     public:
       static constexpr size_t MAC_ADDR_STR_LEN = 18; // "AA:BB:CC:DD:EE:FF\0"
@@ -378,7 +379,7 @@ namespace esphome
       // not a companion bool in this message.
       struct RxBusySkips { bool valid{false}; uint32_t count{0}; };
       RxBusySkips node_rx_busy_skips() const {
-        return RxBusySkips{this->have_rx_busy_skips_, this->node_rx_busy_skips_};
+        return RxBusySkips{this->link_.have_rx_busy_skips(), this->link_.node_rx_busy_skips()};
       }
 
       // The report the node sent back, verbatim. Empty until one arrives.
@@ -480,21 +481,16 @@ namespace esphome
       // node's window for no chance of being heard.
       //
       // Numbered for the log line, not published to Home Assistant.
-      enum class ClassAPlacement : uint8_t
-      {
-        Placed        = 0,  // one copy is queued on an open window
-        NotClassA     = 1,  // this node opens no Class A window — burst
-        NoUplinkStamp = 2,  // never heard an uplink from it — burst
-        WindowsPast   = 3,  // Class A, both windows closed: it is ASLEEP
-        NotSendable   = 4,  // no tracker or no payload — send nothing
-        Dropped       = 5,  // aimed, but the transmit pool refused it (HB13)
-      };
+      using ClassAPlacement = lora_tracker::ClassAPlacement;   // NodeLinkTiming.h
 
       // Place one copy in this node's next OPEN Class A window — RX1 if the
       // queue can still fire on it, otherwise RX2, which the node arms exactly
       // when RX1 passed with no data.
       ClassAPlacement send_into_class_a_window_(const uint8_t *buf, size_t len,
-                                                const mac2::FrameSeal &seal = {});
+                                                const mac2::FrameSeal &seal = {})
+      {
+        return this->link_.send_into_class_a_window(buf, len, seal);
+      }
       // The mark a placed frame for this node would go out on. Shared with
       // send_grid_sync, which must declare the round it will be transmitted in.
       // The frame's SHAPE is required, not optional: clearance depends on how
@@ -503,7 +499,10 @@ namespace esphome
       // Without it this asked the two-argument question, which places after the
       // END of the latest reservation and so skips marks whose air was free.
       int64_t nextPlacementT0_(int64_t now_us, int copies, size_t len,
-                               bool expects_reply) const;
+                               bool expects_reply) const
+      {
+        return this->link_.next_placement_t0(now_us, copies, len, expects_reply);
+      }
       // Capture this node's own uplink T0 and score it against the grid. Called
       // only for a frame that has earned the replay counter — see
       // commit_rx_msgid_.
@@ -524,7 +523,7 @@ namespace esphome
       Mac0Rx rx_ticket_{};
       // §4.6's promotion evidence, taken from a DECRYPTED uplink — the wake
       // beacon or, far more usefully, a MAC ACK.
-      void notePhaseReport_(const ::PhaseReport *pr);
+      void notePhaseReport_(const ::PhaseReport *pr) { this->link_.note_phase_report(pr); }
 
      public:
       // For tests: the same entry point both carriers use, so a test of the
@@ -540,10 +539,10 @@ namespace esphome
 
       // §4.6: did this uplink land where the grid says this node transmits?
       // Called with the node's own T0, from admit_frame_.
-      void noteUplinkPlacement_(int64_t t0_uplink_us);
+      void noteUplinkPlacement_(int64_t t0_uplink_us) { this->link_.note_uplink_placement(t0_uplink_us); }
       // belief_ with confirmation_age_s filled in from the clock — the one
       // field that is a function of now rather than of an event.
-      timedmode::HubBelief hubBeliefNow_() const;
+      timedmode::HubBelief hubBeliefNow_() const { return this->link_.belief_now(); }
       // Broadcast withdrawal, addressed to every node at once. Deliberately
       // separate: after a restart the hub may not yet know which nodes exist.
       void broadcast_grid_demote();
@@ -589,10 +588,7 @@ namespace esphome
       // What this listener would do RIGHT NOW — the production decision itself,
       // not a re-derivation of it. send_aligned_ asks this, and so do the
       // tests, so a test cannot pass a staleness bound the hub never published.
-      timedmode::TxPolicy txPolicyNow() const {
-        return timedmode::txPolicyFor(this->hubBeliefNow_(), timedgrid::kGuardUs,
-                                      this->published_resync_max_s_);
-      }
+      timedmode::TxPolicy txPolicyNow() const { return this->link_.tx_policy_now(); }
       // U-1: WHY this listener is still bursting, from the same ladder the
       // decision above comes out of — not a re-derivation of it.
       //
@@ -609,7 +605,7 @@ namespace esphome
       // to the node in GridSync.ulOffsetUs and used by the hub to decide
       // whether an uplink arrived in slot, so the two must be the same number —
       // it lives on the class rather than in the .cpp for that reason.
-      static constexpr uint32_t kUplinkOffsetUs = 60000;
+      static constexpr uint32_t kUplinkOffsetUs = NodeLinkTiming::kUplinkOffsetUs;
 
       void set_grid_aligned(bool v) { this->grid_aligned_ = v; }
       bool grid_aligned() const     { return this->grid_aligned_; }
@@ -623,7 +619,9 @@ namespace esphome
       // For tests: optimistic-single-shot bookkeeping of the tracked command.
       bool op_short_wait_spent_for_test() const { return this->ctl().short_wait_spent; }
       bool op_sent_optimistic_for_test() const  { return this->ctl().sent_optimistic; }
-      singleshotwait::AckLatency &ack_latency_for_test() { return this->ack_latency_; }
+      singleshotwait::AckLatency &ack_latency_for_test() { return this->link_.ack_latency(); }
+      // For tests: the node's link timing (belief, placement, uplink stamp).
+      NodeLinkTiming &link_timing() { return this->link_; }
       uint32_t op_first_tail_ms_for_test() const { return this->ctl().first_tail_ms; }
 
       // Test seam: send_aligned_ is protected, and the alignment POLICY is the
@@ -699,18 +697,18 @@ namespace esphome
       // unchanged, because reasons 1, 2, 4 and 5 are still live and any
       // non-zero one still voids a point — the precondition should be readable
       // before pressing, not reconstructed from timestamps afterwards.
-      uint32_t node_demotion_reason() const { return this->belief_.node_demotion; }
-      bool     node_timed_rx_active() const { return this->belief_.node_timed_rx; }
+      uint32_t node_demotion_reason() const { return this->link_.belief().node_demotion; }
+      bool     node_timed_rx_active() const { return this->link_.belief().node_timed_rx; }
       // The four inputs phaseTrustworthy() actually tests, so a NoPhase can be
       // attributed instead of guessed. Demotion::NoPhase has TWO producers
       // (TimedModePolicy.h:173 and :175) and they report as the same value:
       // !phase_valid (samples, frames, outside_guard, spread) versus the LAST
       // sample being outside the guard. Without these the two are
       // indistinguishable, which is what made a stuck node unreadable.
-      int32_t  node_phase_err_us() const     { return this->belief_.phase_err_us; }
-      int32_t  node_phase_spread_us() const  { return this->belief_.phase_spread_us; }
-      uint32_t node_phase_samples() const    { return this->belief_.phase_samples; }
-      uint32_t node_phase_outside_guard() const { return this->belief_.phase_outside_guard; }
+      int32_t  node_phase_err_us() const     { return this->link_.belief().phase_err_us; }
+      int32_t  node_phase_spread_us() const  { return this->link_.belief().phase_spread_us; }
+      uint32_t node_phase_samples() const    { return this->link_.belief().phase_samples; }
+      uint32_t node_phase_outside_guard() const { return this->link_.belief().phase_outside_guard; }
 
       const MacStats &mac_stats() const { return this->mac_ping_.stats(); }
       void reset_mac_stats() { this->mac_ping_.reset_stats(); }
@@ -773,9 +771,33 @@ namespace esphome
       // dropped BaseNonceExchange; LOGIN now carries the nonce with its own retry).
       // `seal`: which keys the frame's copies are tagged under (a plaintext frame
       // passes none). A sealed frame sent without its seal is dropped per copy.
-      bool send_aligned_(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal = {});
+      bool send_aligned_(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal = {})
+      {
+        return this->link_.send_aligned(buf, len, seal);
+      }
       bool send_aligned_(const uint8_t *buf, size_t len, const TxPolicy &policy,
-                         const mac2::FrameSeal &seal = {});
+                         const mac2::FrameSeal &seal = {})
+      {
+        return this->link_.send_aligned(buf, len, policy, seal);
+      }
+      // LinkTimingHost (lora_client_timing.cpp).
+      const char *link_name() const override;
+      bool link_has_radio() const override;
+      bool link_grid_aligned() const override;
+      bool link_grid_started() const override;
+      uint32_t link_slot() const override;
+      int64_t link_next_t0(int64_t now_us) const override;
+      int64_t link_next_clear_t0(int64_t now_us, int copies, size_t len,
+                                 bool expects_reply) const override;
+      bool link_send(const uint8_t *buf, size_t len, const TxPolicy &policy,
+                     const mac2::FrameSeal &seal) override;
+      bool link_timed_mode_enabled() const override;
+      bool link_optimistic_single_shot() const override;
+      uint32_t link_resync_max_s() const override;
+      bool link_beacon_overdue() const override;
+      bool link_firmware_known() const override;
+      uint32_t link_node_mode() const override;
+      void link_class_a_offered() override;
 
       // ---- S4: the single MAC data path (docs/mac-separation-layering-plan.md)
       // One packed hub->node data frame, ready for MAC-0.
@@ -894,7 +916,9 @@ namespace esphome
       //
       // Every field is maintained from a real event; nothing here is a claim
       // the node makes about itself, which is the distinction §4.6 turns on.
-      timedmode::HubBelief belief_{};
+      // The node's link timing (NodeLinkTiming.h): §4.6's belief and evidence,
+      // the placement memory, this node's uplink stamp and ack latency.
+      NodeLinkTiming link_{*this};
       // The resyncMaxS this hub actually published, and the bound on how stale
       // a phase report may be before single-shot is withdrawn. Held rather than
       // recomputed so the two can never disagree: the node demotes itself on
@@ -903,38 +927,6 @@ namespace esphome
       // free-running window. Zero until a grid is published, which refuses
       // promotion — the safe direction.
       uint32_t published_resync_max_s_{0};
-      // When this node's uplink was last OBSERVED in its slot. Feeds
-      // confirmation_age_s, which is what expires the confidence.
-      //
-      // An explicit flag rather than `last_in_slot_us_ != 0`, for the same
-      // reason the tracker's have_poll_baseline_ exists: esp_timer_get_time()
-      // starts near zero, so a sentinel of 0 is indistinguishable from a
-      // confirmation that arrived early — and under the host harness, where
-      // the clock starts AT zero, it is not even unlikely. The first version
-      // of this code used the sentinel and the confirmation age came back as
-      // 0xFFFFFFFF forever, which reads as "never confirmed" and silently
-      // pinned the hub to bursts.
-      bool     have_in_slot_confirm_{false};
-      int64_t  last_in_slot_us_{0};
-      // The shape of the LAST frame send_aligned_ placed, whoever placed it.
-      // Distinct from sent_single_shot above, which is the TRACKED
-      // COMMAND's shape and the one Rule 4 judges: every producer through
-      // send_aligned_ would otherwise overwrite it, and a grid publication
-      // already did.
-      bool     last_placed_single_shot_{false};
-      // Whether the frame send_aligned_ last placed was a single shot ONLY
-      // because the optimistic switch bypassed ConfirmationStale. Same
-      // ownership rule as sent_single_shot above: the tracked command copies
-      // it into sent_optimistic itself.
-      bool     last_placed_optimistic_{false};
-      // THIS node's measured mark->ack delays for single placed copies, and what
-      // they make the first ack wait of an optimistic shot (SingleShotAckWait.h).
-      // One per listener, so 32 nodes never share a latency.
-      singleshotwait::AckLatency ack_latency_;
-      // The mark the last placed downlink for this node was aimed at, so a
-      // second command inside the same round goes to the FOLLOWING mark instead
-      // of on top of the first. 0 = nothing placed yet.
-      int64_t  last_placed_t0_us_{0};
 
       // The drift test (BenchStreams.h): its state, timer and FCNT block.
       DriftStream drift_{*this};
@@ -974,17 +966,6 @@ namespace esphome
       int32_t  clock_offset_s_{0};
       uint32_t last_beacon_reason_{0};
       uint32_t node_mode_{0};
-      // When the node's last phase report arrived. §4.6's confirmation freshness
-      // is the age of that beacon; the explicit flag distinguishes "never" from
-      // "at boot", which a zero timestamp cannot.
-      int64_t              last_phase_report_us_{0};
-      bool                 have_phase_report_{false};
-      // U-2: windows the node meant to open and never did, because its radio
-      // was still busy at the mark. Carried on PhaseReport since 2026-09.
-      // The flag says a report has arrived, so the sensor can publish NAN for
-      // "no answer yet" rather than a 0 that reads as a healthy link.
-      uint32_t             node_rx_busy_skips_{0};
-      bool                 have_rx_busy_skips_{false};
       // handle_register_ defers a provisioned node's config push to
       // confirm_session_, the first moment it can be encrypted.
       bool                 config_push_pending_{false};
@@ -1265,19 +1246,11 @@ namespace esphome
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
 
-      // C2: when THIS node's most recent admitted uplink left the air (T0, the
-      // SFD end), and how uncertain that stamp is. Captured in admit_frame_,
-      // because that is the only moment the tracker's single global receive
-      // stamp is known to belong to this node. 0 = no usable origin, in which
-      // case send_into_class_a_window_() answers NoUplinkStamp and the caller
-      // falls back to the burst.
-      int64_t  last_uplink_t0_us_{0};
-      // msgId of the frame last_uplink_t0_us_ belongs to.
+      // msgId of the frame link_.last_uplink_t0_us() belongs to.
       uint32_t last_uplink_msgid_{0};
       // Mode C, MAC-0: this node's wake-clock rate against the hub, from the
       // RTC tick counts its beacons report. See WakeClockFit.h.
       wakeclock::Fit wake_fit_{};
-      uint32_t last_uplink_unc_us_{0};
 
       char address_str_[MAC_ADDR_STR_LEN]{}; // 18 bytes: "AA:BB:CC:DD:EE:FF\0"
 

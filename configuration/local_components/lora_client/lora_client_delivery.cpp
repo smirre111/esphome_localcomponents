@@ -68,12 +68,13 @@ namespace esphome
       // Rule 4's exposure is THIS command's, so the shape is recorded here
       // rather than inside send_aligned_, where every other producer would
       // overwrite it.
-      this->ctl().sent_single_shot = this->last_placed_single_shot_;
-      this->ctl().sent_optimistic  = this->last_placed_optimistic_;
+      this->ctl().sent_single_shot = this->link_.last_placed_single_shot();
+      this->ctl().sent_optimistic  = this->link_.last_placed_optimistic();
       // The placed mark of a FRESH frame (the first, or a re-pack) times the
       // first ack; a re-send of the stored frame leaves it alone.
       if (!a.resent_stored)
-        this->ctl().mark_us = this->last_placed_single_shot_ ? this->last_placed_t0_us_ : 0;
+        this->ctl().mark_us =
+            this->link_.last_placed_single_shot() ? this->link_.last_placed_t0_us() : 0;
     }
 
     // The Control channel's request: the command the slot describes, delivered by
@@ -294,10 +295,13 @@ namespace esphome
     {
       return (this->parent_ != nullptr) ? this->parent_->txDrainUs() : 0;
     }
-    int64_t LORAListener::dlv_last_placed_t0_us() const { return this->last_placed_t0_us_; }
-    singleshotwait::AckLatency &LORAListener::dlv_ack_latency() { return this->ack_latency_; }
-    bool LORAListener::dlv_single_shot_unacked() const { return this->belief_.single_shot_unacked; }
-    void LORAListener::dlv_mark_single_shot_unacked() { this->belief_.single_shot_unacked = true; }
+    int64_t LORAListener::dlv_last_placed_t0_us() const { return this->link_.last_placed_t0_us(); }
+    singleshotwait::AckLatency &LORAListener::dlv_ack_latency() { return this->link_.ack_latency(); }
+    bool LORAListener::dlv_single_shot_unacked() const
+    {
+      return this->link_.belief().single_shot_unacked;
+    }
+    void LORAListener::dlv_mark_single_shot_unacked() { this->link_.mark_single_shot_unacked(); }
     void LORAListener::dlv_drop_session() { this->session_confirmed_ = false; }
     void LORAListener::dlv_relogin() { this->do_login_and_arm_retry_(); }
     void LORAListener::dlv_set_timeout(const char *name, uint32_t ms, std::function<void()> fn)
@@ -764,14 +768,14 @@ namespace esphome
           true, this->ctl().retry_count, this->ctl().short_wait_spent, true);
       bool kept = false;
       if (clean && delay_ms >= 0)
-        kept = this->ack_latency_.note((uint32_t) (now_us / 1000), (uint32_t) delay_ms);
+        kept = this->link_.ack_latency().note((uint32_t) (now_us / 1000), (uint32_t) delay_ms);
       ESP_LOGI(TAG, "[%s] ack %lld ms after the mark (%s%s; first-ack tail %u ms; "
                     "history now %u samples, max %u ms)",
                this->get_name().c_str(), (long long) delay_ms,
                clean ? "clean single shot" : "after a burst fallback or retry",
                kept ? ", recorded" : ", not recorded", (unsigned) this->ctl().first_tail_ms,
-               (unsigned) this->ack_latency_.count((uint32_t) (now_us / 1000)),
-               (unsigned) this->ack_latency_.maxDelayMs((uint32_t) (now_us / 1000)));
+               (unsigned) this->link_.ack_latency().count((uint32_t) (now_us / 1000)),
+               (unsigned) this->link_.ack_latency().maxDelayMs((uint32_t) (now_us / 1000)));
     }
 
     void LORAListener::handle_command_ack_(uint32_t ack_msg_id, AckStatus status)
