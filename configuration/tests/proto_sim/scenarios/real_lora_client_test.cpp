@@ -1004,7 +1004,7 @@ TEST(RealLoraClient, PlaintextBeforeASessionIsAcceptedButNeverTrusted) {
     h.rol.set_response(frame.data(), frame.size());
 
     EXPECT_EQ(h.rol.plaintextRefused(), 0u) << "refusing here would close the bootstrap";
-    EXPECT_EQ(h.rol.seq_.rxId(), 0u) << "an unauthenticated FCNT moved the MAC-1 counter";
+    EXPECT_EQ(h.rol.sequencer().rxId(), 0u) << "an unauthenticated FCNT moved the MAC-1 counter";
     EXPECT_EQ(h.rol.last_uplink_t0_us_, 0) << "an unauthenticated frame moved the timing";
     EXPECT_TRUE(op.ctl().awaiting_ack) << "a plaintext ack retired a tracked command";
     EXPECT_FALSE(h.rol.hubBelief().phase_reported) << "a plaintext PhaseReport reached the belief";
@@ -1091,7 +1091,7 @@ TEST(RealLoraClient, UndecodableBytesAreDroppedWithoutAnyEffect) {
     const size_t tx_before = h.radio.transcript().size();
     uint8_t garbage[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x02};
     h.rol.set_response(garbage, sizeof(garbage));
-    EXPECT_EQ(h.rol.seq_.rxId(), 0u);
+    EXPECT_EQ(h.rol.sequencer().rxId(), 0u);
     EXPECT_TRUE(node.got.empty());
     EXPECT_EQ(h.radio.transcript().size(), tx_before);
 }
@@ -1109,7 +1109,7 @@ TEST(RealLoraClient, AnUnauthenticatedLoginUplinkIsIgnoredAndTearsNothingDown) {
     EXPECT_TRUE(h.rol.session_confirmed_) << "a plaintext LOGIN must not tear a session down";
     EXPECT_EQ(h.radio.transcript().size(), tx_before) << "and must not provoke a LOGIN of ours";
     EXPECT_EQ(h.rol.plaintextRefused(), 0u) << "dropped before the plaintext gate";
-    EXPECT_EQ(h.rol.seq_.rxId(), 0u) << "the counter must not move";
+    EXPECT_EQ(h.rol.sequencer().rxId(), 0u) << "the counter must not move";
     EXPECT_TRUE(node.got.empty());
 }
 
@@ -1381,11 +1381,11 @@ TEST(RealLoraClient, ReplyFromOtherNodeRejectedByListener) {
     feed_sealed(rol_1, ack);
     feed_sealed(rol_2, ack);
 
-    EXPECT_EQ(rol_1.seq_.rxId(), 0u)
+    EXPECT_EQ(rol_1.sequencer().rxId(), 0u)
         << "rol_1 (short_address=17) must REJECT a reply from sender=18 — "
            "cross-listener filter is what keeps multi-node deployments "
            "from cross-talk.";
-    EXPECT_EQ(rol_2.seq_.rxId(), 1u)
+    EXPECT_EQ(rol_2.sequencer().rxId(), 1u)
         << "rol_2 must have accepted the reply matching its own address.";
 
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
@@ -1708,7 +1708,7 @@ TEST(RealLoraClient, ADecryptedBeaconIsWhatCarriesThePhaseReport) {
     inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
     inner.header.destSubnet    = 2;
     inner.header.senderAddress = 18;
-    inner.header.msgId         = rol.seq_.rxId() + 1;
+    inner.header.msgId         = rol.sequencer().rxId() + 1;
     inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Beacon;
     inner.beacon.fwVersion     = 0x00010203;
     inner.beacon.phasePresent      = true;
@@ -1780,7 +1780,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrig
     ASSERT_TRUE(tracker.gridStarted());
 
     const int64_t origin_before = rol.last_uplink_t0_us_;
-    uint32_t msgid = rol.seq_.rxId();
+    uint32_t msgid = rol.sequencer().rxId();
 
     // Three PLAINTEXT uplinks placed perfectly at this node's mark — the exact
     // evidence section 4.6 promotes on, forged.
@@ -1832,7 +1832,7 @@ TEST(RealLoraClient, APlaintextFrameOnAConfirmedSessionCannotBeReplayedWithoutLi
     ASSERT_NE(base, 0u);
     ASSERT_TRUE(rol.session_confirmed_) << "the replay only applies to a live session";
 
-    const uint32_t rx = rol.seq_.rxId();
+    const uint32_t rx = rol.sequencer().rxId();
     auto forged = real_helpers::serialize_avail(/*sender=*/18, rx + 5);
 
     // The first copy is admitted — this path stays open by design, because a
@@ -1846,7 +1846,7 @@ TEST(RealLoraClient, APlaintextFrameOnAConfirmedSessionCannotBeReplayedWithoutLi
     for (int i = 0; i < 5; ++i)
         rol.set_response(forged.data(), forged.size());
 
-    EXPECT_EQ(rol.seq_.rxId(), rx)
+    EXPECT_EQ(rol.sequencer().rxId(), rx)
         << "still no ratchet — that fix must not regress";
     EXPECT_EQ(rol.last_uplink_t0_us_, first_seen)
         << "a replayed plaintext frame must be dropped as a duplicate, not "
@@ -1889,14 +1889,14 @@ TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
     ASSERT_NE(base, 0u);
     ASSERT_TRUE(rol.session_confirmed_) << "the attack only applies to a live session";
 
-    const uint32_t rx_after_login = rol.seq_.rxId();
+    const uint32_t rx_after_login = rol.sequencer().rxId();
 
     // One forged plaintext frame, near the top of the acceptance window.
     auto forged = real_helpers::serialize_avail(/*sender=*/18,
                                                 /*msg_id=*/rx_after_login + 1000);
     rol.set_response(forged.data(), forged.size());
 
-    EXPECT_EQ(rol.seq_.rxId(), rx_after_login)
+    EXPECT_EQ(rol.sequencer().rxId(), rx_after_login)
         << "an unauthenticated uplink must not move the hub's replay counter";
 
     // And the node's next real frame — the very next msgid — is still accepted.
@@ -1916,7 +1916,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
     auto real_frame = proto_sim::serialize_resp(outer);
     rol.set_response(real_frame.data(), real_frame.size());
 
-    EXPECT_EQ(rol.seq_.rxId(), rx_after_login + 1)
+    EXPECT_EQ(rol.sequencer().rxId(), rx_after_login + 1)
         << "the node's genuine next uplink must still be accepted — the forged "
            "frame must not have wedged the link";
 
@@ -2299,7 +2299,7 @@ TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
         bmsg.header.destAddress   = esphome::lora_tracker::kHubAddress;
         bmsg.header.destSubnet    = 2;
         bmsg.header.senderAddress = 18;
-        bmsg.header.msgId         = rol.seq_.rxId() + 1;
+        bmsg.header.msgId         = rol.sequencer().rxId() + 1;
         bmsg.proto                = proto_sim::LoraClientResponseMessage::Proto::Beacon;
         bmsg.beacon.fwVersion       = 0x00010203;
         bmsg.beacon.phasePresent    = true;
@@ -2324,7 +2324,7 @@ TEST(RealLoraClient, ADecryptedAckIsTheCarrierThatKeepsTheReportFresh) {
     inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
     inner.header.destSubnet    = 2;
     inner.header.senderAddress = 18;
-    inner.header.msgId         = rol.seq_.rxId() + 1;
+    inner.header.msgId         = rol.sequencer().rxId() + 1;
     inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Ack;
     inner.ack.ack_msg_id       = 7;
     inner.ack.phasePresent      = true;
@@ -2393,7 +2393,7 @@ TEST(RealLoraClient, AnAckWithNoPhaseReportLeavesTheBeliefAlone) {
     inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
     inner.header.destSubnet    = 2;
     inner.header.senderAddress = 18;
-    inner.header.msgId         = rol.seq_.rxId() + 1;
+    inner.header.msgId         = rol.sequencer().rxId() + 1;
     inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Ack;
     inner.ack.ack_msg_id       = 9;
     inner.ack.phasePresent     = false;
@@ -3217,14 +3217,14 @@ TEST(TestStreamFcnts, ATimerBuiltModeTestMarkNeverTouchesTheSequencer) {
     h.rol.start_mode_test(/*duration_s=*/60, /*grid_ms=*/1500, /*mode=*/1, 1, true, false,
                           false, false, 0);
     h.clock.tick(3100);   // the grid arm builds the first mark (loop)
-    const uint32_t tx_after_reserve = h.rol.seq_.txId();
+    const uint32_t tx_after_reserve = h.rol.sequencer().txId();
     const size_t from = h.tracker.sent_raw.size();
     for (int i = 0; i < 6; ++i)
         h.rol.mode_test_tick_for_test();   // each tick sends a mark and builds the next
     const auto fcnts = sealed_fcnts_from(h.tracker, from);
     ASSERT_GE(fcnts.size(), 6u) << "precondition: the marks went out";
 
-    EXPECT_EQ(h.rol.seq_.txId(), tx_after_reserve)
+    EXPECT_EQ(h.rol.sequencer().txId(), tx_after_reserve)
         << "a mark built on the esp_timer task allocated from the Sequencer (and persisted)";
     for (size_t i = 0; i < fcnts.size(); ++i) {
         EXPECT_LE(fcnts[i], tx_after_reserve) << "a mark's FCNT lies outside the reserved block";
@@ -3242,12 +3242,12 @@ TEST(TestStreamFcnts, ATimerBuiltDriftTickNeverTouchesTheSequencer) {
 
     h.rol.start_drift_test(/*duration_s=*/60, /*grid_ms=*/1000);
     h.clock.tick(3100);
-    const uint32_t tx_after_reserve = h.rol.seq_.txId();
+    const uint32_t tx_after_reserve = h.rol.sequencer().txId();
     const size_t from = h.tracker.sent_raw.size();
     for (int i = 0; i < 6; ++i)
         h.rol.drift_tick_for_test();
     ASSERT_GE(sealed_fcnts_from(h.tracker, from).size(), 6u) << "precondition: the ticks went out";
-    EXPECT_EQ(h.rol.seq_.txId(), tx_after_reserve)
+    EXPECT_EQ(h.rol.sequencer().txId(), tx_after_reserve)
         << "a drift tick built on the esp_timer task allocated from the Sequencer";
     h.rol.stop_drift_test();
 }
@@ -4915,7 +4915,7 @@ TEST(SessionRebuild, WithdrawingTheGridIsNotDeferredBecauseItIsTheSafeDirection)
 // —————————————————————————————————————-
 namespace {
 struct TxIdProbe : LORAClient {
-    uint32_t txId() const { return this->seq_.txId(); }
+    uint32_t txId() const { return this->sequencer().txId(); }
 };
 
 // Open a hub->node SESSION frame with `base_nonce` (tag first) and decode it
@@ -5521,7 +5521,7 @@ TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     ASSERT_NE(f.base, 0u);
     ASSERT_TRUE(f.rol.session_confirmed_);
 
-    f.rol.setCountersForTest(0x7FFFFFFDu, f.rol.seq_.rxId());
+    f.rol.setCountersForTest(0x7FFFFFFDu, f.rol.sequencer().rxId());
     EXPECT_EQ(f.rol.incrTxMessageId(), 0x7FFFFFFEu);
     EXPECT_EQ(f.rol.incrTxMessageId(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
     EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
@@ -5530,7 +5530,7 @@ TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     const uint32_t got = f.rol.incrTxMessageId();
     EXPECT_EQ(got, framecrypto::kMsgidCtrLimit) << "the out-of-space marker";
     EXPECT_FALSE(framecrypto::msgidFitsCtr(got));
-    EXPECT_EQ(f.rol.seq_.txId(), 0x7FFFFFFFu) << "the counter must not wrap or advance";
+    EXPECT_EQ(f.rol.sequencer().txId(), 0x7FFFFFFFu) << "the counter must not wrap or advance";
     EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
 
     // A second refusal asks for nothing more, and the id is still refused.
@@ -5543,7 +5543,7 @@ TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     f.clock.tick(200);
     EXPECT_EQ(count_logins_since(f.radio, before), 1u);
     EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
-    EXPECT_LT(f.rol.seq_.txId(), 0x100u) << "msgids start over";
+    EXPECT_LT(f.rol.sequencer().txId(), 0x100u) << "msgids start over";
 }
 
 // The seal-point / retag-point refusals of the v0 sealer (packOperationForTest,
@@ -5622,12 +5622,12 @@ bool retagLikeLast(const LORATracker &t, uint8_t peer, RetagCase &c) {
 TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSession) {
     MsgidGuardFixture f;
     ASSERT_TRUE(f.rol.login_acked_);
-    f.rol.setCountersForTest(f.rol.seq_.txId(), 0x7FFFFFF0u);
+    f.rol.setCountersForTest(f.rol.sequencer().txId(), 0x7FFFFFF0u);
 
     // CONTROL: an ordinary authentic uplink is accepted and asks for nothing.
     auto ok = hand_sealed_uplink(f.base, 0x7FFFFFF1u, false);
     f.rol.set_response(ok.data(), ok.size());
-    ASSERT_EQ(f.rol.seq_.rxId(), 0x7FFFFFF1u) << "precondition: the control frame was accepted";
+    ASSERT_EQ(f.rol.sequencer().rxId(), 0x7FFFFFF1u) << "precondition: the control frame was accepted";
     ASSERT_FALSE(f.rol.msgidReloginPendingForTest());
 
     // A FORGED frame (one tag bit flipped) with a huge msgid is dropped on the
@@ -5635,13 +5635,13 @@ TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSessi
     auto forged = hand_sealed_uplink(f.base, 0x80000003u, true);
     f.rol.set_response(forged.data(), forged.size());
     EXPECT_FALSE(f.rol.msgidReloginPendingForTest()) << "an unauthenticated frame must not trigger a relogin";
-    EXPECT_EQ(f.rol.seq_.rxId(), 0x7FFFFFF1u);
+    EXPECT_EQ(f.rol.sequencer().rxId(), 0x7FFFFFF1u);
 
     // The authentic one: refused, replay counter untouched, fresh session asked for.
     const size_t before = f.radio.transcript().size();
     auto bad = hand_sealed_uplink(f.base, 0x80000003u, false);
     f.rol.set_response(bad.data(), bad.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), 0x7FFFFFF1u) << "must not advance the replay counter";
+    EXPECT_EQ(f.rol.sequencer().rxId(), 0x7FFFFFF1u) << "must not advance the replay counter";
     EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
 
     // A second one before the login goes out does not queue a second login.
@@ -6717,7 +6717,7 @@ TEST(EncUplink, NoBaseNonceForTheSenderStartsAFreshLoginAndDiscardsTheFrame) {
     h.clock.tick(60'000);
     EXPECT_GE(count_logins_since(h.radio, 0), before + 1) << "re-provisioning goes through a LOGIN";
     EXPECT_TRUE(node.got.empty()) << "and the frame itself is discarded, never forwarded";
-    EXPECT_EQ(h.rol.seq_.rxId(), 0u) << "the replay counter does not move";
+    EXPECT_EQ(h.rol.sequencer().rxId(), 0u) << "the replay counter does not move";
     EXPECT_FALSE(h.rol.session_confirmed_);
 }
 
@@ -6728,11 +6728,11 @@ TEST(EncUplink, WithoutDerivedKeysAndNoSessionNonceTheFrameIsDroppedUntouched) {
     ASSERT_TRUE(f.rol.session_confirmed_);
     EP(f.rol).clearSessionKeys_();               // base nonce stays, keys go
     proto_sim_timer_set_now_us(900'000'000);
-    const uint32_t rx_before   = f.rol.seq_.rxId();
+    const uint32_t rx_before   = f.rol.sequencer().rxId();
     const int64_t  heard_before = EP(f.rol).last_heard_us_;
     auto bytes = sealed_uplink_bytes(f.base, rx_before + 1, avail_payload());
     f.rol.set_response(bytes.data(), bytes.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before) << "no msgid committed";
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before) << "no msgid committed";
     EXPECT_EQ(EP(f.rol).last_heard_us_, heard_before) << "an unauthenticated frame proves nothing alive";
     EXPECT_TRUE(node.got.empty());
 }
@@ -6743,7 +6743,7 @@ TEST(EncUplink, AForgedSessionOpeningFrameLeavesTheLiveSessionExactlyAsItWas) {
     f.rol.register_lora_node(&node);
     const uint32_t gen = f.rol.sessionGenerationForTest();
     const uint32_t installed = installedSessionId(18);
-    const uint32_t rx_before = f.rol.seq_.rxId();
+    const uint32_t rx_before = f.rol.sequencer().rxId();
     ASSERT_EQ(installed, f.base);
 
     // A session-opening frame (sessionNonce != 0) carrying a bad tag: a candidate
@@ -6753,13 +6753,13 @@ TEST(EncUplink, AForgedSessionOpeningFrameLeavesTheLiveSessionExactlyAsItWas) {
     f.rol.set_response(bad.data(), bad.size());
     EXPECT_EQ(f.rol.sessionGenerationForTest(), gen);
     EXPECT_EQ(installedSessionId(18), installed);
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before);
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before);
     EXPECT_TRUE(node.got.empty());
 
     // The live keys still verify the next genuine frame.
     auto good = sealed_uplink_bytes(f.base, rx_before + 2, avail_payload());
     f.rol.set_response(good.data(), good.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before + 2);
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before + 2);
     EXPECT_EQ(f.rol.sessionGenerationForTest(), gen) << "no new generation for an ordinary frame";
 }
 
@@ -6767,12 +6767,12 @@ TEST(EncUplink, ADuplicateSessionOpeningCopyOfTheInstalledSessionUsesTheLiveKeys
     MsgidGuardFixture f;
     const uint32_t gen = f.rol.sessionGenerationForTest();
     ASSERT_EQ(installedSessionId(18), f.base);
-    const uint32_t rx_before = f.rol.seq_.rxId();
+    const uint32_t rx_before = f.rol.sequencer().rxId();
     // Same session id, sessionNonce present again (another burst copy of the
     // opening uplink): verified under the live keys, no new import, no bump.
     auto dup = sealed_uplink_bytes(f.base, rx_before + 1, avail_payload(), /*session_nonce=*/kTestNodeNonce);
     f.rol.set_response(dup.data(), dup.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before + 1) << "accepted";
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before + 1) << "accepted";
     EXPECT_EQ(f.rol.sessionGenerationForTest(), gen) << "no new generation";
 }
 
@@ -6782,12 +6782,12 @@ TEST(EncUplink, AVerifiedFrameWhosePayloadIsNotAMessageStillCommitsAndConfirmsBu
     f.rol.register_lora_node(&node);
     f.rol.session_confirmed_ = false;            // let the confirm step show itself
     proto_sim_timer_set_now_us(900'000'000);
-    const uint32_t rx_before = f.rol.seq_.rxId();
+    const uint32_t rx_before = f.rol.sequencer().rxId();
     const int64_t  heard_before = EP(f.rol).last_heard_us_;
     std::vector<uint8_t> garbage = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01};
     auto bytes = sealed_uplink_bytes(f.base, rx_before + 1, garbage);
     f.rol.set_response(bytes.data(), bytes.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before + 1) << "the tag verified: the msgid is real";
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before + 1) << "the tag verified: the msgid is real";
     EXPECT_NE(EP(f.rol).last_heard_us_, heard_before) << "and the node is proven awake";
     EXPECT_TRUE(f.rol.session_confirmed_) << "the session is confirmed by the verified frame";
     EXPECT_TRUE(node.got.empty()) << "but there is nothing to dispatch or forward";
@@ -6798,7 +6798,7 @@ TEST(EncUplink, AnAuthenticBeaconReachesTheChildNodesWithTheOuterHeaderDecoded) 
     RecordingNode node;
     f.rol.register_lora_node(&node);
     constexpr std::time_t kHubEpoch = 1787000000;
-    const uint32_t rx_before = f.rol.seq_.rxId();
+    const uint32_t rx_before = f.rol.sequencer().rxId();
     send_encrypted_uplink(f.rol, f.base, rx_before + 1, 18, 2,
                           make_beacon(kHubEpoch + 7, /*clock_valid=*/true));
     ASSERT_EQ(node.got.size(), 1u);
@@ -6819,10 +6819,10 @@ TEST(EncUplink, AFramePastTheTagCheckIsStillRefusedWhenItsMsgidBreaksTheReplayWi
     MsgidGuardFixture f;
     RecordingNode node;
     f.rol.register_lora_node(&node);
-    const uint32_t rx_before = f.rol.seq_.rxId();
+    const uint32_t rx_before = f.rol.sequencer().rxId();
     auto replay = sealed_uplink_bytes(f.base, rx_before, avail_payload());   // not above the high-water mark
     f.rol.set_response(replay.data(), replay.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before);
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before);
     EXPECT_TRUE(node.got.empty());
 }
 
@@ -6834,10 +6834,10 @@ TEST(EncUplink, ASessionOpeningUplinkWhoseSessionDiffersFromTheInstalledOneRepla
     const uint32_t gen = f.rol.sessionGenerationForTest();
     ASSERT_EQ(installedSessionId(18), f.base);
     mac2::LinkSecurity::hub().store().setInstalledSessionIdForTest(18, f.base ^ 0x5A5A5A5Au);
-    const uint32_t rx_before = f.rol.seq_.rxId();
+    const uint32_t rx_before = f.rol.sequencer().rxId();
     auto open = sealed_uplink_bytes(f.base, rx_before + 1, avail_payload(), /*session_nonce=*/kTestNodeNonce);
     f.rol.set_response(open.data(), open.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before + 1);
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before + 1);
     EXPECT_EQ(f.rol.sessionGenerationForTest(), gen + 1) << "a fresh candidate was installed";
     EXPECT_EQ(installedSessionId(18), f.base);
 }
@@ -6866,14 +6866,14 @@ TEST(EncUplink, EveryTimingFieldOfTheOuterHeaderIsUnderTheUplinkCmac) {
         outer.encrypted = enc.payload();
         return proto_sim::serialize_resp(outer);
     };
-    const uint32_t rx_before = f.rol.seq_.rxId();
+    const uint32_t rx_before = f.rol.sequencer().rxId();
     auto tampered = build(rx_before + 1, /*tamper_after_seal=*/true);
     f.rol.set_response(tampered.data(), tampered.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before) << "a header changed after sealing is refused";
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before) << "a header changed after sealing is refused";
 
     auto honest = build(rx_before + 1, /*tamper_after_seal=*/false);
     f.rol.set_response(honest.data(), honest.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx_before + 1)
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx_before + 1)
         << "the same fields sealed in are accepted";
 }
 
@@ -9917,7 +9917,6 @@ struct RegridProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::belief_;
     using esphome::lora_tracker::LORAListener::have_in_slot_confirm_;
-    using esphome::lora_tracker::LORAListener::seq_;
     using esphome::lora_tracker::LORAListener::on_sleep_acknowledged_;
     using esphome::lora_tracker::LORAListener::confirm_session_;
     using esphome::lora_tracker::LORAListener::acked_since_confirm_;
@@ -10313,7 +10312,7 @@ TEST(RegridOnce, ASecondGenuineRebootMinutesLaterPublishesAgain) {
 
 // --- 2026-10-11: the downlink counter advances once per node BOOT -----------------------
 namespace {
-uint32_t txId(LORAClient &rol) { return RP(rol).seq_.txId(); }
+uint32_t txId(LORAClient &rol) { return RP(rol).sequencer().txId(); }
 }  // namespace
 
 TEST(BootAdvance, TwoConsecutiveSoftRebootsAdvanceTwice) {
@@ -10495,10 +10494,9 @@ struct FireProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
     using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::last_timesync_sent_us_;
-    using esphome::lora_tracker::LORAListener::seq_;
     using esphome::lora_tracker::LORAListener::delivery_busy_;
     using esphome::lora_tracker::LORAListener::clearSessionKeys_;
-    uint32_t txId() const { return this->seq_.txId(); }
+    uint32_t txId() const { return this->sequencer().txId(); }
 };
 FireProbe &FP(LORAClient &c) { return static_cast<FireProbe &>(c); }
 FireProbe &FP(real_helpers::RealHubHarness &h) { return static_cast<FireProbe &>(h.rol); }
@@ -10738,7 +10736,7 @@ void ack_like_node(LORAClient &rol, uint32_t base, uint32_t acked_fcnt,
     inner.header.destAddress   = esphome::lora_tracker::kHubAddress;
     inner.header.destSubnet    = 2;
     inner.header.senderAddress = 18;
-    inner.header.msgId         = rol.seq_.rxId() + 1;
+    inner.header.msgId         = rol.sequencer().rxId() + 1;
     inner.proto                = proto_sim::LoraClientResponseMessage::Proto::Ack;
     inner.ack.ack_msg_id       = acked_fcnt;
     inner.ack.status           = status;
@@ -10811,7 +10809,7 @@ TEST(TrackedOpRetry, ALoginForgetsTheControlChannelsOldAckIds) {
     ensure_psa_ready();
     drive_session(h.clock, h.radio, h.rol);
     ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
-    h.rol.setCountersForTest(500, h.rol.seq_.rxId() + 1);   // old-session ids far from new ones
+    h.rol.setCountersForTest(500, h.rol.sequencer().rxId() + 1);   // old-session ids far from new ones
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
     auto &op = static_cast<TrackedOpProbe &>(h.rol);
     const uint32_t old_id = op.ctl().last_msgid;
@@ -12178,16 +12176,16 @@ TEST(Mac1HubS3, TheReceiveWindowIsStrictlyForwardAndAtMost1024Wide) {
     give_session(h.rol);
     auto first = plainAvail(18, 10);
     feed_sealed(h.rol, first);
-    ASSERT_EQ(h.rol.seq_.rxId(), 10u);
+    ASSERT_EQ(h.rol.sequencer().rxId(), 10u);
     for (uint32_t bad : {10u, 9u, 10u + 1025u}) {
         auto f = plainAvail(18, bad);
         feed_sealed(h.rol, f);
-        EXPECT_EQ(h.rol.seq_.rxId(), 10u) << "refused: " << bad;
+        EXPECT_EQ(h.rol.sequencer().rxId(), 10u) << "refused: " << bad;
     }
     auto edge = plainAvail(18, 10u + 1024u);
     const int n0 = esphome::prefs_save_count();
     feed_sealed(h.rol, edge);
-    EXPECT_EQ(h.rol.seq_.rxId(), 10u + 1024u) << "the window's far edge is in";
+    EXPECT_EQ(h.rol.sequencer().rxId(), 10u + 1024u) << "the window's far edge is in";
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 1) << "one write per committed uplink";
     EXPECT_EQ(lastSaved().rx_message_id, 10u + 1024u);
 }
@@ -12204,27 +12202,27 @@ TEST(Mac1HubS3, ARefusedOrSkippedOverIdIsNeitherCommittedNorForwarded) {
         auto f = plainAvail(18, id);
         feed_sealed(h.rol, f);
     }
-    ASSERT_EQ(h.rol.seq_.rxId(), 15u);
+    ASSERT_EQ(h.rol.sequencer().rxId(), 15u);
     ASSERT_EQ(node.got.size(), 2u);
     for (uint32_t bad : {12u, 15u, 15u + 1025u}) {
         auto f = plainAvail(18, bad);
         feed_sealed(h.rol, f);
-        EXPECT_EQ(h.rol.seq_.rxId(), 15u) << bad;
+        EXPECT_EQ(h.rol.sequencer().rxId(), 15u) << bad;
     }
     EXPECT_EQ(node.got.size(), 2u) << "no refused frame reached a child";
 }
 
 TEST(Mac1HubS3, AnAuthenticatedUplinkCommitsAndPersistsOnceAForgedOneNeither) {
     MsgidGuardFixture f;
-    const uint32_t rx = f.rol.seq_.rxId();
+    const uint32_t rx = f.rol.sequencer().rxId();
     const int n0 = esphome::prefs_save_count();
     auto bad = sealed_uplink_bytes(f.base, rx + 1, avail_payload(), 0, /*corrupt_tag=*/true);
     f.rol.set_response(bad.data(), bad.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx) << "checked, not committed";
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx) << "checked, not committed";
     EXPECT_EQ(esphome::prefs_save_count(), n0);
     auto good = sealed_uplink_bytes(f.base, rx + 1, avail_payload());
     f.rol.set_response(good.data(), good.size());
-    EXPECT_EQ(f.rol.seq_.rxId(), rx + 1);
+    EXPECT_EQ(f.rol.sequencer().rxId(), rx + 1);
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 1);
     EXPECT_EQ(lastSaved().rx_message_id, rx + 1);
 }
@@ -12233,12 +12231,12 @@ TEST(Mac1HubS3, ALoginResetZeroesBothCountersWithoutAWriteAndTheNextIdIsOne) {
     real_helpers::RealHubHarness f{18, kMacRol2};      // no login-ack sink on this radio
     f.rol.registered_ = true;
     f.rol.incrTxMessageId();
-    ASSERT_GT(f.rol.seq_.txId(), 0u);
+    ASSERT_GT(f.rol.sequencer().txId(), 0u);
     f.rol.pending_login_nonce_ = 0;                      // a FRESH challenge
     const int n0 = esphome::prefs_save_count();
     f.rol.send_login();
-    EXPECT_EQ(f.rol.seq_.rxId(), 0u);
-    EXPECT_EQ(f.rol.seq_.txId(), 1u) << "the LOGIN itself took id 1";
+    EXPECT_EQ(f.rol.sequencer().rxId(), 0u);
+    EXPECT_EQ(f.rol.sequencer().txId(), 1u) << "the LOGIN itself took id 1";
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 1) << "only the LOGIN's id was written";
     EXPECT_EQ(lastSaved().tx_message_id, 1u);
 }
@@ -12250,7 +12248,7 @@ TEST(Mac1HubS3, TheBootMarginMovesTxWithoutAWriteAndTheNextIdIsPersisted) {
     ::NodeWakeBeacon b = NODE_WAKE_BEACON__INIT;
     const int n0 = esphome::prefs_save_count();
     h.rol.advance_tx_for_boot_(&b);
-    EXPECT_EQ(h.rol.seq_.txId(), tx + modebsup::kTxBootMargin);
+    EXPECT_EQ(h.rol.sequencer().txId(), tx + modebsup::kTxBootMargin);
     EXPECT_EQ(esphome::prefs_save_count(), n0) << "the margin itself writes nothing";
     const uint32_t next = h.rol.incrTxMessageId();
     EXPECT_EQ(next, tx + modebsup::kTxBootMargin + 1);
@@ -12268,8 +12266,8 @@ TEST(Mac1HubS3, TheNvsApplyRestoresRxAndTxPlus64) {
     r.logged_in = true;
     const int n0 = esphome::prefs_save_count();
     r.apply(&h.rol);
-    EXPECT_EQ(h.rol.seq_.rxId(), 100u);
-    EXPECT_EQ(h.rol.seq_.txId(), 264u);
+    EXPECT_EQ(h.rol.sequencer().rxId(), 100u);
+    EXPECT_EQ(h.rol.sequencer().txId(), 264u);
     EXPECT_EQ(esphome::prefs_save_count(), n0);
     EXPECT_EQ(h.rol.incrTxMessageId(), 265u);
     EXPECT_EQ(lastSaved().tx_message_id, 265u);
@@ -12279,10 +12277,10 @@ TEST(Mac1HubS3, TheNvsApplyRestoresRxAndTxPlus64) {
 TEST(Mac1HubS3, AMacPingReservationTakesABlockAndPersistsItsEnd) {
     MsgidGuardFixture f;
     f.rol.mark_session_confirmed_for_test();
-    const uint32_t tx = f.rol.seq_.txId();
+    const uint32_t tx = f.rol.sequencer().txId();
     f.rol.start_mac_ping(/*duration_s=*/10, /*grid_ms=*/1000, true, 0, /*crypto=*/true);
     // frames = 10 s / 1 s + 2 = 12: ids tx+1 .. tx+12 reserved.
-    EXPECT_EQ(f.rol.seq_.txId(), tx + 12);
+    EXPECT_EQ(f.rol.sequencer().txId(), tx + 12);
     EXPECT_EQ(lastSaved().tx_message_id, tx + 12) << "the reservation's end is persisted";
     f.rol.stop_mac_ping();
 }
@@ -12426,7 +12424,7 @@ TEST(AppChildrenS6, AnAuthenticPositionReachesTheChildrenOnceDecrypted) {
     esphome::loracov::LoraCoverComponent cover;
     makeCover(f.rol, cover);
     SensorRig s(f.rol);
-    const uint32_t rx = f.rol.seq_.rxId();
+    const uint32_t rx = f.rol.sequencer().rxId();
     send_encrypted_uplink(f.rol, f.base, rx + 1, 18, 2, positionMsg(0.33f, 11.7f, 9.0f));
     EXPECT_FLOAT_EQ(cover.position, 0.33f);
     EXPECT_FLOAT_EQ(s.voltage.state, 11.7f);

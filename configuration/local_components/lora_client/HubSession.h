@@ -11,7 +11,8 @@
 // the counter, confirm the session, hand the body on) stays the listener's.
 //
 // Threading (docs/threading-model.md): loop task, except frame(), which the
-// esp_timer bench streams call too; it touches no member state. The key lock
+// esp_timer bench streams call too (it touches no member state), and
+// take_fcnt() / sealed_in_epoch(), which run under tx_mutex_. The key lock
 // (SessionKeyStore::keys_mutex_) is taken only inside HubLinkSecurity; nothing
 // here logs or makes a virtual call under it.
 
@@ -19,12 +20,15 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include "esphome/components/lora_client/DeliveryService.h"
+#include "esphome/components/lora_client/FcntReservation.h"
 #include "esphome/components/lora_client/HubFrames.h"
 #include "esphome/components/lora_client/HubLinkSecurity.h"
 #include "esphome/components/lora_client/HubWire.h"
 #include "esphome/components/lora_client/MacWire.h"
+#include "esphome/components/lora_client/Sequencer.h"
 
 namespace esphome
 {
@@ -48,6 +52,8 @@ namespace esphome
       virtual void session_relogin() = 0;
       // The ESPHome scheduler.
       virtual void session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn) = 0;
+      // Write the listener's persisted state (the counters among it) now.
+      virtual void session_save_state() = 0;
 
     protected:
       ~SessionHost() = default;
@@ -73,6 +79,42 @@ namespace esphome
       explicit HubSession(SessionHost &host) : host_(host) {}
       HubSession(const HubSession &) = delete;
       HubSession &operator=(const HubSession &) = delete;
+
+      // ---- MAC-1 (stage S3): the node's frame counters ----
+      // The shared mac1::Sequencer, ForwardRatchet policy -- accept only
+      // rx < id <= rx + 1024, commit sets rx := id -- with persist margins of 1,
+      // i.e. every id handed out and every committed uplink is written at once
+      // (persist_hook_). Two-phase: the listener's admit_frame_ check()s,
+      // commit_rx() commits only after MAC-2 verified (or before any session).
+      const mac1::Sequencer &seq() const { return this->seq_; }
+      // The next downlink FCNT (loop only: allocating persists). An exhausted
+      // space hands back kMsgidCtrLimit, which the seal refuses, and asks for a
+      // fresh session.
+      uint32_t allocate_tx();
+      // Commit an uplink FCNT the listener already check()ed.
+      void     commit_rx(uint32_t msg_id);
+      // Set both counters WITHOUT a write and count them as persisted (NVS
+      // apply, login reset, boot margin, a reservation). Sequencer::restore with
+      // the margins of 1 subtracted, exact in uint32 arithmetic (0 - 1 + 1 == 0).
+      void set_counters_no_write(uint32_t tx, uint32_t rx) { this->seq_.restore(tx - 1u, rx - 1u); }
+      // A new session: both directions restart (under tx_mutex_).
+      void restart_counters()
+      {
+        std::lock_guard<std::mutex> lock(this->tx_mutex_);
+        this->set_counters_no_write(0, 0);
+      }
+      // FCNT blocks for the esp_timer streams (FcntReservation.h).
+      // reserve: loop only (one persist), n >= 1; false leaves *r invalid.
+      bool     reserve_fcnts(uint32_t n, mac1::FcntReservation *r);
+      // take: any task; the next FCNT of *r under this peer's current key
+      // epoch, or 0 when there is none.
+      uint32_t take_fcnt(mac1::FcntReservation *r);
+      bool     sealed_in_epoch(const DeliveryFrame &f, const mac1::FcntReservation &r);
+      // Guards the Sequencer and the FCNT reservations. The Sequencer itself is
+      // loop-only (its allocation persists through ESPHome preferences); the
+      // esp_timer streams take FCNTs only from a reservation, under this lock.
+      // Never held while logging; keys_mutex_ is never taken inside it.
+      std::mutex &tx_mutex() const { return this->tx_mutex_; }
 
       // ---- MAC-2 keys (SessionKeyStore, this node's entry) ----
       // Tier 3: derive K_enc/K_mac from (K_root, session_id, node_nonce,
@@ -127,12 +169,17 @@ namespace esphome
       void     clear_msgid_relogin() { this->msgid_relogin_pending_ = false; }
 
     private:
+      // The Sequencer's PersistHook: the listener's save_state + notePersisted.
+      static bool persist_hook_(void *ctx);
+      mac1::PersistHook persist_() { return mac1::PersistHook{&HubSession::persist_hook_, this}; }
       bool seal_(DeliveryFrame *f, size_t hdr_len, size_t body_len);
       bool verify_uplink_(EncUplink &up);
       mac2::LinkSecurity::Verify tag_verdict_(EncUplink &up);
       void drop_candidate_(EncUplink &up);
 
       SessionHost &host_;
+      mac1::Sequencer seq_{mac1::Config{mac1::Policy::ForwardRatchet, 1, 1}};
+      mutable std::mutex tx_mutex_;
       macwire::WireHdr rx_hdr_{};
       const uint8_t   *rx_frame_{nullptr};
       size_t           rx_len_{0};

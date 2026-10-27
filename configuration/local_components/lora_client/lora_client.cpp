@@ -76,8 +76,8 @@ namespace esphome
         restore->apply(this);
         ESP_LOGI(TAG, "[%s] After apply — rx_id=%u tx_id=%u (tx+64) registered=%s",
                  this->get_name().c_str(),
-                 (unsigned)this->seq_.rxId(),
-                 (unsigned)this->seq_.txId(),
+                 (unsigned)this->session_.seq().rxId(),
+                 (unsigned)this->session_.seq().txId(),
                  this->registered_ ? "yes" : "no");
 
         // finding 2: only an UNCHANGED config skips the REGISTER round trip a
@@ -230,8 +230,8 @@ namespace esphome
         LORAClientRestoreState restore{};
         memset(&restore, 0, sizeof(restore));
         restore.version          = kRestoreStateVersion;
-        restore.rx_message_id    = this->seq_.rxId();
-        restore.tx_message_id    = this->seq_.txId();
+        restore.rx_message_id    = this->session_.seq().rxId();
+        restore.tx_message_id    = this->session_.seq().txId();
         restore.logged_in        = this->registered_;
         restore.last_sleep_epoch = this->last_sleep_epoch_;
         restore.config_hash      = this->currentConfigHash_();
@@ -1544,7 +1544,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       ESP_LOGI(TAG, "[%s] Node reset (%s%s) — advancing tx_message_id by %u to %u",
                this->get_name().c_str(), s_reset_reason_name(b->resetreason),
                b->resetreason == modebsup::kResetDeepSleep ? ", resumed wake" : ", non-deep-sleep",
-               (unsigned) modebsup::kTxBootMargin, (unsigned) this->seq_.txId());
+               (unsigned) modebsup::kTxBootMargin, (unsigned) this->session_.seq().txId());
     }
 
     void LORAListener::note_beacon_clock_(const ::NodeWakeBeacon *b)

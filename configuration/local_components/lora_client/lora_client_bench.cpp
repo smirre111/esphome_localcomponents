@@ -451,48 +451,9 @@ namespace esphome
       ESP_LOGW(TAG, "[%s] ModeTest REPORT: %s", this->get_name().c_str(), buf);
     }
 
-    bool LORAListener::reserve_fcnt_block_(uint32_t n, mac1::FcntReservation *r)
-    {
-      const mac::Addr peer = static_cast<mac::Addr>(this->short_address_);
-      const uint32_t first = (n > 0) ? this->incrTxMessageId() : 0;   // one persist
-      if (first == 0 || first >= framecrypto::kMsgidCtrLimit)
-      {
-        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-        r->invalidate();
-        return false;
-      }
-      uint32_t last = first + (n - 1);
-      if (last < first || last >= framecrypto::kMsgidCtrLimit)
-        last = framecrypto::kMsgidCtrLimit - 1;
-      const uint32_t epoch = s_keys().keyEpoch(peer);   // keys_mutex_ never nests inside ours
-      {
-        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-        this->set_counters_no_write_(last, this->seq_.rxId());   // skip the block
-        r->grant(first, last, epoch);
-      }
-      this->save_state_(true);   // ...and persist its end
-      return true;
-    }
-
-    uint32_t LORAListener::take_reserved_fcnt_(mac1::FcntReservation *r)
-    {
-      const uint32_t epoch = s_keys().keyEpoch(static_cast<mac::Addr>(this->short_address_));
-      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-      return r->take(epoch);
-    }
-
-    // A frame sealed from a reserved FCNT must carry the reservation's key
-    // epoch: otherwise the keys moved between take() and the seal and the
-    // ciphertext must never reach the air.
-    bool LORAListener::sealed_in_epoch_(const MacFrame &f, const mac1::FcntReservation &r)
-    {
-      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-      return f.seal.sealed && f.seal.key_epoch == r.keyEpoch();
-    }
-
     void LORAListener::invalidate_fcnt_reservations_()
     {
-      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+      std::lock_guard<std::mutex> lock(this->session_.tx_mutex());
       this->mac_ping_.fcnts()->invalidate();
       this->mode_test_.fcnts()->invalidate();
       this->drift_.fcnts()->invalidate();
@@ -601,7 +562,7 @@ namespace esphome
     }
     void LORAListener::stream_invalidate_fcnts(mac1::FcntReservation *r)
     {
-      std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+      std::lock_guard<std::mutex> lock(this->session_.tx_mutex());
       r->invalidate();
     }
     bool LORAListener::stream_send_placed(const uint8_t *buf, size_t len, const TxPolicy &policy,

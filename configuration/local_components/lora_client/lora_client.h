@@ -327,6 +327,8 @@ namespace esphome
 
       // For tests: how many times this listener's session keys have been
       // (re)derived — mirrors CmdDispatcher::sessionGenerationForTest().
+      // For tests: the node's MAC-1 counters (read-only).
+      const mac1::Sequencer &sequencer() const { return this->session_.seq(); }
       uint32_t sessionGenerationForTest() const { return this->session_.generation(); }
       // For tests: install a session directly (sets the base nonce AND
       // derives K_enc/K_mac from it), without a real LOGIN/uplink round
@@ -1111,8 +1113,8 @@ namespace esphome
       // Call it after send(), so the frame just sent is counted as well.
       uint32_t ack_wait_ms_(uint32_t base_ms) const { return this->dlv_.ack_wait_ms(base_ms); }
       virtual void send_remote_config();
-      uint32_t incrTxMessageId();
-      void setRxMessageId(uint32_t msg_id);
+      uint32_t incrTxMessageId() { return this->session_.allocate_tx(); }
+      void setRxMessageId(uint32_t msg_id) { this->session_.commit_rx(msg_id); }
 
       // The ONE way a child cover hands its CoverConfig to the radio: a Fire request
       // through the delivery mechanism, so it is encrypted whenever the session is
@@ -1237,23 +1239,8 @@ namespace esphome
       regfresh::Highest register_seq_{};
       static constexpr int64_t kRegisterRateLimitUs = 5000000; // 5 s, matches the node's LOGIN_RATE_LIMIT_MS
 
-      // uint32_t rx_message_id_{0};
-      // uint32_t tx_message_id_{0};
-      // MAC-1 (stage S3): the shared mac1::Sequencer, ForwardRatchet policy --
-      // accept only rx < id <= rx + 1024, commit sets rx := id -- with persist
-      // margins of 1, i.e. every id handed out and every committed uplink is
-      // written at once (persist_hook_), exactly the cadence this listener has
-      // always had. Two-phase: admit_frame_ check()s, commit_rx_msgid_ commit()s
-      // only after MAC-2 verified (or before any session exists).
-      mac1::Sequencer seq_{mac1::Config{mac1::Policy::ForwardRatchet, 1, 1}};
-      // The Sequencer's PersistHook: save_state_ + notePersisted.
-      static bool persist_hook_(void *ctx);
-      mac1::PersistHook persist_() { return mac1::PersistHook{&LORAListener::persist_hook_, this}; }
-      // Set both counters WITHOUT a write and count them as persisted (NVS
-      // apply, login reset, boot margin, MAC ping reservation -- none of which
-      // has ever written by itself). Uses Sequencer::restore with the margins
-      // of 1 subtracted, which is exact in uint32 arithmetic (0 - 1 + 1 == 0).
-      void set_counters_no_write_(uint32_t tx, uint32_t rx) { this->seq_.restore(tx - 1u, rx - 1u); }
+      // MAC-1 (stage S3): HubSession owns the node's Sequencer (HubSession.h).
+      void set_counters_no_write_(uint32_t tx, uint32_t rx) { this->session_.set_counters_no_write(tx, rx); }
       // ---- the MAC-1 counter interface ------------------------------------
       // The only operations the application uses to move the counters (the
       // allocation and the commit are incrTxMessageId / setRxMessageId);
@@ -1261,18 +1248,24 @@ namespace esphome
       // A new session (or no persisted state): both directions restart at 0.
       void mac1_restart_session_() { this->set_counters_no_write_(0, 0); }
       // The node rebooted on a resumed session: skip n tx ids it may have seen.
-      void mac1_skip_tx_(uint32_t n) { this->set_counters_no_write_(this->seq_.txId() + n, this->seq_.rxId()); }
+      void mac1_skip_tx_(uint32_t n)
+      {
+        this->set_counters_no_write_(this->session_.seq().txId() + n, this->session_.seq().rxId());
+      }
       // Install a persisted (tx, rx) snapshot.
       void mac1_restore_(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
-      // FCNT blocks for the esp_timer streams (FcntReservation.h).
-      // reserve: loop only (one persist), n >= 1; false leaves *r invalid.
-      bool reserve_fcnt_block_(uint32_t n, mac1::FcntReservation *r);
-      // take: any task; the next FCNT of *r under this peer's current key
-      // epoch, or 0 when there is none.
-      uint32_t take_reserved_fcnt_(mac1::FcntReservation *r);
+      // FCNT blocks for the esp_timer streams: HubSession's (see HubSession.h).
+      bool reserve_fcnt_block_(uint32_t n, mac1::FcntReservation *r)
+      {
+        return this->session_.reserve_fcnts(n, r);
+      }
+      uint32_t take_reserved_fcnt_(mac1::FcntReservation *r) { return this->session_.take_fcnt(r); }
       // Every counter restart / key change drops every block (loop).
       void invalidate_fcnt_reservations_();
-      bool sealed_in_epoch_(const MacFrame &f, const mac1::FcntReservation &r);
+      bool sealed_in_epoch_(const MacFrame &f, const mac1::FcntReservation &r)
+      {
+        return this->session_.sealed_in_epoch(f, r);
+      }
       bool pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block, MacFrame *f);
       // Placement for a frame built on the esp_timer task with an explicit
       // shape (MAC ping): touches no loop-owned state (last_placed_*, belief).
@@ -1284,12 +1277,6 @@ namespace esphome
     public:
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
-      // Guards the Sequencer and the FCNT reservations (mac_ping_.fcnts(),
-      // mode_test_.fcnts(), drift_.fcnts()). The Sequencer itself is loop-only (its
-      // allocation persists through ESPHome preferences); the esp_timer
-      // streams take FCNTs only from a reservation, under this lock. Never
-      // held while logging; keys_mutex_ is never taken inside it.
-      mutable std::mutex session_tx_mutex_;
 
       // C2: when THIS node's most recent admitted uplink left the air (T0, the
       // SFD end), and how uncertain that stamp is. Captured in admit_frame_,
@@ -1441,6 +1428,7 @@ namespace esphome
       void session_keys_cleared() override;
       void session_relogin() override;
       void session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn) override;
+      void session_save_state() override;
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
       void commit_rx_msgid_(const hubframes::Up *rcv_message);

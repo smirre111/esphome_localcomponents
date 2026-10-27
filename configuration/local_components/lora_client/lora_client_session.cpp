@@ -338,7 +338,7 @@ namespace esphome
       if (rcv_message->header) {
         ESP_LOGV(TAG, "Received message with ID %u from address %u (my rx id %u, my address %u)",
                  (unsigned) rcv_message->header->msgid, (unsigned) rcv_message->header->senderaddress,
-                 (unsigned) this->seq_.rxId(), (unsigned) this->short_address_);
+                 (unsigned) this->session_.seq().rxId(), (unsigned) this->short_address_);
       } else {
         ESP_LOGD(TAG, "Received message without header");
       }
@@ -366,7 +366,7 @@ namespace esphome
         // 1024) — a huge msgid from a corrupt/spurious frame would otherwise
         // ratchet rx up and wedge the link (dropping every legitimate lower id)
         // until the next login resets it. MAC-1's read-only check (S3).
-        if (rcv_message->header && this->seq_.check(rcv_message->header->msgid))
+        if (rcv_message->header && this->session_.seq().check(rcv_message->header->msgid))
         {
           // CHECKED here, COMMITTED later — see commit_rx_msgid_().
           //
@@ -389,7 +389,7 @@ namespace esphome
         {
           ESP_LOGE(TAG, "%s, duplicate or old FCNT %u, ignoring (rx id %u)", this->get_name().c_str(),
                    (unsigned) (rcv_message->header ? rcv_message->header->msgid : 0u),
-                   (unsigned) this->seq_.rxId());
+                   (unsigned) this->session_.seq().rxId());
           return false;
         }
       }
@@ -1061,12 +1061,13 @@ namespace esphome
       this->ctl().frame_tag = 0;
     }
     void LORAListener::session_relogin() { this->do_login_and_arm_retry_(); }
+    void LORAListener::session_save_state() { this->save_state_(true); }
     void LORAListener::session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn)
     {
       this->set_timeout(name, ms, std::move(fn));
     }
 
-    uint32_t LORAListener::incrTxMessageId()
+    uint32_t HubSession::allocate_tx()
     {
       // LOOP ONLY: allocating persists the counter through ESPHome
       // preferences (persist_hook_ -> save_state_), which the loop task owns.
@@ -1077,7 +1078,7 @@ namespace esphome
       uint32_t val = 0;
       bool exhausted = false;
       {
-        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
+        std::lock_guard<std::mutex> lock(this->tx_mutex_);
         const mac1::Alloc a = this->seq_.allocate(this->persist_());
         if (a.status != mac1::AllocStatus::Ok)
         {
@@ -1096,7 +1097,7 @@ namespace esphome
         }
       }
       if (exhausted)
-        this->requestMsgidRelogin_("allocate");
+        this->request_msgid_relogin("allocate");
       return val;
     }
 
@@ -1211,7 +1212,7 @@ namespace esphome
         ESP_LOGE(TAG, "[%s] v1 LOGIN could not be framed/authenticated — not sent",
                  this->get_name().c_str());
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
-               this->get_name().c_str(), (unsigned) base, (unsigned) this->seq_.txId(),
+               this->get_name().c_str(), (unsigned) base, (unsigned) this->session_.seq().txId(),
                (int) login.request_register);
     }
 
@@ -1292,20 +1293,59 @@ namespace esphome
 
     // MAC-1 commit (S3): only for an id admit_frame_ already check()ed; the
     // Sequencer persists the new mark at once (margin 1).
-    void LORAListener::setRxMessageId(uint32_t msg_id)
+    void HubSession::commit_rx(uint32_t msg_id)
     {
       this->seq_.commit(msg_id, esp_timer_get_time(), this->persist_());
     }
 
-    bool LORAListener::persist_hook_(void *ctx)
+    bool HubSession::persist_hook_(void *ctx)
     {
-      auto *self = static_cast<LORAListener *>(ctx);
+      auto *self = static_cast<HubSession *>(ctx);
       // Mark exactly the snapshot save_state_ writes as persisted (node N4(a)).
       const uint32_t tx = self->seq_.txId();
       const uint32_t rx = self->seq_.rxId();
-      self->save_state_(true);
+      self->host_.session_save_state();
       self->seq_.notePersisted(tx, rx);
       return true;
+    }
+
+    bool HubSession::reserve_fcnts(uint32_t n, mac1::FcntReservation *r)
+    {
+      const mac::Addr peer = static_cast<mac::Addr>(this->host_.session_peer());
+      const uint32_t first = (n > 0) ? this->allocate_tx() : 0;   // one persist
+      if (first == 0 || first >= framecrypto::kMsgidCtrLimit)
+      {
+        std::lock_guard<std::mutex> lock(this->tx_mutex_);
+        r->invalidate();
+        return false;
+      }
+      uint32_t last = first + (n - 1);
+      if (last < first || last >= framecrypto::kMsgidCtrLimit)
+        last = framecrypto::kMsgidCtrLimit - 1;
+      const uint32_t epoch = s_keys().keyEpoch(peer);   // keys_mutex_ never nests inside ours
+      {
+        std::lock_guard<std::mutex> lock(this->tx_mutex_);
+        this->set_counters_no_write(last, this->seq_.rxId());   // skip the block
+        r->grant(first, last, epoch);
+      }
+      this->host_.session_save_state();   // ...and persist its end
+      return true;
+    }
+
+    uint32_t HubSession::take_fcnt(mac1::FcntReservation *r)
+    {
+      const uint32_t epoch = s_keys().keyEpoch(static_cast<mac::Addr>(this->host_.session_peer()));
+      std::lock_guard<std::mutex> lock(this->tx_mutex_);
+      return r->take(epoch);
+    }
+
+    // A frame sealed from a reserved FCNT must carry the reservation's key
+    // epoch: otherwise the keys moved between take() and the seal and the
+    // ciphertext must never reach the air.
+    bool HubSession::sealed_in_epoch(const DeliveryFrame &f, const mac1::FcntReservation &r)
+    {
+      std::lock_guard<std::mutex> lock(this->tx_mutex_);
+      return f.seal.sealed && f.seal.key_epoch == r.keyEpoch();
     }
 
     void LORAListener::send_login()
@@ -1364,10 +1404,7 @@ namespace esphome
       this->plaintext_hwm_      = 0;
       this->have_plaintext_hwm_ = false;
 
-      {
-        std::lock_guard<std::mutex> lock(this->session_tx_mutex_);
-        this->mac1_restart_session_();   // a new session: both directions restart
-      }
+      this->session_.restart_counters();   // a new session: both directions restart
       // ...so no FCNT reserved from the old count may be spent any more: the
       // new session counts up through the same numbers (P1).
       this->invalidate_fcnt_reservations_();
