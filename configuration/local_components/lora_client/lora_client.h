@@ -163,7 +163,7 @@ namespace esphome
       void sendDebugSysop(int32_t op);
       virtual void set_response(uint8_t *data, size_t len);
 
-      void send_login();
+      void send_login() { this->session_.send_login(); }
       // P1: push wall-clock time to the node.  The node has no clock source of
       // its own, so this is its only way to learn the time.  Sent once the
       // encrypted session is confirmed (see set_response), because before that
@@ -622,9 +622,18 @@ namespace esphome
       // What confirm_session_ sets, without its pushes: for a test that needs a
       // confirmed session and will drive the follow-up traffic itself.
       void mark_session_confirmed_for_test() {
-        this->session_confirmed_ = true;
-        this->relogin_pending_   = false;
+        this->session_.login_state_for_test().confirmed       = true;
+        this->session_.login_state_for_test().relogin_pending = false;
       }
+      // The session's state machine, read-only (HubSession::LoginState).
+      bool     session_confirmed() const { return this->session_.confirmed(); }
+      bool     login_acked() const { return this->session_.login_acked(); }
+      bool     relogin_pending() const { return this->session_.relogin_pending(); }
+      uint32_t pending_login_nonce() const { return this->session_.pending_login_nonce(); }
+      uint8_t  login_retry_count() const { return this->session_.login_retry_count(); }
+      bool     startup_login_initiated() const { return this->session_.startup_login_initiated(); }
+      // For tests: set a precondition of the session's state machine.
+      HubSession::LoginState &login_state_for_test() { return this->session_.login_state_for_test(); }
 
       // --- Tracked-delivery state, read-only -------------------------------
       //
@@ -859,13 +868,6 @@ namespace esphome
       bool     acquire_onboarding_() { return this->session_.acquire_onboarding(); }
       void     release_onboarding_(const char *why) { this->session_.release_onboarding(why); }
 
-      // True from the moment the hub learns a node has restarted (its REGISTER) or
-      // starts a login challenge, until the node proves the new key. The session
-      // it held is gone or about to be, so a TimeSync, ScheduleConfig or GridSync
-      // sent now is either undecryptable (old key) or in the clear (session just
-      // un-confirmed) — and a node that holds a session refuses the latter. Those
-      // three are re-sent by confirm_session_ anyway, so they WAIT rather than go.
-      bool     relogin_pending_{false};
 
       // Grid slot, claimed in declaration order exactly as login_slot_ is, so
       // it is stable across reboots without any extra configuration.
@@ -1168,13 +1170,7 @@ namespace esphome
       // layout and three MacPing tests started reading registered_ as true
       // garbage. A node is not registered until handle_register_ sets this.
       bool     registered_{false};
-      // Security review finding 2: time-based REGISTER replay guard — see
-      // handle_register_(). A monotonic msgid check doesn't work here since
-      // every legitimate REGISTER's msgid is a small post-reboot value.
-      int64_t  last_register_accepted_us_{0};
-      // HB14: the highest register_seq this node has sent (RegisterFreshness.h).
-      regfresh::Highest register_seq_{};
-      static constexpr int64_t kRegisterRateLimitUs = 5000000; // 5 s, matches the node's LOGIN_RATE_LIMIT_MS
+      static constexpr int64_t kRegisterRateLimitUs = HubSession::kRegisterRateLimitUs;
 
       // MAC-1 (stage S3): HubSession owns the node's Sequencer (HubSession.h).
       void set_counters_no_write_(uint32_t tx, uint32_t rx) { this->session_.set_counters_no_write(tx, rx); }
@@ -1233,35 +1229,14 @@ namespace esphome
       // pending mask needs "how long ago" without depending on a valid wall clock.
       int64_t  last_heard_us_{0};
       void     note_node_heard_();
-      bool     login_acked_{false};
-      // True once the hub has successfully DECRYPTED a frame from this node,
-      // proving the node holds the matching base nonce (session id).  The hub encrypts
-      // downlink commands (and treats login as acknowledged) ONLY once this is
-      // set; until then it sends plaintext, so a node that missed the LoginMsg can
-      // still be controlled and Part B stays consistent (node has no session ->
-      // accepts plaintext).  Cleared at each new login challenge and on sleep.
-      bool     session_confirmed_{false};
-      uint8_t  login_retry_count_{0};
-      // Pending base-nonce for an in-flight login challenge.  Generated once
-      // per challenge by send_login() and reused on every retry until the node
-      // acknowledges; cleared when login_acked_ flips to true (or at sleep).
-      // This prevents the hub from minting a fresh nonce on each retry — the
-      // node rate-limits LoginMsg to one per 5 s and only stores the first
-      // accepted one, so regenerating leaves hub and node with disagreeing
-      // base nonces and every subsequent encrypted reply fails IV check.
-      uint32_t pending_login_nonce_{0};
+      // The login / session state machine (login_acked, session confirmed,
+      // relogin pending, the pending base nonce, retries): HubSession's.
       // This node's session keys, generation and installed session id live in
       // mac2::SessionKeyStore (HubLinkSecurity.h) since stage S2 — the single
       // owner, keyed by short_address_. The installed session id is what lets
       // handle_encrypted_ tell "this session-opening uplink is for the session
       // I already hold" (a duplicate burst copy must not force a fresh PSA
       // import and bump the generation) apart from "this is a NEW session".
-      // Set to true as soon as the startup-login path is initiated (either the
-      // timer is armed or the login has already been sent).  Checked by the NTP
-      // on_time_sync callback so that NTP resyncs (which fire the callback again)
-      // do not disrupt an already-running session.  Unlike login_acked_, this flag
-      // is never cleared by incoming messages.
-      bool     startup_login_initiated_{false};
       // True once this hub boot has pushed configuration to the node.  Reset to
       // false on every hub reboot (member default), so a config change flashed
       // into the hub is delivered exactly once per node per boot; routine wakes
@@ -1269,19 +1244,11 @@ namespace esphome
       bool     config_synced_{false};
 
       static constexpr uint8_t  kRestoreStateVersion  = 3;   // +config_hash
-      static constexpr uint8_t  kMaxLoginRetries      = 24; // 24 × 1 h = 1 day
-      static constexpr uint32_t kLoginRetryIntervalMs = 3600000; // 1 h ceiling between login retries
-      static constexpr uint32_t kLoginRetryBaseMs     = 5000;    // first retry delay; doubles each retry up to the ceiling
-      // Delay between receiving REGISTER and firing the login challenge.  The
-      // REGISTER path first queues ClientConfig + each node's config, each sent
-      // as a ~1.5-1.9 s burst.  A shorter delay (was 500 ms) queued LoginMsg on
-      // top of those bursts, saturating the channel so the node's login-ack had
-      // no quiet window.  4 s clears ~2 config bursts before login is sent.
-      static constexpr uint32_t kRegisterToLoginDelayMs = 4000;
-      // When config is skipped (provisioned node, already synced) there are no
-      // config bursts to drain, so login can fire much sooner — shortening the
-      // battery node's awake window.
-      static constexpr uint32_t kRegisterToLoginFastMs  = 800;
+      static constexpr uint8_t  kMaxLoginRetries        = HubSession::kMaxLoginRetries;
+      static constexpr uint32_t kLoginRetryIntervalMs   = HubSession::kLoginRetryIntervalMs;
+      static constexpr uint32_t kLoginRetryBaseMs       = HubSession::kLoginRetryBaseMs;
+      static constexpr uint32_t kRegisterToLoginDelayMs = HubSession::kRegisterToLoginDelayMs;
+      static constexpr uint32_t kRegisterToLoginFastMs  = HubSession::kRegisterToLoginFastMs;
 
     protected:
       esp_bd_addr_t remote_bda_; // 6 bytes
@@ -1316,7 +1283,10 @@ namespace esphome
       // the hub mirror of the node's onReceiveNew (70 -> 15). The ORDER in
       // set_response is load-bearing: REGISTER must bypass the address and
       // replay filters, so it is tested before admit_frame_().
-      void handle_register_(hubframes::Up *rcv_message, uint8_t *data, size_t len);
+      void handle_register_(hubframes::Up *rcv_message, uint8_t *data, size_t len)
+      {
+        this->session_.handle_register(rcv_message, data, len);
+      }
       bool admit_frame_(hubframes::Up *rcv_message);
       void handle_encrypted_(hubframes::Up *rcv_message, uint8_t *data, size_t len);
       // The node's MAC-2 link (HubSession.h): keys, v1 framing and seal, the
@@ -1330,10 +1300,7 @@ namespace esphome
         return this->session_.frame(op, fcnt, encrypt, out);
       }
       // The v1 LOGIN path of send_login (frame, send, log).
-      void send_login_v1_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base);
       // The REGISTER's authentication: the K_AUTH tag over the raw frame.
-      bool register_authentic_(const hubframes::Up *rcv_message, const uint8_t *data,
-                               size_t len);
       // The v1 shape check + decoded view (set_response's first step).
       std::unique_ptr<hubwire::Uplink> unpack_uplink_(uint8_t *data, size_t len);
       bool v1_login_frame_(const ::LoginMsg &login, uint32_t fcnt, MacFrame *out)
@@ -1359,6 +1326,19 @@ namespace esphome
       void session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn) override;
       void session_save_state() override;
       void session_cancel_timeout(const char *name) override;
+      bool session_has_radio() const override;
+      uint64_t session_mac_address() const override;
+      uint32_t session_login_slot() const override;
+      uint32_t session_ms_until_awake() const override;
+      uint32_t session_ack_wait_ms(uint32_t base_ms) const override;
+      bool session_send(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal) override;
+      void session_register_accepted() override;
+      bool session_register_config(bool needs_config) override;
+      void session_challenge_started() override;
+      void session_counters_restarted() override;
+      bool session_request_register() const override;
+      void session_on_confirmed() override;
+      void session_on_login_acknowledged() override;
       int64_t session_tx_drain_us() const override;
       bool session_schedule_outstanding() const override;
       // Move the replay counter. Called only for a frame that has been
@@ -1370,7 +1350,7 @@ namespace esphome
       // PortTable.h), then -- for a mac::Port::App frame only -- one decoded
       // AppIndication to each child. `outer` is the frame's (outer) header.
       void deliver_uplink_(hubframes::Up *msg, const hubframes::Hdr *outer, bool authentic);
-      void confirm_session_();
+      void confirm_session_() { this->session_.confirm(); }
       void send_deferred_tracked_op_();
       void send_deferred_config_push_();
       void schedule_config_sync_relogin_();
@@ -1421,8 +1401,8 @@ namespace esphome
       bool     push_awaiting_ack_();
       bool     frames_queued_(int64_t now_us) const;
       uint32_t ms_until_node_awake_() const;
-      void     schedule_startup_login_();
-      void     do_login_and_arm_retry_();
+      void     schedule_startup_login_() { this->session_.schedule_startup_login(); }
+      void     do_login_and_arm_retry_() { this->session_.do_login_and_arm_retry(); }
 
       // Msgid / CTR-space guard: HubSession::request_msgid_relogin.
       void     requestMsgidRelogin_(const char *where) { this->session_.request_msgid_relogin(where); }
@@ -1431,8 +1411,7 @@ namespace esphome
       // fired the "hourly" login retry within ~0.6 s of the challenge, stepping
       // on the node's burst-deferred login-ack and piling a redundant LoginMsg
       // burst on top of the register-triggered config bursts.
-      void     schedule_login_retry_();
-      void     login_retry_step_();
+      void     login_retry_step_() { this->session_.login_retry_step(); }
 
       // ---- command ACK / retransmit state (cover ops AND sysops) ----
       // The Control channel of the delivery service carries both: the first

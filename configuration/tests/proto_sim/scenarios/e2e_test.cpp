@@ -233,7 +233,7 @@ TEST_F(E2E, ALoginBecomesAProvenSessionOnBothSides) {
         << "the node must hold the hub's base nonce";
     EXPECT_NE(nonce, 0u);
 
-    EXPECT_TRUE(rol.login_acked_)
+    EXPECT_TRUE(rol.login_acked())
         << "and the hub must have seen the node answer its challenge";
 }
 
@@ -289,7 +289,7 @@ TEST_F(E2E, ACoverCommandIsExecutedAndAcknowledged) {
 TEST_F(E2E, ACommandTheNodeRefusesFailsAtOnceOnTheHub) {
     bringUpSession();
     drainNodeOps();
-    ASSERT_TRUE(rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(rol.session_confirmed()) << "precondition";
 
     rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 1.5f);
     ASSERT_TRUE(rol.awaitingAck()) << "precondition: the hub is tracking it";
@@ -307,7 +307,7 @@ TEST_F(E2E, ACommandTheNodeRefusesFailsAtOnceOnTheHub) {
     for (size_t i = before; i < frames.size(); ++i)
         if (frames[i].bytes == cmd) ++resent;
     EXPECT_EQ(resent, 0u) << "no retry of the refused command";
-    EXPECT_TRUE(rol.session_confirmed_) << "no relogin over a refusal";
+    EXPECT_TRUE(rol.session_confirmed()) << "no relogin over a refusal";
 }
 
 TEST_F(E2E, ACloseIsNotAnOpen) {

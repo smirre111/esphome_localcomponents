@@ -872,8 +872,8 @@ TEST(MacWireV1Listener, LoginIsKAuthOnTheSessionPortAndVerifiesAtTheNode) {
 TEST(MacWireV1Listener, TheSessionOpeningUplinkConfirmsTheSession) {
     Hub hub;
     openSession(hub);
-    EXPECT_TRUE(hub.rol.session_confirmed_);
-    EXPECT_TRUE(hub.rol.login_acked_);
+    EXPECT_TRUE(hub.rol.session_confirmed());
+    EXPECT_TRUE(hub.rol.login_acked());
 }
 
 TEST(MacWireV1Listener, ATamperedOrV0UplinkConfirmsNothing) {
@@ -895,17 +895,17 @@ TEST(MacWireV1Listener, ATamperedOrV0UplinkConfirmsNothing) {
     Bytes up = proto_sim::v1_session_frame(session, kNodeNonce, kHub, kNode, false, h, availBody());
     up[up.size() - 1] ^= 0x01;
     hub.rol.set_response(up.data(), up.size());
-    EXPECT_FALSE(hub.rol.session_confirmed_) << "a bad tag";
+    EXPECT_FALSE(hub.rol.session_confirmed()) << "a bad tag";
 
     Bytes v0 = {0x0A, 0x04, 0x18, 0x12, 0x20, 0x01, 0x52, 0x02, 0x08, 0x01};
     hub.rol.set_response(v0.data(), v0.size());
-    EXPECT_FALSE(hub.rol.session_confirmed_) << "a v0 frame is not a v1 frame";
+    EXPECT_FALSE(hub.rol.session_confirmed()) << "a v0 frame is not a v1 frame";
 }
 
 TEST(MacWireV1Listener, ACoverOpIsSealedAsksForAnAckAndCarriesItsCmdId) {
     Hub hub;
     const uint32_t session = openSession(hub);
-    ASSERT_TRUE(hub.rol.session_confirmed_);
+    ASSERT_TRUE(hub.rol.session_confirmed());
     ASSERT_TRUE(hub.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.75f));
     const Bytes f = lastDown(hub.radio);
     macwire::WireHdr h;
@@ -1066,7 +1066,7 @@ TEST(MacWireV1Listener, APlaintextUplinkBeforeTheSessionIsHeard) {
     hub.time.set_now(1000, true);
     Bytes up = proto_sim::v1_plain_frame(uplinkHdr(1, macwire::kPortApp, macwire::Auth::None), availBody());
     hub.rol.set_response(up.data(), up.size());
-    EXPECT_FALSE(hub.rol.session_confirmed_);
+    EXPECT_FALSE(hub.rol.session_confirmed());
     (void) before;
 }
 

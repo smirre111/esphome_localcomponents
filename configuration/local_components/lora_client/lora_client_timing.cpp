@@ -46,7 +46,7 @@ namespace esphome
       // for the session (see relogin_pending_); confirm_session_ publishes it
       // again if timed mode is on. WITHDRAWING one is not deferred: it is the safe
       // direction and carries no key.
-      if (this->relogin_pending_)
+      if (this->session_.relogin_pending())
       {
         ESP_LOGD(TAG, "[%s] GridSync deferred — session being rebuilt", this->get_name().c_str());
         return;
@@ -152,7 +152,7 @@ namespace esphome
       // A node that gets a keyless GridSync simply holds no key and treats
       // beacons the way it did before this existed: bounded re-anchor, no
       // mask. The hub re-publishes on the next grid change.
-      if (this->session_confirmed_ && this->parent_ != nullptr &&
+      if (this->session_.confirmed() && this->parent_ != nullptr &&
           this->parent_->netKeyId() != 0)
       {
         gs.netkey.data = const_cast<uint8_t *>(this->parent_->netKey());

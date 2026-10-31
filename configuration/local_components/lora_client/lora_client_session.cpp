@@ -12,317 +12,6 @@ namespace esphome
   namespace lora_tracker
   {
 
-    void LORAListener::schedule_startup_login_()
-    {
-      this->cancel_timeout("login_startup");
-      this->cancel_timeout("login_retry");
-
-      // Per-node stagger: SLOT × sleepmodel::kLoginStaggerMs, slot being this node's
-      // index in declaration order (see login_slot_).
-      //
-      // Prevents simultaneous login transmissions when all nodes happen to be
-      // awake at hub reboot. 3 s gives enough headroom for a full challenge +
-      // response exchange even at SF12 (~2.5 s airtime per packet).
-      //
-      // This used to multiply by short_address_, which gave the right 3 s
-      // SEPARATION but an absurd absolute OFFSET: addresses 17 and 18 meant
-      // 51 s and 54 s of silence after every hub restart, delaying recovery
-      // for both nodes by nearly a minute.
-      uint32_t stagger_ms = static_cast<uint32_t>(this->login_slot_) * sleepmodel::kLoginStaggerMs;
-
-      uint32_t delay_ms = this->ms_until_node_awake_();
-      if (delay_ms == 0)
-      {
-        // Node is in its wake window — wait 5 s for radio init + per-node stagger.
-        uint32_t total_ms = sleepmodel::kBootMarginMs + stagger_ms;
-        ESP_LOGI(TAG, "[%s] Node awake — login challenge in %u s (5 s radio-init + %u s stagger)",
-                 this->get_name().c_str(), total_ms / 1000, stagger_ms / 1000);
-        this->set_timeout("login_startup", total_ms, [this]() { this->do_login_and_arm_retry_(); });
-      }
-      else
-      {
-        // Add sleepmodel::kBootMarginMs beyond the calculated wake time so that REGISTER
-        // (sent by the node ~1-3 s after deep-sleep wake-up) almost always arrives
-        // before this timer fires and cancels it.  The startup timer is then purely
-        // a fallback for lost REGISTER packets.
-        uint32_t total_ms = delay_ms + sleepmodel::kBootMarginMs + stagger_ms;
-        ESP_LOGI(TAG, "[%s] Node asleep — login deferred %u s (%u s sleep + %u s boot margin + %u s stagger)",
-                 this->get_name().c_str(), total_ms / 1000,
-                 delay_ms / 1000, sleepmodel::kBootMarginMs / 1000, stagger_ms / 1000);
-        this->set_timeout("login_startup", total_ms,
-                          [this]() { this->do_login_and_arm_retry_(); });
-      }
-    }
-
-    void LORAListener::do_login_and_arm_retry_()
-    {
-      // Do NOT bail on login_acked_ here.  After a hub reboot the node may have
-      // already sent a status message (setting login_acked_=true via the incoming-
-      // message path) before this timer fired.  We still need to send LoginMsg so
-      // that the base-nonce map is repopulated (it is cleared on hub
-      // reboot as a file-scope static and is never persisted to flash).
-      //
-      // One node's onboarding at a time. The downlink is a single queue at ~1.85 s
-      // a frame; a second node's login started behind the first's config, time
-      // and schedule pushes sits in that queue while every ack timer runs. Checked
-      // before the log so a wait is one line, not one per poll.
-      if (this->parent_ != nullptr && !this->acquire_onboarding_())
-      {
-        this->set_timeout("login_startup", onboarding::kPollMs,
-                          [this]() { this->do_login_and_arm_retry_(); });
-        return;
-      }
-      ESP_LOGI(TAG, "[%s] Login challenge firing (parent=%s)",
-               this->get_name().c_str(), this->parent_ == nullptr ? "NULL" : "ok");
-      if (this->parent_ == nullptr)
-      {
-        ESP_LOGE(TAG, "[%s] parent_ is null — cannot send login (register_client() missing set_parent?)",
-                 this->get_name().c_str());
-        return;
-      }
-
-      // Reset login state BEFORE send_login(). Today the radio is async so
-      // the node's ACK can only arrive long after send_login() returns, and
-      // the order doesn't matter. Resetting AFTER would silently clobber an
-      // already-arrived ACK the moment the radio path becomes synchronous
-      // (e.g. driver swap, scheduler tweak, host-side test) — defensive
-      // ordering that matches the production semantic
-      // ("login is unacknowledged at the start of a challenge") regardless
-      // of when the reply happens to arrive.
-      this->login_acked_       = false;
-      this->login_retry_count_ = 0;
-
-      this->send_login();   // resets frame counters to 0 + sends LoginMsg
-
-      // Retry every hour; give up after kMaxLoginRetries (24 h).  One-shot,
-      // self-re-arming — NOT set_interval (whose random initial phase fired the
-      // first "hourly" retry within ~0.6 s, clashing with the register bursts).
-      this->cancel_timeout("login_retry");
-      this->schedule_login_retry_();
-    }
-
-    void LORAListener::schedule_login_retry_()
-    {
-      // Self-re-arming ONE-SHOT set_timeout with exponential backoff: fast early
-      // retries (a transient handshake loss recovers in seconds) growing to the
-      // 1 h ceiling.  delay = base << retry_count, capped at kLoginRetryIntervalMs.
-      const uint32_t shift = (this->login_retry_count_ < 20) ? this->login_retry_count_ : 20;
-      uint64_t delay = static_cast<uint64_t>(kLoginRetryBaseMs) << shift;
-      if (delay > kLoginRetryIntervalMs)
-        delay = kLoginRetryIntervalMs;
-      // The backoff counts from when the login is ON THE AIR, not from when it
-      // was queued behind another node's bursts.
-      delay = this->ack_wait_ms_(static_cast<uint32_t>(delay));
-      // Never retry earlier than the node can hear it. A sleeping node cannot
-      // answer, so a burst sent before its wake is pure airtime and hub TX
-      // energy — 68 such retries were observed in one log before this gate.
-      //
-      // The delay is stretched, not replaced: the backoff still governs how
-      // often we try once the node IS awake.
-      const uint32_t until_awake = this->ms_until_node_awake_();
-      if (until_awake > delay)
-      {
-        ESP_LOGD(TAG, "[%s] Login retry deferred %u s — node asleep until then",
-                 this->get_name().c_str(), until_awake / 1000);
-        delay = until_awake;
-      }
-
-      this->set_timeout("login_retry", static_cast<uint32_t>(delay),
-                        [this]() { this->login_retry_step_(); });
-    }
-
-    void LORAListener::login_retry_step_()
-    {
-      if (this->login_acked_)
-        return; // acked already; one-shot, nothing to re-arm
-      // A retry is a login challenge like any other: it may not start while
-      // another node is being brought up. The attempt is NOT counted and the
-      // backoff is not advanced — it has not been made yet.
-      if (this->parent_ != nullptr && !this->acquire_onboarding_())
-      {
-        this->set_timeout("login_retry", onboarding::kPollMs,
-                          [this]() { this->login_retry_step_(); });
-        return;
-      }
-      if (++this->login_retry_count_ >= kMaxLoginRetries)
-      {
-        ESP_LOGE(TAG, "[%s] Login not acknowledged after %u retries — giving up",
-                 this->get_name().c_str(), static_cast<unsigned>(kMaxLoginRetries));
-        this->release_onboarding_("gave up");
-        return;
-      }
-      ESP_LOGW(TAG, "[%s] Login not acknowledged — retry %u/%u",
-               this->get_name().c_str(),
-               static_cast<unsigned>(this->login_retry_count_),
-               static_cast<unsigned>(kMaxLoginRetries));
-      this->send_login();
-      this->schedule_login_retry_(); // re-arm the next one-shot
-    }
-
-    // A REGISTER is accepted before any address or FCNT filter, so a node whose
-    // address has just changed can still get through. Its proof is the frame's
-    // K_AUTH tag over every raw byte (spec 4.3).
-    bool LORAListener::register_authentic_(const hubframes::Up *rcv_message,
-                                           const uint8_t *data, size_t len)
-    {
-      (void) rcv_message;
-      return s_sec().verifyAuthFrameV1(/*downlink=*/false, data, len);
-    }
-
-    void LORAListener::handle_register_(hubframes::Up *rcv_message,
-                                        uint8_t *data, size_t len)
-    {
-        ClientRegister *reg = rcv_message->register_;
-        ESP_LOGD(TAG, "Received register command for MAC address: 0x%012" PRIx64, (uint64_t) reg->mac_addr);
-        ESP_LOGD(TAG, "This clients' MAC address: 0x%012" PRIx64, (uint64_t) this->address_uint64_);
-        if (reg->mac_addr != this->address_uint64_)
-        {
-          // Every REGISTER reaches every listener; all but the addressed one land
-          // here. That is routing, not a fault, and at ERROR it read as one — it
-          // was logged twice per handshake and hid the real errors around it.
-          ESP_LOGD(TAG, "%s: REGISTER is for another node's MAC — ignoring", this->get_name().c_str());
-          return;
-        }
-
-        // Tier 3 (mac-separation-implementation-plan.md section 2(b), step
-        // 7): verify REGISTER's MIC before any state change — this used to
-        // be accepted purely on an address match, before any filter at all,
-        // so a forged plaintext REGISTER naming a real node's MAC could drop
-        // that node's existing session outright.
-        if (!this->register_authentic_(rcv_message, data, len))
-        {
-          ESP_LOGW(TAG, "%s: REGISTER failed MIC verification — dropping", this->get_name().c_str());
-          return;
-        }
-
-        // HB14: a replayed REGISTER carries a register_seq the node has already
-        // used. Checked before the rate limit, so a genuine frame the limit
-        // drops still raises the bar for its own replay.
-        if (!this->register_seq_.admit(reg->register_seq))
-        {
-          ESP_LOGW(TAG, "%s: REGISTER replayed (register_seq %u, highest seen %u) — dropping",
-                   this->get_name().c_str(), (unsigned) reg->register_seq,
-                   (unsigned) this->register_seq_.highest());
-          return;
-        }
-
-        // Security review finding 2: the MIC above stops forgery but not
-        // replay — REGISTER carries no msgid/freshness check of its own
-        // (it is routed around admit_frame_ for the unprovisioned-bootstrap
-        // case, which has no session to check one against), and a REGISTER's
-        // own msgid is NOT usable as a monotonic replay key either: it is
-        // always a small post-reboot value, so a strict increasing check
-        // would reject every legitimate reboot after the first. A captured
-        // REGISTER could otherwise be replayed at will to force a full
-        // relogin cycle on demand — the same grid-demote-with-no-rate-limit
-        // bypass H2 closed for LOGIN, reached through this message instead.
-        // Rate-limited by time instead: a real reboot cadence is many
-        // seconds at minimum, so this blocks rapid replay without blocking
-        // a genuine one.
-        {
-          const int64_t now_us = esp_timer_get_time();
-          if (this->last_register_accepted_us_ != 0 &&
-              (now_us - this->last_register_accepted_us_) < kRegisterRateLimitUs)
-          {
-            ESP_LOGW(TAG, "%s: REGISTER rate-limited (%lld ms after the last one) — dropping",
-                     this->get_name().c_str(),
-                     (long long) ((now_us - this->last_register_accepted_us_) / 1000));
-              return;
-          }
-          this->last_register_accepted_us_ = now_us;
-        }
-
-        ESP_LOGI(TAG, "%s, Registered with LORA server", this->get_name().c_str());
-        this->registered_ = true;
-        // (a'): a REGISTER from THIS node's MAC is proof it is awake right now.
-        this->note_node_heard_();
-
-        // §4.6 rule 3: any hub uncertainty means burst. A REGISTER is the hub's
-        // actual notification that this node has restarted — it is the first
-        // thing a node sends after boot — so it is the one place that can
-        // truthfully SET rebooted_since_confirm. The flag defaulted true and
-        // was cleared by the first in-slot uplink, but nothing ever raised it
-        // again: after the first confirmation it was false for the lifetime of
-        // the hub process, and the rule it implements never fired. A rebooted
-        // node has lost its grid phase and must re-earn the hub's confidence.
-        // The node's last phase report described a grid it held before it
-        // restarted. It is not evidence about the node in front of us now.
-        this->link_.note_node_rebooted();
-
-        // Only (re)push configuration when the node reports it is unprovisioned
-        // (needs_config), or when this hub boot has not yet pushed to the node
-        // (!config_synced_ → delivers config changes flashed into the hub once
-        // per boot).  A provisioned node waking from deep sleep keeps its
-        // persisted config, so both are false and we skip the two ~1.5 s config
-        // bursts and go straight to login — saving awake radio time on battery.
-        const bool needs_cfg    = reg->needs_config;
-        const bool push_config  = needs_cfg || !this->config_synced_;
-
-
-        // An unprovisioned node holds no session, so plaintext is the only way
-        // to reach it and it accepts it — that is the bootstrap. A PROVISIONED
-        // node is the opposite case: it has a session and refuses plaintext
-        // commands, so pushing now would send two ~1.5 s bursts the node drops
-        // on the floor. Defer that push to confirm_session_, which is the first
-        // moment the hub can encrypt it.
-        if (push_config && needs_cfg)
-        {
-          ESP_LOGI(TAG, "[%s] Pushing config in the clear (node reports unprovisioned)",
-                   this->get_name().c_str());
-          this->send_remote_config();   // ClientConfig (address, subnet, name, sleepDuration)
-          // Tell every child the node REGISTERed (mac::Port::Session), so each
-          // can send its own configuration (LoraCoverComponent: CoverConfig).
-          for (auto *node : this->nodes_)
-            node->on_register();
-          this->config_synced_ = true;
-        }
-        else if (push_config)
-        {
-          ESP_LOGI(TAG, "[%s] Config push deferred until the session is confirmed",
-                   this->get_name().c_str());
-          this->config_push_pending_ = true;
-          this->pending_register_notice_ = true;
-        }
-        else
-        {
-          ESP_LOGI(TAG, "[%s] Config already in sync — skipping config push, login only",
-                   this->get_name().c_str());
-        }
-
-        // Re-negotiate nonce and reset frame counters after (re-)registration.
-        // Cancel any pending login timers from a previous boot/sleep cycle, then
-        // arm a short delay so ClientConfig + node configs are transmitted first.
-        this->login_acked_              = false;
-        this->login_retry_count_        = 0;
-        this->relogin_pending_          = true;  // the node restarted: its old session is gone
-        this->pending_login_nonce_      = 0;     // node just (re-)registered → mint fresh
-        // The node rebooted (its REGISTER says so): the old session's keys and
-        // any stored ciphertext are void on both sides, so drop them now rather
-        // than at the next LOGIN challenge.
-        this->clearSessionKeys_();
-        this->startup_login_initiated_  = true;  // prevent NTP callback from cancelling this timer
-        this->cancel_timeout("login_startup");
-        this->cancel_timeout("login_retry");
-
-        // The startup timer (schedule_startup_login_) fires 5 s AFTER the node's
-        // expected wake time so that REGISTER (sent by the node ~1-3 s after boot)
-        // almost always arrives first and cancels the timer via cancel_timeout above.
-        // If REGISTER arrives while the timer is still pending we still schedule the
-        // login here — the node's 5-second rate-limit window is wide enough to
-        // absorb the rare case where both paths reach do_login_and_arm_retry_() at
-        // nearly the same time (the second LoginMsg is simply rate-limited on the node).
-        // When config was pushed, kRegisterToLoginDelayMs lets the ClientConfig +
-        // node-config bursts drain first so LoginMsg is not queued on top of them.
-        // When config was skipped there is nothing to drain, so login fast.
-        const uint32_t login_delay_ms = push_config ? kRegisterToLoginDelayMs
-                                                     : kRegisterToLoginFastMs;
-        ESP_LOGI(TAG, "[%s] REGISTER received — login in %u ms",
-                 this->get_name().c_str(), (unsigned)login_delay_ms);
-        this->set_timeout("login_startup", login_delay_ms, [this]() {
-          this->do_login_and_arm_retry_();
-        });
-    }
-
     // Should this frame be acted on? Registration gate, cross-talk address
     // filter, then the bounded replay window — in that order.
     //
@@ -511,32 +200,295 @@ namespace esphome
       }
     }
 
-    void LORAListener::confirm_session_()
-    {
-      this->session_confirmed_ = true;
-      this->relogin_pending_   = false;
+    // ---- the login / session lifecycle (HubSession, review HB10) ----
 
-      // Security review finding 1: send the tracked op that send_cover_
-      // operation()/send_tracked_sysop_() deferred instead of packing
-      // plaintext. Unlike the config/TimeSync/GridSync deferrals below, this
-      // is NOT gated on !login_acked_ — a tracked op can be deferred by any
-      // relogin, not just the hub's first one this process, so it must fire
-      // on every confirm that finds one waiting.
-      this->send_deferred_tracked_op_();
+    void HubSession::schedule_startup_login()
+    {
+      this->host_.session_cancel_timeout("login_startup");
+      this->host_.session_cancel_timeout("login_retry");
+
+      // Per-node stagger: SLOT × sleepmodel::kLoginStaggerMs, slot being this node's
+      // index in declaration order (see login_slot_).
+      //
+      // Prevents simultaneous login transmissions when all nodes happen to be
+      // awake at hub reboot. 3 s gives enough headroom for a full challenge +
+      // response exchange even at SF12 (~2.5 s airtime per packet).
+      //
+      // This used to multiply by short_address_, which gave the right 3 s
+      // SEPARATION but an absurd absolute OFFSET: addresses 17 and 18 meant
+      // 51 s and 54 s of silence after every hub restart, delaying recovery
+      // for both nodes by nearly a minute.
+      uint32_t stagger_ms = this->host_.session_login_slot() * sleepmodel::kLoginStaggerMs;
+
+      uint32_t delay_ms = this->host_.session_ms_until_awake();
+      if (delay_ms == 0)
+      {
+        // Node is in its wake window — wait 5 s for radio init + per-node stagger.
+        uint32_t total_ms = sleepmodel::kBootMarginMs + stagger_ms;
+        ESP_LOGI(TAG, "[%s] Node awake — login challenge in %u s (5 s radio-init + %u s stagger)",
+                 this->host_.session_name(), total_ms / 1000, stagger_ms / 1000);
+        this->host_.session_set_timeout("login_startup", total_ms,
+                                        [this]() { this->do_login_and_arm_retry(); });
+      }
+      else
+      {
+        // Add sleepmodel::kBootMarginMs beyond the calculated wake time so that REGISTER
+        // (sent by the node ~1-3 s after deep-sleep wake-up) almost always arrives
+        // before this timer fires and cancels it.  The startup timer is then purely
+        // a fallback for lost REGISTER packets.
+        uint32_t total_ms = delay_ms + sleepmodel::kBootMarginMs + stagger_ms;
+        ESP_LOGI(TAG, "[%s] Node asleep — login deferred %u s (%u s sleep + %u s boot margin + %u s stagger)",
+                 this->host_.session_name(), total_ms / 1000,
+                 delay_ms / 1000, sleepmodel::kBootMarginMs / 1000, stagger_ms / 1000);
+        this->host_.session_set_timeout("login_startup", total_ms,
+                                        [this]() { this->do_login_and_arm_retry(); });
+      }
+    }
+
+    void HubSession::do_login_and_arm_retry()
+    {
+      // Do NOT bail on login_acked here.  After a hub reboot the node may have
+      // already sent a status message (setting login_acked=true via the incoming-
+      // message path) before this timer fired.  We still need to send LoginMsg so
+      // that the base-nonce map is repopulated (it is cleared on hub
+      // reboot as a file-scope static and is never persisted to flash).
+      //
+      // One node's onboarding at a time. The downlink is a single queue at ~1.85 s
+      // a frame; a second node's login started behind the first's config, time
+      // and schedule pushes sits in that queue while every ack timer runs. Checked
+      // before the log so a wait is one line, not one per poll.
+      if (this->host_.session_has_radio() && !this->acquire_onboarding())
+      {
+        this->host_.session_set_timeout("login_startup", onboarding::kPollMs,
+                                        [this]() { this->do_login_and_arm_retry(); });
+        return;
+      }
+      ESP_LOGI(TAG, "[%s] Login challenge firing (parent=%s)",
+               this->host_.session_name(), !this->host_.session_has_radio() ? "NULL" : "ok");
+      if (!this->host_.session_has_radio())
+      {
+        ESP_LOGE(TAG, "[%s] parent_ is null — cannot send login (register_client() missing set_parent?)",
+                 this->host_.session_name());
+        return;
+      }
+
+      // Reset login state BEFORE send_login(). Today the radio is async so
+      // the node's ACK can only arrive long after send_login() returns, and
+      // the order doesn't matter. Resetting AFTER would silently clobber an
+      // already-arrived ACK the moment the radio path becomes synchronous
+      // (e.g. driver swap, scheduler tweak, host-side test) — defensive
+      // ordering that matches the production semantic
+      // ("login is unacknowledged at the start of a challenge") regardless
+      // of when the reply happens to arrive.
+      this->login_.login_acked       = false;
+      this->login_.login_retry_count = 0;
+
+      this->send_login();   // resets frame counters to 0 + sends LoginMsg
+
+      // Retry every hour; give up after kMaxLoginRetries (24 h).  One-shot,
+      // self-re-arming — NOT set_interval (whose random initial phase fired the
+      // first "hourly" retry within ~0.6 s, clashing with the register bursts).
+      this->host_.session_cancel_timeout("login_retry");
+      this->schedule_login_retry_();
+    }
+
+    void HubSession::schedule_login_retry_()
+    {
+      // Self-re-arming ONE-SHOT set_timeout with exponential backoff: fast early
+      // retries (a transient handshake loss recovers in seconds) growing to the
+      // 1 h ceiling.  delay = base << retry_count, capped at kLoginRetryIntervalMs.
+      const uint32_t shift = (this->login_.login_retry_count < 20) ? this->login_.login_retry_count : 20;
+      uint64_t delay = static_cast<uint64_t>(kLoginRetryBaseMs) << shift;
+      if (delay > kLoginRetryIntervalMs)
+        delay = kLoginRetryIntervalMs;
+      // The backoff counts from when the login is ON THE AIR, not from when it
+      // was queued behind another node's bursts.
+      delay = this->host_.session_ack_wait_ms(static_cast<uint32_t>(delay));
+      // Never retry earlier than the node can hear it. A sleeping node cannot
+      // answer, so a burst sent before its wake is pure airtime and hub TX
+      // energy — 68 such retries were observed in one log before this gate.
+      //
+      // The delay is stretched, not replaced: the backoff still governs how
+      // often we try once the node IS awake.
+      const uint32_t until_awake = this->host_.session_ms_until_awake();
+      if (until_awake > delay)
+      {
+        ESP_LOGD(TAG, "[%s] Login retry deferred %u s — node asleep until then",
+                 this->host_.session_name(), until_awake / 1000);
+        delay = until_awake;
+      }
+
+      this->host_.session_set_timeout("login_retry", static_cast<uint32_t>(delay),
+                                      [this]() { this->login_retry_step(); });
+    }
+
+    void HubSession::login_retry_step()
+    {
+      if (this->login_.login_acked)
+        return; // acked already; one-shot, nothing to re-arm
+      // A retry is a login challenge like any other: it may not start while
+      // another node is being brought up. The attempt is NOT counted and the
+      // backoff is not advanced — it has not been made yet.
+      if (this->host_.session_has_radio() && !this->acquire_onboarding())
+      {
+        this->host_.session_set_timeout("login_retry", onboarding::kPollMs,
+                                        [this]() { this->login_retry_step(); });
+        return;
+      }
+      if (++this->login_.login_retry_count >= kMaxLoginRetries)
+      {
+        ESP_LOGE(TAG, "[%s] Login not acknowledged after %u retries — giving up",
+                 this->host_.session_name(), static_cast<unsigned>(kMaxLoginRetries));
+        this->release_onboarding("gave up");
+        return;
+      }
+      ESP_LOGW(TAG, "[%s] Login not acknowledged — retry %u/%u",
+               this->host_.session_name(),
+               static_cast<unsigned>(this->login_.login_retry_count),
+               static_cast<unsigned>(kMaxLoginRetries));
+      this->send_login();
+      this->schedule_login_retry_(); // re-arm the next one-shot
+    }
+
+    // A REGISTER is accepted before any address or FCNT filter, so a node whose
+    // address has just changed can still get through. Its proof is the frame's
+    // K_AUTH tag over every raw byte (spec 4.3).
+    bool HubSession::register_authentic_(const uint8_t *data, size_t len)
+    {
+      return s_sec().verifyAuthFrameV1(/*downlink=*/false, data, len);
+    }
+
+    // The REGISTER's own checks, in order: addressed to this node, authentic
+    // (K_AUTH tag), fresh (register_seq, HB14), not a rapid repeat (rate limit).
+    bool HubSession::register_admitted_(const ::ClientRegister *reg, const uint8_t *data, size_t len)
+    {
+        ESP_LOGD(TAG, "Received register command for MAC address: 0x%012" PRIx64, (uint64_t) reg->mac_addr);
+        ESP_LOGD(TAG, "This clients' MAC address: 0x%012" PRIx64, (uint64_t) this->host_.session_mac_address());
+        if (reg->mac_addr != this->host_.session_mac_address())
+        {
+          // Every REGISTER reaches every listener; all but the addressed one land
+          // here. That is routing, not a fault, and at ERROR it read as one — it
+          // was logged twice per handshake and hid the real errors around it.
+          ESP_LOGD(TAG, "%s: REGISTER is for another node's MAC — ignoring", this->host_.session_name());
+          return false;
+        }
+
+        // Tier 3 (mac-separation-implementation-plan.md section 2(b), step
+        // 7): verify REGISTER's MIC before any state change — this used to
+        // be accepted purely on an address match, before any filter at all,
+        // so a forged plaintext REGISTER naming a real node's MAC could drop
+        // that node's existing session outright.
+        if (!this->register_authentic_(data, len))
+        {
+          ESP_LOGW(TAG, "%s: REGISTER failed MIC verification — dropping", this->host_.session_name());
+          return false;
+        }
+
+        // HB14: a replayed REGISTER carries a register_seq the node has already
+        // used. Checked before the rate limit, so a genuine frame the limit
+        // drops still raises the bar for its own replay.
+        if (!this->register_seq_.admit(reg->register_seq))
+        {
+          ESP_LOGW(TAG, "%s: REGISTER replayed (register_seq %u, highest seen %u) — dropping",
+                   this->host_.session_name(), (unsigned) reg->register_seq,
+                   (unsigned) this->register_seq_.highest());
+          return false;
+        }
+
+        // Security review finding 2: the MIC above stops forgery but not
+        // replay — REGISTER carries no msgid/freshness check of its own
+        // (it is routed around admit_frame_ for the unprovisioned-bootstrap
+        // case, which has no session to check one against), and a REGISTER's
+        // own msgid is NOT usable as a monotonic replay key either: it is
+        // always a small post-reboot value, so a strict increasing check
+        // would reject every legitimate reboot after the first. A captured
+        // REGISTER could otherwise be replayed at will to force a full
+        // relogin cycle on demand — the same grid-demote-with-no-rate-limit
+        // bypass H2 closed for LOGIN, reached through this message instead.
+        // Rate-limited by time instead: a real reboot cadence is many
+        // seconds at minimum, so this blocks rapid replay without blocking
+        // a genuine one.
+        const int64_t now_us = esp_timer_get_time();
+        if (this->last_register_accepted_us_ != 0 &&
+            (now_us - this->last_register_accepted_us_) < kRegisterRateLimitUs)
+        {
+          ESP_LOGW(TAG, "%s: REGISTER rate-limited (%lld ms after the last one) — dropping",
+                   this->host_.session_name(),
+                   (long long) ((now_us - this->last_register_accepted_us_) / 1000));
+          return false;
+        }
+        this->last_register_accepted_us_ = now_us;
+        return true;
+    }
+
+    void HubSession::handle_register(const hubframes::Up *rcv_message, const uint8_t *data, size_t len)
+    {
+        const ClientRegister *reg = rcv_message->register_;
+        if (!this->register_admitted_(reg, data, len))
+          return;
+
+        ESP_LOGI(TAG, "%s, Registered with LORA server", this->host_.session_name());
+        this->host_.session_register_accepted();
+        const bool push_config = this->host_.session_register_config(reg->needs_config);
+
+        // Re-negotiate nonce and reset frame counters after (re-)registration.
+        // Cancel any pending login timers from a previous boot/sleep cycle, then
+        // arm a short delay so ClientConfig + node configs are transmitted first.
+        this->login_.login_acked             = false;
+        this->login_.login_retry_count       = 0;
+        this->login_.relogin_pending         = true;  // the node restarted: its old session is gone
+        this->login_.pending_login_nonce     = 0;     // node just (re-)registered → mint fresh
+        // The node rebooted (its REGISTER says so): the old session's keys and
+        // any stored ciphertext are void on both sides, so drop them now rather
+        // than at the next LOGIN challenge.
+        this->clear_keys();
+        this->login_.startup_login_initiated = true;  // prevent NTP callback from cancelling this timer
+        this->host_.session_cancel_timeout("login_startup");
+        this->host_.session_cancel_timeout("login_retry");
+
+        // The startup timer (schedule_startup_login) fires 5 s AFTER the node's
+        // expected wake time so that REGISTER (sent by the node ~1-3 s after boot)
+        // almost always arrives first and cancels the timer via cancel_timeout above.
+        // If REGISTER arrives while the timer is still pending we still schedule the
+        // login here — the node's 5-second rate-limit window is wide enough to
+        // absorb the rare case where both paths reach do_login_and_arm_retry() at
+        // nearly the same time (the second LoginMsg is simply rate-limited on the node).
+        // When config was pushed, kRegisterToLoginDelayMs lets the ClientConfig +
+        // node-config bursts drain first so LoginMsg is not queued on top of them.
+        // When config was skipped there is nothing to drain, so login fast.
+        const uint32_t login_delay_ms = push_config ? kRegisterToLoginDelayMs
+                                                     : kRegisterToLoginFastMs;
+        ESP_LOGI(TAG, "[%s] REGISTER received — login in %u ms",
+                 this->host_.session_name(), (unsigned)login_delay_ms);
+        this->host_.session_set_timeout("login_startup", login_delay_ms, [this]() {
+          this->do_login_and_arm_retry();
+        });
+    }
+
+    // A successful decrypt proves the node holds the matching base nonce, so
+    // the encrypted session is confirmed both ways. Everything the hub defers
+    // until it can encrypt downlink safely hangs off this one moment (the
+    // listener's session_on_confirmed / session_on_login_acknowledged).
+    //
+    // Deliberately NOT triggered by a plaintext frame bumping the msgid — that
+    // does not prove the node holds the session key, and treating it as proof
+    // once left a node that missed the LoginMsg unable to decrypt commands.
+    void HubSession::confirm()
+    {
+      this->login_.confirmed       = true;
+      this->login_.relogin_pending = false;
 
       // The settle clock for the onboarding gate starts here: the pushes that
       // follow a confirmation are queued over the next ~2 s.
-      this->session_.note_onboarding_confirmed();
+      this->note_onboarding_confirmed();
 
-      // The deferred config push from handle_register_. This is the first
-      // moment it can be encrypted, and a provisioned node will not accept it
-      // any other way. config_synced_ is set HERE rather than at the point the
-      // push was decided, so a push that never happened is not recorded as one
-      // that did.
-      this->send_deferred_config_push_();
-      // U2 (Tier-1 interim mitigation, round 12): clear pending_login_nonce_
+      // Security review finding 1 (the deferred tracked op) and the deferred
+      // config push: on EVERY confirm that finds one waiting.
+      this->host_.session_on_confirmed();
+
+      // U2 (Tier-1 interim mitigation, round 12): clear pending_login_nonce
       // unconditionally on every confirm, not only on the first ack. Three
-      // call paths reach send_login() while login_acked_ is already true
+      // call paths reach send_login() while login_acked is already true
       // (config_sync_relogin, the node-LOGIN path, the missing-nonce path),
       // and each of those previously skipped this clear, so the next
       // send_login() reused the still-pending nonce under a reset msgid —
@@ -544,15 +496,305 @@ namespace esphome
       // issue (send_login's own unconditional tx/rx reset is the deeper
       // bug; Tier 3's session redesign is the real fix) but removes this
       // specific repeat-clear gap cheaply in the meantime.
-      this->pending_login_nonce_ = 0;
-      if (!this->login_acked_)
+      this->login_.pending_login_nonce = 0;
+      if (!this->login_.login_acked)
       {
-        this->login_acked_         = true;
-        this->login_retry_count_   = 0;
-        this->acked_since_confirm_ = false;
-        this->cancel_timeout("login_retry");
+        this->login_.login_acked       = true;
+        this->login_.login_retry_count = 0;
+        this->host_.session_cancel_timeout("login_retry");
         ESP_LOGI(TAG, "[%s] Login acknowledged by node (encrypted session confirmed)",
-                 this->get_name().c_str());
+                 this->host_.session_name());
+        this->host_.session_on_login_acknowledged();
+      }
+    }
+
+    void HubSession::send_login()
+    {
+      // Base-nonce policy:
+      //   * Mint a fresh esp_random() ONLY for the first send of a challenge.
+      //   * On every retry (pending_login_nonce != 0) reuse the same value.
+      // Rationale: the node rate-limits CMD_LOGIN to one accepted message per
+      // 5 s.  If the hub regenerated the nonce on retry, the node would keep the
+      // FIRST nonce it saw (the rate-limited retry is silently dropped) while
+      // the hub's session id would be the LAST one — the two
+      // sides then permanently disagree and every encrypted reply fails the
+      // IV check.  pending_login_nonce is cleared when the node's first valid
+      // reply confirms the session (confirm()), and at sleep.
+      uint32_t base;
+      if (this->login_.pending_login_nonce != 0)
+      {
+        base = this->login_.pending_login_nonce;
+      }
+      else
+      {
+        base = esp_random();
+        this->login_.pending_login_nonce = base;
+        // A genuinely NEW challenge: whatever session keys are live belong
+        // to the session this challenge supersedes. Clear them now so a
+        // downlink packed before the new session-opening uplink arrives is
+        // correctly dropped ("no session keys") instead of silently
+        // encrypted under the old session's keys. See clear_keys()'s
+        // comment for why this is NOT done on a bare retry.
+        this->clear_keys();
+      }
+
+      // A new session invalidates the hub's confidence and its sequencing
+      // state for unauthenticated frames (the listener's reactions).
+      this->host_.session_challenge_started();
+
+      this->restart_counters();   // a new session: both directions restart
+      // ...so no FCNT reserved from the old count may be spent any more (P1),
+      // and ack ids on record would alias the new msgid space.
+      this->host_.session_counters_restarted();
+      this->clear_msgid_relogin();   // the msgid space restarts here
+      // New login challenge: the encrypted session is not confirmed until the
+      // node proves it by sending a frame we can decrypt.  Until then the hub
+      // sends commands in plaintext (see frame()).
+      this->login_.confirmed       = false;
+      this->login_.relogin_pending = true;
+
+      // Store the base-nonce on the hub side before sending so it is ready to
+      // validate the first encrypted response the node sends back.
+      {
+        s_keys().setSessionId(static_cast<mac::Addr>(this->host_.session_peer()), base);
+      }
+
+      const uint32_t fcnt = this->allocate_tx();
+
+      LoginMsg login = LOGIN_MSG__INIT;
+      // nonce carries the base-nonce (session id) for the CTR counter block.
+      // The node stores it as its base_nonce on receipt of CMD_LOGIN.
+      login.nonce = base;
+      // Ask the node to REGISTER when this hub boot has not pushed its config
+      // yet -- but not while a push is already waiting for this session (the
+      // listener's session_request_register explains the deadlock).
+      login.request_register = this->host_.session_request_register();
+
+      // Security review finding 7: true only on the hub's FIRST LOGIN send
+      // for this node since the hub process itself started — i.e. a genuine
+      // reboot. login_acked is exactly this: it starts false at boot/setup
+      // and is never reset to false again except by this same node's own
+      // reboot/sleep cycle (handle_register, enter-sleep) or the very next
+      // send_login() challenge before it fires — never by the OTHER triggers
+      // that call send_login() while the node stays up (tracked-op-retry
+      // exhaustion, config_sync_relogin, the REGISTER follow-up, the
+      // sleep-fallback timer), which is exactly the distinction the node's
+      // demote-on-LOGIN needs and did not have before.
+      login.hub_rebooted = !this->login_.login_acked;
+
+      // The frame's K_AUTH tag (over every raw byte, recomputed per burst copy)
+      // authenticates LOGIN (spec 4.3).
+      this->send_login_frame_(login, fcnt, base);
+    }
+
+    // The v1 LOGIN of send_login: frame, send, log.
+    void HubSession::send_login_frame_(const LoginMsg &login, uint32_t fcnt, uint32_t base)
+    {
+      DeliveryFrame f;
+      if (this->login_frame(login, fcnt, &f))
+        this->host_.session_send(f.bytes.data(), f.bytes.size(), f.seal);
+      else
+        ESP_LOGE(TAG, "[%s] v1 LOGIN could not be framed/authenticated — not sent",
+                 this->host_.session_name());
+      ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
+               this->host_.session_name(), (unsigned) base, (unsigned) this->seq().txId(),
+               (int) login.request_register);
+    }
+
+    // The node acknowledged CMD_SLEEP: sleep ends the session; mint fresh on wake.
+    void HubSession::end_for_sleep()
+    {
+      this->login_.login_acked         = false;
+      this->login_.login_retry_count   = 0;
+      this->login_.pending_login_nonce = 0;   // sleep ends the session; mint fresh on wake
+      this->host_.session_cancel_timeout("login_retry");   // ("login_startup" is replaced by the arming below)
+    }
+
+    // ---- the listener's side of the session lifecycle (SessionHost events) ----
+
+    bool LORAListener::session_has_radio() const { return this->parent_ != nullptr; }
+    uint64_t LORAListener::session_mac_address() const { return this->address_uint64_; }
+    uint32_t LORAListener::session_login_slot() const
+    {
+      return static_cast<uint32_t>(this->login_slot_);
+    }
+    uint32_t LORAListener::session_ms_until_awake() const { return this->ms_until_node_awake_(); }
+    uint32_t LORAListener::session_ack_wait_ms(uint32_t base_ms) const
+    {
+      return this->ack_wait_ms_(base_ms);
+    }
+    bool LORAListener::session_send(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
+    {
+      return this->mac0_send_(buf, len, TxPolicy{}, seal);
+    }
+
+    // An admitted REGISTER from THIS node's MAC.
+    void LORAListener::session_register_accepted()
+    {
+        this->registered_ = true;
+        // (a'): a REGISTER from THIS node's MAC is proof it is awake right now.
+        this->note_node_heard_();
+
+        // §4.6 rule 3: any hub uncertainty means burst. A REGISTER is the hub's
+        // actual notification that this node has restarted — it is the first
+        // thing a node sends after boot — so it is the one place that can
+        // truthfully SET rebooted_since_confirm. The flag defaulted true and
+        // was cleared by the first in-slot uplink, but nothing ever raised it
+        // again: after the first confirmation it was false for the lifetime of
+        // the hub process, and the rule it implements never fired. A rebooted
+        // node has lost its grid phase and must re-earn the hub's confidence.
+        // The node's last phase report described a grid it held before it
+        // restarted. It is not evidence about the node in front of us now.
+        this->link_.note_node_rebooted();
+    }
+
+    // The REGISTER's configuration decision. True when configuration is pushed
+    // (now or deferred to the session), which sets the login delay.
+    bool LORAListener::session_register_config(bool needs_config)
+    {
+        // Only (re)push configuration when the node reports it is unprovisioned
+        // (needs_config), or when this hub boot has not yet pushed to the node
+        // (!config_synced_ → delivers config changes flashed into the hub once
+        // per boot).  A provisioned node waking from deep sleep keeps its
+        // persisted config, so both are false and we skip the two ~1.5 s config
+        // bursts and go straight to login — saving awake radio time on battery.
+        const bool needs_cfg    = needs_config;
+        const bool push_config  = needs_cfg || !this->config_synced_;
+
+
+        // An unprovisioned node holds no session, so plaintext is the only way
+        // to reach it and it accepts it — that is the bootstrap. A PROVISIONED
+        // node is the opposite case: it has a session and refuses plaintext
+        // commands, so pushing now would send two ~1.5 s bursts the node drops
+        // on the floor. Defer that push to confirm_session_, which is the first
+        // moment the hub can encrypt it.
+        if (push_config && needs_cfg)
+        {
+          ESP_LOGI(TAG, "[%s] Pushing config in the clear (node reports unprovisioned)",
+                   this->get_name().c_str());
+          this->send_remote_config();   // ClientConfig (address, subnet, name, sleepDuration)
+          // Tell every child the node REGISTERed (mac::Port::Session), so each
+          // can send its own configuration (LoraCoverComponent: CoverConfig).
+          for (auto *node : this->nodes_)
+            node->on_register();
+          this->config_synced_ = true;
+        }
+        else if (push_config)
+        {
+          ESP_LOGI(TAG, "[%s] Config push deferred until the session is confirmed",
+                   this->get_name().c_str());
+          this->config_push_pending_ = true;
+          this->pending_register_notice_ = true;
+        }
+        else
+        {
+          ESP_LOGI(TAG, "[%s] Config already in sync — skipping config push, login only",
+                   this->get_name().c_str());
+        }
+        return push_config;
+    }
+
+    // A new login challenge.
+    void LORAListener::session_challenge_started()
+    {
+      // §4.6 rule: a new session invalidates the hub's confidence. The
+      // counters reset here, the session keying changes, and the node may have
+      // rebooted — none of which is compatible with still believing its
+      // uplinks land in slot. It earns single-shot back from observation.
+      //
+      // session_changed alone did NOT achieve that. noteUplinkPlacement_ clears
+      // it on the FIRST in-slot uplink, and in_slot_acks survived the login
+      // untouched — so a node that had earned single-shot before re-keying got
+      // it back after one observation instead of kPromotionUplinks. Earning it
+      // back from observation means starting the count again.
+      // Same reasoning as the reboot path: a measurement from the previous
+      // session is not evidence about this one.
+      this->link_.note_session_changed();
+      this->last_gridsync_ack_us_   = 0;
+      this->mbs_restart_();
+
+      // A new session is also a new sequencing space for unauthenticated
+      // frames; a high-water mark from the old one means nothing here.
+      this->plaintext_hwm_      = 0;
+      this->have_plaintext_hwm_ = false;
+    }
+
+    // Both counters restarted for the new session.
+    void LORAListener::session_counters_restarted()
+    {
+      // No FCNT reserved from the old count may be spent any more: the new
+      // session counts up through the same numbers (P1).
+      this->invalidate_fcnt_reservations_();
+      this->dlv_forget_ids_();
+    }
+
+    // If we have not pushed config to this node this session (config_synced_
+    // is cleared on every hub boot and after a failed cover op), ask the node
+    // to REGISTER.  That drives the register -> config-push -> login path so an
+    // awake node that re-established via LOGIN still picks up config changes /
+    // OTA flashed into the hub — without needing to reboot.  Once config is
+    // pushed (config_synced_ becomes true) subsequent logins clear this flag,
+    // so the handshake converges after a single register cycle.
+    //
+    // ...UNLESS a config push is already deferred and waiting for this very
+    // session (config_push_pending_, set by handle_register_ for a node that
+    // reports itself PROVISIONED). Asking that node to re-register is a
+    // deadlock, and it hangs the whole link:
+    //
+    //   handle_register_  provisioned -> defer the push, config_synced_ stays false
+    //   send_login        request_register = !config_synced_ = TRUE
+    //   node              "CMD_LOGIN requests re-register" -> plaintext REGISTER,
+    //                     and by design it does NOT store the nonce or ack the
+    //                     login, because it expects the NEXT login to carry
+    //                     request_register = false
+    //   handle_register_  provisioned -> defer again, config_synced_ still false
+    //   ...forever, at the node's 5 s login rate limit
+    //
+    // The node's expectation is correct and documented at CmdDispatcher.cpp's
+    // request_register branch: a REGISTER is answered by a config push and
+    // then a clean login. But the hub only pushes inline when the node reports
+    // needs_config; for a provisioned node it defers to confirm_session_(),
+    // which can never run, because confirming the session requires the
+    // encrypted login ack that request_register just told the node to skip.
+    //
+    // So while a push is pending, ask for a login and nothing else. The
+    // session confirms, confirm_session_() sends the deferred push encrypted
+    // (the only way a provisioned node will accept it) and sets
+    // config_synced_. The resume-path guarantee in confirm_session_() is
+    // unaffected: it fires when config is unsynced with NO pending push,
+    // where request_register is still exactly what is wanted.
+    //
+    // Observed at the bench: node 2 provisioned, hub freshly flashed (which
+    // clears config_synced_), looping register <-> login for 8+ minutes with
+    // a healthy radio at RSSI -36. No measurement can run without a session.
+    bool LORAListener::session_request_register() const
+    {
+      return !this->config_synced_ && !this->config_push_pending_;
+    }
+
+    // Every confirmed session.
+    void LORAListener::session_on_confirmed()
+    {
+      // Security review finding 1: send the tracked op that send_cover_
+      // operation()/send_tracked_sysop_() deferred instead of packing
+      // plaintext. Unlike the config/TimeSync/GridSync deferrals below, this
+      // is NOT gated on !login_acked — a tracked op can be deferred by any
+      // relogin, not just the hub's first one this process, so it must fire
+      // on every confirm that finds one waiting.
+      this->send_deferred_tracked_op_();
+
+      // The deferred config push from handle_register_. This is the first
+      // moment it can be encrypted, and a provisioned node will not accept it
+      // any other way. config_synced_ is set HERE rather than at the point the
+      // push was decided, so a push that never happened is not recorded as one
+      // that did.
+      this->send_deferred_config_push_();
+    }
+
+    // The FIRST confirmation since the login was last unacknowledged.
+    void LORAListener::session_on_login_acknowledged()
+    {
+        this->acked_since_confirm_ = false;
 
         // P1: seed the node's wall clock.  Deferred rather than sent inline so
         // this frame's processing finishes first and the TimeSync does not
@@ -628,7 +870,6 @@ namespace esphome
         // re-entering here.  Re-checked in the lambda in case a REGISTER already
         // synced config in the meantime.
         this->schedule_config_sync_relogin_();
-      }
     }
 
     // The resume-path config-sync guarantee of confirm_session_ (moved out
@@ -1010,7 +1251,7 @@ namespace esphome
     // Returns true when the frame may be acted on.
     bool LORAListener::accept_plaintext_uplink_(hubframes::Up *rcv_message)
     {
-      if (!this->session_confirmed_)
+      if (!this->session_.confirmed())
       {
         const uint32_t id = rcv_message->header != nullptr ? rcv_message->header->msgid : 0u;
         if (this->have_plaintext_hwm_ && id <= this->plaintext_hwm_)
@@ -1198,19 +1439,6 @@ namespace esphome
              s_sec().authFrameV1(/*downlink=*/true, out->bytes.data(), out->bytes.size(), &out->seal);
     }
 
-    void LORAListener::send_login_v1_(const LoginMsg &login, uint32_t fcnt, uint32_t base)
-    {
-      MacFrame f;
-      if (this->v1_login_frame_(login, fcnt, &f))
-        this->mac0_send_(f.bytes.data(), f.bytes.size(), TxPolicy{}, f.seal);
-      else
-        ESP_LOGE(TAG, "[%s] v1 LOGIN could not be framed/authenticated — not sent",
-                 this->get_name().c_str());
-      ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
-               this->get_name().c_str(), (unsigned) base, (unsigned) this->session_.seq().txId(),
-               (int) login.request_register);
-    }
-
     bool HubSession::demote_frame(DeliveryFrame *out)
     {
       out->msgid = 0;
@@ -1341,139 +1569,6 @@ namespace esphome
     {
       std::lock_guard<std::mutex> lock(this->tx_mutex_);
       return f.seal.sealed && f.seal.key_epoch == r.keyEpoch();
-    }
-
-    void LORAListener::send_login()
-    {
-      // Base-nonce policy:
-      //   * Mint a fresh esp_random() ONLY for the first send of a challenge.
-      //   * On every retry (pending_login_nonce_ != 0) reuse the same value.
-      // Rationale: the node rate-limits CMD_LOGIN to one accepted message per
-      // 5 s.  If the hub regenerated the nonce on retry, the node would keep the
-      // FIRST nonce it saw (the rate-limited retry is silently dropped) while
-      // the hub's session id would be the LAST one — the two
-      // sides then permanently disagree and every encrypted reply fails the
-      // IV check.  pending_login_nonce_ is cleared in set_response() when the
-      // node's first valid reply sets login_acked_, and in enterSleep().
-      uint32_t base;
-      if (this->pending_login_nonce_ != 0)
-      {
-        base = this->pending_login_nonce_;
-      }
-      else
-      {
-        base = esp_random();
-        this->pending_login_nonce_ = base;
-        // A genuinely NEW challenge: whatever session keys are live belong
-        // to the session this challenge supersedes. Clear them now so a
-        // downlink packed before the new session-opening uplink arrives is
-        // correctly dropped ("no session keys") instead of silently
-        // encrypted under the old session's keys. See clearSessionKeys_()'s
-        // comment for why this is NOT done on a bare retry.
-        this->clearSessionKeys_();
-      }
-
-      // §4.6 rule: a new session invalidates the hub's confidence. The
-      // counters reset here, the session keying changes, and the node may have
-      // rebooted — none of which is compatible with still believing its
-      // uplinks land in slot. It earns single-shot back from observation.
-      //
-      // session_changed alone did NOT achieve that. noteUplinkPlacement_ clears
-      // it on the FIRST in-slot uplink, and in_slot_acks survived the login
-      // untouched — so a node that had earned single-shot before re-keying got
-      // it back after one observation instead of kPromotionUplinks. Earning it
-      // back from observation means starting the count again.
-      // Same reasoning as the reboot path: a measurement from the previous
-      // session is not evidence about this one.
-      this->link_.note_session_changed();
-      this->last_gridsync_ack_us_   = 0;
-      this->mbs_restart_();
-
-      // A new session is also a new sequencing space for unauthenticated
-      // frames; a high-water mark from the old one means nothing here.
-      this->plaintext_hwm_      = 0;
-      this->have_plaintext_hwm_ = false;
-
-      this->session_.restart_counters();   // a new session: both directions restart
-      // ...so no FCNT reserved from the old count may be spent any more: the
-      // new session counts up through the same numbers (P1).
-      this->invalidate_fcnt_reservations_();
-      this->session_.clear_msgid_relogin();   // the msgid space restarts here
-      this->dlv_forget_ids_();
-      // New login challenge: the encrypted session is not confirmed until the
-      // node proves it by sending a frame we can decrypt.  Until then the hub
-      // sends commands in plaintext (see v1_frame_).
-      this->session_confirmed_ = false;
-      this->relogin_pending_   = true;
-
-      // Store the base-nonce on the hub side before sending so it is ready to
-      // validate the first encrypted response the node sends back.
-      {
-        s_keys().setSessionId(static_cast<mac::Addr>(this->short_address_), base);
-      }
-
-      const uint32_t fcnt = this->incrTxMessageId();
-
-      LoginMsg login = LOGIN_MSG__INIT;
-      // nonce carries the base-nonce (session id) for the CTR counter block.
-      // The node stores it as its base_nonce on receipt of CMD_LOGIN.
-      login.nonce = base;
-      // If we have not pushed config to this node this session (config_synced_
-      // is cleared on every hub boot and after a failed cover op), ask the node
-      // to REGISTER.  That drives the register -> config-push -> login path so an
-      // awake node that re-established via LOGIN still picks up config changes /
-      // OTA flashed into the hub — without needing to reboot.  Once config is
-      // pushed (config_synced_ becomes true) subsequent logins clear this flag,
-      // so the handshake converges after a single register cycle.
-      //
-      // ...UNLESS a config push is already deferred and waiting for this very
-      // session (config_push_pending_, set by handle_register_ for a node that
-      // reports itself PROVISIONED). Asking that node to re-register is a
-      // deadlock, and it hangs the whole link:
-      //
-      //   handle_register_  provisioned -> defer the push, config_synced_ stays false
-      //   send_login        request_register = !config_synced_ = TRUE
-      //   node              "CMD_LOGIN requests re-register" -> plaintext REGISTER,
-      //                     and by design it does NOT store the nonce or ack the
-      //                     login, because it expects the NEXT login to carry
-      //                     request_register = false
-      //   handle_register_  provisioned -> defer again, config_synced_ still false
-      //   ...forever, at the node's 5 s login rate limit
-      //
-      // The node's expectation is correct and documented at CmdDispatcher.cpp's
-      // request_register branch: a REGISTER is answered by a config push and
-      // then a clean login. But the hub only pushes inline when the node reports
-      // needs_config; for a provisioned node it defers to confirm_session_(),
-      // which can never run, because confirming the session requires the
-      // encrypted login ack that request_register just told the node to skip.
-      //
-      // So while a push is pending, ask for a login and nothing else. The
-      // session confirms, confirm_session_() sends the deferred push encrypted
-      // (the only way a provisioned node will accept it) and sets
-      // config_synced_. The resume-path guarantee in confirm_session_() is
-      // unaffected: it fires when config is unsynced with NO pending push,
-      // where request_register is still exactly what is wanted.
-      //
-      // Observed at the bench: node 2 provisioned, hub freshly flashed (which
-      // clears config_synced_), looping register <-> login for 8+ minutes with
-      // a healthy radio at RSSI -36. No measurement can run without a session.
-      login.request_register = !this->config_synced_ && !this->config_push_pending_;
-
-      // Security review finding 7: true only on the hub's FIRST LOGIN send
-      // for this node since the hub process itself started — i.e. a genuine
-      // reboot. login_acked_ is exactly this: it starts false at boot/setup
-      // and is never reset to false again except by this same node's own
-      // reboot/sleep cycle (handle_register_, enter-sleep) or the very next
-      // send_login() challenge before it fires — never by the OTHER triggers
-      // that call send_login() while the node stays up (tracked-op-retry
-      // exhaustion, config_sync_relogin, the REGISTER follow-up, the
-      // sleep-fallback timer), which is exactly the distinction the node's
-      // demote-on-LOGIN needs and did not have before.
-      login.hub_rebooted = !this->login_acked_;
-
-      // The frame's K_AUTH tag (over every raw byte, recomputed per burst copy)
-      // authenticates LOGIN (spec 4.3).
-      this->send_login_v1_(login, fcnt, base);
     }
 
     onboarding::Gate HubSession::onboarding_gate_;

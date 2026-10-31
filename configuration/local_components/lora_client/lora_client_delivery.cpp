@@ -226,7 +226,7 @@ namespace esphome
       // confirm_session_() can send exactly this once encryption is possible,
       // rather than this sending a plaintext frame now that the node (already
       // holding a session) will reject outright.
-      if (this->relogin_pending_ || hold)
+      if (this->session_.relogin_pending() || hold)
       {
         this->ctl().deferred_until_login = true;
         ESP_LOGD(TAG, "[%s] %s deferred — %s", this->get_name().c_str(),
@@ -280,7 +280,7 @@ namespace esphome
     // ---- DeliveryHost: what the delivery service may ask of the listener ----
     const char *LORAListener::dlv_name() const { return this->get_name().c_str(); }
     bool LORAListener::dlv_has_radio() const { return this->parent_ != nullptr; }
-    bool LORAListener::dlv_relogin_pending() const { return this->relogin_pending_; }
+    bool LORAListener::dlv_relogin_pending() const { return this->session_.relogin_pending(); }
     bool LORAListener::dlv_frame(hubframes::Down *op, DeliveryFrame *out)
     {
       return this->mac_frame_(op, out);
@@ -302,7 +302,7 @@ namespace esphome
       return this->link_.belief().single_shot_unacked;
     }
     void LORAListener::dlv_mark_single_shot_unacked() { this->link_.mark_single_shot_unacked(); }
-    void LORAListener::dlv_drop_session() { this->session_confirmed_ = false; }
+    void LORAListener::dlv_drop_session() { this->session_.drop_confirmation(); }
     void LORAListener::dlv_relogin() { this->do_login_and_arm_retry_(); }
     void LORAListener::dlv_set_timeout(const char *name, uint32_t ms, std::function<void()> fn)
     {

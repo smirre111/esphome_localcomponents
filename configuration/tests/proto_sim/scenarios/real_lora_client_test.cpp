@@ -170,7 +170,7 @@ void give_session(LORAClient &rol) {
     ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
     rol.registered_ = true;
     ASSERT_TRUE(rol.deriveSessionKeysForTest(kTestSessionId, kTestNodeNonce));
-    rol.session_confirmed_ = true;
+    rol.login_state_for_test().confirmed = true;
 }
 // A plaintext v1 uplink re-framed as the node seals it in that session.
 std::vector<uint8_t> sealed_like_node(const std::vector<uint8_t> &plain) {
@@ -187,7 +187,7 @@ std::vector<uint8_t> sealed_like_node(const std::vector<uint8_t> &plain) {
 // Feed an uplink: sealed when the listener holds a confirmed session (a real
 // node in session never sends plaintext), as it is otherwise.
 void feed_sealed(LORAClient &rol, const std::vector<uint8_t> &plain) {
-    std::vector<uint8_t> f = rol.session_confirmed_ ? sealed_like_node(plain) : plain;
+    std::vector<uint8_t> f = rol.session_confirmed() ? sealed_like_node(plain) : plain;
     rol.set_response(f.data(), f.size());
 }
 
@@ -269,14 +269,14 @@ TEST(RealLoraClient, SendLoginReusesPendingNonceAcrossRetries) {
 
     // First challenge.
     rol_2.send_login();
-    const uint32_t pending_first = rol_2.pending_login_nonce_;
+    const uint32_t pending_first = rol_2.pending_login_nonce();
     ASSERT_NE(pending_first, 0u);
 
     // Two more retries before any ACK.
     rol_2.send_login();
     rol_2.send_login();
 
-    EXPECT_EQ(rol_2.pending_login_nonce_, pending_first)
+    EXPECT_EQ(rol_2.pending_login_nonce(), pending_first)
         << "REAL LORAListener::send_login() must reuse pending nonce on "
            "every retry — this is the production-side guarantee that "
            "the harness model also enforces.";
@@ -353,7 +353,7 @@ TEST(RealLoraClient, DoLoginAndArmRetryResetsBeforeSend) {
     // silently turn this regression test into a no-op.
     clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 100);
 
-    EXPECT_TRUE(rol_2.login_acked_)
+    EXPECT_TRUE(rol_2.login_acked())
         << "do_login_and_arm_retry_ must reset login_acked_=false BEFORE "
            "calling send_login(). Otherwise a synchronous ACK arriving "
            "during send_login() is silently clobbered, and the hub "
@@ -955,7 +955,7 @@ TEST(RealLoraClient, AForgedPlaintextAckCannotRetireATrackedCommand) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_         = true;
-    h.rol.session_confirmed_  = true;   // the node has proved it holds the key
+    h.rol.login_state_for_test().confirmed = true;   // the node has proved it holds the key
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
                                COV_OPERATION__CMD_OPEN, 0.0f);
     auto &op = static_cast<TrackedOpProbe &>(h.rol);
@@ -975,7 +975,7 @@ TEST(RealLoraClient, AForgedPlaintextAckCannotEarnSingleShot) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_        = true;
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
 
     auto forged = plaintext_ack_frame(/*msgid=*/5, /*ack_msg_id=*/1, /*timed=*/true);
     h.rol.set_response(forged.data(), forged.size());
@@ -1043,7 +1043,7 @@ TEST(RealLoraClient, AForgedPlaintextFcntCannotBlockTheSessionOpeningUplink) {
     inner.avail.available      = true;
     auto reply = proto_sim::seal_resp(inner, *base, kTestNodeNonce);
     h.rol.set_response(reply.data(), reply.size());
-    EXPECT_TRUE(h.rol.session_confirmed_)
+    EXPECT_TRUE(h.rol.session_confirmed())
         << "the node's session-opening uplink was refused after a forged plaintext FCNT";
 }
 
@@ -1100,13 +1100,13 @@ TEST(RealLoraClient, AnUnauthenticatedLoginUplinkIsIgnoredAndTearsNothingDown) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_        = true;
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     RecordingNode node;
     h.rol.register_lora_node(&node);
     const size_t tx_before = h.radio.transcript().size();
     auto frame = plaintext_login_uplink(/*msgid=*/5);
     h.rol.set_response(frame.data(), frame.size());
-    EXPECT_TRUE(h.rol.session_confirmed_) << "a plaintext LOGIN must not tear a session down";
+    EXPECT_TRUE(h.rol.session_confirmed()) << "a plaintext LOGIN must not tear a session down";
     EXPECT_EQ(h.radio.transcript().size(), tx_before) << "and must not provoke a LOGIN of ours";
     EXPECT_EQ(h.rol.plaintextRefused(), 0u) << "dropped before the plaintext gate";
     EXPECT_EQ(h.rol.sequencer().rxId(), 0u) << "the counter must not move";
@@ -1145,7 +1145,7 @@ TEST(RealLoraClient, AnAdmittedPlaintextFrameIsFannedOutDecodedToTheChildNodes) 
     }
 
     // Once a session is confirmed the same frame is refused outright: no fan-out.
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     auto again = position_frame(6);
     h.rol.set_response(again.data(), again.size());
     EXPECT_EQ(a.got.size(), 1u);
@@ -1508,7 +1508,7 @@ TEST(RealLoraClient, TimeSyncPushedAfterSessionConfirmed) {
 
     const uint32_t base = drive_session(clock, radio, rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(rol.login_acked_) << "session must be confirmed before TimeSync is due";
+    ASSERT_TRUE(rol.login_acked()) << "session must be confirmed before TimeSync is due";
 
     const size_t before = radio.transcript().size();
     clock.tick(1000);   // past the 750 ms deferred push
@@ -1581,7 +1581,7 @@ TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
     // encrypted, and it must go then.
     const uint32_t base = drive_session(clock, radio, rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(rol.session_confirmed_);
+    ASSERT_TRUE(rol.session_confirmed());
 
     EXPECT_TRUE(rol.config_synced_)
         << "the deferred push must actually happen once the session exists";
@@ -1638,7 +1638,7 @@ TEST(RealLoraClient, AProvisionedNodesCoverConfigIsEncryptedToo) {
 
     const uint32_t base = drive_session(clock, radio, rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(rol.session_confirmed_)
+    ASSERT_TRUE(rol.session_confirmed())
         << "the plaintext-on-a-confirmed-session case needs a confirmed session";
     ASSERT_TRUE(rol.config_synced_) << "the deferred push must have run";
 
@@ -1697,7 +1697,7 @@ TEST(RealLoraClient, ADecryptedBeaconIsWhatCarriesThePhaseReport) {
 
     const uint32_t base = drive_session(clock, radio, rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(rol.session_confirmed_);
+    ASSERT_TRUE(rol.session_confirmed());
 
     rol.enable_timed_mode(true);
     EXPECT_FALSE(rol.hubBelief().phase_reported)
@@ -1774,7 +1774,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrig
 
     const uint32_t base = drive_session(clock, radio, rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(rol.session_confirmed_);
+    ASSERT_TRUE(rol.session_confirmed());
     rol.node_fw_version_ = 0x00010203;
     rol.enable_timed_mode(true);
     ASSERT_TRUE(tracker.gridStarted());
@@ -1830,7 +1830,7 @@ TEST(RealLoraClient, APlaintextFrameOnAConfirmedSessionCannotBeReplayedWithoutLi
 
     const uint32_t base = drive_session(clock, radio, rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(rol.session_confirmed_) << "the replay only applies to a live session";
+    ASSERT_TRUE(rol.session_confirmed()) << "the replay only applies to a live session";
 
     const uint32_t rx = rol.sequencer().rxId();
     auto forged = real_helpers::serialize_avail(/*sender=*/18, rx + 5);
@@ -1887,7 +1887,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
 
     const uint32_t base = drive_session(clock, radio, rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(rol.session_confirmed_) << "the attack only applies to a live session";
+    ASSERT_TRUE(rol.session_confirmed()) << "the attack only applies to a live session";
 
     const uint32_t rx_after_login = rol.sequencer().rxId();
 
@@ -3157,7 +3157,7 @@ TEST(MacPing, AReservedFcntIsNeverSealedUnderTheNextSessionsKeys) {
     });
     const uint32_t base1 = drive_session(h.clock, h.radio, h.rol);
     ASSERT_NE(base1, 0u);
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition: session 1 confirmed";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition: session 1 confirmed";
 
     h.rol.start_mac_ping(/*duration_s=*/300, /*grid_ms=*/1100, /*want_echo=*/false,
                          /*pad_bytes=*/0, /*crypto=*/true);
@@ -3167,7 +3167,7 @@ TEST(MacPing, AReservedFcntIsNeverSealedUnderTheNextSessionsKeys) {
     // is confirmed while the ping run is still going.
     const size_t relogin_at = h.radio.transcript().size();
     h.rol.send_login();
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition: session 2 confirmed";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition: session 2 confirmed";
     ASSERT_GE(nonces->size(), 2u);
     ASSERT_NE(nonces->back(), base1) << "precondition: a NEW session id";
 
@@ -3210,7 +3210,7 @@ TEST(TestStreamFcnts, ATimerBuiltModeTestMarkNeverTouchesTheSequencer) {
     RealHubHarness h{18, kMacRol2};
     ensure_psa_ready();
     drive_session(h.clock, h.radio, h.rol);
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
 
     h.rol.start_mode_test(/*duration_s=*/60, /*grid_ms=*/1500, /*mode=*/1, 1, true, false,
                           false, false, 0);
@@ -3236,7 +3236,7 @@ TEST(TestStreamFcnts, ATimerBuiltDriftTickNeverTouchesTheSequencer) {
     RealHubHarness h{18, kMacRol2};
     ensure_psa_ready();
     drive_session(h.clock, h.radio, h.rol);
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
 
     h.rol.start_drift_test(/*duration_s=*/60, /*grid_ms=*/1000);
     h.clock.tick(3100);
@@ -3257,14 +3257,14 @@ TEST(TestStreamFcnts, AReloginMidRunNeverSealsAMarkUnderTheNextSession) {
     RealHubHarness h{18, kMacRol2};
     ensure_psa_ready();
     drive_session(h.clock, h.radio, h.rol);
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
     h.rol.start_mode_test(300, 1500, /*mode=*/1, 1, true, false, false, false, 0);
     h.clock.tick(3100);
     h.rol.mode_test_tick_for_test();
 
     const size_t relogin_at = h.radio.transcript().size();
     h.rol.send_login();
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition: session 2 confirmed";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition: session 2 confirmed";
     for (int i = 0; i < 16; ++i) {
         h.rol.send_timesync();
         h.rol.mode_test_tick_for_test();
@@ -4621,19 +4621,19 @@ TEST(OnboardingGateHub, TheSecondNodeDoesNotStartItsLoginWhileTheFirstIsBeingBro
         h.clock.tick(100);
         if (h.loginsTo(18) > 0) {
             second_started = true;
-            first_was_settled_by_then = h.rol_1.session_confirmed_ &&
+            first_was_settled_by_then = h.rol_1.session_confirmed() &&
                                         !h.rol_1.onboarding_held_for_test();
         }
     }
     ASSERT_TRUE(second_started) << "the second node must not be starved";
     EXPECT_TRUE(first_was_settled_by_then)
         << "node 17 had to have confirmed its session and released the gate";
-    EXPECT_TRUE(h.rol_2.onboarding_held_for_test() || h.rol_2.session_confirmed_);
+    EXPECT_TRUE(h.rol_2.onboarding_held_for_test() || h.rol_2.session_confirmed());
 
     // ...and both end up with a confirmed session.
     h.clock.tick(30000);
-    EXPECT_TRUE(h.rol_1.session_confirmed_);
-    EXPECT_TRUE(h.rol_2.session_confirmed_);
+    EXPECT_TRUE(h.rol_1.session_confirmed());
+    EXPECT_TRUE(h.rol_2.session_confirmed());
     EXPECT_FALSE(h.rol_1.onboarding_held_for_test());
     EXPECT_FALSE(h.rol_2.onboarding_held_for_test());
 }
@@ -4658,8 +4658,8 @@ TEST(OnboardingGateHub, ANodeThatNeverAnswersDoesNotHoldTheOtherNodeHostage) {
     EXPECT_GE(h.loginsTo(18), 1)
         << "node 17 never answered, so node 18 must have been let through";
     h.clock.tick(30000);
-    EXPECT_TRUE(h.rol_2.session_confirmed_);
-    EXPECT_FALSE(h.rol_1.session_confirmed_);
+    EXPECT_TRUE(h.rol_2.session_confirmed());
+    EXPECT_FALSE(h.rol_1.session_confirmed());
 }
 
 TEST(OnboardingGateHub, ALoneNodeIsNotDelayedByTheGate) {
@@ -4669,7 +4669,7 @@ TEST(OnboardingGateHub, ALoneNodeIsNotDelayedByTheGate) {
     h.rol_2.set_response(r2.data(), r2.size());
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
     EXPECT_EQ(h.loginsTo(18), 1) << "no other node is onboarding: no wait";
-    EXPECT_TRUE(h.rol_2.session_confirmed_);
+    EXPECT_TRUE(h.rol_2.session_confirmed());
 }
 
 namespace {
@@ -4695,13 +4695,13 @@ TEST(OnboardingGateHub, ALoginRetryIsNotSentIntoAnotherNodesOnboarding) {
     static_cast<RetryProbe&>(h.rol_2).login_retry_step_();
     EXPECT_EQ(h.loginsTo(18), before)
         << "no login to 18 while 17 is being brought up";
-    EXPECT_EQ(h.rol_2.login_retry_count_, 0u)
+    EXPECT_EQ(h.rol_2.login_retry_count(), 0u)
         << "and the retry that did not happen must not be counted against 18's ladder";
 
     // Once 17 is done the same step goes through.
     h.clock.tick(60000);
     ASSERT_FALSE(h.rol_1.onboarding_held_for_test());
-    h.rol_2.login_acked_ = false;
+    h.rol_2.login_state_for_test().login_acked = false;
     static_cast<RetryProbe&>(h.rol_2).login_retry_step_();
     EXPECT_GT(h.loginsTo(18), before) << "a free gate lets the retry through";
 }
@@ -4739,7 +4739,7 @@ TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheSchedulePushIsUnacknowledged
     // Past confirmation and the settle delay, but the node has not acked the
     // ScheduleConfig it was sent.
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
-    ASSERT_TRUE(h.rol_1.session_confirmed_);
+    ASSERT_TRUE(h.rol_1.session_confirmed());
     ASSERT_NE(h.rol_1.schedulePushMsgid(), 0u) << "precondition: a ScheduleConfig is outstanding";
     EXPECT_TRUE(h.rol_1.onboarding_held_for_test())
         << "still bringing node 17 up: its schedule has not landed";
@@ -4758,7 +4758,7 @@ TEST(OnboardingGateHub, ASchedulePushWithNoRetryLeftNoLongerHoldsTheGate) {
     h.bothRegister();
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
-    ASSERT_TRUE(h.rol_1.session_confirmed_);
+    ASSERT_TRUE(h.rol_1.session_confirmed());
     ASSERT_TRUE(h.rol_1.onboarding_held_for_test()) << "precondition: the push holds the gate";
 
     AK(h.rol_1).pushInFlight(7, LORAClient::kSchedMaxRetries - 1, h.rol_1.schedule_version());
@@ -4778,7 +4778,7 @@ TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheNodesOwnFramesAreStillQueued
     h.bothRegister();
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
-    ASSERT_TRUE(h.rol_1.session_confirmed_);
+    ASSERT_TRUE(h.rol_1.session_confirmed());
     ASSERT_NE(h.rol_1.schedulePushMsgid(), 0u);
 
     h.tracker.tx_drain_us = 20'000'000;
@@ -4836,7 +4836,7 @@ TEST(SessionRebuild, HousekeepingPushesWaitForTheSessionInsteadOfGoingOutInTheCl
 
     // Bring the session up. The pushes now go, encrypted.
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
-    ASSERT_TRUE(h.rol.session_confirmed_);
+    ASSERT_TRUE(h.rol.session_confirmed());
     ASSERT_NE(base, 0u);
     h.clock.tick(4000);
 
@@ -4938,7 +4938,7 @@ TEST(MacPingCrypto, AnEncryptedPingReachesTheNodeAndCarriesItsOwnSeq) {
     h.rol.registered_ = true;
     const uint32_t base = drive_session(h.clock, h.radio, h.rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(h.rol.session_confirmed_);
+    ASSERT_TRUE(h.rol.session_confirmed());
 
     h.rol.start_mac_ping(/*duration_s=*/5, /*grid_ms=*/1000, /*want_echo=*/true,
                          /*pad_bytes=*/0, /*crypto=*/true);
@@ -4972,7 +4972,7 @@ TEST(MacPingCrypto, WithoutASessionCryptoFallsBackToPlaintextLikeEveryOtherDownl
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
-    ASSERT_FALSE(h.rol.session_confirmed_);
+    ASSERT_FALSE(h.rol.session_confirmed());
     const uint32_t txid_before = static_cast<TxIdProbe &>(h.rol).txId();
 
     h.rol.start_mac_ping(/*duration_s=*/5, /*grid_ms=*/1000, /*want_echo=*/true,
@@ -5291,7 +5291,7 @@ TEST(ConfigHashPersistence, ACommandAfterAHubRebootWaitsForTheSessionInsteadOfGo
         tracker2.register_client(&rol2);
         rol2.setup();
         ASSERT_TRUE(rol2.registered_) << "precondition: restored as registered";
-        ASSERT_FALSE(rol2.session_confirmed_) << "precondition: no keys after the reboot";
+        ASSERT_FALSE(rol2.session_confirmed()) << "precondition: no keys after the reboot";
 
         const size_t before = tracker2.sent_raw.size();
         rol2.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
@@ -5517,7 +5517,7 @@ TEST(HubRootKey, IsSha256OfTheFleetKeyPhraseTruncatedTo16Bytes) {
 TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     MsgidGuardFixture f;
     ASSERT_NE(f.base, 0u);
-    ASSERT_TRUE(f.rol.session_confirmed_);
+    ASSERT_TRUE(f.rol.session_confirmed());
 
     f.rol.setCountersForTest(0x7FFFFFFDu, f.rol.sequencer().rxId());
     EXPECT_EQ(f.rol.incrTxMessageId(), 0x7FFFFFFEu);
@@ -5619,7 +5619,7 @@ bool retagLikeLast(const LORATracker &t, uint8_t peer, RetagCase &c) {
 
 TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSession) {
     MsgidGuardFixture f;
-    ASSERT_TRUE(f.rol.login_acked_);
+    ASSERT_TRUE(f.rol.login_acked());
     f.rol.setCountersForTest(f.rol.sequencer().txId(), 0x7FFFFFF0u);
 
     // CONTROL: an ordinary authentic uplink is accepted and asks for nothing.
@@ -5668,7 +5668,6 @@ namespace {
 // AckProbe above, adding no state.
 struct OptProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
-    using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::last_timesync_sent_us_;
 };
 OptProbe &P(real_helpers::RealHubHarness &h) { return static_cast<OptProbe &>(h.rol); }
@@ -5926,7 +5925,7 @@ TEST(OptimisticShot, ASessionChangeStillBurstsAndKeepsTheNormalWait) {
     ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::SessionChanged)
         << "optimism must not outrank a session change";
 
-    P(h).relogin_pending_ = false;
+    P(h).login_state_for_test().relogin_pending = false;
     sendOpen(h);
     EXPECT_NE(h.tracker.last_copies, 1) << "a burst";
     EXPECT_FALSE(h.rol.op_sent_optimistic_for_test());
@@ -5948,7 +5947,7 @@ TEST(OptimisticShot, ARebootStillBurstsAndKeepsTheNormalWait) {
     h.rol.set_response(reg.data(), reg.size());
     ASSERT_EQ(h.rol.txRefusalNow(), timedmode::TxRefusal::RebootedSinceConfirm);
 
-    P(h).relogin_pending_ = false;
+    P(h).login_state_for_test().relogin_pending = false;
     sendOpen(h);
     EXPECT_NE(h.tracker.last_copies, 1);
     EXPECT_FALSE(h.rol.op_sent_optimistic_for_test());
@@ -6074,7 +6073,7 @@ TEST(AdaptiveAckWait, OnlyACleanSinglePlacedCopyFeedsTheHistory) {
         h.rol.node_fw_version_ = 10104;
         h.rol.notePhaseReportForTest(2, 500, 800, 8, 0, true);
         h.rol.send_login();
-        P(h).relogin_pending_ = false;
+        P(h).login_state_for_test().relogin_pending = false;
         sendOpen(h);
         ASSERT_NE(h.tracker.last_copies, 1);
         h.clock.tick(500);
@@ -6233,8 +6232,8 @@ TEST(PendingShadowInputs, TheListenerReportsWhatItOwes) {
     EXPECT_EQ(in.slot, (uint8_t) (h.rol.grid_slot() % timedgrid::kSlotCount));
 
     // Settle everything the listener could owe.
-    h.rol.session_confirmed_ = true;
-    P(h).relogin_pending_   = false;
+    h.rol.login_state_for_test().confirmed = true;
+    P(h).login_state_for_test().relogin_pending = false;
     h.rol.config_synced_     = true;
     h.rol.enable_timed_mode(true);
     h.rol.set_auto_mode_default(true);
@@ -6274,8 +6273,8 @@ TEST(PendingShadowInputs, EachOwedPushConditionIsAReasonOnItsOwn) {
     h.rol.registered_ = true;
     const int64_t now = esp_timer_get_time();
     auto settle = [&]() {
-        h.rol.session_confirmed_ = true;
-        P(h).relogin_pending_    = false;
+        h.rol.login_state_for_test().confirmed = true;
+        P(h).login_state_for_test().relogin_pending = false;
         h.rol.config_synced_     = true;
         h.rol.config_push_pending_ = false;
         h.rol.node_sched_version_ = h.rol.schedule_version();
@@ -6324,7 +6323,7 @@ TEST(PendingShadowInputs, OpsAndDeferredOpsAreVisible) {
     deliverAck(h.rol, P(h).ctl().first_msgid);
     EXPECT_FALSE(h.rol.pending_shadow_inputs(now).op_awaiting_ack);
 
-    P(h).relogin_pending_ = true;
+    P(h).login_state_for_test().relogin_pending = true;
     sendOpen(h);   // parked behind the relogin
     EXPECT_TRUE(P(h).ctl().deferred_until_login);
     const pendingshadow::NodeInputs in = h.rol.pending_shadow_inputs(now);
@@ -6563,14 +6562,14 @@ TEST(OpRetry, ARetryThatFallsInsideARelogin_DefersWithoutSpendingTheBudget) {
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
     const size_t sends = h.tracker.sent_copies.size();
-    P(h).relogin_pending_ = true;
+    P(h).login_state_for_test().relogin_pending = true;
     h.clock.tick(30'000);                         // ten intervals' worth
     EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "nothing is sent into a session that does not exist";
     EXPECT_EQ(h.rol.opRetryCount(), 0u) << "and no retry is charged";
     EXPECT_FALSE(h.rol.commandFailed());
     EXPECT_TRUE(h.rol.awaitingAck());
 
-    P(h).relogin_pending_ = false;                // the deferral re-armed itself
+    P(h).login_state_for_test().relogin_pending = false;                // the deferral re-armed itself
     h.clock.tick(4'000);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the retry resumes";
     EXPECT_EQ(h.rol.opRetryCount(), 1u);
@@ -6580,20 +6579,20 @@ TEST(OpRetry, ExhaustingTheRetriesFailsTheCommandAndForcesAFreshSession) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     staleButOtherwiseGood(h);
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
     for (uint32_t i = 1; i <= 4; ++i) {
         h.clock.tick(3000 + 50);
         EXPECT_EQ(h.rol.opRetryCount(), i);
         EXPECT_TRUE(h.rol.awaitingAck());
-        EXPECT_TRUE(h.rol.session_confirmed_);
+        EXPECT_TRUE(h.rol.session_confirmed());
     }
     const size_t sends = h.tracker.sent_copies.size();
     h.clock.tick(3000 + 50);
     EXPECT_TRUE(h.rol.commandFailed());
     EXPECT_FALSE(h.rol.awaitingAck());
-    EXPECT_FALSE(h.rol.session_confirmed_) << "the session is presumed dead";
+    EXPECT_FALSE(h.rol.session_confirmed()) << "the session is presumed dead";
     EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1)
         << "exactly one frame leaves: the fresh LoginMsg, not another op retransmit";
     h.clock.tick(60'000);
@@ -6695,7 +6694,6 @@ uint32_t installedSessionId(uint8_t peer) { return mac2::LinkSecurity::hub().sto
 struct EncProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::clearSessionKeys_;
     using esphome::lora_tracker::LORAListener::last_heard_us_;
-    using esphome::lora_tracker::LORAListener::login_acked_;
 };
 EncProbe &EP(LORAClient &c) { return static_cast<EncProbe &>(c); }
 
@@ -6715,14 +6713,14 @@ TEST(EncUplink, NoBaseNonceForTheSenderStartsAFreshLoginAndDiscardsTheFrame) {
     EXPECT_GE(count_logins_since(h.radio, 0), before + 1) << "re-provisioning goes through a LOGIN";
     EXPECT_TRUE(node.got.empty()) << "and the frame itself is discarded, never forwarded";
     EXPECT_EQ(h.rol.sequencer().rxId(), 0u) << "the replay counter does not move";
-    EXPECT_FALSE(h.rol.session_confirmed_);
+    EXPECT_FALSE(h.rol.session_confirmed());
 }
 
 TEST(EncUplink, WithoutDerivedKeysAndNoSessionNonceTheFrameIsDroppedUntouched) {
     MsgidGuardFixture f;
     RecordingNode node;
     f.rol.register_lora_node(&node);
-    ASSERT_TRUE(f.rol.session_confirmed_);
+    ASSERT_TRUE(f.rol.session_confirmed());
     EP(f.rol).clearSessionKeys_();               // base nonce stays, keys go
     proto_sim_timer_set_now_us(900'000'000);
     const uint32_t rx_before   = f.rol.sequencer().rxId();
@@ -6777,7 +6775,7 @@ TEST(EncUplink, AVerifiedFrameWhosePayloadIsNotAMessageStillCommitsAndConfirmsBu
     MsgidGuardFixture f;
     RecordingNode node;
     f.rol.register_lora_node(&node);
-    f.rol.session_confirmed_ = false;            // let the confirm step show itself
+    f.rol.login_state_for_test().confirmed = false;            // let the confirm step show itself
     proto_sim_timer_set_now_us(900'000'000);
     const uint32_t rx_before = f.rol.sequencer().rxId();
     const int64_t  heard_before = EP(f.rol).last_heard_us_;
@@ -6786,7 +6784,7 @@ TEST(EncUplink, AVerifiedFrameWhosePayloadIsNotAMessageStillCommitsAndConfirmsBu
     f.rol.set_response(bytes.data(), bytes.size());
     EXPECT_EQ(f.rol.sequencer().rxId(), rx_before + 1) << "the tag verified: the msgid is real";
     EXPECT_NE(EP(f.rol).last_heard_us_, heard_before) << "and the node is proven awake";
-    EXPECT_TRUE(f.rol.session_confirmed_) << "the session is confirmed by the verified frame";
+    EXPECT_TRUE(f.rol.session_confirmed()) << "the session is confirmed by the verified frame";
     EXPECT_TRUE(node.got.empty()) << "but there is nothing to dispatch or forward";
 }
 
@@ -7282,7 +7280,7 @@ TEST(ModeBListener, ANodeWithoutAConfirmedSessionIsNotWarmedUp) {
     r.session();
     r.rol.enable_timed_mode(true);
     r.ackGrid();
-    r.rol.session_confirmed_ = false;     // e.g. a login challenge in flight
+    r.rol.login_state_for_test().confirmed = false;     // e.g. a login challenge in flight
     r.secs(900);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
 }
@@ -7471,8 +7469,8 @@ struct SecondNode {
         rol2.enable_timed_mode(true);          // plaintext GridSync is fine for this test
         proto_sim_timer_advance_us(2000);
         deliverAck(rol2, AK(rol2).mac().acks.id[0]);
-        rol2.session_confirmed_ = true;
-        rol2.login_acked_       = true;
+        rol2.login_state_for_test().confirmed = true;
+        rol2.login_state_for_test().login_acked = true;
         rol2.note_node_heard_();
     }
 };
@@ -7537,7 +7535,6 @@ namespace {
 
 struct SleepProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
-    using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::note_node_heard_;
     using esphome::lora_tracker::LORAListener::rtc_;
     using esphome::lora_tracker::LORAListener::login_slot_;
@@ -7569,8 +7566,8 @@ int countLoginFrames(real_helpers::RealHubHarness &h) {
 void sleepReady(real_helpers::RealHubHarness &h) {
     h.rol.registered_ = true;
     h.time.set_now(kModeBNow, /*valid=*/true);
-    h.rol.login_acked_         = true;
-    h.rol.pending_login_nonce_ = 0x1234;
+    h.rol.login_state_for_test().login_acked = true;
+    h.rol.login_state_for_test().pending_login_nonce = 0x1234;
 }
 
 // The node's CommandAck for the sleep in flight.
@@ -7602,8 +7599,8 @@ TEST(NightlySleep, GoesOutAsATrackedOpAndMutatesNothingUntilTheAck) {
     EXPECT_EQ(countSleepFrames(h), 1);
     // ...and the hub's picture of the node is exactly what it was.
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "no sleep is recorded before the node says so";
-    EXPECT_TRUE(h.rol.login_acked_) << "the session is still live";
-    EXPECT_EQ(h.rol.pending_login_nonce_, 0x1234u);
+    EXPECT_TRUE(h.rol.login_acked()) << "the session is still live";
+    EXPECT_EQ(h.rol.pending_login_nonce(), 0x1234u);
     esphome::lora_tracker::LORAClientRestoreState before{};
     ASSERT_TRUE(SP(h.rol).rtc_.load(&before));
     EXPECT_EQ(before.last_sleep_epoch, 0u) << "and nothing was persisted either";
@@ -7614,8 +7611,8 @@ TEST(NightlySleep, GoesOutAsATrackedOpAndMutatesNothingUntilTheAck) {
     EXPECT_FALSE(h.rol.commandFailed());
     EXPECT_EQ(h.rol.last_sleep_epoch_, (uint32_t) kModeBNow + 1)
         << "stamped at the ack, one second past the uplink that carried it";
-    EXPECT_FALSE(h.rol.login_acked_);
-    EXPECT_EQ(h.rol.pending_login_nonce_, 0u);
+    EXPECT_FALSE(h.rol.login_acked());
+    EXPECT_EQ(h.rol.pending_login_nonce(), 0u);
     esphome::lora_tracker::LORAClientRestoreState after{};
     ASSERT_TRUE(SP(h.rol).rtc_.load(&after));
     EXPECT_EQ(after.last_sleep_epoch, (uint32_t) kModeBNow + 1) << "persisted on the ack";
@@ -7636,7 +7633,7 @@ TEST(NightlySleep, AnUnackedSleepIsRetransmittedWithTheSameMsgidAndStillRecordsN
     EXPECT_EQ(h.rol.opRetryCount(), 1u);
     EXPECT_EQ(SP(h.rol).ctl().last_msgid, id) << "the retry IS the original command";
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
-    EXPECT_TRUE(h.rol.login_acked_);
+    EXPECT_TRUE(h.rol.login_acked());
 
     ackSleep(h);   // a late ack for the original still counts
     EXPECT_FALSE(h.rol.awaitingAck());
@@ -7715,7 +7712,7 @@ TEST(NightlySleep, WithoutAnAckNoLoginFallbackIsEverArmed) {
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
     h.rol.set_sleep_duration(60);
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.rol.enterSleep();
     exhaustRetries(h);
     const int logins = countLoginFrames(h);
@@ -7728,7 +7725,7 @@ TEST(NightlySleep, ExhaustedRetriesKeepTheSessionAndRecordNoSleep) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.rol.enterSleep();
     const int logins0 = countLoginFrames(h);
     exhaustRetries(h);
@@ -7737,9 +7734,9 @@ TEST(NightlySleep, ExhaustedRetriesKeepTheSessionAndRecordNoSleep) {
     EXPECT_TRUE(h.rol.commandFailed()) << "visible in Home Assistant";
     EXPECT_TRUE(SP(h.rol).ctl().sleep_unconfirmed);
     // The teardown "Command failed after retries - clearing session" is NOT applied.
-    EXPECT_TRUE(h.rol.session_confirmed_) << "the session is kept";
-    EXPECT_TRUE(h.rol.login_acked_);
-    EXPECT_EQ(h.rol.pending_login_nonce_, 0x1234u);
+    EXPECT_TRUE(h.rol.session_confirmed()) << "the session is kept";
+    EXPECT_TRUE(h.rol.login_acked());
+    EXPECT_EQ(h.rol.pending_login_nonce(), 0x1234u);
     EXPECT_EQ(countLoginFrames(h), logins0) << "and no forced re-login is sent into the night";
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "a sleep nobody confirmed is not recorded";
 }
@@ -7763,7 +7760,7 @@ TEST(NightlySleep, HearingTheNodeDoesNotClearALaterCommandsFailure) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.rol.enterSleep();
     exhaustRetries(h);
     ASSERT_TRUE(SP(h.rol).ctl().sleep_unconfirmed);
@@ -7790,8 +7787,8 @@ TEST(NightlySleep, AnAutoModeNodeIsSkippedExactlyAsBefore) {
     EXPECT_FALSE(h.rol.awaitingAck());
     EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "nothing is sent";
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
-    EXPECT_TRUE(h.rol.login_acked_) << "the session is not discarded";
-    EXPECT_EQ(h.rol.pending_login_nonce_, 0x1234u);
+    EXPECT_TRUE(h.rol.login_acked()) << "the session is not discarded";
+    EXPECT_EQ(h.rol.pending_login_nonce(), 0x1234u);
 }
 
 TEST(NightlySleep, ASecondRequestWhileOneIsPendingChangesNothing) {
@@ -7822,7 +7819,7 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsDroppedAfterTheExpiryNotSentHo
     ensure_psa_ready();
     ModeBRig r;
     r.session();
-    SP(r.rol).relogin_pending_ = true;            // the session is being rebuilt
+    SP(r.rol).login_state_for_test().relogin_pending = true;            // the session is being rebuilt
     const size_t frames = r.radio.hub_to_node_frames().size();
 
     r.rol.enterSleep();
@@ -7846,7 +7843,7 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsSentWhenTheSessionReturnsInTim
     ensure_psa_ready();
     ModeBRig r;
     r.session();
-    SP(r.rol).relogin_pending_ = true;
+    SP(r.rol).login_state_for_test().relogin_pending = true;
     r.rol.enterSleep();
     r.secs(175);                                  // 5 s before the expiry
 
@@ -7919,7 +7916,7 @@ TEST(NightlySleep, ASecondRequestWhileTheFirstIsDeferredBehindARelogin_ChangesNo
     ensure_psa_ready();
     ModeBRig r;
     r.session();
-    SP(r.rol).relogin_pending_ = true;
+    SP(r.rol).login_state_for_test().relogin_pending = true;
     r.rol.enterSleep();
     ASSERT_TRUE(SP(r.rol).ctl().deferred_until_login);
     const uint32_t gen = SP(r.rol).ctl().generation;
@@ -7936,7 +7933,7 @@ TEST(NightlySleep, ASleepWhoseRetriesAreStuckBehindARelogin_IsGivenUpAtTheExpiry
     r.session();
     r.rol.enterSleep();
     ASSERT_TRUE(r.rol.awaitingAck());
-    SP(r.rol).relogin_pending_ = true;            // the session dies under it: retries defer
+    SP(r.rol).login_state_for_test().relogin_pending = true;            // the session dies under it: retries defer
 
     r.secs(200);
 
@@ -7949,22 +7946,22 @@ TEST(NightlySleep, AnAckForAnyOtherTrackedOpRecordsNoSleep) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.rol.enterSleep();
     ackSleep(h);
     ASSERT_NE(h.rol.last_sleep_epoch_, 0u);
     h.rol.last_sleep_epoch_ = 0;                  // the node woke; the hub knows
-    h.rol.login_acked_      = true;
+    h.rol.login_state_for_test().login_acked = true;
 
     h.rol.triggerOTA();                           // a different SYSOP
     ackSleep(h);
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "an OTA ack is not a sleep";
-    EXPECT_TRUE(h.rol.login_acked_);
+    EXPECT_TRUE(h.rol.login_acked());
 
     sendOpen(h);                                  // and a COVER op, with sysop still CMD_OTA
     ackSleep(h);
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
-    EXPECT_TRUE(h.rol.login_acked_);
+    EXPECT_TRUE(h.rol.login_acked());
 }
 
 TEST(NightlySleep, AnAckedCoverOpAfterASleepIsNotASleepEither) {
@@ -7972,17 +7969,17 @@ TEST(NightlySleep, AnAckedCoverOpAfterASleepIsNotASleepEither) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.rol.enterSleep();
     ackSleep(h);
     h.rol.last_sleep_epoch_ = 0;
-    h.rol.login_acked_      = true;
+    h.rol.login_state_for_test().login_acked = true;
 
     sendOpen(h);                                  // sysop is still CMD_SLEEP
     ackSleep(h);
 
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "a cover op's ack must not replay the sleep";
-    EXPECT_TRUE(h.rol.login_acked_);
+    EXPECT_TRUE(h.rol.login_acked());
 }
 
 TEST(NightlySleep, WithoutAValidClockTheSleepIsStillAckedAndTheFallbackStillArmed) {
@@ -7995,7 +7992,7 @@ TEST(NightlySleep, WithoutAValidClockTheSleepIsStillAckedAndTheFallbackStillArme
     ackSleep(h);
 
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "no clock, no timestamp (as before)";
-    EXPECT_FALSE(h.rol.login_acked_) << "but the session still ends";
+    EXPECT_FALSE(h.rol.login_acked()) << "but the session still ends";
     const int logins0 = countLoginFrames(h);
     h.clock.tick(60u * 1000u + 5000u + 100u);
     EXPECT_EQ(countLoginFrames(h), logins0 + 1);
@@ -8025,7 +8022,7 @@ TEST(NightlySleep, AnAckedSleepCancelsALoginRetryThatWasAlreadyRunning) {
     SP(h.rol).do_login_and_arm_retry_();          // a login challenge in flight, retry timer armed
     const int logins0 = countLoginFrames(h);
     ASSERT_GE(logins0, 1);
-    SP(h.rol).relogin_pending_ = false;           // (the retry timer is what this test is about)
+    SP(h.rol).login_state_for_test().relogin_pending = false;           // (the retry timer is what this test is about)
     h.rol.enterSleep();
     ASSERT_TRUE(h.rol.awaitingAck()) << "sent, not deferred";
     ackSleep(h);
@@ -8050,7 +8047,6 @@ namespace {
 
 struct DlvProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
-    using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::clearSessionKeys_;
     using esphome::lora_tracker::LORAListener::confirm_session_;
     using esphome::lora_tracker::LORAListener::sleep_op_in_flight_;
@@ -8096,7 +8092,7 @@ TEST(SchedPush, TheLadderIsOnePushPlusKSchedMaxRetriesResendsThenItGivesUpAndKee
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     schedReady(h);
-    h.rol.session_confirmed_ = false;
+    h.rol.login_state_for_test().confirmed = false;
     h.rol.send_schedule_config();
     ASSERT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 1u);
 
@@ -8113,7 +8109,7 @@ TEST(SchedPush, TheLadderIsOnePushPlusKSchedMaxRetriesResendsThenItGivesUpAndKee
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version()) << "the node never confirmed";
     // A failed schedule push never tears the session down.
     EXPECT_FALSE(h.rol.commandFailed());
-    EXPECT_FALSE(DP(h).relogin_pending_);
+    EXPECT_FALSE(DP(h).relogin_pending());
     EXPECT_EQ(msgidsOf(h, OpCmd::Login).size(), 0u) << "no forced re-login";
 }
 
@@ -8123,15 +8119,15 @@ TEST(SchedPush, AFailedPushLeavesAConfirmedSessionConfirmed) {
     ensure_psa_ready();
     ModeBRig r;
     r.session();
-    ASSERT_TRUE(r.rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(r.rol.session_confirmed()) << "precondition";
     const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
     r.rol.node_sched_version_ = r.rol.schedule_version() ^ 1u;
     r.rol.send_schedule_config();
     ASSERT_TRUE(AK(r.rol).cfg().awaiting_ack);
     r.secs(60);                                    // far past the whole ladder
     EXPECT_FALSE(AK(r.rol).cfg().awaiting_ack) << "the ladder ran out";
-    EXPECT_TRUE(r.rol.session_confirmed_) << "and the session was left alone";
-    EXPECT_FALSE(DP(r).relogin_pending_);
+    EXPECT_TRUE(r.rol.session_confirmed()) << "and the session was left alone";
+    EXPECT_FALSE(DP(r).relogin_pending());
     EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0) << "no re-login";
 }
 
@@ -8308,12 +8304,12 @@ TEST(SchedPush, AReloginInTheMiddleDefersTheResendAndChargesNothing) {
     RealHubHarness h{18, kMacRol2};
     schedReady(h);
     h.rol.send_schedule_config();
-    DP(h).relogin_pending_ = true;
+    DP(h).login_state_for_test().relogin_pending = true;
     for (int i = 0; i < 6; ++i) h.clock.tick(kSchedStepMs);
     EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 1u) << "nothing is sent into a rebuilt session";
     EXPECT_EQ(AK(h.rol).cfg().retry_count, 0) << "and nothing is charged";
     EXPECT_TRUE(AK(h.rol).cfg().awaiting_ack);
-    DP(h).relogin_pending_ = false;
+    DP(h).login_state_for_test().relogin_pending = false;
     h.clock.tick(kSchedStepMs);
     EXPECT_EQ(msgidsOf(h, OpCmd::Schedule).size(), 2u) << "the ladder resumes where it was";
     EXPECT_EQ(AK(h.rol).cfg().retry_count, 1);
@@ -8509,7 +8505,7 @@ TEST(DeliveryGlue, AFailReloginRequestClearsTheSessionAndLogsInAgainWhereAFailKe
     for (const bool relogin : {false, true}) {
         RealHubHarness h{18, kMacRol2};
         h.rol.registered_ = true;
-        h.rol.session_confirmed_ = true;
+        h.rol.login_state_for_test().confirmed = true;
         int failed = 0, built = 0;
         esphome::lora_tracker::DeliveryRequest req;
         req.what   = "test";
@@ -8528,7 +8524,7 @@ TEST(DeliveryGlue, AFailReloginRequestClearsTheSessionAndLogsInAgainWhereAFailKe
         EXPECT_EQ(built, 2) << "one send and max_retries=1 resend";
         EXPECT_EQ(failed, 1) << "on_fail runs once";
         EXPECT_FALSE(static_cast<GlueProbe &>(h.rol).cfg().awaiting_ack);
-        EXPECT_EQ(h.rol.session_confirmed_, !relogin);
+        EXPECT_EQ(h.rol.session_confirmed(), !relogin);
         EXPECT_EQ(msgidsOf(h, OpCmd::Login).size() > 0, relogin);
     }
 }
@@ -8795,7 +8791,7 @@ TEST(GridSyncGlue, GivingUpLogsTheSameLinesAndKeepsTheSession) {
     ensure_psa_ready();
     ModeBRig r;
     r.session();
-    ASSERT_TRUE(r.rol.session_confirmed_);
+    ASSERT_TRUE(r.rol.session_confirmed());
     const size_t logins0 = msgidsOf(r, OpCmd::Login).size();
 
     testing::internal::CaptureStderr();
@@ -8811,8 +8807,8 @@ TEST(GridSyncGlue, GivingUpLogsTheSameLinesAndKeepsTheSession) {
                                "the node stays in Mode A until its next login"), 1) << log;
     EXPECT_EQ(occurrences(log, "clearing session"), 0) << "giving up does not tear the session down";
     EXPECT_FALSE(r.rol.gridSyncAwaitingAck());
-    EXPECT_TRUE(r.rol.session_confirmed_);
-    EXPECT_FALSE(DP(r).relogin_pending_);
+    EXPECT_TRUE(r.rol.session_confirmed());
+    EXPECT_FALSE(DP(r).relogin_pending());
     EXPECT_EQ(msgidsOf(r, OpCmd::Login).size(), logins0) << "and no login follows";
     EXPECT_EQ(r.rol.last_gridsync_ack_us_, 0);
 }
@@ -8899,7 +8895,7 @@ TEST(GridSyncGlue, ANodeResetMidLadderForgetsTheIdsAndTheRepublishWaitsForTheSes
     EXPECT_EQ(AK(h.rol).mac().retry_count, 0) << "and the wait costs the budget nothing";
     EXPECT_EQ(h.rol.gridSyncRepublishes(), 0u);
 
-    DP(h).relogin_pending_ = false;           // the session is confirmed again
+    DP(h).login_state_for_test().relogin_pending = false;           // the session is confirmed again
     h.clock.tick(kGridStepMs);
     EXPECT_EQ(publishedGrids(h).size(), sent + 1) << "the ladder resumes where it was";
     EXPECT_EQ(AK(h.rol).mac().retry_count, 1);
@@ -8938,7 +8934,7 @@ TEST(GridSyncGlue, ThePublishIsDeferredWhileTheSessionIsBeingRebuilt) {
     h.rol.enable_timed_mode(true);
     h.clock.tick(10);
     h.rol.send_login();
-    ASSERT_TRUE(DP(h).relogin_pending_);
+    ASSERT_TRUE(DP(h).relogin_pending());
     AK(h.rol).noGrid();
     const size_t sent = h.tracker.sent_copies.size();
 
@@ -9130,7 +9126,7 @@ TEST(ControlQueue, ACoverOpSentWhileASleepIsInFlightQueuesBehindItAndTheSleepIsR
 
     ackSleep(h);                                       // the node DID hear it
     EXPECT_NE(h.rol.last_sleep_epoch_, 0u) << "its own ack is recognised: the sleep is recorded";
-    EXPECT_FALSE(h.rol.login_acked_) << "and the hub's session with the sleeping node ends";
+    EXPECT_FALSE(h.rol.login_acked()) << "and the hub's session with the sleeping node ends";
     EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
     EXPECT_EQ(airOrder(h), (Order{"S4"})) << "the cover op is NOT sent into the sleeping node";
     EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
@@ -9158,7 +9154,7 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     // node still modelled asleep is ignored) and logs in afresh.
     r.time.set_now(kModeBNow + 601, /*valid=*/true);
     QP(r).note_node_heard_();
-    DP(r).relogin_pending_ = true;
+    DP(r).login_state_for_test().relogin_pending = true;
     DP(r).confirm_session_();
 
     EXPECT_FALSE(DP(r).ctl().deferred_until_login);
@@ -9186,7 +9182,7 @@ TEST(ControlQueue, ACoverOpSentWhileASleepIsDeferredQueuesBehindItThere_Too) {
     ensure_psa_ready();
     ModeBRig r;
     r.session();
-    DP(r).relogin_pending_ = true;
+    DP(r).login_state_for_test().relogin_pending = true;
     r.rol.enterSleep();
     ASSERT_TRUE(DP(r).ctl().deferred_until_login);
     ASSERT_TRUE(DP(r).sleep_op_in_flight_());
@@ -9211,7 +9207,7 @@ TEST(ControlQueue, ASetAutoModeSysopDuringACoverOpQueuesBehindIt) {
     ensure_psa_ready();
     ModeBRig h;
     h.session();
-    ASSERT_TRUE(h.rol.session_confirmed_);
+    ASSERT_TRUE(h.rol.session_confirmed());
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
     const uint32_t cover_id = DP(h).ctl().last_msgid;
@@ -9456,13 +9452,13 @@ TEST(ControlQueue, ARetriedSleepsSecondAckChangesNothing) {
 
     ackSleep(h);
     ASSERT_NE(h.rol.last_sleep_epoch_, 0u);
-    ASSERT_FALSE(h.rol.login_acked_);
+    ASSERT_FALSE(h.rol.login_acked());
     const uint32_t epoch = h.rol.last_sleep_epoch_;
-    h.rol.login_acked_ = true;                         // anything on_sleep_acknowledged_ would undo
+    h.rol.login_state_for_test().login_acked = true;                         // anything on_sleep_acknowledged_ would undo
 
     deliverAck(h.rol, id);                             // the re-ack of the duplicate
 
-    EXPECT_TRUE(h.rol.login_acked_) << "the sleep's effects ran once";
+    EXPECT_TRUE(h.rol.login_acked()) << "the sleep's effects ran once";
     EXPECT_EQ(h.rol.last_sleep_epoch_, epoch);
     EXPECT_FALSE(h.rol.awaitingAck());
 }
@@ -9521,7 +9517,7 @@ TEST(ControlQueue, ASleepWaitingInLineForTooLongIsDroppedAndTheCommandAheadOfItS
     ensure_psa_ready();
     ModeBRig r;
     r.session();
-    DP(r).relogin_pending_ = true;
+    DP(r).login_state_for_test().relogin_pending = true;
     sendOpen(r);                                       // deferred
     r.rol.enterSleep();                                // behind it
     ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
@@ -9548,7 +9544,7 @@ TEST(ControlQueue, AnExpiredSleepInFlightHandsTheChannelOnToWhatWaitsBehindIt) {
     ensure_psa_ready();
     ModeBRig r;
     r.session();
-    DP(r).relogin_pending_ = true;
+    DP(r).login_state_for_test().relogin_pending = true;
     r.rol.enterSleep();                                // deferred
     sendOpen(r);                                       // behind it
     ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
@@ -9635,7 +9631,7 @@ TEST(OneSlot, ASetAutoModeWithoutAConfirmedSessionSendsNothingAndLeavesTheCoverO
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     sendOpen(h);
-    ASSERT_FALSE(h.rol.session_confirmed_);
+    ASSERT_FALSE(h.rol.session_confirmed());
     const uint32_t last = DP(h).ctl().last_msgid;
 
     h.rol.set_auto_mode(true);                         // saved, pushed with the schedule later
@@ -9661,13 +9657,13 @@ TEST(OtaRepack, AnOtaWhoseSessionChangedMidDeliveryIsFailedNotRepackedWithAFresh
     // What handle_register_ does when the node reboots mid-delivery.
     DP(h).clearSessionKeys_();
     ASSERT_TRUE(DP(h).ctl().frame.bytes.empty());
-    DP(h).relogin_pending_ = true;
+    DP(h).login_state_for_test().relogin_pending = true;
     h.clock.tick(10'000);                              // retries defer, nothing is sent or charged
     EXPECT_EQ(sysopMsgids(h, proto_sim::ClientOperation::CMD_OTA).size(), 1u);
     EXPECT_EQ(h.rol.opRetryCount(), 0u);
     EXPECT_TRUE(h.rol.awaitingAck()) << "still waiting for the session, not failed yet";
     const int logins = countLoginFrames(h);
-    DP(h).relogin_pending_ = false;                    // the new session is up
+    DP(h).login_state_for_test().relogin_pending = false;                    // the new session is up
 
     h.clock.tick(3050);                                // the next retry is due
 
@@ -9700,7 +9696,7 @@ TEST(OtaRepack, AnOtaWithItsStoredFrameIsRetriedWithTheSameMsgidAndThenGivenUpLi
     h.clock.tick(3050);                                // the fifth expiry is the give-up
     EXPECT_FALSE(h.rol.awaitingAck());
     EXPECT_TRUE(h.rol.commandFailed());
-    EXPECT_FALSE(h.rol.session_confirmed_) << "the session is presumed dead (FailRelogin)";
+    EXPECT_FALSE(h.rol.session_confirmed()) << "the session is presumed dead (FailRelogin)";
 }
 
 // Triggering OTA again after a failed one is a deliberate new request: it is sent.
@@ -9733,10 +9729,10 @@ TEST(OtaRepack, ACoverOpWhoseStoredFrameWasClearedByAReloginIsRePackedAndItsNewM
     const uint32_t old_id = DP(h).ctl().last_msgid;
     DP(h).clearSessionKeys_();
     ASSERT_TRUE(DP(h).ctl().frame.bytes.empty());
-    DP(h).relogin_pending_ = true;
+    DP(h).login_state_for_test().relogin_pending = true;
     h.clock.tick(10'000);
     EXPECT_EQ(msgidsOf(h, OpCmd::Operation).size(), 1u) << "nothing is sent into a session being rebuilt";
-    DP(h).relogin_pending_ = false;
+    DP(h).login_state_for_test().relogin_pending = false;
 
     h.clock.tick(3050);
 
@@ -9771,13 +9767,13 @@ TEST(ConfirmSession, AResumedSessionWithoutConfigSyncSchedulesAFreshLoginAt500ms
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
-    h.rol.login_acked_  = false;                 // the first confirmation of this session
+    h.rol.login_state_for_test().login_acked = false;                 // the first confirmation of this session
     h.rol.config_synced_ = false;
     const size_t logins0 = msgidsOf(h, OpCmd::Login).size();
 
     DP(h).confirm_session_();
 
-    EXPECT_TRUE(h.rol.login_acked_);
+    EXPECT_TRUE(h.rol.login_acked());
     h.clock.tick(400);
     EXPECT_EQ(msgidsOf(h, OpCmd::Login).size(), logins0) << "not before 500 ms";
     h.clock.tick(200);
@@ -9789,7 +9785,7 @@ TEST(ConfirmSession, ASessionWhoseConfigIsInSyncSchedulesNoLoginAndAnAlreadyAcke
     {
         RealHubHarness h{18, kMacRol2};
         h.rol.registered_ = true;
-        h.rol.login_acked_   = false;
+        h.rol.login_state_for_test().login_acked = false;
         h.rol.config_synced_ = true;
         const size_t logins0 = msgidsOf(h, OpCmd::Login).size();
         DP(h).confirm_session_();
@@ -9799,7 +9795,7 @@ TEST(ConfirmSession, ASessionWhoseConfigIsInSyncSchedulesNoLoginAndAnAlreadyAcke
     {
         RealHubHarness h{18, kMacRol2};
         h.rol.registered_ = true;
-        h.rol.login_acked_   = true;                 // not the first confirmation: the block is skipped
+        h.rol.login_state_for_test().login_acked = true;                 // not the first confirmation: the block is skipped
         h.rol.config_synced_ = false;
         const size_t logins0 = msgidsOf(h, OpCmd::Login).size();
         DP(h).confirm_session_();
@@ -9843,7 +9839,7 @@ TEST(TimeSyncSleepOk, TheNodeMayOnlySleepWhenTheHubOwesItNothing) {
         r.session();
         settleEverythingOwed(r);
         ASSERT_FALSE(r.rol.awaitingAck());
-        ASSERT_TRUE(r.rol.session_confirmed_);
+        ASSERT_TRUE(r.rol.session_confirmed());
         EXPECT_EQ(sleepOkAfterTimesync(r), 1) << "nothing owed: sleep immediately";
     }
     {   // a command awaiting its ack keeps the node awake
@@ -9865,7 +9861,7 @@ TEST(TimeSyncSleepOk, TheNodeMayOnlySleepWhenTheHubOwesItNothing) {
         ModeBRig r;
         r.session();
         settleEverythingOwed(r);
-        r.rol.session_confirmed_ = false;
+        r.rol.login_state_for_test().confirmed = false;
         EXPECT_EQ(sleepOkAfterTimesync(r), 0) << "login still settling";
     }
 }
@@ -9910,11 +9906,9 @@ void promotedNode(ModeBRig &r) {
 namespace {
 struct RegridProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::dispatch_mac_payload_;
-    using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::on_sleep_acknowledged_;
     using esphome::lora_tracker::LORAListener::confirm_session_;
     using esphome::lora_tracker::LORAListener::acked_since_confirm_;
-    using esphome::lora_tracker::LORAListener::login_acked_;
     using esphome::lora_tracker::LORAListener::handle_command_ack_;
 };
 RegridProbe &RP(LORAClient &c) { return static_cast<RegridProbe &>(c); }
@@ -10125,7 +10119,7 @@ TEST(RebootRegrid, ABeaconBeforeALoginDefersToTheLoginPublish) {
     ModeBRig r;
     promotedNode(r);
     // A full relogin is under way: the D1 publish at its confirmation will do it.
-    static_cast<RegridProbe &>(r.rol).relogin_pending_ = true;
+    static_cast<RegridProbe &>(r.rol).login_state_for_test().relogin_pending = true;
     deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BOOT, kResetSw);
     EXPECT_EQ(publishesDuring(r, 4), 0) << "send_grid_sync defers while the session is rebuilt";
 }
@@ -10419,7 +10413,7 @@ void sleepThenResumedWake(ModeBRig &r, bool node_acks) {
     RP(r.rol).on_sleep_acknowledged_();
     r.secs(595);
     RP(r.rol).confirm_session_();                 // the first decrypted uplink after the wake
-    ASSERT_TRUE(RP(r.rol).login_acked_);
+    ASSERT_TRUE(RP(r.rol).login_acked());
     RP(r.rol).acked_since_confirm_ = node_acks;   // it has (not) acked a downlink since
 }
 }  // namespace
@@ -10486,7 +10480,6 @@ struct FireProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::cfg;
     using esphome::lora_tracker::LORAListener::mac;
     using esphome::lora_tracker::LORAListener::ctl;
-    using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::last_timesync_sent_us_;
     using esphome::lora_tracker::LORAListener::delivery_busy_;
     using esphome::lora_tracker::LORAListener::clearSessionKeys_;
@@ -10749,7 +10742,7 @@ TEST(TrackedOpRetry, ANewCommandWhoseFirstPackFailsNeverResendsThePreviousOne) {
     RealHubHarness h{18, kMacRol2};
     ensure_psa_ready();
     const uint32_t base = drive_session(h.clock, h.radio, h.rol);
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
 
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
     h.clock.tick(10);
@@ -10772,7 +10765,7 @@ TEST(TrackedOpRetry, AnOtaWhoseFirstPackFailsIsNeverReplacedByAnOlderFrame) {
     RealHubHarness h{18, kMacRol2};
     ensure_psa_ready();
     const uint32_t base = drive_session(h.clock, h.radio, h.rol);
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
 
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
     h.clock.tick(10);
@@ -10802,7 +10795,7 @@ TEST(TrackedOpRetry, ALoginForgetsTheControlChannelsOldAckIds) {
     RealHubHarness h{18, kMacRol2};
     ensure_psa_ready();
     drive_session(h.clock, h.radio, h.rol);
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
     h.rol.setCountersForTest(500, h.rol.sequencer().rxId() + 1);   // old-session ids far from new ones
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
     auto &op = static_cast<TrackedOpProbe &>(h.rol);
@@ -10823,7 +10816,7 @@ TEST(TrackedOpRetry, ACommandTheNodeRefusesFailsAtOnceWithoutTearingTheSessionDo
     RealHubHarness h{18, kMacRol2};
     ensure_psa_ready();
     const uint32_t base = drive_session(h.clock, h.radio, h.rol);
-    ASSERT_TRUE(h.rol.session_confirmed_) << "precondition";
+    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
     h.clock.tick(10);
     auto &op = static_cast<TrackedOpProbe &>(h.rol);
@@ -10836,7 +10829,7 @@ TEST(TrackedOpRetry, ACommandTheNodeRefusesFailsAtOnceWithoutTearingTheSessionDo
     const size_t handed = h.tracker.sent_raw.size();
     h.clock.tick(15000);
     EXPECT_EQ(count_handed_equal(h.tracker, handed, cmd_frame), 0u) << "the command was re-sent";
-    EXPECT_TRUE(h.rol.session_confirmed_) << "the session was torn down over a refusal";
+    EXPECT_TRUE(h.rol.session_confirmed()) << "the session was torn down over a refusal";
 }
 
 // Review HB6: set_sleep_duration took a uint16_t, so the schema's own range
@@ -10920,7 +10913,7 @@ TEST(FireDelivery, AFrameThatCannotBePackedSendsNothingAndNamesItselfInTheLog) {
     esphome::loracov::LoraCoverComponent cover;
     makeCover(r.rol, cover);
     r.session();
-    ASSERT_TRUE(r.rol.session_confirmed_);
+    ASSERT_TRUE(r.rol.session_confirmed());
     // A session whose keys are gone (a new challenge cleared them): sealing is
     // impossible, and falling back to plaintext would be refused by the node.
     FP(r.rol).clearSessionKeys_();
@@ -10945,7 +10938,7 @@ TEST(FireDelivery, TheThreeFramesAreSealedOnAConfirmedSessionAndNeverInTheClear)
     esphome::loracov::LoraCoverComponent cover;
     makeCover(r.rol, cover);
     r.session();
-    ASSERT_TRUE(r.rol.session_confirmed_);
+    ASSERT_TRUE(r.rol.session_confirmed());
     r.secs(5);
     const size_t n0 = airSeen(r.radio, r.base).size();
 
@@ -10965,7 +10958,7 @@ TEST(FireDelivery, TheThreeFramesGoInTheClearBeforeAnySessionExistsTheBootstrap)
     RealHubHarness h{18, kMacRol2};
     esphome::loracov::LoraCoverComponent cover;
     makeCover(h.rol, cover);
-    ASSERT_FALSE(h.rol.session_confirmed_);
+    ASSERT_FALSE(h.rol.session_confirmed());
 
     fireAllThree(h.rol, cover);
 
@@ -10983,7 +10976,7 @@ TEST(FireDelivery, ATimeSyncIsHeldBackWhileTheSessionIsRebuiltWithoutBurningAMsg
         h.rol.registered_ = true;
         h.rol.set_auto_mode_default(auto_mode);
         h.rol.send_login();
-        ASSERT_TRUE(FP(h).relogin_pending_);
+        ASSERT_TRUE(FP(h).relogin_pending());
         const size_t sends0 = h.tracker.sent_copies.size();
         const uint32_t id0  = FP(h).txId();
 
@@ -10994,7 +10987,7 @@ TEST(FireDelivery, ATimeSyncIsHeldBackWhileTheSessionIsRebuiltWithoutBurningAMsg
         EXPECT_EQ(FP(h).last_timesync_sent_us_, 0)
             << "and it does not count as this week's TimeSync: confirm_session_ must be able to send it";
 
-        FP(h).relogin_pending_ = false;
+        FP(h).login_state_for_test().relogin_pending = false;
         h.rol.send_timesync();
         EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "and it goes the moment the session is back";
     }
@@ -11005,7 +10998,7 @@ TEST(FireDelivery, AConfigPushIsNotHeldBackByARebuildingSessionBecauseTheRegiste
     RealHubHarness h{18, kMacRol2};
     esphome::loracov::LoraCoverComponent cover;
     makeCover(h.rol, cover);
-    FP(h).relogin_pending_ = true;
+    FP(h).login_state_for_test().relogin_pending = true;
 
     h.rol.send_remote_config();
     cover.send_remote_config();
@@ -11165,7 +11158,7 @@ TEST(FireDelivery, TwoNodesFireFramesAreAddressedAndNumberedIndependently) {
     EXPECT_EQ(FP(rol2).txId(), 2u);
 
     // One node rebuilding its session holds back only its OWN TimeSync.
-    FP(r.rol).relogin_pending_ = true;
+    FP(r.rol).login_state_for_test().relogin_pending = true;
     const size_t n0 = airSeen(r.radio).size();
     r.rol.send_timesync();
     rol2.send_timesync();
@@ -11246,7 +11239,7 @@ TEST(FireDelivery, TheTimeSyncAfterALoginComesSevenHundredFiftyMillisecondsAfter
     ensure_psa_ready();
     const uint32_t base = drive_session(h.clock, h.radio, h.rol);
     ASSERT_NE(base, 0u);
-    ASSERT_TRUE(h.rol.login_acked_);
+    ASSERT_TRUE(h.rol.login_acked());
     EXPECT_EQ(countCmd(airSeen(h.radio, base), OpCmd::TimeSync), 0u) << "not inline with the login ack";
 
     h.clock.tick(1000);
@@ -11363,7 +11356,6 @@ struct GateProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::login_slot_;
     using esphome::lora_tracker::LORAListener::note_node_heard_;
     using esphome::lora_tracker::LORAListener::confirm_session_;
-    using esphome::lora_tracker::LORAListener::relogin_pending_;
     using esphome::lora_tracker::LORAListener::ctl;
     using esphome::lora_tracker::LORAListener::ctl_queue_;
 };
@@ -11414,7 +11406,7 @@ struct GateRig : real_helpers::RealHubHarness {
 // is for a node KNOWN to be asleep, not a shield against silence.
 TEST(SleepGate, AnAwakeButSilentNodeStillRunsTheWholeLadderAndForcesARelogin) {
     GateRig h;
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     testing::internal::CaptureStderr();
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
@@ -11424,7 +11416,7 @@ TEST(SleepGate, AnAwakeButSilentNodeStillRunsTheWholeLadderAndForcesARelogin) {
 
     EXPECT_GE(h.sends(), s0 + 1) << "retransmissions went out";
     EXPECT_TRUE(h.rol.commandFailed());
-    EXPECT_FALSE(h.rol.session_confirmed_) << "and the session was torn down";
+    EXPECT_FALSE(h.rol.session_confirmed()) << "and the session was torn down";
     EXPECT_EQ(occurrences(log, "Command failed after retries"), 1) << log;
 }
 
@@ -11432,7 +11424,7 @@ TEST(SleepGate, AnAwakeButSilentNodeStillRunsTheWholeLadderAndForcesARelogin) {
 
 TEST(SleepGate, ACoverOpAfterTheSleepAckIsIgnoredWithOneLogLineAndNothingElse) {
     GateRig h;
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.sleepNow();
     ASSERT_TRUE(GP(h).node_asleep_());
     const size_t s0      = h.sends();
@@ -11464,7 +11456,7 @@ TEST(SleepGate, ACoverOpAfterTheSleepAckIsIgnoredWithOneLogLineAndNothingElse) {
 // Every sysop, not only cover ops: OTA, STATUS, WiFi, a mode switch.
 TEST(SleepGate, EverySysopIsIgnoredWhileTheNodeSleepsAndNoneIsSentAtTheWake) {
     GateRig h;
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.sleepNow();
     const size_t s0 = h.sends();
 
@@ -11485,7 +11477,7 @@ TEST(SleepGate, EverySysopIsIgnoredWhileTheNodeSleepsAndNoneIsSentAtTheWake) {
     // The wake: heard, new session. The OTA (and the rest) are NOT re-sent.
     h.time.set_now(kWakeAt + 5, true);
     GP(h).note_node_heard_();
-    GP(h).relogin_pending_ = true;
+    GP(h).login_state_for_test().relogin_pending = true;
     GP(h).confirm_session_();
     EXPECT_EQ(airOrder(h), (Order{"S4"})) << "an ignored command is gone, not postponed";
     EXPECT_FALSE(h.rol.awaitingAck());
@@ -11583,7 +11575,7 @@ TEST(SleepGate, ANodeHeardSinceTheSleepStaysAwakeAfterTheHeardWindowLapses) {
 
 TEST(SleepGate, AnUnconfirmedSleepLeavesTheNodeAwakeAndCommandsGoOut) {
     GateRig h;
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.rol.enterSleep();
     exhaustRetries(h);
     ASSERT_TRUE(GP(h).ctl().sleep_unconfirmed);
@@ -11600,7 +11592,7 @@ TEST(SleepGate, TheUnconfirmedFlagWinsOverAStaleSleepStamp) {
     // A stamp from an EARLIER acknowledged sleep must not make an unconfirmed
     // newer sleep look like sleep.
     GateRig h;
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     h.rol.last_sleep_epoch_ = kModeBNow + 1;
     h.rol.last_heard_epoch_ = kModeBNow;
     ASSERT_TRUE(GP(h).node_asleep_()) << "precondition: the stamp alone says asleep";
@@ -11627,7 +11619,7 @@ TEST(SleepGate, ACommandQueuedBehindAnInFlightSleepIsHeldAndDeliveredAtTheWake) 
 
     h.time.set_now(kWakeAt + 5, true);                   // the node is back
     GP(h).note_node_heard_();
-    GP(h).relogin_pending_ = true;
+    GP(h).login_state_for_test().relogin_pending = true;
     GP(h).confirm_session_();
     EXPECT_TRUE(h.rol.awaitingAck());
     EXPECT_EQ(airOrder(h), (Order{"S4", "C0"})) << "the held cover op (OPEN) went out once";
@@ -11651,8 +11643,8 @@ TEST(SleepGate, TwoNodesAreGatedIndependently) {
     TzGuard tz(0);
     for (LORAClient *r : {&h.rol_1, &h.rol_2}) {
         r->registered_ = true;
-        r->login_acked_ = true;
-        r->pending_login_nonce_ = 0x1234;
+        r->login_state_for_test().login_acked = true;
+        r->login_state_for_test().pending_login_nonce = 0x1234;
         GP(*r).login_slot_ = 0;
     }
     h.rol_1.last_sleep_epoch_ = kModeBNow + 1;           // node 17 sleeps, node 18 does not
@@ -11781,7 +11773,7 @@ TEST(SleepStatus, AQuietNodeTurnsAwakeAtTheModelledWakeWithoutHearingAnything) {
 
 TEST(SleepStatus, AnUnconfirmedSleepIsShownAndClearedWhenTheNodeIsHeard) {
     GateRig h;
-    h.rol.session_confirmed_ = true;
+    h.rol.login_state_for_test().confirmed = true;
     GP(h).refresh_sleep_status_();
     h.rol.enterSleep();
     exhaustRetries(h);
@@ -12226,7 +12218,7 @@ TEST(Mac1HubS3, ALoginResetZeroesBothCountersWithoutAWriteAndTheNextIdIsOne) {
     f.rol.registered_ = true;
     f.rol.incrTxMessageId();
     ASSERT_GT(f.rol.sequencer().txId(), 0u);
-    f.rol.pending_login_nonce_ = 0;                      // a FRESH challenge
+    f.rol.login_state_for_test().pending_login_nonce = 0;                      // a FRESH challenge
     const int n0 = esphome::prefs_save_count();
     f.rol.send_login();
     EXPECT_EQ(f.rol.sequencer().rxId(), 0u);

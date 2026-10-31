@@ -129,7 +129,7 @@ struct Seam : public ::testing::Test {
         while (disp.runOneTxCommand()) {}
         for (auto &frame : lif.drain_tx_queue())
             rol.set_response(frame.data(), frame.size());
-        ASSERT_TRUE(rol.session_confirmed_) << "bringUpSession: no session";
+        ASSERT_TRUE(rol.session_confirmed()) << "bringUpSession: no session";
     }
 
     // Deliver a frame to the node as the radio would: the node is handed

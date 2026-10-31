@@ -113,8 +113,8 @@ namespace esphome
       // onboarding gate or the node's modelled wake). Until then commands are
       // deferred, never packed plaintext for a node that refuses plaintext
       // (review HB5); confirm_session_ clears this.
-      if (this->registered_ && !this->session_confirmed_)
-        this->relogin_pending_ = true;
+      if (this->registered_ && !this->session_.confirmed())
+        this->session_.mark_relogin_pending();
 
       this->start_sleep_status_();
 
@@ -135,13 +135,11 @@ namespace esphome
                (this->time != nullptr && this->time->now().is_valid()) ? "yes" : "no");
       if (this->registered_)
       {
-        this->login_acked_              = false;
-        this->login_retry_count_        = 0;
-        this->startup_login_initiated_  = false;
+        this->session_.reset_for_boot();
         if (this->time != nullptr && this->time->now().is_valid())
         {
           // Time already synced — evaluate sleep window immediately.
-          this->startup_login_initiated_ = true;
+          this->session_.set_startup_login_initiated();
           this->schedule_startup_login_();
         }
         else if (this->time != nullptr)
@@ -160,9 +158,9 @@ namespace esphome
           ESP_LOGI(TAG, "[%s] Waiting for NTP sync before scheduling login", this->get_name().c_str());
           this->time->add_on_time_sync_callback([this]()
           {
-            if (!this->startup_login_initiated_)
+            if (!this->session_.startup_login_initiated())
             {
-              this->startup_login_initiated_ = true;
+              this->session_.set_startup_login_initiated();
               this->schedule_startup_login_();
             }
           });
@@ -178,7 +176,7 @@ namespace esphome
           uint32_t total_ms   = sleepmodel::kBootMarginMs + stagger_ms;
           ESP_LOGW(TAG, "[%s] No time component — login in %u s (5 s radio-init + %u s stagger, no sleep-window check)",
                    this->get_name().c_str(), total_ms / 1000, stagger_ms / 1000);
-          this->startup_login_initiated_ = true;
+          this->session_.set_startup_login_initiated();
           this->set_timeout("login_startup", total_ms, [this]() { this->do_login_and_arm_retry_(); });
         }
       }
@@ -385,7 +383,7 @@ namespace esphome
       in.op_deferred_until_login  = this->ctl().deferred_until_login;
       // "Login still settling" counts with an explicit relogin: both mean the
       // hub is mid-conversation with this node (TimeSync's sleepOk reads the same).
-      in.relogin_pending          = this->relogin_pending_ || !this->session_confirmed_;
+      in.relogin_pending          = this->session_.relogin_pending() || !this->session_.confirmed();
       // Anything the node has been sent and not confirmed, or is still owed:
       // a schedule push in flight or an edit not yet pushed, a GridSync, and
       // this boot's configuration push.
@@ -799,10 +797,7 @@ namespace esphome
       this->ctl_hold_for_wake_ = true;
       this->stamp_sleep_epoch_();
       this->refresh_sleep_status_();
-      this->login_acked_         = false;
-      this->login_retry_count_   = 0;
-      this->pending_login_nonce_ = 0;   // sleep ends the session; mint fresh on wake
-      this->cancel_timeout("login_retry");   // ("login_startup" is replaced by the arming below)
+      this->session_.end_for_sleep();
       // incrTxMessageId() no longer persists last_sleep_epoch_ as a side effect.
       this->save_state_(true);
       this->arm_post_sleep_login_fallback_();
@@ -849,7 +844,7 @@ namespace esphome
     // that drops our downlinks is exactly what a fresh LOGIN repairs.
     void LORAListener::post_sleep_fallback_fire_()
     {
-      if (this->login_acked_ && this->session_confirmed_)
+      if (this->session_.login_acked() && this->session_.confirmed())
       {
         if (this->acked_since_confirm_)
         {
@@ -908,7 +903,7 @@ namespace esphome
       // Actively retrying with a live session: its own retry budget ends it.
       // (relogin_pending_ is cleared only by confirm_session_(), which also sends
       // a deferred op, so it alone says "still waiting for a session".)
-      if (!this->relogin_pending_ || !this->drop_stale_sleep_())
+      if (!this->session_.relogin_pending() || !this->drop_stale_sleep_())
         return;
       ESP_LOGW(TAG, "[%s] Sleep still waiting for a session after %u s — dropped, not sent late",
                this->get_name().c_str(), (unsigned) (kPendingSleepExpiryMs / 1000));
@@ -966,7 +961,7 @@ namespace esphome
 
     bool LORAListener::mac_frame_(hubframes::Down *op, MacFrame *out)
     {
-      return this->mac_frame_(op, this->incrTxMessageId(), this->session_confirmed_, out);
+      return this->mac_frame_(op, this->incrTxMessageId(), this->session_.confirmed(), out);
     }
 
     bool LORAListener::mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt,
@@ -1171,7 +1166,7 @@ namespace esphome
       // Asked BEFORE the flip: the flip itself would make an interactive node read
       // as "auto" (never gated). A sleeping node is not told now; the schedule push
       // at its wake carries the mode.
-      const bool ignored = this->session_confirmed_ &&
+      const bool ignored = this->session_.confirmed() &&
           this->refuse_while_asleep_({false, 0, 0, 0.0f, on ? CLIENT_OPERATION__CMD_MODE_AUTO
                                                             : CLIENT_OPERATION__CMD_MODE_INTERACTIVE});
       this->auto_mode_   = on;
@@ -1189,7 +1184,7 @@ namespace esphome
                this->get_name().c_str(), on ? "AUTO" : "INTERACTIVE");
       // An awake node can be switched immediately; a sleeping one picks it up
       // from the schedule push when it next beacons.
-      if (this->session_confirmed_ && !ignored)
+      if (this->session_.confirmed() && !ignored)
         this->send_tracked_sysop_(on ? CLIENT_OPERATION__CMD_MODE_AUTO
                                      : CLIENT_OPERATION__CMD_MODE_INTERACTIVE);
     }
@@ -1252,7 +1247,7 @@ namespace esphome
         return;
       // See relogin_pending_. Checked before the msgid is taken, so a deferred
       // push does not burn one; confirm_session_ pushes the schedule again.
-      if (this->relogin_pending_)
+      if (this->session_.relogin_pending())
       {
         ESP_LOGD(TAG, "[%s] ScheduleConfig deferred — session being rebuilt", this->get_name().c_str());
         return;
@@ -1673,7 +1668,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       return this->schedule_pending() ||          // a ScheduleConfig push is due
              this->sched_dirty_ ||                // an edit not yet turned into one
              this->ctl().awaiting_ack ||          // a command awaiting its ack
-             !this->session_confirmed_;           // login still settling
+             !this->session_.confirmed();          // login still settling
     }
 
     void LORAListener::send_timesync()
@@ -1825,7 +1820,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     {
       modebsup::Inputs in;
       in.supervised = this->mbs_supervised_();
-      in.session_ok = this->session_confirmed_ && !this->relogin_pending_;
+      in.session_ok = this->session_.confirmed() && !this->session_.relogin_pending();
       in.awake      = this->is_node_awake_();
       in.s_since_grid_ack =
           this->mbs_grid_acked_()

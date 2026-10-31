@@ -29,6 +29,8 @@
 #include "esphome/components/lora_client/HubWire.h"
 #include "esphome/components/lora_client/MacWire.h"
 #include "esphome/components/lora_client/OnboardingGate.h"
+#include "esphome/components/lora_client/RegisterFreshness.h"
+#include "esphome/components/lora_client/SleepModel.h"
 #include "esphome/components/lora_client/Sequencer.h"
 
 namespace esphome
@@ -60,6 +62,37 @@ namespace esphome
       virtual int64_t session_tx_drain_us() const = 0;
       // A schedule push that can still be retried is outstanding.
       virtual bool session_schedule_outstanding() const = 0;
+
+      // ---- what the login lifecycle needs to know or do ----
+      // A tracker to send through.
+      virtual bool session_has_radio() const = 0;
+      // The node's MAC (the REGISTER's address).
+      virtual uint64_t session_mac_address() const = 0;
+      // This node's index in declaration order (the login stagger).
+      virtual uint32_t session_login_slot() const = 0;
+      // Milliseconds until the node is predicted awake (0 = awake now).
+      virtual uint32_t session_ms_until_awake() const = 0;
+      // `base_ms` plus the transmit backlog.
+      virtual uint32_t session_ack_wait_ms(uint32_t base_ms) const = 0;
+      // Hand one frame (the LOGIN) to MAC-0.
+      virtual bool session_send(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal) = 0;
+
+      // ---- the lifecycle's events ----
+      // An admitted REGISTER from this node: it is registered, heard, rebooted.
+      virtual void session_register_accepted() = 0;
+      // The REGISTER's configuration decision; true when configuration is pushed
+      // (now or deferred to the session), which sets the login delay.
+      virtual bool session_register_config(bool needs_config) = 0;
+      // A new login challenge (beliefs about the old session are void).
+      virtual void session_challenge_started() = 0;
+      // Both counters restarted (reserved FCNTs and ack ids are stale).
+      virtual void session_counters_restarted() = 0;
+      // Whether this LOGIN asks the node to REGISTER.
+      virtual bool session_request_register() const = 0;
+      // Every confirmed session (deferred tracked op, deferred config push).
+      virtual void session_on_confirmed() = 0;
+      // The first confirmation since the login was last unacknowledged.
+      virtual void session_on_login_acknowledged() = 0;
 
     protected:
       ~SessionHost() = default;
@@ -166,6 +199,79 @@ namespace esphome
       // CTR-decrypt into the session's own buffer; nullptr on failure.
       uint8_t *decrypt(EncUplink &up);
 
+      // ---- the login / session lifecycle ----
+      // The state machine's flags. One struct so a test can set a precondition
+      // through ONE seam (login_state_for_test) and production reads them only
+      // through the accessors below.
+      struct LoginState
+      {
+        // True once the hub has DECRYPTED a frame from this node under this
+        // session: the node holds the matching base nonce. Downlink is sealed
+        // only once this is set. Cleared at each new login challenge.
+        bool     confirmed{false};
+        bool     login_acked{false};
+        // From the node's REGISTER or a new challenge until the node proves the
+        // new key: TimeSync, ScheduleConfig and GridSync WAIT (confirm re-sends them).
+        bool     relogin_pending{false};
+        // The base nonce of the challenge in flight, reused on every retry
+        // (the node keeps the FIRST LoginMsg it accepts per 5 s).
+        uint32_t pending_login_nonce{0};
+        uint8_t  login_retry_count{0};
+        // The startup login path was initiated (never cleared by incoming
+        // frames, so an NTP resync does not restart a running session).
+        bool     startup_login_initiated{false};
+      };
+      static constexpr uint8_t  kMaxLoginRetries      = 24; // 24 × 1 h = 1 day
+      static constexpr uint32_t kLoginRetryIntervalMs = 3600000; // 1 h ceiling between login retries
+      static constexpr uint32_t kLoginRetryBaseMs     = 5000;    // first retry delay; doubles each retry up to the ceiling
+      // Delay between receiving REGISTER and firing the login challenge.  The
+      // REGISTER path first queues ClientConfig + each node's config, each sent
+      // as a ~1.5-1.9 s burst.  A shorter delay (was 500 ms) queued LoginMsg on
+      // top of those bursts, saturating the channel so the node's login-ack had
+      // no quiet window.  4 s clears ~2 config bursts before login is sent.
+      static constexpr uint32_t kRegisterToLoginDelayMs = 4000;
+      // When config is skipped (provisioned node, already synced) there are no
+      // config bursts to drain, so login can fire much sooner — shortening the
+      // battery node's awake window.
+      static constexpr uint32_t kRegisterToLoginFastMs  = 800;
+      static constexpr int64_t  kRegisterRateLimitUs    = 5000000; // 5 s, matches the node's LOGIN_RATE_LIMIT_MS
+
+      bool     confirmed() const { return this->login_.confirmed; }
+      bool     login_acked() const { return this->login_.login_acked; }
+      bool     relogin_pending() const { return this->login_.relogin_pending; }
+      uint32_t pending_login_nonce() const { return this->login_.pending_login_nonce; }
+      uint8_t  login_retry_count() const { return this->login_.login_retry_count; }
+      bool     startup_login_initiated() const { return this->login_.startup_login_initiated; }
+      // A node restored as registered still holds its NVS session, but the hub
+      // has no keys until its first LOGIN: defer commands until then (HB5).
+      void mark_relogin_pending() { this->login_.relogin_pending = true; }
+      // A command went fully unacked: the session is dead (DeliveryService).
+      void drop_confirmation() { this->login_.confirmed = false; }
+      // setup() of a node restored as registered: a login challenge is due.
+      void reset_for_boot()
+      {
+        this->login_.login_acked             = false;
+        this->login_.login_retry_count       = 0;
+        this->login_.startup_login_initiated = false;
+      }
+      void set_startup_login_initiated() { this->login_.startup_login_initiated = true; }
+      // The node acknowledged CMD_SLEEP: sleep ends the session.
+      void end_for_sleep();
+
+      // Arm the startup login, respecting the node's sleep window and stagger.
+      void schedule_startup_login();
+      // A login challenge now (through the onboarding gate) and its retry ladder.
+      void do_login_and_arm_retry();
+      void login_retry_step();
+      // The LoginMsg of a (new or retried) challenge.
+      void send_login();
+      // A frame from the node decrypted under this session.
+      void confirm();
+      // A REGISTER (bypasses the replay window; checked here, see register_admitted_).
+      void handle_register(const hubframes::Up *rcv_message, const uint8_t *data, size_t len);
+
+      LoginState &login_state_for_test() { return this->login_; }
+
       // ---- the onboarding gate (OnboardingGate.h) ----
       // The hub has one downlink queue; bringing a node up costs ~8 frames
       // (~15 s), so two nodes started 3 s apart interleave and every ack timer
@@ -205,6 +311,10 @@ namespace esphome
       mac1::PersistHook persist_() { return mac1::PersistHook{&HubSession::persist_hook_, this}; }
       bool seal_(DeliveryFrame *f, size_t hdr_len, size_t body_len);
       void onboarding_poll_();
+      void schedule_login_retry_();
+      bool register_authentic_(const uint8_t *data, size_t len);
+      bool register_admitted_(const ::ClientRegister *reg, const uint8_t *data, size_t len);
+      void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base);
       bool verify_uplink_(EncUplink &up);
       mac2::LinkSecurity::Verify tag_verdict_(EncUplink &up);
       void drop_candidate_(EncUplink &up);
@@ -220,6 +330,11 @@ namespace esphome
       bool     msgid_relogin_pending_{false};
       uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       static onboarding::Gate onboarding_gate_;
+      LoginState login_{};
+      // Security review finding 2: time-based REGISTER replay guard.
+      int64_t  last_register_accepted_us_{0};
+      // HB14: the highest register_seq this node has sent (RegisterFreshness.h).
+      regfresh::Highest register_seq_{};
       bool     onboarding_held_{false};
       bool     onboarding_waiting_logged_{false};   // log the wait once, not per poll
       bool     onboarding_confirmed_{false};

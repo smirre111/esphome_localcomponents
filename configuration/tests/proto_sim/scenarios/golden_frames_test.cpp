@@ -187,7 +187,7 @@ struct GoldenHub {
         tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
         tick(1000);
         ASSERT_NE(base_nonce, 0u) << "precondition: a LOGIN went out and was answered";
-        ASSERT_TRUE(rol.login_acked_) << "precondition: the session is confirmed";
+        ASSERT_TRUE(rol.login_acked()) << "precondition: the session is confirmed";
     }
 
     void ackCtl() {

@@ -538,7 +538,7 @@ namespace esphome
     {
       return this->mac0_send_(buf, len, policy, seal);
     }
-    bool LORAListener::stream_session_confirmed() const { return this->session_confirmed_; }
+    bool LORAListener::stream_session_confirmed() const { return this->session_.confirmed(); }
     bool LORAListener::stream_grid_ready() const
     {
       return this->grid_aligned_ && this->parent_ != nullptr && this->parent_->gridStarted();
