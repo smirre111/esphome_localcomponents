@@ -102,76 +102,6 @@ namespace esphome
       std::function<void(uint32_t log_id)> on_sent;
     };
 
-    // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
-    // delivery refactor). Everything the tracked-command machinery used to keep
-    // as loose op_* members on the listener. One request per channel at a time
-    // (Control: cover operations and sysops, with a small line of what waits
-    // behind it; Config: ScheduleConfig; Mac: GridSync).
-    struct DeliverySlot
-    {
-      // What encode_ctl_ builds the command from.
-      enum class Kind : uint8_t { COVER, SYSOP };
-      Kind     kind{Kind::COVER};
-      bool     awaiting_ack{false};
-      uint32_t first_msgid{0};   // first msgid used for the current logical command
-      uint32_t last_msgid{0};    // msgid of the most recent (re)transmission
-      // Which LOGICAL command this is, for txqueue::SupersedeTable. Bumped once
-      // per command from Home Assistant — never per retransmission, which must
-      // stay under the generation it belongs to.
-      //
-      // Deliberately NOT msgid, even though msgid is also monotonic: a LoginMsg
-      // ZEROES the message counters, so a generation taken from msgid would go
-      // backwards after a re-login and the first command afterwards would be
-      // dropped as stale by frames queued before it. Starts at 1 because 0 is
-      // the table's "takes no part in this" value.
-      uint32_t generation{1};
-      uint8_t  retry_count{0};
-      // Stored operation, replayed on each retransmission with a fresh msgid.
-      uint32_t covop_case{0};
-      int32_t  operation{0};
-      float    position{0.0f};
-      int32_t  sysop{0};         // ClientOperation value when kind == SYSOP
-      // Resend::SameBytes: the first attempt's frame (bytes, msgid, and the keys
-      // it was sealed under -- a retry hands the SAME binding to the tracker, so
-      // a frame sealed before a re-key is never re-tagged, F4), and its tag.
-      // Owned by the delivery service (S7).
-      DeliveryFrame        frame{};
-      uint32_t             frame_tag{0};
-      // Security review finding 1: a cover op / sysop issued while
-      // relogin_pending_ is true would otherwise pack plaintext (session not
-      // confirmed yet) and get stored — then every retry is rejected by the
-      // node's own plaintext-gate (it already holds a session), and after
-      // kOpMaxRetries the hub tears down the session it just rebuilt. Set by
-      // send_cover_operation()/send_tracked_sysop_() when deferring instead
-      // of sending; consumed by confirm_session_(), which actually sends it
-      // once encryption is possible.
-      bool     deferred_until_login{false};
-      // Whether the frame currently awaiting an ack went out as a single copy.
-      // Rule 4 bounds the exposure to ONE frame: the first retry of a single
-      // shot puts the node back on bursts until it is confirmed again.
-      bool     sent_single_shot{false};
-      // The command's first shot was an optimistic single shot, so its first ack
-      // wait is the short one (SingleShotAckWait.h).
-      bool     sent_optimistic{false};
-      // The short wait has been used for this command. It is used at most once,
-      // and is never counted against kOpMaxRetries.
-      bool     short_wait_spent{false};
-      // The mark the command's FIRST frame was placed on, 0 when that frame was
-      // not a single placed copy. Captured at send time: other placements move
-      // last_placed_t0_us_ before the ack arrives.
-      int64_t  mark_us{0};
-      // The tail (ms after the mark) the first ack wait used; 0 = none.
-      uint32_t first_tail_ms{0};
-      // True from "retries exhausted, no ack" until the node is next heard
-      // (CMD_SLEEP only; see on_sleep_unconfirmed_).
-      bool     sleep_unconfirmed{false};
-      // ---- the generic glue (step 3): Config and Mac channels ----
-      // awaiting_ack / retry_count above are shared with it. The ids are every
-      // msgid the current AND earlier requests went out under, with the tag of
-      // the attempt: an ack for any of them is recognised.
-      DeliveryRequest        req;
-      deliverypolicy::AckIds acks;
-    };
 
     // The delivery channels. A request occupies one channel until it is acked,
     // fails, or is superseded; channels do not block each other.
@@ -224,6 +154,8 @@ namespace esphome
 
     class DeliveryService
     {
+      struct DeliverySlot;   // one channel's request in flight (private, below)
+
     public:
       // The most an ack timer is stretched by the transmit backlog. A ceiling
       // rather than trust: the drain estimate is written from two cores without
@@ -245,16 +177,41 @@ namespace esphome
       void cancel(DeliveryChannel ch);
       // A new session restarts the msgid space: ids on record would alias new ones.
       void forget_ids();
-      // Something is in flight that a Mode B warm-up must not run into.
-      bool busy() const;
       // `base_ms` plus the transmit backlog (see ack_wait_ms).
       uint32_t ack_wait_ms(uint32_t base_ms) const;
       // (Re-)arm the channel's ack wait.
       void arm_timer(DeliveryChannel ch);
       static const char *timer_name(DeliveryChannel ch);
 
-      DeliverySlot       &slot(DeliveryChannel ch)       { return this->slots_[ch]; }
-      const DeliverySlot &slot(DeliveryChannel ch) const { return this->slots_[ch]; }
+      // ---- the channels' delivery state: read-only outside the service ----
+      // Only const references are handed out (slot_for_test aside): callers
+      // read a slot's fields and change it through the methods below.
+      using SlotState = DeliverySlot;
+      const SlotState &slot(DeliveryChannel ch) const { return this->slots_[ch]; }
+      // The few things the application may change about a channel's request.
+      // The node acknowledged: no longer awaited (the ack path then cancels).
+      void clear_awaiting(DeliveryChannel ch) { this->slots_[ch].awaiting_ack = false; }
+      // Ack ids on record: a superseded or given-up request's must not complete it.
+      void forget_ack_ids(DeliveryChannel ch) { this->slots_[ch].acks.clear(); }
+      // The stored frame was sealed under keys just destroyed: never re-send it.
+      void drop_stored_frame(DeliveryChannel ch)
+      {
+        this->slots_[ch].frame     = DeliveryFrame{};
+        this->slots_[ch].frame_tag = 0;
+      }
+      // The shape the request's frame went out in (Rule 4, the short first wait).
+      void set_sent_shape(DeliveryChannel ch, bool single_shot, bool optimistic)
+      {
+        this->slots_[ch].sent_single_shot = single_shot;
+        this->slots_[ch].sent_optimistic  = optimistic;
+      }
+      // The mark the request's FIRST frame was placed on (0 = not a single placed copy).
+      void set_mark_us(DeliveryChannel ch, int64_t mark_us) { this->slots_[ch].mark_us = mark_us; }
+      // A new command on the channel may use the short first wait again.
+      void reset_short_wait(DeliveryChannel ch) { this->slots_[ch].short_wait_spent = false; }
+
+      // For tests: set up a channel's delivery state directly.
+      DeliverySlot &slot_for_test(DeliveryChannel ch) { return this->slots_[ch]; }
 
     private:
       bool     fire_(DeliveryRequest &req);
@@ -269,6 +226,47 @@ namespace esphome
       void     give_up_(DeliveryChannel ch);
       // Run the channel's on_done (a copy: it may start the channel's next request).
       void     done_(DeliveryChannel ch);
+
+      // ONE DELIVERY CHANNEL'S REQUEST IN FLIGHT (step 2 of the unified MAC
+      // delivery refactor). Everything the tracked-command machinery used to keep
+      // as loose op_* members on the listener. One request per channel at a time
+      // (Control: cover operations and sysops, with a small line of what waits
+      // behind it; Config: ScheduleConfig; Mac: GridSync).
+      struct DeliverySlot
+      {
+        bool     awaiting_ack{false};
+        uint32_t first_msgid{0};   // first msgid used for the current logical command
+        uint32_t last_msgid{0};    // msgid of the most recent (re)transmission
+        uint8_t  retry_count{0};
+        // Resend::SameBytes: the first attempt's frame (bytes, msgid, and the keys
+        // it was sealed under -- a retry hands the SAME binding to the tracker, so
+        // a frame sealed before a re-key is never re-tagged, F4), and its tag.
+        // Owned by the delivery service (S7).
+        DeliveryFrame        frame{};
+        uint32_t             frame_tag{0};
+        // Whether the frame currently awaiting an ack went out as a single copy.
+        // Rule 4 bounds the exposure to ONE frame: the first retry of a single
+        // shot puts the node back on bursts until it is confirmed again.
+        bool     sent_single_shot{false};
+        // The command's first shot was an optimistic single shot, so its first ack
+        // wait is the short one (SingleShotAckWait.h).
+        bool     sent_optimistic{false};
+        // The short wait has been used for this command. It is used at most once,
+        // and is never counted against kOpMaxRetries.
+        bool     short_wait_spent{false};
+        // The mark the command's FIRST frame was placed on, 0 when that frame was
+        // not a single placed copy. Captured at send time: other placements move
+        // last_placed_t0_us_ before the ack arrives.
+        int64_t  mark_us{0};
+        // The tail (ms after the mark) the first ack wait used; 0 = none.
+        uint32_t first_tail_ms{0};
+        // ---- the generic glue (step 3): Config and Mac channels ----
+        // awaiting_ack / retry_count above are shared with it. The ids are every
+        // msgid the current AND earlier requests went out under, with the tag of
+        // the attempt: an ack for any of them is recognised.
+        DeliveryRequest        req;
+        deliverypolicy::AckIds acks;
+      };
 
       DeliveryHost &host_;
       DeliverySlot  slots_[kDeliveryChannels];

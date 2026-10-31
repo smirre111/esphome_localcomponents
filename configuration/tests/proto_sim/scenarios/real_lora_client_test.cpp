@@ -438,13 +438,14 @@ struct AckProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::on_grid_sync_acked_;
     using esphome::lora_tracker::LORAListener::on_grid_sync_failed_;
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::ctl_request_;
     // A Control-channel command "in flight" the way the glue would have left it:
     // sent under every id in `ids`, with the slot's command as it stands. No timer
     // is armed (the tests that need one send for real).
     void ctlInFlight(std::initializer_list<uint32_t> ids) {
         this->cancel_timeout("dlv_ctl");
-        auto &s = this->ctl();
+        auto &s = this->dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL);
         s.req = this->ctl_request_();
         s.acks.clear();
         for (uint32_t id : ids) s.acks.add(id, id);
@@ -457,7 +458,7 @@ struct AckProbe : LORAClient {
     // spent. No timer is armed (the tests that need one send for real).
     void pushInFlight(uint32_t id, uint8_t retries, uint32_t tag) {
         this->cancel_timeout("dlv_cfg");
-        auto &s = this->cfg();
+        auto &s = this->dlv_slot_for_test(esphome::lora_tracker::CH_CONFIG);
         s.req = {};
         s.req.what   = "ScheduleConfig";
         s.req.policy = deliverypolicy::kSchedulePolicy;
@@ -473,7 +474,7 @@ struct AckProbe : LORAClient {
     // every id in `ids` (each its own tag, as in production), no timer armed.
     void gridInFlight(std::initializer_list<uint32_t> ids) {
         this->cancel_timeout("dlv_mac");
-        auto &s = this->mac();
+        auto &s = this->dlv_slot_for_test(esphome::lora_tracker::CH_MAC);
         s.req = {};
         s.req.what    = "GridSync";
         s.req.policy  = deliverypolicy::kGridSyncPolicy;
@@ -489,7 +490,7 @@ struct AckProbe : LORAClient {
     // No GridSync on record at all.
     void noGrid() {
         this->cancel_timeout("dlv_mac");
-        auto &s = this->mac();
+        auto &s = this->dlv_slot_for_test(esphome::lora_tracker::CH_MAC);
         s.awaiting_ack = false;
         s.retry_count  = 0;
         s.acks.clear();
@@ -497,7 +498,7 @@ struct AckProbe : LORAClient {
     // No push on record at all.
     void noPush() {
         this->cancel_timeout("dlv_cfg");
-        auto &s = this->cfg();
+        auto &s = this->dlv_slot_for_test(esphome::lora_tracker::CH_CONFIG);
         s.awaiting_ack = false;
         s.retry_count  = 0;
         s.acks.clear();
@@ -932,6 +933,7 @@ TEST(RealLoraClient, ARequestWhileAGridSyncAwaitsItsAckIsNotAnswered) {
 namespace {
 struct TrackedOpProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
 };
 
 std::vector<uint8_t> plaintext_ack_frame(uint32_t msgid, uint32_t ack_msg_id,
@@ -5306,7 +5308,7 @@ TEST(ConfigHashPersistence, ACommandAfterAHubRebootWaitsForTheSessionInsteadOfGo
         }
         EXPECT_EQ(plaintext_ops, 0u)
             << "a command for a node that still holds its session went out plaintext";
-        EXPECT_TRUE(static_cast<TrackedOpProbe &>(static_cast<LORAClient &>(rol2)).ctl().deferred_until_login)
+        EXPECT_TRUE(static_cast<TrackedOpProbe &>(static_cast<LORAClient &>(rol2)).ctl_cmd().deferred_until_login)
             << "it waits for the session instead";
     }
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
@@ -5668,6 +5670,7 @@ namespace {
 // AckProbe above, adding no state.
 struct OptProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::last_timesync_sent_us_;
 };
 OptProbe &P(real_helpers::RealHubHarness &h) { return static_cast<OptProbe &>(h.rol); }
@@ -6325,7 +6328,7 @@ TEST(PendingShadowInputs, OpsAndDeferredOpsAreVisible) {
 
     P(h).login_state_for_test().relogin_pending = true;
     sendOpen(h);   // parked behind the relogin
-    EXPECT_TRUE(P(h).ctl().deferred_until_login);
+    EXPECT_TRUE(P(h).ctl_cmd().deferred_until_login);
     const pendingshadow::NodeInputs in = h.rol.pending_shadow_inputs(now);
     EXPECT_TRUE(in.op_deferred_until_login);
     EXPECT_TRUE(in.relogin_pending);
@@ -6365,6 +6368,7 @@ TEST(PendingShadowInputs, TrafficAgeComesFromHearingAndFromAddressingTheNode) {
 namespace {
 struct AckPathProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::command_failed_;
 };
 AckPathProbe &AP(real_helpers::RealHubHarness &h) { return static_cast<AckPathProbe &>(h.rol); }
@@ -6446,8 +6450,8 @@ TEST(AckPath, ATrackedOpIsAckedByAnyMsgidItWasSentUnderAndOnlyWhileAwaiting) {
     }
     // Nothing awaiting (acked or given up): a late ack is not an event.
     arm();
-    AP(h).ctl().awaiting_ack = false;
-    AP(h).ctl().acks.clear();
+    AP(h).dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).awaiting_ack = false;
+    AP(h).dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).acks.clear();
     deliverAck(h.rol, 11);
     EXPECT_TRUE(AP(h).command_failed_) << "must not be touched when nothing is awaiting";
 }
@@ -6460,9 +6464,9 @@ TEST(AckPath, OnlyACleanSingleShotAckFeedsTheLatencyHistory) {
     auto maxd  = [&]() { return h.rol.ack_latency_for_test().maxDelayMs((uint32_t) (esp_timer_get_time() / 1000)); };
     auto arm = [&](int64_t mark_us, uint8_t retries, bool short_spent) {
         AK(h.rol).ctlInFlight({10});
-        AP(h).ctl().mark_us      = mark_us;
-        AP(h).ctl().retry_count  = retries;
-        AP(h).ctl().short_wait_spent = short_spent;
+        AP(h).dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).mark_us      = mark_us;
+        AP(h).dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).retry_count  = retries;
+        AP(h).dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).short_wait_spent = short_spent;
     };
     ASSERT_EQ(count(), 0u);
 
@@ -6547,7 +6551,7 @@ TEST(OpRetry, ATimerThatFiresAfterTheOpIsNoLongerAwaitedDoesNothingAndDoesNotRea
     staleButOtherwiseGood(h);
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
-    AP(h).ctl().awaiting_ack = false;     // not via an ack: the timer is still armed
+    AP(h).dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).awaiting_ack = false;     // not via an ack: the timer is still armed
     const size_t sends = h.tracker.sent_copies.size();
     h.clock.tick(40'000);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends);
@@ -6646,7 +6650,7 @@ TEST(OpRetry, TheShortWaitIsMeasuredFromTheOpMarkWhenThereIsOneElseFromTheLastPl
         ASSERT_EQ(h.tracker.last_copies, 1);
         const int64_t now = esp_timer_get_time();
         P(h).link_timing().set_last_placed_t0_for_test(now + 900'000);
-        AP(h).ctl().mark_us       = have_op_mark ? now + 400'000 : 0;
+        AP(h).dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).mark_us       = have_op_mark ? now + 400'000 : 0;
         static_cast<ReArmProbe &>(h.rol).arm_dlv_timer_(esphome::lora_tracker::CH_CONTROL);   // re-arm the first wait
         const int64_t to_mark_us = have_op_mark ? 400'000 : 900'000;
         const uint32_t want = singleshotwait::firstAckWaitMs(to_mark_us, 0, h.rol.op_first_tail_ms_for_test());
@@ -7089,10 +7093,10 @@ TEST(ModeBListener, ANodeWithACoverOpInFlightIsNotWarmedUp) {
     r.rol.enable_timed_mode(true);
     r.ackGrid();
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
-    op.ctl().awaiting_ack = true;                 // a command nobody has acked yet
+    op.dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).awaiting_ack = true;                 // a command nobody has acked yet
     r.secs(modebsup::kGridSettleS + modebsup::kJitterMaxS + 30);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "the cover op owns the node";
-    op.ctl().awaiting_ack = false;                // acked
+    op.dlv_slot_for_test(esphome::lora_tracker::CH_CONTROL).awaiting_ack = false;                // acked
     ASSERT_GE(r.untilWarmup(modebsup::kJitterMaxS + 20), 0);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 1u);
 }
@@ -7535,6 +7539,7 @@ namespace {
 
 struct SleepProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::note_node_heard_;
     using esphome::lora_tracker::LORAListener::rtc_;
     using esphome::lora_tracker::LORAListener::login_slot_;
@@ -7594,7 +7599,7 @@ TEST(NightlySleep, GoesOutAsATrackedOpAndMutatesNothingUntilTheAck) {
     h.rol.enterSleep();
 
     EXPECT_TRUE(h.rol.awaitingAck()) << "a tracked op, not a raw frame";
-    EXPECT_EQ(SP(h.rol).ctl().sysop, (int32_t) CLIENT_OPERATION__CMD_SLEEP);
+    EXPECT_EQ(SP(h.rol).ctl_cmd().sysop, (int32_t) CLIENT_OPERATION__CMD_SLEEP);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1);
     EXPECT_EQ(countSleepFrames(h), 1);
     // ...and the hub's picture of the node is exactly what it was.
@@ -7732,7 +7737,7 @@ TEST(NightlySleep, ExhaustedRetriesKeepTheSessionAndRecordNoSleep) {
 
     EXPECT_FALSE(h.rol.awaitingAck()) << "the budget is spent";
     EXPECT_TRUE(h.rol.commandFailed()) << "visible in Home Assistant";
-    EXPECT_TRUE(SP(h.rol).ctl().sleep_unconfirmed);
+    EXPECT_TRUE(SP(h.rol).ctl_cmd().sleep_unconfirmed);
     // The teardown "Command failed after retries - clearing session" is NOT applied.
     EXPECT_TRUE(h.rol.session_confirmed()) << "the session is kept";
     EXPECT_TRUE(h.rol.login_acked());
@@ -7747,12 +7752,12 @@ TEST(NightlySleep, TheNextUplinkFromTheNodeSettlesAnUnconfirmedSleep) {
     sleepReady(h);
     h.rol.enterSleep();
     exhaustRetries(h);
-    ASSERT_TRUE(SP(h.rol).ctl().sleep_unconfirmed);
+    ASSERT_TRUE(SP(h.rol).ctl_cmd().sleep_unconfirmed);
     ASSERT_TRUE(h.rol.commandFailed());
 
     SP(h.rol).note_node_heard_();
 
-    EXPECT_FALSE(SP(h.rol).ctl().sleep_unconfirmed);
+    EXPECT_FALSE(SP(h.rol).ctl_cmd().sleep_unconfirmed);
     EXPECT_FALSE(h.rol.commandFailed()) << "the alarm clears: the node is demonstrably there";
 }
 
@@ -7763,14 +7768,14 @@ TEST(NightlySleep, HearingTheNodeDoesNotClearALaterCommandsFailure) {
     h.rol.login_state_for_test().confirmed = true;
     h.rol.enterSleep();
     exhaustRetries(h);
-    ASSERT_TRUE(SP(h.rol).ctl().sleep_unconfirmed);
+    ASSERT_TRUE(SP(h.rol).ctl_cmd().sleep_unconfirmed);
 
     sendOpen(h);                    // a cover op replaces the sleep as the tracked op
     exhaustRetries(h);
     ASSERT_TRUE(h.rol.commandFailed()) << "the cover op failed on its own account";
 
     SP(h.rol).note_node_heard_();
-    EXPECT_FALSE(SP(h.rol).ctl().sleep_unconfirmed);
+    EXPECT_FALSE(SP(h.rol).ctl_cmd().sleep_unconfirmed);
     EXPECT_TRUE(h.rol.commandFailed()) << "that failure is the cover op's, not the sleep's";
 }
 
@@ -7797,13 +7802,13 @@ TEST(NightlySleep, ASecondRequestWhileOneIsPendingChangesNothing) {
     sleepReady(h);
     h.rol.enterSleep();
     const size_t   sends = h.tracker.sent_copies.size();
-    const uint32_t gen   = SP(h.rol).ctl().generation;
+    const uint32_t gen   = SP(h.rol).ctl_cmd().generation;
     const uint32_t id    = SP(h.rol).ctl().last_msgid;
 
     h.rol.enterSleep();
 
     EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "no second command";
-    EXPECT_EQ(SP(h.rol).ctl().generation, gen) << "the first is not superseded";
+    EXPECT_EQ(SP(h.rol).ctl_cmd().generation, gen) << "the first is not superseded";
     EXPECT_EQ(SP(h.rol).ctl().last_msgid, id);
 
     ackSleep(h);
@@ -7823,14 +7828,14 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsDroppedAfterTheExpiryNotSentHo
     const size_t frames = r.radio.hub_to_node_frames().size();
 
     r.rol.enterSleep();
-    EXPECT_TRUE(SP(r.rol).ctl().deferred_until_login);
+    EXPECT_TRUE(SP(r.rol).ctl_cmd().deferred_until_login);
     EXPECT_EQ(r.radio.hub_to_node_frames().size(), frames) << "nothing in the clear";
 
     r.secs(170);
-    EXPECT_TRUE(SP(r.rol).ctl().deferred_until_login) << "still within the expiry";
+    EXPECT_TRUE(SP(r.rol).ctl_cmd().deferred_until_login) << "still within the expiry";
     r.secs(20);
-    EXPECT_FALSE(SP(r.rol).ctl().deferred_until_login) << "expired";
-    EXPECT_TRUE(SP(r.rol).ctl().sleep_unconfirmed);
+    EXPECT_FALSE(SP(r.rol).ctl_cmd().deferred_until_login) << "expired";
+    EXPECT_TRUE(SP(r.rol).ctl_cmd().sleep_unconfirmed);
     EXPECT_TRUE(r.rol.commandFailed());
 
     SP(r.rol).confirm_session_();                 // the node finally comes back
@@ -7849,11 +7854,11 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsSentWhenTheSessionReturnsInTim
 
     SP(r.rol).confirm_session_();
     EXPECT_TRUE(r.rol.awaitingAck()) << "sent from confirm_session_()";
-    EXPECT_FALSE(SP(r.rol).ctl().deferred_until_login);
+    EXPECT_FALSE(SP(r.rol).ctl_cmd().deferred_until_login);
 
     r.secs(6);                                    // the expiry timer fires meanwhile
     EXPECT_TRUE(r.rol.awaitingAck()) << "the expiry does not kill a sleep that is being retried";
-    EXPECT_FALSE(SP(r.rol).ctl().sleep_unconfirmed);
+    EXPECT_FALSE(SP(r.rol).ctl_cmd().sleep_unconfirmed);
     deliverAck(r.rol, SP(r.rol).ctl().last_msgid);
     EXPECT_NE(r.rol.last_sleep_epoch_, 0u);
 }
@@ -7918,12 +7923,12 @@ TEST(NightlySleep, ASecondRequestWhileTheFirstIsDeferredBehindARelogin_ChangesNo
     r.session();
     SP(r.rol).login_state_for_test().relogin_pending = true;
     r.rol.enterSleep();
-    ASSERT_TRUE(SP(r.rol).ctl().deferred_until_login);
-    const uint32_t gen = SP(r.rol).ctl().generation;
+    ASSERT_TRUE(SP(r.rol).ctl_cmd().deferred_until_login);
+    const uint32_t gen = SP(r.rol).ctl_cmd().generation;
 
     r.rol.enterSleep();
 
-    EXPECT_EQ(SP(r.rol).ctl().generation, gen) << "the deferred sleep is not re-issued";
+    EXPECT_EQ(SP(r.rol).ctl_cmd().generation, gen) << "the deferred sleep is not re-issued";
 }
 
 TEST(NightlySleep, ASleepWhoseRetriesAreStuckBehindARelogin_IsGivenUpAtTheExpiry) {
@@ -7938,7 +7943,7 @@ TEST(NightlySleep, ASleepWhoseRetriesAreStuckBehindARelogin_IsGivenUpAtTheExpiry
     r.secs(200);
 
     EXPECT_FALSE(r.rol.awaitingAck()) << "not retried into the afternoon";
-    EXPECT_TRUE(SP(r.rol).ctl().sleep_unconfirmed);
+    EXPECT_TRUE(SP(r.rol).ctl_cmd().sleep_unconfirmed);
     EXPECT_EQ(r.rol.last_sleep_epoch_, 0u);
 }
 
@@ -8004,13 +8009,13 @@ TEST(NightlySleep, ANewSleepAckedAfterAnUnconfirmedOneClearsTheUnconfirmedFlag) 
     sleepReady(h);
     h.rol.enterSleep();
     exhaustRetries(h);
-    ASSERT_TRUE(SP(h.rol).ctl().sleep_unconfirmed);
+    ASSERT_TRUE(SP(h.rol).ctl_cmd().sleep_unconfirmed);
 
     h.rol.enterSleep();                           // the operator tries again
     ASSERT_TRUE(h.rol.awaitingAck()) << "an unconfirmed sleep does not block a new request";
     deliverAck(h.rol, SP(h.rol).ctl().last_msgid);  // (no note_node_heard_: the flag is the ack's to clear)
 
-    EXPECT_FALSE(SP(h.rol).ctl().sleep_unconfirmed);
+    EXPECT_FALSE(SP(h.rol).ctl_cmd().sleep_unconfirmed);
     EXPECT_NE(h.rol.last_sleep_epoch_, 0u);
 }
 
@@ -8047,6 +8052,7 @@ namespace {
 
 struct DlvProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::clearSessionKeys_;
     using esphome::lora_tracker::LORAListener::confirm_session_;
     using esphome::lora_tracker::LORAListener::sleep_op_in_flight_;
@@ -8394,7 +8400,7 @@ TEST(SchedPush, ACoverOpDeferredBehindAReloginCountsAsBusyForTheWarmUp) {
     r.ackGrid();
     AK(r.rol).noPush();
     ASSERT_FALSE(AK(r.rol).delivery_busy_());
-    static_cast<TrackedOpProbe &>(r.rol).ctl().deferred_until_login = true;
+    static_cast<TrackedOpProbe &>(r.rol).ctl_cmd_.deferred_until_login = true;
     EXPECT_TRUE(AK(r.rol).delivery_busy_());
     r.secs(modebsup::kGridSettleS + modebsup::kJitterMaxS + 30);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "the parked op owns the node";
@@ -9114,7 +9120,7 @@ TEST(ControlQueue, ACoverOpSentWhileASleepIsInFlightQueuesBehindItAndTheSleepIsR
     sendOpen(h);
 
     EXPECT_TRUE(DP(h).sleep_op_in_flight_()) << "the sleep keeps its slot";
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::SYSOP);
+    EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::SYSOP);
     EXPECT_EQ(DP(h).ctl().last_msgid, sleep_id);
     EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "the cover op is waiting";
     EXPECT_EQ(airOrder(h), (Order{"S4"})) << "nothing else on the air yet";
@@ -9129,8 +9135,8 @@ TEST(ControlQueue, ACoverOpSentWhileASleepIsInFlightQueuesBehindItAndTheSleepIsR
     EXPECT_FALSE(h.rol.login_acked()) << "and the hub's session with the sleeping node ends";
     EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
     EXPECT_EQ(airOrder(h), (Order{"S4"})) << "the cover op is NOT sent into the sleeping node";
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
-    EXPECT_TRUE(DP(h).ctl().deferred_until_login) << "it is held for the node's wake";
+    EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_TRUE(DP(h).ctl_cmd().deferred_until_login) << "it is held for the node's wake";
     EXPECT_FALSE(h.rol.awaitingAck());
     EXPECT_FALSE(h.rol.commandFailed());
 }
@@ -9146,7 +9152,7 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     sendOpen(r);
     ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
     ackSleep(r);
-    ASSERT_TRUE(DP(r).ctl().deferred_until_login);
+    ASSERT_TRUE(DP(r).ctl_cmd().deferred_until_login);
     const size_t before = r.radio.hub_to_node_frames().size();
 
     // The wake: the node is HEARD (every confirmation is preceded by the uplink that
@@ -9157,9 +9163,9 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     DP(r).login_state_for_test().relogin_pending = true;
     DP(r).confirm_session_();
 
-    EXPECT_FALSE(DP(r).ctl().deferred_until_login);
+    EXPECT_FALSE(DP(r).ctl_cmd().deferred_until_login);
     EXPECT_TRUE(r.rol.awaitingAck()) << "sent from confirm_session_()";
-    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_EQ(DP(r).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
     EXPECT_GT(r.radio.hub_to_node_frames().size(), before);
     ackInFlight(r);
     EXPECT_FALSE(r.rol.awaitingAck());
@@ -9171,9 +9177,9 @@ TEST(ControlQueue, ACoverOpThatWaitedBehindASleepIsSentWhenTheNodeIsBack) {
     sendClose(r.rol);
     ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
     ackInFlight(r);
-    EXPECT_FALSE(DP(r).ctl().deferred_until_login);
+    EXPECT_FALSE(DP(r).ctl_cmd().deferred_until_login);
     EXPECT_TRUE(r.rol.awaitingAck()) << "the cover op that waited behind the OTA is sent";
-    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_EQ(DP(r).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
 }
 
 // The same when the sleep itself is still waiting for a session (deferred).
@@ -9184,18 +9190,18 @@ TEST(ControlQueue, ACoverOpSentWhileASleepIsDeferredQueuesBehindItThere_Too) {
     r.session();
     DP(r).login_state_for_test().relogin_pending = true;
     r.rol.enterSleep();
-    ASSERT_TRUE(DP(r).ctl().deferred_until_login);
+    ASSERT_TRUE(DP(r).ctl_cmd().deferred_until_login);
     ASSERT_TRUE(DP(r).sleep_op_in_flight_());
 
     sendOpen(r);
 
-    EXPECT_TRUE(DP(r).ctl().deferred_until_login) << "still the sleep that is deferred";
+    EXPECT_TRUE(DP(r).ctl_cmd().deferred_until_login) << "still the sleep that is deferred";
     EXPECT_TRUE(DP(r).sleep_op_in_flight_()) << "and it is still the sleep";
     EXPECT_EQ(QP(r).ctl_queue_.size(), 1u);
     DP(r).confirm_session_();
     EXPECT_TRUE(r.rol.awaitingAck()) << "the sleep is sent from confirm_session_()";
-    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::SYSOP);
-    EXPECT_EQ(DP(r).ctl().sysop, kOpSleep);
+    EXPECT_EQ(DP(r).ctl_cmd().kind, DlvProbe::TrackedOpKind::SYSOP);
+    EXPECT_EQ(DP(r).ctl_cmd().sysop, kOpSleep);
     ackSleep(r);
     EXPECT_NE(r.rol.last_sleep_epoch_, 0u) << "the sleep was not lost";
 }
@@ -9211,11 +9217,11 @@ TEST(ControlQueue, ASetAutoModeSysopDuringACoverOpQueuesBehindIt) {
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
     const uint32_t cover_id = DP(h).ctl().last_msgid;
-    ASSERT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    ASSERT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
 
     h.rol.set_auto_mode(true);
 
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER) << "the cover op is not displaced";
+    EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER) << "the cover op is not displaced";
     EXPECT_EQ(DP(h).ctl().last_msgid, cover_id);
     EXPECT_EQ(QP(h).ctl_queue_.size(), 1u);
     h.clock.tick(3050);
@@ -9223,8 +9229,8 @@ TEST(ControlQueue, ASetAutoModeSysopDuringACoverOpQueuesBehindIt) {
 
     deliverAck(h.rol, cover_id);                       // the cover op's ack
     EXPECT_EQ(QP(h).ctl_queue_.size(), 0u);
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::SYSOP) << "now the sysop";
-    EXPECT_EQ(DP(h).ctl().sysop, (int32_t) CLIENT_OPERATION__CMD_MODE_AUTO);
+    EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::SYSOP) << "now the sysop";
+    EXPECT_EQ(DP(h).ctl_cmd().sysop, (int32_t) CLIENT_OPERATION__CMD_MODE_AUTO);
     EXPECT_TRUE(h.rol.awaitingAck());
     EXPECT_EQ(h.rol.opRetryCount(), 0u) << "with a fresh retry budget";
     deliverAck(h.rol, cover_id);                       // a duplicate ack of the cover op
@@ -9272,10 +9278,10 @@ TEST(ControlQueue, AFailedCommandHandsTheChannelOnToTheNextOneWhichWaitsForTheNe
 
     for (int i = 0; i < 5; ++i) h.clock.tick(3050);    // 4 retries, then the give-up
 
-    EXPECT_TRUE(h.rol.commandFailed() || DP(h).ctl().deferred_until_login);
+    EXPECT_TRUE(h.rol.commandFailed() || DP(h).ctl_cmd().deferred_until_login);
     EXPECT_EQ(QP(h).ctl_queue_.size(), 0u) << "the sysop took the channel";
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::SYSOP);
-    EXPECT_TRUE(DP(h).ctl().deferred_until_login) << "but the session is being rebuilt: it waits for it";
+    EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::SYSOP);
+    EXPECT_TRUE(DP(h).ctl_cmd().deferred_until_login) << "but the session is being rebuilt: it waits for it";
     EXPECT_EQ(airOrder(h), (Order{"C0"})) << "not sent into the dead session";
 }
 
@@ -9370,7 +9376,7 @@ TEST(ControlQueue, ANewerCoverOpReplacesTheCoverOpInFlightAndLeavesTheLineAlone)
 
     deliverAck(h.rol, first);                          // the retired command's ack
     EXPECT_TRUE(h.rol.awaitingAck()) << "is not matched";
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER) << "the CLOSE is still the one awaited";
+    EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER) << "the CLOSE is still the one awaited";
     EXPECT_EQ(DP(h).ctl().last_msgid, second);
     EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "and the sysop has not been let through";
     ackInFlight(h);
@@ -9435,7 +9441,7 @@ TEST(ControlQueue, AnAbandonedOtaHandsTheChannelToTheCommandWaitingBehindIt) {
     h.clock.tick(3050);
 
     EXPECT_EQ(airOrder(h), (Order{"S2", "C0"})) << "the OTA is not re-sent; the cover op follows";
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
     EXPECT_TRUE(h.rol.awaitingAck());
 }
 
@@ -9521,15 +9527,15 @@ TEST(ControlQueue, ASleepWaitingInLineForTooLongIsDroppedAndTheCommandAheadOfItS
     sendOpen(r);                                       // deferred
     r.rol.enterSleep();                                // behind it
     ASSERT_EQ(QP(r).ctl_queue_.size(), 1u);
-    ASSERT_TRUE(DP(r).ctl().deferred_until_login);
+    ASSERT_TRUE(DP(r).ctl_cmd().deferred_until_login);
 
     r.secs(179);
     EXPECT_EQ(QP(r).ctl_queue_.size(), 1u) << "still within the expiry";
     r.secs(2);
 
     EXPECT_EQ(QP(r).ctl_queue_.size(), 0u) << "expired";
-    EXPECT_TRUE(DP(r).ctl().deferred_until_login) << "the cover op ahead of it is untouched";
-    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_TRUE(DP(r).ctl_cmd().deferred_until_login) << "the cover op ahead of it is untouched";
+    EXPECT_EQ(DP(r).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
     EXPECT_FALSE(r.rol.commandFailed()) << "a sleep that was never sent is not an unconfirmed one";
     DP(r).confirm_session_();
     EXPECT_TRUE(r.rol.awaitingAck());
@@ -9553,8 +9559,8 @@ TEST(ControlQueue, AnExpiredSleepInFlightHandsTheChannelOnToWhatWaitsBehindIt) {
 
     EXPECT_FALSE(DP(r).sleep_op_in_flight_()) << "the sleep was dropped";
     EXPECT_EQ(QP(r).ctl_queue_.size(), 0u);
-    EXPECT_EQ(DP(r).ctl().kind, DlvProbe::TrackedOpKind::COVER) << "the cover op took the channel";
-    EXPECT_TRUE(DP(r).ctl().deferred_until_login);
+    EXPECT_EQ(DP(r).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER) << "the cover op took the channel";
+    EXPECT_TRUE(DP(r).ctl_cmd().deferred_until_login);
     DP(r).confirm_session_();
     EXPECT_TRUE(r.rol.awaitingAck());
     EXPECT_EQ(countSleepFrames(r), 0);
@@ -9636,7 +9642,7 @@ TEST(OneSlot, ASetAutoModeWithoutAConfirmedSessionSendsNothingAndLeavesTheCoverO
 
     h.rol.set_auto_mode(true);                         // saved, pushed with the schedule later
 
-    EXPECT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
     EXPECT_EQ(DP(h).ctl().last_msgid, last);
 }
 
@@ -10480,6 +10486,7 @@ struct FireProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::cfg;
     using esphome::lora_tracker::LORAListener::mac;
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::last_timesync_sent_us_;
     using esphome::lora_tracker::LORAListener::delivery_busy_;
     using esphome::lora_tracker::LORAListener::clearSessionKeys_;
@@ -11083,14 +11090,14 @@ TEST(FireDelivery, ACoverOpLadderRunsOnUndisturbedByTheThreeFrames) {
     ASSERT_TRUE(h.rol.awaitingAck());
     const uint32_t first = FP(h).ctl().first_msgid;
     const uint32_t last  = FP(h).ctl().last_msgid;
-    const uint8_t  gen   = (uint8_t) FP(h).ctl().generation;
+    const uint8_t  gen   = (uint8_t) FP(h).ctl_cmd().generation;
 
     fireAllThree(h.rol, cover);
 
     EXPECT_TRUE(h.rol.awaitingAck());
     EXPECT_EQ(FP(h).ctl().first_msgid, first);
     EXPECT_EQ(FP(h).ctl().last_msgid, last) << "the Fire frames took msgids but are not part of the op's range";
-    EXPECT_EQ((uint8_t) FP(h).ctl().generation, gen);
+    EXPECT_EQ((uint8_t) FP(h).ctl_cmd().generation, gen);
     EXPECT_EQ(FP(h).ctl().retry_count, 0);
 
     const auto seen = airSeen(h.radio);
@@ -11357,6 +11364,7 @@ struct GateProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::note_node_heard_;
     using esphome::lora_tracker::LORAListener::confirm_session_;
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::ctl_queue_;
 };
 GateProbe &GP(real_helpers::RealHubHarness &h) { return static_cast<GateProbe &>(h.rol); }
@@ -11438,7 +11446,7 @@ TEST(SleepGate, ACoverOpAfterTheSleepAckIsIgnoredWithOneLogLineAndNothingElse) {
     EXPECT_EQ(occurrences(log, "cover op ignored — node asleep until 03:53 (sleep acknowledged 21:53)"), 1) << log;
     EXPECT_EQ(h.sends(), s0) << "nothing sent";
     EXPECT_FALSE(h.rol.awaitingAck());
-    EXPECT_FALSE(GP(h).ctl().deferred_until_login) << "and not held for the wake";
+    EXPECT_FALSE(GP(h).ctl_cmd().deferred_until_login) << "and not held for the wake";
     EXPECT_EQ(GP(h).ctl_queue_.size(), 0u) << "no FIFO entry";
     EXPECT_FALSE(h.rol.commandFailed()) << "no Command Failed";
     EXPECT_EQ(h.failed.publishes, 0) << "the alarm sensor was not even touched";
@@ -11578,7 +11586,7 @@ TEST(SleepGate, AnUnconfirmedSleepLeavesTheNodeAwakeAndCommandsGoOut) {
     h.rol.login_state_for_test().confirmed = true;
     h.rol.enterSleep();
     exhaustRetries(h);
-    ASSERT_TRUE(GP(h).ctl().sleep_unconfirmed);
+    ASSERT_TRUE(GP(h).ctl_cmd().sleep_unconfirmed);
     ASSERT_EQ(h.rol.last_sleep_epoch_, 0u);
 
     EXPECT_FALSE(GP(h).node_asleep_());
@@ -11596,7 +11604,7 @@ TEST(SleepGate, TheUnconfirmedFlagWinsOverAStaleSleepStamp) {
     h.rol.last_sleep_epoch_ = kModeBNow + 1;
     h.rol.last_heard_epoch_ = kModeBNow;
     ASSERT_TRUE(GP(h).node_asleep_()) << "precondition: the stamp alone says asleep";
-    GP(h).ctl().sleep_unconfirmed = true;
+    GP(h).ctl_cmd_.sleep_unconfirmed = true;
     EXPECT_FALSE(GP(h).node_asleep_());
 }
 
@@ -11614,7 +11622,7 @@ TEST(SleepGate, ACommandQueuedBehindAnInFlightSleepIsHeldAndDeliveredAtTheWake) 
 
     ackSleep(h);
     EXPECT_TRUE(GP(h).node_asleep_());
-    EXPECT_TRUE(GP(h).ctl().deferred_until_login) << "held for the wake, as hardware-verified";
+    EXPECT_TRUE(GP(h).ctl_cmd().deferred_until_login) << "held for the wake, as hardware-verified";
     EXPECT_EQ(airOrder(h), (Order{"S4"}));
 
     h.time.set_now(kWakeAt + 5, true);                   // the node is back
@@ -11898,7 +11906,7 @@ TEST(PositionIsNotAnAck, APositionAtTheDispatchSeamDoesNotCompleteACoverOp) {
     h.rol.registered_ = true;
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
-    ASSERT_EQ(DP(h).ctl().kind, DlvProbe::TrackedOpKind::COVER);
+    ASSERT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
     hubframes::Up pos{};
     pos.proto_case = hubframes::UL_POSITION;
 

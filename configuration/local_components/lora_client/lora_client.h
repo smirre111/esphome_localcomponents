@@ -129,6 +129,43 @@ namespace esphome
 
  
 
+    // THE CONTROL CHANNEL'S COMMAND: what the cover op / sysop in flight IS. The
+    // application's data; how it is delivered is the delivery service's
+    // (DeliveryService's private slot).
+    struct ControlCommand
+    {
+      // What encode_ctl_ builds the command from.
+      enum class Kind : uint8_t { COVER, SYSOP };
+      Kind     kind{Kind::COVER};
+      // Which LOGICAL command this is, for txqueue::SupersedeTable. Bumped once
+      // per command from Home Assistant — never per retransmission, which must
+      // stay under the generation it belongs to.
+      //
+      // Deliberately NOT msgid, even though msgid is also monotonic: a LoginMsg
+      // ZEROES the message counters, so a generation taken from msgid would go
+      // backwards after a re-login and the first command afterwards would be
+      // dropped as stale by frames queued before it. Starts at 1 because 0 is
+      // the table's "takes no part in this" value.
+      uint32_t generation{1};
+      // Stored operation, replayed on each retransmission with a fresh msgid.
+      uint32_t covop_case{0};
+      int32_t  operation{0};
+      float    position{0.0f};
+      int32_t  sysop{0};         // ClientOperation value when kind == SYSOP
+      // Security review finding 1: a cover op / sysop issued while
+      // relogin_pending is true would otherwise pack plaintext (session not
+      // confirmed yet) and get stored — then every retry is rejected by the
+      // node's own plaintext-gate (it already holds a session), and after
+      // kOpMaxRetries the hub tears down the session it just rebuilt. Set by
+      // send_cover_operation()/send_tracked_sysop_() when deferring instead
+      // of sending; consumed by confirm_session_(), which actually sends it
+      // once encryption is possible.
+      bool     deferred_until_login{false};
+      // True from "retries exhausted, no ack" until the node is next heard
+      // (CMD_SLEEP only; see on_sleep_unconfirmed_).
+      bool     sleep_unconfirmed{false};
+    };
+
     class LORAListener : public EntityBase, public Component, private StreamHost,
                          private DeliveryHost, private SessionHost, private LinkTimingHost
     {
@@ -634,6 +671,13 @@ namespace esphome
       bool     startup_login_initiated() const { return this->session_.startup_login_initiated(); }
       // For tests: set a precondition of the session's state machine.
       HubSession::LoginState &login_state_for_test() { return this->session_.login_state_for_test(); }
+      // The Control channel's command, read-only.
+      const ControlCommand &ctl_cmd() const { return this->ctl_cmd_; }
+      // For tests: set up a channel's delivery state directly.
+      DeliveryService::SlotState &dlv_slot_for_test(DeliveryChannel ch)
+      {
+        return this->dlv_.slot_for_test(ch);
+      }
 
       // --- Tracked-delivery state, read-only -------------------------------
       //
@@ -1418,17 +1462,16 @@ namespace esphome
       // attempt is packed once and every retry re-sends the same bytes (same
       // FCNT, same cmd_id) until the node's MAC ACK, then the command is failed
       // (and, unless it was a SLEEP, the session rebuilt) after kOpMaxRetries.
-      using TrackedOpKind = DeliverySlot::Kind;
+      using TrackedOpKind = ControlCommand::Kind;
       // The delivery service (DeliveryService.h): the channels' slots, ack ids,
-      // ladders and timers. ctl() is the tracked cover-op / sysop slot, cfg() the
-      // schedule push, mac() the GridSync.
+      // ladders and timers, read-only here. ctl() is the tracked cover-op /
+      // sysop request, cfg() the schedule push, mac() the GridSync.
       DeliveryService dlv_{*this};
-      DeliverySlot       &ctl()       { return this->dlv_.slot(CH_CONTROL); }
-      const DeliverySlot &ctl() const { return this->dlv_.slot(CH_CONTROL); }
-      DeliverySlot       &cfg()       { return this->dlv_.slot(CH_CONFIG); }
-      const DeliverySlot &cfg() const { return this->dlv_.slot(CH_CONFIG); }
-      DeliverySlot       &mac()       { return this->dlv_.slot(CH_MAC); }
-      const DeliverySlot &mac() const { return this->dlv_.slot(CH_MAC); }
+      const DeliveryService::SlotState &ctl() const { return this->dlv_.slot(CH_CONTROL); }
+      const DeliveryService::SlotState &cfg() const { return this->dlv_.slot(CH_CONFIG); }
+      const DeliveryService::SlotState &mac() const { return this->dlv_.slot(CH_MAC); }
+      // The Control channel's command (what the request in flight IS).
+      ControlCommand ctl_cmd_{};
 
       // ---- the delivery service, as the listener uses it ----
       void deliver_(DeliveryChannel ch, DeliveryRequest req) { this->dlv_.deliver(ch, std::move(req)); }
@@ -1477,7 +1520,11 @@ namespace esphome
       void     fill_grid_sync_(::GridSync *gs, int64_t planned_t0);
       // Something is being delivered to this node that a Mode B warm-up must not
       // run into: a cover op / sysop, a ScheduleConfig, a GridSync.
-      bool     delivery_busy_() const { return this->dlv_.busy(); }
+      bool     delivery_busy_() const
+      {
+        return this->ctl().awaiting_ack || this->ctl_cmd_.deferred_until_login ||
+               this->cfg().awaiting_ack || this->mac().awaiting_ack;
+      }
       bool     command_failed_{false};
       binary_sensor::BinarySensor *command_failed_bsensor_{nullptr};
       switch_::Switch             *auto_mode_switch_{nullptr};

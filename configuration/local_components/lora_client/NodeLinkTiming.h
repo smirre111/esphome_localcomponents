@@ -159,7 +159,7 @@ namespace esphome
       bool     have_in_slot_confirm_{false};
       int64_t  last_in_slot_us_{0};
       // The shape of the LAST frame send_aligned placed, whoever placed it --
-      // not the tracked command's (DeliverySlot::sent_single_shot), which its
+      // not the tracked command's (the delivery service's sent_single_shot), which its
       // senders copy from here themselves.
       bool     last_placed_single_shot_{false};
       // Whether that frame was a single shot ONLY because the optimistic switch

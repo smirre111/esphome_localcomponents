@@ -172,7 +172,7 @@ namespace esphome
     void LORAListener::send_deferred_tracked_op_()
     {
       this->ctl_hold_for_wake_ = false;   // the node is back
-      if (this->ctl().deferred_until_login)
+      if (this->ctl_cmd_.deferred_until_login)
       {
         ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred tracked op",
                  this->get_name().c_str());
@@ -1277,7 +1277,7 @@ namespace esphome
     const char *LORAListener::session_name() const { return this->get_name().c_str(); }
     uint8_t LORAListener::session_peer() const { return this->short_address_; }
     uint8_t LORAListener::session_subnet() const { return this->subnet_address_; }
-    uint32_t LORAListener::session_cmd_generation() const { return this->ctl().generation; }
+    uint32_t LORAListener::session_cmd_generation() const { return this->ctl_cmd_.generation; }
     void LORAListener::session_keys_installed() { this->invalidate_fcnt_reservations_(); }
     void LORAListener::session_keys_cleared()
     {
@@ -1287,8 +1287,7 @@ namespace esphome
       // re-send the bytes) is sealed under the keys just destroyed, so it must
       // never be re-sent: the retry re-packs or, for an at-most-once command,
       // is abandoned (DeliveryService::resend_).
-      this->ctl().frame     = MacFrame{};   // the delivery service's stored frame
-      this->ctl().frame_tag = 0;
+      this->dlv_.drop_stored_frame(CH_CONTROL);   // the delivery service's stored frame
     }
     void LORAListener::session_relogin() { this->do_login_and_arm_retry_(); }
     void LORAListener::session_save_state() { this->save_state_(true); }

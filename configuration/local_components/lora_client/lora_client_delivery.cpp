@@ -27,23 +27,23 @@ namespace esphome
     {
       hubframes::Down op_message {};
       LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
-      if (this->ctl().kind == TrackedOpKind::SYSOP)
+      if (this->ctl_cmd_.kind == TrackedOpKind::SYSOP)
       {
         op_message.cmd_case = hubframes::DL_SYSOP;
-        op_message.sysop    = static_cast<ClientOperation>(this->ctl().sysop);
+        op_message.sysop    = static_cast<ClientOperation>(this->ctl_cmd_.sysop);
       }
       else
       {
         op_message.cmd_case = hubframes::DL_OPERATION;
-        if (this->ctl().covop_case == LORA_COVER_OPERATION__COVOP_POSITION)
+        if (this->ctl_cmd_.covop_case == LORA_COVER_OPERATION__COVOP_POSITION)
         {
           covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
-          covop.position   = this->ctl().position;
+          covop.position   = this->ctl_cmd_.position;
         }
         else
         {
           covop.covop_case = LORA_COVER_OPERATION__COVOP_OPERATION;
-          covop.operation  = static_cast<CovOperation>(this->ctl().operation);
+          covop.operation  = static_cast<CovOperation>(this->ctl_cmd_.operation);
         }
         op_message.operation = &covop;
       }
@@ -51,7 +51,7 @@ namespace esphome
       // authenticated; falls back to plaintext only before a session exists.
       if (frame(&op_message))
         return true;
-      this->ctl().mark_us = 0;
+      this->dlv_.set_mark_us(CH_CONTROL, 0);
       ESP_LOGE(TAG, "[%s] Failed to pack tracked operation", this->get_name().c_str());
       return false;
     }
@@ -68,13 +68,13 @@ namespace esphome
       // Rule 4's exposure is THIS command's, so the shape is recorded here
       // rather than inside send_aligned_, where every other producer would
       // overwrite it.
-      this->ctl().sent_single_shot = this->link_.last_placed_single_shot();
-      this->ctl().sent_optimistic  = this->link_.last_placed_optimistic();
+      this->dlv_.set_sent_shape(CH_CONTROL, this->link_.last_placed_single_shot(),
+                                this->link_.last_placed_optimistic());
       // The placed mark of a FRESH frame (the first, or a re-pack) times the
       // first ack; a re-send of the stored frame leaves it alone.
       if (!a.resent_stored)
-        this->ctl().mark_us =
-            this->link_.last_placed_single_shot() ? this->link_.last_placed_t0_us() : 0;
+        this->dlv_.set_mark_us(CH_CONTROL, this->link_.last_placed_single_shot()
+                                               ? this->link_.last_placed_t0_us() : 0);
     }
 
     // The Control channel's request: the command the slot describes, delivered by
@@ -90,9 +90,9 @@ namespace esphome
       DeliveryRequest req;
       req.what        = "Tracked op";
       req.resend_verb = nullptr;   // the service's SameBytes lines log the retransmit, with the frame id
-      req.sent_label  = this->ctl().kind == TrackedOpKind::SYSOP ? "Sysop" : "Cover op";
+      req.sent_label  = this->ctl_cmd_.kind == TrackedOpKind::SYSOP ? "Sysop" : "Cover op";
       req.policy      = deliverypolicy::controlPolicy(
-          this->ctl().kind == TrackedOpKind::COVER, this->ctl().sysop,
+          this->ctl_cmd_.kind == TrackedOpKind::COVER, this->ctl_cmd_.sysop,
           CLIENT_OPERATION__CMD_SLEEP, CLIENT_OPERATION__CMD_OTA);
       req.encode  = [this](bool, uint32_t *, const DeliveryRequest::FrameFn &frame) {
         return this->encode_ctl_(frame);
@@ -115,17 +115,17 @@ namespace esphome
     // Start the slot's command: one attempt now, then the ladder.
     void LORAListener::ctl_send_()
     {
-      this->ctl().deferred_until_login = false;
-      this->ctl().short_wait_spent     = false;
+      this->ctl_cmd_.deferred_until_login = false;
+      this->dlv_.reset_short_wait(CH_CONTROL);
       // A superseded command's ack must not complete this one.
-      this->ctl().acks.clear();
+      this->dlv_.forget_ack_ids(CH_CONTROL);
       this->set_command_failed_(false);
       this->deliver_(CH_CONTROL, this->ctl_request_());
     }
 
     bool LORAListener::on_ctl_acked_(uint32_t ack_msg_id)
     {
-      this->ctl().awaiting_ack = false;
+      this->dlv_.clear_awaiting(CH_CONTROL);
       this->set_command_failed_(false);
       ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
                (unsigned) ack_msg_id);
@@ -142,7 +142,7 @@ namespace esphome
     // session change; a second one would only repeat it).
     void LORAListener::on_ctl_abandoned_()
     {
-      this->ctl().acks.clear();
+      this->dlv_.forget_ack_ids(CH_CONTROL);
       this->set_command_failed_(true);
     }
 
@@ -152,7 +152,7 @@ namespace esphome
     void LORAListener::on_ctl_failed_()
     {
       // A late ack of a command given up on must not revive it.
-      this->ctl().acks.clear();
+      this->dlv_.forget_ack_ids(CH_CONTROL);
       if (this->op_is_sleep_())
       {
         this->on_sleep_unconfirmed_();
@@ -179,7 +179,7 @@ namespace esphome
 
     bool LORAListener::ctl_busy_() const
     {
-      return this->ctl().awaiting_ack || this->ctl().deferred_until_login;
+      return this->ctl().awaiting_ack || this->ctl_cmd_.deferred_until_login;
     }
 
     // One command in flight per node. A newer cover op replaces an older one; any
@@ -192,7 +192,7 @@ namespace esphome
       if (this->refuse_while_asleep_(c))
         return false;
       this->mbs_yield_to_op_();
-      if (deliverypolicy::admitControl(this->ctl_busy_(), this->ctl().kind == TrackedOpKind::COVER,
+      if (deliverypolicy::admitControl(this->ctl_busy_(), this->ctl_cmd_.kind == TrackedOpKind::COVER,
                                        c.is_cover) == deliverypolicy::ControlAdmit::Queue)
       {
         this->ctl_enqueue_(c);
@@ -206,20 +206,20 @@ namespace esphome
     {
       if (c.is_cover)
       {
-        this->ctl().kind       = TrackedOpKind::COVER;
-        this->ctl().covop_case = c.covop_case;
-        this->ctl().operation  = c.operation;
-        this->ctl().position   = c.position;
+        this->ctl_cmd_.kind       = TrackedOpKind::COVER;
+        this->ctl_cmd_.covop_case = c.covop_case;
+        this->ctl_cmd_.operation  = c.operation;
+        this->ctl_cmd_.position   = c.position;
       }
       else
       {
-        this->ctl().kind  = TrackedOpKind::SYSOP;
-        this->ctl().sysop = c.sysop;
+        this->ctl_cmd_.kind  = TrackedOpKind::SYSOP;
+        this->ctl_cmd_.sysop = c.sysop;
       }
       // A NEW logical command, so a previous one still sitting in the transmit
       // queue is now stale. Bumped before the pack, so the frame carries the
       // generation that supersedes it. See txqueue::SupersedeTable.
-      this->ctl().generation++;
+      this->ctl_cmd_.generation++;
 
       // Security review finding 1: see deferred_until_login's comment. The
       // command's parameters are already stored in the slot, so
@@ -228,7 +228,7 @@ namespace esphome
       // holding a session) will reject outright.
       if (this->session_.relogin_pending() || hold)
       {
-        this->ctl().deferred_until_login = true;
+        this->ctl_cmd_.deferred_until_login = true;
         ESP_LOGD(TAG, "[%s] %s deferred — %s", this->get_name().c_str(),
                  c.is_cover ? "Cover op" : "Sysop",
                  hold ? "the node is asleep" : "session being rebuilt");
@@ -273,7 +273,7 @@ namespace esphome
     {
       TxPolicy p;
       p.supersede_key = this->short_address_;
-      p.supersede_gen = this->ctl().generation;
+      p.supersede_gen = this->ctl_cmd_.generation;
       return p;
     }
 
@@ -749,12 +749,6 @@ namespace esphome
     {
       for (uint8_t c = 0; c < kDeliveryChannels; ++c)
         this->slots_[c].acks.clear();
-    }
-
-    bool DeliveryService::busy() const
-    {
-      return this->slots_[CH_CONTROL].awaiting_ack || this->slots_[CH_CONTROL].deferred_until_login ||
-             this->slots_[CH_CONFIG].awaiting_ack || this->slots_[CH_MAC].awaiting_ack;
     }
 
     // Mark -> ack, for every command whose FIRST frame was a single placed

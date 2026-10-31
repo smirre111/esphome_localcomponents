@@ -102,6 +102,7 @@ struct V1Probe : LORAClient {
     using esphome::lora_tracker::LORAListener::v1_login_frame_;
     using esphome::lora_tracker::LORAListener::v1_demote_frame_;
     using esphome::lora_tracker::LORAListener::ctl;
+    using esphome::lora_tracker::LORAListener::ctl_cmd_;
 };
 V1Probe &P(LORAClient &r) { return static_cast<V1Probe &>(r); }
 
@@ -364,7 +365,7 @@ TEST(MacWireVectorsHub, CoverOpSealedStampedOnMark) {
     VectorSession s;
     Hub hub;
     const mv::Vector &v = vec("cover_op");
-    P(hub.rol).ctl().generation = 7;   // cmd_id = the Control slot's generation
+    P(hub.rol).ctl_cmd_.generation = 7;   // cmd_id = the Control slot's generation
     hubframes::Down op{};
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
     covop.covop_case = LORA_COVER_OPERATION__COVOP_POSITION;
@@ -386,7 +387,7 @@ TEST(MacWireVectorsHub, SysopOtaCarriesItsCmdId) {
     VectorSession s;
     Hub hub;
     const mv::Vector &v = vec("sysop_ota");
-    P(hub.rol).ctl().generation = 300;
+    P(hub.rol).ctl_cmd_.generation = 300;
     hubframes::Down op{};
     op.cmd_case = hubframes::DL_SYSOP;
     op.sysop    = CLIENT_OPERATION__CMD_OTA;
@@ -917,7 +918,7 @@ TEST(MacWireV1Listener, ACoverOpIsSealedAsksForAnAckAndCarriesItsCmdId) {
     ASSERT_NE(app, nullptr);
     ASSERT_EQ(app->pdu_case, HUB_APP_PDU__PDU_OPERATION);
     EXPECT_FLOAT_EQ(app->operation->position, 0.75f);
-    EXPECT_EQ(app->operation->cmd_id, P(hub.rol).ctl().generation);
+    EXPECT_EQ(app->operation->cmd_id, P(hub.rol).ctl_cmd().generation);
     EXPECT_NE(app->operation->cmd_id, 0u);
     hub_app_pdu__free_unpacked(app, nullptr);
     EXPECT_TRUE(hub.rol.awaitingAck());

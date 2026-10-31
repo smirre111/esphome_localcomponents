@@ -239,7 +239,7 @@ namespace esphome
       ESP_LOGE(TAG, "[%s] GridSync not acknowledged after %u re-publishes — "
                     "the node stays in Mode A until its next login",
                this->get_name().c_str(), (unsigned) kGridSyncMaxRepublishes);
-      this->mac().acks.clear();
+      this->dlv_.forget_ack_ids(CH_MAC);
       if (modebsup::reloginAfterSpentLadder(this->s_since_(this->last_regrid_us_),
                                             this->last_gridsync_ack_us_ != 0,
                                             this->s_since_(this->last_forced_relogin_us_)))

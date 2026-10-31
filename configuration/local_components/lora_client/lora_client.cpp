@@ -359,10 +359,10 @@ namespace esphome
 
     void LORAListener::note_node_heard_()
     {
-      if (this->ctl().sleep_unconfirmed)
+      if (this->ctl_cmd_.sleep_unconfirmed)
       {
         // See on_sleep_unconfirmed_(): the node is awake (again), whichever it was.
-        this->ctl().sleep_unconfirmed = false;
+        this->ctl_cmd_.sleep_unconfirmed = false;
         if (this->op_is_sleep_())   // a later op's failure is that op's own
           this->set_command_failed_(false);
         ESP_LOGW(TAG, "[%s] Node heard again after an UNCONFIRMED sleep command — treating it as awake",
@@ -380,7 +380,7 @@ namespace esphome
       pendingshadow::NodeInputs in;
       in.slot = static_cast<uint8_t>(this->grid_slot_ % timedgrid::kSlotCount);
       in.op_awaiting_ack          = this->ctl().awaiting_ack;
-      in.op_deferred_until_login  = this->ctl().deferred_until_login;
+      in.op_deferred_until_login  = this->ctl_cmd_.deferred_until_login;
       // "Login still settling" counts with an explicit relogin: both mean the
       // hub is mid-conversation with this node (TimeSync's sleepOk reads the same).
       in.relogin_pending          = this->session_.relogin_pending() || !this->session_.confirmed();
@@ -489,7 +489,7 @@ namespace esphome
     {
       sleepmodel::Inputs in{};
       in.auto_mode         = this->auto_mode_;
-      in.sleep_unconfirmed = this->ctl().sleep_unconfirmed;
+      in.sleep_unconfirmed = this->ctl_cmd_.sleep_unconfirmed;
       in.last_sleep_epoch  = this->last_sleep_epoch_;
       in.last_heard_epoch  = this->last_heard_epoch_;
       in.ms_until_awake    = this->ms_until_node_awake_();
@@ -778,12 +778,12 @@ namespace esphome
 
     bool LORAListener::op_is_sleep_() const
     {
-      return this->ctl().kind == TrackedOpKind::SYSOP && this->ctl().sysop == CLIENT_OPERATION__CMD_SLEEP;
+      return this->ctl_cmd_.kind == TrackedOpKind::SYSOP && this->ctl_cmd_.sysop == CLIENT_OPERATION__CMD_SLEEP;
     }
 
     bool LORAListener::sleep_op_in_flight_() const
     {
-      return this->op_is_sleep_() && (this->ctl().awaiting_ack || this->ctl().deferred_until_login);
+      return this->op_is_sleep_() && (this->ctl().awaiting_ack || this->ctl_cmd_.deferred_until_login);
     }
 
     // The node acknowledged CMD_SLEEP: it has heard it and is about to deep-sleep
@@ -791,7 +791,7 @@ namespace esphome
     // code did eagerly happens here instead.
     void LORAListener::on_sleep_acknowledged_()
     {
-      this->ctl().sleep_unconfirmed = false;
+      this->ctl_cmd_.sleep_unconfirmed = false;
       // Whatever waited behind the sleep must not be sent into a sleeping node: it
       // goes out when the node is back (confirm_session_).
       this->ctl_hold_for_wake_ = true;
@@ -879,8 +879,8 @@ namespace esphome
     // normal path handles; one that did not is simply heard.
     void LORAListener::on_sleep_unconfirmed_()
     {
-      this->ctl().awaiting_ack   = false;
-      this->ctl().sleep_unconfirmed = true;
+      this->dlv_.clear_awaiting(CH_CONTROL);
+      this->ctl_cmd_.sleep_unconfirmed = true;
       this->refresh_sleep_status_();
       this->set_command_failed_(true);
       ESP_LOGE(TAG, "[%s] SLEEP command UNCONFIRMED after %u retries — the node may have "
@@ -916,7 +916,7 @@ namespace esphome
     {
       if (this->sleep_op_in_flight_())
       {
-        this->ctl().deferred_until_login = false;
+        this->ctl_cmd_.deferred_until_login = false;
         this->cancel_timeout(DeliveryService::timer_name(CH_CONTROL));
         this->on_sleep_unconfirmed_();
         this->ctl_next_();
