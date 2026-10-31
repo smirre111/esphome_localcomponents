@@ -241,7 +241,6 @@ struct NodeProbe : CmdDispatcher {
     NodeProbe(MotorCtrl *m, SystemCtrl *s, LoraInterface *l,
               portMUX_TYPE &mm, portMUX_TYPE &bm)
         : CmdDispatcher(m, s, l, mm, bm) {}
-    using CmdDispatcher::modeTestExpiredCb_;   // the node-owned deadline
     using CmdDispatcher::mac_ping_seq_hw_;       // the MAC ping high-water mark
     // What the HUB was last told, as distinct from what the console last saw.
     // The flicker test has to assert the state the hub ends up believing, and
@@ -4660,7 +4659,7 @@ TEST_F(RealNodeFixture, TheLogLevelsComeBackWhenTheNodeEndsItsOwnTest) {
     proto_sim_log_levels().clear();
     holdSessionAndArmTest(disp, /*counter_on=*/false);
     ASSERT_TRUE(disp.modeTestActive());
-    NodeProbe::modeTestExpiredCb_(&disp);
+    disp.expireModeTestForTest();
     ASSERT_FALSE(disp.modeTestActive());
     for (const char *tag : {"CmdDispatcher", "LoraInterface", "frtosTasks"})
         EXPECT_EQ(tagLevel(tag), ESP_LOG_INFO) << tag;

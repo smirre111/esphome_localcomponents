@@ -95,7 +95,6 @@ struct DispProbe : CmdDispatcher {
     DispProbe(MotorCtrl *m, SystemCtrl *s, LoraInterface *l,
               portMUX_TYPE &mm, portMUX_TYPE &bm)
         : CmdDispatcher(m, s, l, mm, bm) {}
-    using CmdDispatcher::mode_test_active_;
 };
 
 void resetIrqSession();   // the Mode B section's session context (below)
@@ -494,7 +493,7 @@ TEST_F(Irq, DISABLED_ASweepsMisArmedWindowIsNeverRescuedByAnExtension) {
     // guard's null check short-circuits, and the window extends anyway — which
     // is exactly how this test first failed.
     lif.setCmdDispatcher(&disp);
-    disp.mode_test_active_            = true;
+    disp.setModeTestActiveForTest(true);
     disp.mac0ForTest().setArmOffsetUs(12'000);   // a sweep, arming late
 
     lif.armTimedRxWindow();

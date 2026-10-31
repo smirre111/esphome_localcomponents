@@ -30,10 +30,11 @@
 // drift gate compares the two -- edit THIS file, never the vendored one.
 //
 // Since S8 the fields of MacHdr are the MAC wire v1 fixed header (MacWire.h,
-// docs/mac-wire-format.md). Today the layers call each other through bespoke
-// methods (LinkSecurity::sealWireSession, Mac0Access::commitTiming, ...); the
-// request/indication structs below name the primitives those methods
-// implement (review N26: the SAP is the vocabulary, not yet the call API).
+// docs/mac-wire-format.md). The service primitives ARE the layers' methods
+// (LinkSecurity::sealWireSession / verifyWireSession, Mac0Access::rxTicket /
+// commitTiming / dataRequest, mac1::Sequencer::check / commit / allocate);
+// this header holds the vocabulary they share. The request/indication
+// structs an earlier stage sketched were never used and are gone (review N26).
 // ---------------------------------------------------------------------------
 
 namespace mac
@@ -82,18 +83,6 @@ struct MacHdr
     uint32_t session_nonce{0};
 };
 
-// How MAC-0 should put a frame on the air.
-struct TxOpts
-{
-    uint8_t  copies{1};          // 1 = single shot, 17 = Mode A burst
-    uint16_t stride_ms{0};       // copy spacing when copies > 1
-    int64_t  earliest_us{0};     // 0 = as soon as the channel allows
-    bool     on_mark{false};     // placed on the destination's Mode B mark
-    bool     expects_reply{false};
-    bool     ack_request{false};
-    uint8_t  priority{0};
-};
-
 // Per-copy authentication WITHOUT MAC-0 knowing keys: MAC-2 hands MAC-0 a
 // sealer bound to ONE frame's key generation; MAC-0 calls it once per copy
 // after stamping that copy's header bytes. Since S8 the tag covers the raw
@@ -114,25 +103,6 @@ struct RxTicket
     uint32_t window_gen{0};       // the RX window that heard it (mark hits are window-scoped)
 };
 
-// MAC-0 data request (down) and indication (up).
-struct Mac0DataReq
-{
-    MacHdr         hdr{};
-    const uint8_t *body{nullptr};
-    size_t         len{0};
-    TxOpts         opts{};
-    CopySealer     sealer{nullptr};
-    void          *sealer_ctx{nullptr};
-};
-
-struct Mac0DataInd
-{
-    MacHdr         hdr{};
-    const uint8_t *body{nullptr};
-    size_t         len{0};
-    RxTicket       ticket{};
-};
-
 // MAC-2 receive outcome.
 enum class SecRxStatus : uint8_t
 {
@@ -141,27 +111,6 @@ enum class SecRxStatus : uint8_t
     BadMic,       // CMAC (or LOGIN/REGISTER MIC) failed
     NoSession,    // sealed, but no keys for this peer
     MsgidSpent,   // the FCNT space is exhausted (2^31); a fresh session is needed
-};
-
-// MAC-2 data request (down) and indication (up).
-struct SecDataReq
-{
-    Addr           dst{0};
-    Port           port{Port::App};
-    const uint8_t *pt{nullptr};
-    size_t         len{0};
-    TxOpts         opts{};
-    bool           require_seal{true};   // fail closed when no session key exists
-};
-
-struct SecDataInd
-{
-    MacHdr         hdr{};
-    Port           port{Port::App};
-    const uint8_t *pt{nullptr};
-    size_t         len{0};
-    SecRxStatus    status{SecRxStatus::Plaintext};
-    Freshness      freshness{Freshness::Stale};
 };
 
 }  // namespace mac
