@@ -558,16 +558,14 @@ namespace esphome
     // -----------------------------------------------------------------------
     void LORATracker::startGrid()
     {
-      if (this->grid_started_)
+      if (!this->grid_.start(esp_timer_get_time()))
         return;   // set once, never moved
-      this->grid_anchor_us_ = esp_timer_get_time();
-      this->grid_started_   = true;
 
       // The fleet key is the management plane's (mac_mgmt.h), minted WITH the
       // anchor because its lifetime is exactly the grid's.
       this->mgmt_.mintFleetKey();
       ESP_LOGI(TAG, "Grid anchor set at %lld us (%u slots of %u us in %u us)",
-               (long long) this->grid_anchor_us_,
+               (long long) this->grid_.anchor_us(),
                (unsigned) timedgrid::kSlotCount,
                (unsigned) timedgrid::kSlotPitchUs,
                (unsigned) timedgrid::kRoundUs);
@@ -575,48 +573,22 @@ namespace esphome
 
     uint32_t LORATracker::roundForSlotT0(uint8_t slot, int64_t t0_us) const
     {
-      if (!this->grid_started_)
-        return 0;
-      const int64_t rel = t0_us - this->grid_anchor_us_
-                        - (int64_t) (slot % timedgrid::kSlotCount)
-                            * (int64_t) timedgrid::kSlotPitchUs;
-      if (rel < 0)
-        return 0;
-      return (uint32_t) (rel / (int64_t) timedgrid::kRoundUs);
+      return this->grid_.round_for_slot_t0(slot, t0_us);
     }
 
     bool LORATracker::fireStampFor_(int64_t t0_us, uint32_t *round, uint32_t *offset_us) const
     {
-      if (!this->grid_started_)
-        return false;
-      const int64_t rel = t0_us - this->grid_anchor_us_;
-      if (rel < 0)
-        return false;
-      if (round != nullptr)
-        *round = (uint32_t) (rel / (int64_t) timedgrid::kRoundUs);
-      if (offset_us != nullptr)
-        *offset_us = (uint32_t) (rel % (int64_t) timedgrid::kRoundUs);
-      return true;
+      return this->grid_.fire_stamp_for(t0_us, round, offset_us);
     }
 
     uint32_t LORATracker::beaconRoundForT0(int64_t t0_us) const
     {
-      return this->roundForSlotT0((uint8_t) timedgrid::kBeaconSlotIndex, t0_us);
+      return this->grid_.beacon_round_for_t0(t0_us);
     }
 
     int64_t LORATracker::nextBeaconT0Us(int64_t now_us) const
     {
-      if (!this->grid_started_ || timedgrid::kBeaconEveryRounds == 0)
-        return 0;
-      // The beacon slot's marks come every round; only every Nth is a beacon.
-      const int64_t stride = (int64_t) timedgrid::kRoundUs
-                           * (int64_t) timedgrid::kBeaconEveryRounds;
-      const int64_t base   = this->grid_anchor_us_
-                           + (int64_t) timedgrid::kBeaconSlotIndex
-                               * (int64_t) timedgrid::kSlotPitchUs;
-      if (now_us <= base)
-        return base;
-      return base + ((now_us - base + stride - 1) / stride) * stride;
+      return this->grid_.next_beacon_t0(now_us);
     }
 
     // Section 4.4. The frame that keeps a node IN Mode B.
@@ -632,7 +604,7 @@ namespace esphome
     // mark is not within the window where holding a buffer for it pays).
     bool LORATracker::beacon_due_(int64_t &now, int64_t &t0, uint32_t &round, int64_t &fire)
     {
-      if (!this->grid_started_ || timedgrid::kBeaconEveryRounds == 0)
+      if (!this->grid_.started() || timedgrid::kBeaconEveryRounds == 0)
         return false;
 
       now = esp_timer_get_time();
@@ -754,28 +726,12 @@ namespace esphome
 
     int64_t LORATracker::nextT0ForSlotUs(uint8_t slot, int64_t now_us) const
     {
-      if (!this->grid_started_)
-        return now_us;   // no grid: send now, do not invent an instant
-
-      const int64_t pitch = (int64_t) timedgrid::kSlotPitchUs;
-      const int64_t round = (int64_t) timedgrid::kRoundUs;
-      const int64_t base  = this->grid_anchor_us_
-                          + (int64_t) (slot % timedgrid::kSlotCount) * pitch;
-
-      // Rounds elapsed since that slot's first T0, rounded UP so the answer is
-      // never in the past. Integer division truncates towards zero, which for a
-      // negative delta would round the wrong way — hence the explicit branch
-      // rather than a (d + round - 1) / round that only works for d >= 0.
-      const int64_t delta = now_us - base;
-      if (delta <= 0)
-        return base;
-      const int64_t rounds = (delta + round - 1) / round;
-      return base + rounds * round;
+      return this->grid_.next_t0_for_slot(slot, now_us);
     }
 
     uint32_t LORATracker::msUntilNextT0(uint8_t slot) const
     {
-      if (!this->grid_started_)
+      if (!this->grid_.started())
         return 0;
       const int64_t now = esp_timer_get_time();
       const int64_t t0  = this->nextT0ForSlotUs(slot, now);
@@ -823,7 +779,7 @@ namespace esphome
     // early.
     size_t LORATracker::onAirLen_(size_t len, bool fire_stamp) const
     {
-      return len + ((mac0::kTxFrameInsertsStamp && this->grid_started_ && fire_stamp)
+      return len + ((mac0::kTxFrameInsertsStamp && this->grid_.started() && fire_stamp)
                         ? macwire::kStampBytes : 0);
     }
 
@@ -893,7 +849,7 @@ namespace esphome
     int64_t LORATracker::nextClearT0ForSlotUs(uint8_t slot, int64_t now_us, int copies,
                                               size_t len, bool expects_reply) const
     {
-      if (!this->grid_started_)
+      if (!this->grid_.started())
         return now_us;
 
       int64_t t0 = this->nextT0ForSlotUs(slot, now_us);
@@ -924,7 +880,7 @@ namespace esphome
 
     uint32_t LORATracker::msUntilNextClearT0(uint8_t slot) const
     {
-      if (!this->grid_started_)
+      if (!this->grid_.started())
         return 0;
       const int64_t now = esp_timer_get_time();
       const int64_t t0  = this->nextClearT0ForSlotUs(slot, now);
@@ -1191,7 +1147,7 @@ namespace esphome
       // declares its own round and slot, the node reads it on its own path,
       // and the stamp would take it past kBeaconPayloadBytes — the size its
       // fleet-wide airtime is budgeted on.
-      if (!(this->grid_started_ && fire_stamp))
+      if (!(this->grid_.started() && fire_stamp))
         return false;
       const int64_t reachable = esp_timer_get_time() + kStampLeadUs;
       if (*fire_at_us < reachable)

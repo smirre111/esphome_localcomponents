@@ -1663,7 +1663,6 @@ struct BeaconProbe : TxProbe {
     // S5: the fleet key and the shadow sources live in the MAC management unit.
     uint8_t *net_key() { return this->mgmt().netKeyForTest(); }
     using LORATracker::beacon_round_queued_;
-    using LORATracker::grid_started_;
 };
 }  // namespace
 

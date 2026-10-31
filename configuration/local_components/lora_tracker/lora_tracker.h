@@ -34,6 +34,7 @@
 
 // The transmit buffer pool and its buffer type (TxPool, review HB10).
 #include "tx_pool.h"
+#include "hub_grid.h"
 
 namespace mac0
 {
@@ -271,8 +272,8 @@ namespace esphome
       pendingshadow::Verdict recordShadowPending(const pendingshadow::NodeInputs *in,
                                                  const std::string *names, size_t n,
                                                  uint32_t round);
-      int64_t   gridAnchorUs() const { return this->grid_anchor_us_; }
-      bool      gridStarted() const  { return this->grid_started_; }
+      int64_t   gridAnchorUs() const { return this->grid_.anchor_us(); }
+      bool      gridStarted() const  { return this->grid_.started(); }
       // True once setup() has finished: the radio is configured and the send task
       // is running. Component setup order puts the template switches (798) and the
       // listeners (600) BEFORE this component (300), so a switch restored at boot
@@ -497,7 +498,8 @@ namespace esphome
 
       esp_err_t init_memory_pool(void);
 
-      int64_t grid_anchor_us_{0};
+      // The grid: its anchor and the round / slot arithmetic (hub_grid.h).
+      HubGrid grid_;
       // The last beacon round this hub queued a frame for, so loop() does not
       // queue the same beacon repeatedly while its mark approaches. Held as
       // "one past" rather than a bool so a beacon missed entirely (a hub busy
@@ -513,7 +515,6 @@ namespace esphome
       uint32_t shadow_beacons_{0};
       uint32_t shadow_beacons_with_clear_{0};
       uint32_t shadow_last_mask_{0xFFFFFFFFu};
-      bool    grid_started_{false};
       bool    setup_done_{false};
       // Section 4.4's fleet key (minted in startGrid(), published inside each
       // node's already-encrypted GridSync, never sent in the clear), the beacon
