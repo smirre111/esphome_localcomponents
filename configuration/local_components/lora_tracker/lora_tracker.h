@@ -32,53 +32,8 @@
 // S5: the MAC management unit (fleet key, beacon build, shadow inputs).
 #include "mac_mgmt.h"
 
-// The transmit buffer pool (review HB25: constants, not global macros).
-namespace loratx
-{
-static constexpr int      kPoolSize    = 5;            // buffers in the TX pool
-static constexpr size_t   kBufferSize  = 256;          // one LoRa frame (<= 255 B) fits
-static constexpr int      kQueueDepth  = 20;           // TX handoff queue entries
-static constexpr uint32_t kBufferMagic = 0xDEADBEEF;   // a pool buffer's integrity mark
-}  // namespace loratx
-// Memory pool structure with safety features
-typedef struct
-{
-  uint8_t data[loratx::kBufferSize];
-  size_t length;
-  uint32_t timestamp;
-  uint32_t magic;    // Magic number for validation
-  uint8_t in_use;    // Flag to track buffer state
-  uint8_t ref_count; // Reference counting
-  // How THIS frame is to be transmitted. Travels with the buffer because the
-  // policy is decided at enqueue and consumed at dequeue, and those are
-  // different moments on different tasks — see TxPolicy.
-  int      tx_copies;     // 0 = the default full burst
-  uint32_t tx_stride_ms;  // 0 = the default txIntervalMs
-  int64_t  tx_earliest_us; // 0 = no constraint
-  uint8_t  tx_priority;    // txqueue::Priority as an integer
-  // Supersession (txqueue::SupersedeTable). These travel WITH the frame for the
-  // same reason the policy above does: the decision is made when the frame
-  // reaches the front, by which time the caller that queued it is long gone.
-  uint32_t tx_supersede_key;  // 0 = supersedes nothing, superseded by nothing
-  uint32_t tx_supersede_gen;
-  uint8_t  tx_on_mark;        // TxPolicy::on_mark, stamped into the header
-  uint8_t  tx_expects_reply;  // TxPolicy::expects_reply: hold the response window
-  // S4: MAC-2's sealer for THIS frame's copies and the binding it is called
-  // with (TxPolicy::sealer / seal_binding). Opaque here: MAC-0 never sees a key.
-  mac::CopySealer tx_sealer;
-  uint64_t        tx_seal_binding;
-  uint8_t         tx_fire_stamp;  // TxPolicy::fire_stamp
-} tx_buffer_t;
-
-// Statistics
-typedef struct
-{
-  uint32_t buffers_allocated;
-  uint32_t buffers_freed;
-  uint32_t allocation_failures;
-  uint32_t double_free_attempts;
-  uint32_t invalid_buffer_errors;
-} pool_stats_t;
+// The transmit buffer pool and its buffer type (TxPool, review HB10).
+#include "tx_pool.h"
 
 namespace esphome
 {
@@ -634,10 +589,8 @@ namespace esphome
       int64_t burstEndUs_(int64_t start_us, int copies, uint32_t stride_ms,
                           size_t len, bool expects_reply = true) const;
 
-      tx_buffer_t *get_free_buffer(TickType_t timeout);
-      esp_err_t return_buffer_to_pool(tx_buffer_t *buffer);
-      esp_err_t buffer_ref_inc(tx_buffer_t *buffer);
-      bool validate_buffer(tx_buffer_t *buffer);
+      // The transmit buffer pool (tx_pool.h).
+      TxPool pool_;
 
       // Group 1: Large objects (12+ bytes) - vectors and callback manager
       std::vector<LORAClient *> clients_;

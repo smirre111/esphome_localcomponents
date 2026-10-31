@@ -1505,13 +1505,9 @@ TEST(RealTrackerTx, AnExhaustedPoolIsReportedRatherThanDroppedSilently) {
         ASSERT_TRUE(t.send(f.data(), f.size(), placed)) << "buffer " << i;
     }
 
-    // A DELTA, not an absolute, and the reason matters beyond this test: the
-    // pool and its statistics are FILE-STATICS in lora_tracker.cpp, not
-    // members. So every LORATracker in a process shares one pool of five, and
-    // init_memory_pool() re-initialises that shared pool rather than its own.
-    // Harmless on a hub, which has exactly one tracker; it is why this test
-    // cannot read the count as a fresh zero, and worth knowing before anyone
-    // constructs a second tracker.
+    // A DELTA, not an absolute: the earlier sends may already have counted.
+    // (The pool and its statistics were file-statics shared by every tracker
+    // in the process until HB10 made them the tracker's own TxPool.)
     const uint32_t before = t.poolAllocationFailures();
 
     auto overflow = tagged(0xDF);

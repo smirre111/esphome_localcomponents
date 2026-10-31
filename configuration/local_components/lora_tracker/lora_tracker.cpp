@@ -47,11 +47,7 @@
 
 #undef TAG
 
-static tx_buffer_t memory_pool[loratx::kPoolSize];
-static QueueHandle_t free_buffer_queue;
 static QueueHandle_t data_queue;
-static SemaphoreHandle_t pool_mutex;
-static pool_stats_t pool_stats = {};
 
 namespace esphome
 {
@@ -245,7 +241,7 @@ namespace esphome
       //   {
       //     ESP_LOGE(TAG, "Buffer length %d exceeds max %d",
       //              rx_buffer->length, loratx::kBufferSize);
-      //     this->return_buffer_to_pool(rx_buffer);
+      //     this->pool_.put(rx_buffer);
       //     return;
       //   }
 
@@ -343,7 +339,7 @@ namespace esphome
         // Validate before scheduling. Use continue, NOT return: this runs on
         // the persistent TX task, and returning early would leave the rest of
         // the handoff queue unread.
-        if (!this->validate_buffer(rx_buffer))
+        if (!this->pool_.validate(rx_buffer))
         {
           ESP_LOGE(TAG, "Received invalid buffer, skipping");
           continue;
@@ -352,11 +348,11 @@ namespace esphome
         {
           ESP_LOGE(TAG, "Buffer length %u exceeds max %u",
                    (unsigned) rx_buffer->length, (unsigned) loratx::kBufferSize);
-          this->return_buffer_to_pool(rx_buffer);
+          this->pool_.put(rx_buffer);
           continue;
         }
 
-        const uint8_t slot = (uint8_t) (rx_buffer - memory_pool);
+        const uint8_t slot = this->pool_.slot_of(rx_buffer);
         if (slot >= loratx::kPoolSize)
         {
           // Not from the pool. Cannot be scheduled by index and cannot be
@@ -377,7 +373,7 @@ namespace esphome
           // deferral the queue exists to provide.
           ESP_LOGW(TAG, "TX scheduler full (%u entries), dropping %d bytes",
                    (unsigned) this->tx_queue_.size(), (int) rx_buffer->length);
-          this->return_buffer_to_pool(rx_buffer);
+          this->pool_.put(rx_buffer);
         }
       }
     }
@@ -411,7 +407,7 @@ namespace esphome
         if (slot == txqueue::kInvalidSlot)
           return false;
 
-        rx_buffer = &memory_pool[slot];
+        rx_buffer = this->pool_.at(slot);
 
         // Section 11b's "one gesture, two commands": the hub tracks exactly one
         // command per node, so a second arriving before the first has fired
@@ -427,7 +423,7 @@ namespace esphome
         if (!current)
         {
           this->tx_superseded_drops_++;   // reported from loop() (HB8)
-          this->return_buffer_to_pool(rx_buffer);
+          this->pool_.put(rx_buffer);
           continue;   // the next entry may be the one that IS wanted
         }
         break;
@@ -464,7 +460,7 @@ namespace esphome
                             rx_buffer->tx_fire_stamp != 0);
       lora_tx_busy_ = false;
 
-      this->return_buffer_to_pool(rx_buffer);
+      this->pool_.put(rx_buffer);
       return true;
     }
 
@@ -946,15 +942,15 @@ namespace esphome
       }
 
       // Check queue initialization
-      if (free_buffer_queue == nullptr || data_queue == nullptr)
+      if (!this->pool_.ready() || data_queue == nullptr)
       {
         ESP_LOGE(TAG, "Queues not initialized. free_buffer_queue=%p, data_queue=%p",
-                 free_buffer_queue, data_queue);
+                 this->pool_.free_queue(), data_queue);
         return false;
       }
 
       ESP_LOGV(TAG, "Free buffers available: %u",
-               (unsigned) uxQueueMessagesWaiting(free_buffer_queue));
+               (unsigned) this->pool_.free_count());
 
       // A LoRa frame is at most 255 bytes. A longer one is refused, never
       // truncated: a prefix of a frame is a corrupt frame with a broken tag
@@ -966,7 +962,7 @@ namespace esphome
       }
 
       // Get a free buffer from pool
-      tx_buffer_t *rx_buffer = this->get_free_buffer(10 / portTICK_PERIOD_MS);
+      tx_buffer_t *rx_buffer = this->pool_.get(10 / portTICK_PERIOD_MS);
 
       if (rx_buffer)
       {
@@ -1003,7 +999,7 @@ namespace esphome
         if (xQueueSend(data_queue, &rx_buffer, 0) != pdTRUE)
         {
           ESP_LOGW(TAG, "Data queue full, dropping data");
-          this->return_buffer_to_pool(rx_buffer);
+          this->pool_.put(rx_buffer);
           return false;
         }
 
@@ -1559,25 +1555,35 @@ namespace esphome
       this->mgmt_.addShadowSource(listener);   // its state feeds the shadow mask
     }
 
-    // Initialize memory pool and queues
+    // Initialize the handoff queue and the buffer pool
     esp_err_t LORATracker::init_memory_pool(void)
     {
-      // Create queues - use queue registry for debugging
-      free_buffer_queue = xQueueCreate(loratx::kPoolSize, sizeof(tx_buffer_t *));
+      // Create the handoff queue - use queue registry for debugging
       data_queue = xQueueCreate(loratx::kQueueDepth, sizeof(tx_buffer_t *));
+      if (!data_queue)
+      {
+        ESP_LOGE(TAG, "Failed to create queues");
+        return ESP_FAIL;
+      }
+      vQueueAddToRegistry(data_queue, "DataQueue");
+      return this->pool_.init();
+    }
 
-      if (!free_buffer_queue || !data_queue)
+    esp_err_t TxPool::init()
+    {
+      // Create queues - use queue registry for debugging
+      this->free_queue_ = xQueueCreate(loratx::kPoolSize, sizeof(tx_buffer_t *));
+      if (!this->free_queue_)
       {
         ESP_LOGE(TAG, "Failed to create queues");
         return ESP_FAIL;
       }
 
-      vQueueAddToRegistry(free_buffer_queue, "FreeBuffers");
-      vQueueAddToRegistry(data_queue, "DataQueue");
+      vQueueAddToRegistry(this->free_queue_, "FreeBuffers");
 
       // Create mutex for pool protection
-      pool_mutex = xSemaphoreCreateMutex();
-      if (!pool_mutex)
+      this->mutex_ = xSemaphoreCreateMutex();
+      if (!this->mutex_)
       {
         ESP_LOGE(TAG, "Failed to create mutex");
         return ESP_FAIL;
@@ -1586,13 +1592,13 @@ namespace esphome
       // Initialize all buffers in pool
       for (int i = 0; i < loratx::kPoolSize; i++)
       {
-        memset(&memory_pool[i], 0, sizeof(tx_buffer_t));
-        memory_pool[i].magic = loratx::kBufferMagic;
-        memory_pool[i].in_use = 0;
-        memory_pool[i].ref_count = 0;
+        memset(&this->buffers_[i], 0, sizeof(tx_buffer_t));
+        this->buffers_[i].magic = loratx::kBufferMagic;
+        this->buffers_[i].in_use = 0;
+        this->buffers_[i].ref_count = 0;
 
-        tx_buffer_t *buffer = &memory_pool[i];
-        if (xQueueSend(free_buffer_queue, &buffer, 0) != pdTRUE)
+        tx_buffer_t *buffer = &this->buffers_[i];
+        if (xQueueSend(this->free_queue_, &buffer, 0) != pdTRUE)
         {
           ESP_LOGE(TAG, "Failed to initialize free buffer queue");
           return ESP_FAIL;
@@ -1603,31 +1609,30 @@ namespace esphome
       return ESP_OK;
     }
 
-    // Get a free buffer from the pool (thread-safe)
-    // Defined here rather than inline in the header because pool_stats is a
-    // file-static in this translation unit.
     uint32_t LORATracker::poolAllocationFailures() const
     {
-      return pool_stats.allocation_failures;
+      return this->pool_.allocation_failures();
     }
 
-    tx_buffer_t *LORATracker::get_free_buffer(TickType_t timeout)
+    // Get a free buffer from the pool (thread-safe)
+
+    tx_buffer_t *TxPool::get(TickType_t timeout)
     {
       tx_buffer_t *buffer = NULL;
 
-      if (xQueueReceive(free_buffer_queue, &buffer, timeout) != pdTRUE)
+      if (xQueueReceive(this->free_queue_, &buffer, timeout) != pdTRUE)
       {
-        pool_stats.allocation_failures++;
+        this->stats_.allocation_failures++;
         return NULL;
       }
 
       // Take mutex to safely modify buffer state
-      if (xSemaphoreTake(pool_mutex, portMAX_DELAY) == pdTRUE)
+      if (xSemaphoreTake(this->mutex_, portMAX_DELAY) == pdTRUE)
       {
         // Validate buffer
-        if (!this->validate_buffer(buffer))
+        if (!this->validate(buffer))
         {
-          xSemaphoreGive(pool_mutex);
+          xSemaphoreGive(this->mutex_);
           return NULL;
         }
 
@@ -1635,8 +1640,8 @@ namespace esphome
         if (buffer->in_use)
         {
           ESP_LOGE(TAG, "Buffer %p already in use!", buffer);
-          xSemaphoreGive(pool_mutex);
-          pool_stats.invalid_buffer_errors++;
+          xSemaphoreGive(this->mutex_);
+          this->stats_.invalid_buffer_errors++;
           return NULL;
         }
 
@@ -1647,9 +1652,9 @@ namespace esphome
         buffer->timestamp = xTaskGetTickCount();
         memset(buffer->data, 0, loratx::kBufferSize);
 
-        pool_stats.buffers_allocated++;
+        this->stats_.buffers_allocated++;
 
-        xSemaphoreGive(pool_mutex);
+        xSemaphoreGive(this->mutex_);
         return buffer;
       }
 
@@ -1658,15 +1663,15 @@ namespace esphome
     }
 
     // Return a buffer to the free pool (thread-safe)
-    esp_err_t LORATracker::return_buffer_to_pool(tx_buffer_t *buffer)
+    esp_err_t TxPool::put(tx_buffer_t *buffer)
     {
-      if (!this->validate_buffer(buffer))
+      if (!this->validate(buffer))
       {
         return ESP_ERR_INVALID_ARG;
       }
 
       // Take mutex to safely modify buffer state
-      if (xSemaphoreTake(pool_mutex, portMAX_DELAY) != pdTRUE)
+      if (xSemaphoreTake(this->mutex_, portMAX_DELAY) != pdTRUE)
       {
         ESP_LOGE(TAG, "Failed to take mutex in return_buffer_to_pool");
         return ESP_FAIL;
@@ -1676,8 +1681,8 @@ namespace esphome
       if (!buffer->in_use)
       {
         ESP_LOGE(TAG, "Double-free detected for buffer %p", buffer);
-        pool_stats.double_free_attempts++;
-        xSemaphoreGive(pool_mutex);
+        this->stats_.double_free_attempts++;
+        xSemaphoreGive(this->mutex_);
         return ESP_ERR_INVALID_STATE;
       }
 
@@ -1696,44 +1701,44 @@ namespace esphome
         // Clear sensitive data
         memset(buffer->data, 0, loratx::kBufferSize);
 
-        xSemaphoreGive(pool_mutex);
+        xSemaphoreGive(this->mutex_);
 
         // Return to free pool
-        if (xQueueSend(free_buffer_queue, &buffer, 0) != pdTRUE)
+        if (xQueueSend(this->free_queue_, &buffer, 0) != pdTRUE)
         {
           ESP_LOGE(TAG, "Failed to return buffer to pool (queue full)");
           return ESP_FAIL;
         }
 
-        pool_stats.buffers_freed++;
+        this->stats_.buffers_freed++;
       }
       else
       {
-        xSemaphoreGive(pool_mutex);
+        xSemaphoreGive(this->mutex_);
       }
 
       return ESP_OK;
     }
 
     // Increment reference count (for multiple consumers)
-    esp_err_t LORATracker::buffer_ref_inc(tx_buffer_t *buffer)
+    esp_err_t TxPool::ref_inc(tx_buffer_t *buffer)
     {
-      if (!this->validate_buffer(buffer))
+      if (!this->validate(buffer))
       {
         return ESP_ERR_INVALID_ARG;
       }
 
-      if (xSemaphoreTake(pool_mutex, portMAX_DELAY) == pdTRUE)
+      if (xSemaphoreTake(this->mutex_, portMAX_DELAY) == pdTRUE)
       {
         if (!buffer->in_use)
         {
           ESP_LOGE(TAG, "Attempting to ref unused buffer %p", buffer);
-          xSemaphoreGive(pool_mutex);
+          xSemaphoreGive(this->mutex_);
           return ESP_ERR_INVALID_STATE;
         }
 
         buffer->ref_count++;
-        xSemaphoreGive(pool_mutex);
+        xSemaphoreGive(this->mutex_);
         return ESP_OK;
       }
 
@@ -1741,7 +1746,7 @@ namespace esphome
     }
 
     // Validate buffer belongs to pool and has correct magic number
-    bool LORATracker::validate_buffer(tx_buffer_t *buffer)
+    bool TxPool::validate(tx_buffer_t *buffer)
     {
       if (!buffer)
       {
@@ -1750,10 +1755,10 @@ namespace esphome
       }
 
       // Check if pointer is within pool bounds
-      if (buffer < memory_pool || buffer >= &memory_pool[loratx::kPoolSize])
+      if (buffer < this->buffers_ || buffer >= &this->buffers_[loratx::kPoolSize])
       {
         ESP_LOGE(TAG, "Buffer pointer %p outside pool range", buffer);
-        pool_stats.invalid_buffer_errors++;
+        this->stats_.invalid_buffer_errors++;
         return false;
       }
 
@@ -1761,7 +1766,7 @@ namespace esphome
       if (buffer->magic != loratx::kBufferMagic)
       {
         ESP_LOGE(TAG, "Buffer %p has invalid magic: 0x%08lX", buffer, buffer->magic);
-        pool_stats.invalid_buffer_errors++;
+        this->stats_.invalid_buffer_errors++;
         return false;
       }
 
