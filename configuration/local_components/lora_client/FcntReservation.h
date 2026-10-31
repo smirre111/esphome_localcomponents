@@ -6,20 +6,20 @@
 // frame per tick on the esp_timer task. They must not call the Sequencer there:
 // allocating persists the counter through ESPHome preferences, which only the
 // loop task may touch. So the loop reserves a whole run's FCNTs once
-// (LORAListener::reserve_fcnt_block_) and the timer takes them from here.
+// (HubSession::reserve_fcnts) and the timer takes them from here.
 //
 // A block belongs to the session it was reserved in. Every FCNT is a CTR
 // counter-block input: sealing a reserved FCNT under the NEXT session's keys
 // would reuse keystream, because the next session counts up from 1 through the
 // same numbers (review P1). So a block is
 //   * invalidated explicitly whenever the counters restart or the keys change
-//     (send_login, clearSessionKeys_, installSessionKeys_), and
+//     (send_login, HubSession::clear_keys / install_keys), and
 //   * bound to the key epoch it was reserved under: take() refuses once the
 //     peer's key epoch has moved, even if an invalidation were missed.
 // The caller also drops a frame whose seal reports another epoch.
 //
 // Not thread-safe by itself: the caller holds the lock that guards the
-// sequencer (LORAListener::session_tx_mutex_) around grant/take/invalidate.
+// sequencer (HubSession::tx_mutex_) around grant/take/invalidate.
 // Pure: no heap, no logging, no ESPHome dependency (host-tested).
 
 #include <cstdint>

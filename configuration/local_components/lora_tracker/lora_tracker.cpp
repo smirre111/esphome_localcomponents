@@ -366,13 +366,13 @@ namespace esphome
           : (rx_buffer->tx_priority >= 2) ? txqueue::Priority::Background
                                           : txqueue::Priority::Normal;
 
-        if (!this->tx_queue_.push(slot, rx_buffer->tx_earliest_us, prio))
+        if (!this->sched_.push(slot, rx_buffer->tx_earliest_us, prio))
         {
           // The scheduler is full. Refuse loudly and return the buffer — the
           // alternative, silently sending it out of order, would defeat the
           // deferral the queue exists to provide.
           ESP_LOGW(TAG, "TX scheduler full (%u entries), dropping %d bytes",
-                   (unsigned) this->tx_queue_.size(), (int) rx_buffer->length);
+                   (unsigned) this->sched_.queued(), (int) rx_buffer->length);
           this->pool_.put(rx_buffer);
         }
       }
@@ -380,7 +380,7 @@ namespace esphome
 
     int64_t LORATracker::nextTxEligibleUs(int64_t now_us) const
     {
-      return this->tx_queue_.nextEligibleUs(now_us);
+      return this->sched_.next_eligible_us(now_us);
     }
 
     bool LORATracker::serviceTxQueue(int64_t now_us)
@@ -403,7 +403,7 @@ namespace esphome
       {
         fire_at_us = 0;
         const uint8_t slot =
-            this->tx_queue_.popDue(now_us, kPrepareLeadUs, fire_at_us);
+            this->sched_.pop_due(now_us, kPrepareLeadUs, fire_at_us);
         if (slot == txqueue::kInvalidSlot)
           return false;
 
@@ -414,12 +414,8 @@ namespace esphome
         // means the hub has ALREADY stopped caring about the first — it will
         // not accept its ack and will not retry it. Transmitting it anyway is
         // what made the blind move twice, 1.5 s apart, from one gesture.
-        bool current = true;
-        {
-          std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-          current = this->supersede_.isCurrent(rx_buffer->tx_supersede_key,
-                                               rx_buffer->tx_supersede_gen);
-        }
+        const bool current = this->sched_.is_current(rx_buffer->tx_supersede_key,
+                                                     rx_buffer->tx_supersede_gen);
         if (!current)
         {
           this->tx_superseded_drops_++;   // reported from loop() (HB8)
@@ -442,14 +438,10 @@ namespace esphome
       // what another caller consults to decide whether the channel is free.
       const int64_t tx_start_us = (fire_at_us > now_us) ? fire_at_us : now_us;
       const bool expects_reply = rx_buffer->tx_expects_reply != 0;
-      {
-        std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-        this->burst_busy_until_us_ =
-            this->burstEndUs_(tx_start_us, copies, stride_ms, rx_buffer->length, expects_reply);
-        // A placed frame reserved its span in send(); an unplaced one only now.
-        if (rx_buffer->tx_earliest_us <= 0)
-          this->reserve_locked_(tx_start_us, this->burst_busy_until_us_);
-      }
+      // A placed frame reserved its span in send(); an unplaced one only now.
+      this->sched_.begin_burst(tx_start_us, rx_buffer->tx_earliest_us > 0, [&](int64_t start_us) {
+        return this->burstEndUs_(start_us, copies, stride_ms, rx_buffer->length, expects_reply);
+      });
       this->last_tx_expects_reply_ = expects_reply;
 
       lora_tx_busy_ = true;
@@ -506,7 +498,7 @@ namespace esphome
         // that frame until some UNRELATED traffic happened to arrive and wake
         // the task. The peek is what makes the wait interruptible — the frame
         // it sees is drained at the top of the next pass, not here.
-        const int64_t next_us = this->tx_queue_.nextEligibleUs(now_us);
+        const int64_t next_us = this->sched_.next_eligible_us(now_us);
         TickType_t wait_ticks;
         if (next_us == INT64_MAX)
         {
@@ -754,8 +746,7 @@ namespace esphome
     // is why the deferral is two rounds and not one.
     int64_t LORATracker::busyUntilUs() const
     {
-      std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-      return this->burst_busy_until_us_;
+      return this->sched_.busy_until_us();
     }
 
     // When a burst of `copies` starting at `start_us` stops occupying the channel,
@@ -783,36 +774,14 @@ namespace esphome
                         ? macwire::kStampBytes : 0);
     }
 
-    void LORATracker::reserve_(int64_t start_us, int64_t end_us)
-    {
-      std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-      this->reserve_locked_(start_us, end_us);
-    }
-
-    void LORATracker::reserve_locked_(int64_t start_us, int64_t end_us)
-    {
-      size_t victim = 0;
-      for (size_t i = 1; i < kMaxReservations; ++i)
-        if (this->reservations_[i].end_us < this->reservations_[victim].end_us)
-          victim = i;
-      this->reservations_[victim].start_us = start_us;
-      this->reservations_[victim].end_us   = end_us;
-    }
-
     int64_t LORATracker::placedBusyUntilUs() const
     {
-      std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-      return this->placed_busy_until_us_;
+      return this->sched_.placed_busy_until_us();
     }
 
     int64_t LORATracker::txDrainUs() const
     {
-      const int64_t now_us = esp_timer_get_time();
-      std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-      int64_t end_us = this->queued_air_end_us_;
-      if (this->burst_busy_until_us_ > end_us)
-        end_us = this->burst_busy_until_us_;
-      return (end_us > now_us) ? end_us - now_us : 0;
+      return this->sched_.drain_us(esp_timer_get_time());
     }
 
     // The next T0 for `slot` that is not inside a burst.
@@ -832,13 +801,7 @@ namespace esphome
     // phaseErr p50 -321 686 us. It never promoted (windows 0/0).
     int64_t LORATracker::nextClearT0ForSlotUs(uint8_t slot, int64_t now_us) const
     {
-      int64_t floor_us = now_us;
-      {
-        std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-        if (this->burst_busy_until_us_ > floor_us)  floor_us = this->burst_busy_until_us_;
-        if (this->placed_busy_until_us_ > floor_us) floor_us = this->placed_busy_until_us_;
-      }
-      return this->nextT0ForSlotUs(slot, floor_us);
+      return this->nextT0ForSlotUs(slot, this->sched_.clear_floor_us(now_us));
     }
 
     // Clear of every reservation, by interval. The two-argument form above
@@ -853,26 +816,16 @@ namespace esphome
         return now_us;
 
       int64_t t0 = this->nextT0ForSlotUs(slot, now_us);
-      std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-      for (uint32_t n = 0; n < kMaxClearSearchRounds; ++n, t0 += (int64_t) timedgrid::kRoundUs)
-      {
-        const int64_t fire  = loratiming::fireInstantUs(t0, 0);
+      const auto span_of = [&](int64_t mark, int64_t *start, int64_t *end) {
+        const int64_t fire = loratiming::fireInstantUs(mark, 0);
         // The node listens from a guard before T0: another frame starting inside
         // that guard would be the one it receives.
-        const int64_t start = fire - (int64_t) timedgrid::kGuardUs;
-        const int64_t end   = this->burstEndUs_(fire, copies, 0, this->onAirLen_(len, true), expects_reply);
-        bool clear = true;
-        for (const Reservation &r : this->reservations_)
-        {
-          if (r.end_us > now_us && start < r.end_us && r.start_us < end)
-          {
-            clear = false;
-            break;
-          }
-        }
-        if (clear)
-          return t0;
-      }
+        *start = fire - (int64_t) timedgrid::kGuardUs;
+        *end   = this->burstEndUs_(fire, copies, 0, this->onAirLen_(len, true), expects_reply);
+      };
+      if (this->sched_.first_clear(t0, now_us, kMaxClearSearchRounds, (int64_t) timedgrid::kRoundUs,
+                                   span_of))
+        return t0;
       ESP_LOGW(TAG, "no clear mark for slot %u in %u rounds", (unsigned) slot,
                (unsigned) kMaxClearSearchRounds);
       return t0;
@@ -946,10 +899,7 @@ namespace esphome
         // reaches the front. A second command queued while the first is still
         // waiting has to raise the mark immediately, or the first would look
         // current right up until the second overtook it.
-        {
-          std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-          this->supersede_.note(policy.supersede_key, policy.supersede_gen);
-        }
+        this->sched_.note_generation(policy.supersede_key, policy.supersede_gen);
 
         // Send buffer pointer to data queue
         if (xQueueSend(data_queue, &rx_buffer, 0) != pdTRUE)
@@ -961,17 +911,11 @@ namespace esphome
 
         // Price this frame into the queue: it leaves after whatever is on the air
         // and after every frame accepted before it. See txDrainUs().
-        {
-          const int64_t now_us = esp_timer_get_time();
-          std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-          int64_t start_us = this->queued_air_end_us_;
-          if (this->burst_busy_until_us_ > start_us) start_us = this->burst_busy_until_us_;
-          if (now_us > start_us)                     start_us = now_us;
-          if (policy.earliest_us > start_us)         start_us = policy.earliest_us;
-          this->queued_air_end_us_ = this->burstEndUs_(start_us, policy.copies, policy.stride_ms,
-                                                       this->onAirLen_(copy_len, policy.fire_stamp),
-                                                       policy.expects_reply);
-        }
+        this->sched_.price_accepted(esp_timer_get_time(), policy.earliest_us, [&](int64_t start_us) {
+          return this->burstEndUs_(start_us, policy.copies, policy.stride_ms,
+                                   this->onAirLen_(copy_len, policy.fire_stamp),
+                                   policy.expects_reply);
+        });
 
         // A PLACED frame reserves the channel from the moment it is accepted, so
         // the next placement lands after it (see nextClearT0ForSlotUs). Frames
@@ -983,10 +927,7 @@ namespace esphome
                                                    policy.stride_ms,
                                                    this->onAirLen_(copy_len, policy.fire_stamp),
                                                    policy.expects_reply);
-          std::lock_guard<std::mutex> lock(this->reservations_mutex_);
-          if (end_us > this->placed_busy_until_us_)
-            this->placed_busy_until_us_ = end_us;
-          this->reserve_locked_(policy.earliest_us, end_us);
+          this->sched_.reserve_placed(policy.earliest_us, end_us);
         }
         return true;
       }

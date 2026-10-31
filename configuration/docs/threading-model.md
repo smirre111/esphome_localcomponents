@@ -48,23 +48,23 @@ latency buckets, and the anomaly counters it increments (`tx_late_placed_`,
 
 | state | written by | read by | protection |
 |---|---|---|---|
-| FCNT reservations `mac_ping_fcnts_`, `mt_fcnts_`, `drift_fcnts_` (`FcntReservation.h`) | loop (reserve, invalidate) | esp_timer (take) | `LORAListener::session_tx_mutex_` |
+| FCNT reservations: `MacPingStream`, `ModeTestStream`, `DriftStream` `fcnts_` (`FcntReservation.h`), and the node's `mac1::Sequencer` | loop (reserve, invalidate, allocate) | esp_timer (take) | `HubSession::tx_mutex_` |
 | session keys, session id, key epoch, generation (`SessionKeyStore::Keys`) | loop (install, clear, set session id) | send task (retag), esp_timer (seal), loop | `SessionKeyStore::keys_mutex_` |
-| tracker channel schedule: `supersede_`, `burst_busy_until_us_`, `placed_busy_until_us_`, `queued_air_end_us_`, `reservations_` | `send()` on loop and esp_timer; `serviceTxQueue` on the send task | both, plus the placement queries | `LORATracker::reservations_mutex_` |
+| tracker channel schedule (`TxScheduler`): supersession table, burst-busy / placed-busy / queued-air-end instants, reservations | `send()` on loop and esp_timer; `serviceTxQueue` on the send task | both, plus the placement queries | `TxScheduler::mutex_` |
 | the radio (SPI + mode) | send task (TX, RX re-arm between copies) | loop (`receive()`) | `LORATracker::radio_mutex_` (FreeRTOS mutex) |
-| the TX buffer pool and queues | `send()` (any producer), send task | | FreeRTOS queues + `pool_mutex` |
-| stream flags `mode_test_active_`, `drift_test_active_`, `mac_ping_active_`; tracker `lora_tx_busy_` | loop / send task | the other task | `std::atomic<bool>` |
-| `mt_cb_busy_`, `drift_cb_busy_`, `mac_ping_cb_busy_` | the callback (RAII `CallbackBusy`) | loop (stop) | `std::atomic<bool>` |
+| the TX buffer pool (`TxPool`) and the handoff queue | `send()` (any producer), send task | | FreeRTOS queues + `TxPool::mutex_` |
+| stream flags `MacPingStream` / `ModeTestStream` / `DriftStream` `active_`; tracker `lora_tx_busy_` | loop / send task | the other task | `std::atomic<bool>` |
+| the streams' `cb_busy_` | the callback (RAII `CallbackBusy`) | loop (stop) | `std::atomic<bool>` |
 
 ## Rules
 
 1. **The Sequencer is loop-only.** A frame built off the loop takes its FCNT
-   from a block the loop reserved (`reserve_fcnt_block_`, one persist per
-   run) via `take_reserved_fcnt_`. A block is dropped on every counter
+   from a block the loop reserved (`HubSession::reserve_fcnts`, one persist
+   per run) via `HubSession::take_fcnt`. A block is dropped on every counter
    restart or key change (`send_login`, `clearSessionKeys_`,
    `installSessionKeys_`) and is bound to the key epoch it was reserved
    under; a frame whose seal reports another epoch is dropped
-   (`sealed_in_epoch_`). Reason: an FCNT is a CTR counter-block input; one
+   (`HubSession::sealed_in_epoch`). Reason: an FCNT is a CTR counter-block input; one
    sealed twice under one key reuses keystream (review P1).
 2. **Nothing logs, allocates, or makes a virtual call under
    `keys_mutex_`.** The seal and the retag read the session id, the key
@@ -75,16 +75,16 @@ latency buckets, and the anomaly counters it increments (`tx_late_placed_`,
    `sendPacketBurst` counts anomalies; `LORATracker::loop` reports them at
    most every 10 s (`drainTxAnomalyReport_`) and drains the H-1 report
    (`drainTagLatencyReport_`). No hex dumps on the send task.
-4. **Nothing logs under `reservations_mutex_`.** `session_tx_mutex_` is held
-   briefly by the timer (`take_reserved_fcnt_`, `sealed_in_epoch_`, no
+4. **Nothing logs under `TxScheduler::mutex_`.** `HubSession::tx_mutex_` is held
+   briefly by the timer (`take_fcnt`, `sealed_in_epoch`, no
    logging) and by the loop across an allocation, whose persist logs at
    DEBUG; the timer never waits on it for long because the loop's critical
    sections are short. `keys_mutex_` is never taken while
-   `session_tx_mutex_` is held, and vice versa (the epoch is read before the
+   `HubSession::tx_mutex_` is held, and vice versa (the epoch is read before the
    reservation lock is taken), so the mutexes have no ordering cycle.
 5. **Stopping a timer stream waits for its callback.** `esp_timer_stop`
    does not wait for a callback that is already running. Each stop sets the
-   active flag false, stops the timer, then `wait_callback_idle_` spins until
+   active flag false, stops the timer, then `wait_until_idle` spins until
    the callback's busy flag clears, and only then builds the STOP/OFF frame
    in the shared buffer. The esp_timer task outranks the loop, so the spin is
    short.

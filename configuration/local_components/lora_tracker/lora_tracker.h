@@ -35,6 +35,7 @@
 // The transmit buffer pool and its buffer type (TxPool, review HB10).
 #include "tx_pool.h"
 #include "hub_grid.h"
+#include "tx_scheduler.h"
 
 namespace mac0
 {
@@ -506,10 +507,6 @@ namespace esphome
       // through the whole window) is simply skipped rather than sent late into
       // a slot the nodes have stopped listening in.
       uint32_t beacon_round_queued_{0xFFFFFFFFu};
-      // Which generation is current for each node, so a frame that reaches the
-      // front can tell whether it is still wanted. Noted by send() (loop and
-      // esp_timer tasks), read by sendTask: under reservations_mutex_ (HB2).
-      txqueue::SupersedeTable supersede_;
       uint32_t tx_superseded_drops_{0};
       uint32_t beacons_sent_{0};
       uint32_t shadow_beacons_{0};
@@ -520,20 +517,10 @@ namespace esphome
       // node's already-encrypted GridSync, never sent in the clear), the beacon
       // build and the shadow-mask sources: the MAC management unit's (S5).
       macmgmt::HubMacManagement mgmt_;
-      // The channel-schedule state below (burst_busy_until_us_,
-      // placed_busy_until_us_, queued_air_end_us_, reservations_, supersede_) is
-      // written by send() on the loop and esp_timer tasks and by sendTask, and
-      // the 64-bit fields tear on the 32-bit core: every access holds
-      // reservations_mutex_ (HB2). Nothing logs or blocks under it.
-      // When the hub's own burst stops occupying the channel, including the
-      // post-burst response window sendTask holds the radio in.
-      int64_t burst_busy_until_us_{0};
-      // The same for frames placed but not yet dequeued. See send().
-      int64_t placed_busy_until_us_{0};
-      // When the last frame accepted by send() will have left the radio. Grows by
-      // one burst per accepted frame, so it prices a QUEUE where
-      // burst_busy_until_us_ only knows the frame currently on the air.
-      int64_t queued_air_end_us_{0};
+      // The transmit scheduler (tx_scheduler.h): the queue's order, supersession
+      // and the channel calendar (burst on air, placed frames, the queue's
+      // drain, every reserved span), under its own mutex (HB2).
+      TxScheduler sched_;
       uint32_t tx_late_placed_{0};
       uint32_t tx_mark_late_{0};
       // HB8: send-task counters (no logging there) and what loop() last reported.
@@ -549,21 +536,8 @@ namespace esphome
       uint8_t copy_buf_[loratx::kBufferSize + 16]{};
       // Whether the frame sendTask last sent is answered (see postTxHoldMs).
       bool last_tx_expects_reply_{true};
-      // Every span the channel is spoken for: frames placed and not yet sent, and
-      // the burst on the air. Written from send() (loop and esp_timer tasks) and
-      // sendTask, hence the mutex. Eight covers the pool (loratx::kPoolSize) plus the
-      // burst on air; a full table evicts the span that ends first.
-      struct Reservation
-      {
-        int64_t start_us{0};
-        int64_t end_us{0};
-      };
-      static constexpr size_t   kMaxReservations      = 8;
+      // How far a placement looks for a clear mark (nextClearT0ForSlotUs).
       static constexpr uint32_t kMaxClearSearchRounds = 64;
-      std::array<Reservation, kMaxReservations> reservations_{};
-      mutable std::mutex reservations_mutex_;
-      void reserve_(int64_t start_us, int64_t end_us);
-      void reserve_locked_(int64_t start_us, int64_t end_us);   // caller holds the mutex
       // The instant lora_tx() was called for the last copy, and how many copies
       // missed their stamped instant. See kStampLeadUs.
       int64_t last_fire_us_{0};
@@ -631,11 +605,9 @@ namespace esphome
       // hint that lets the main loop skip receive() while a copy is actively
       // transmitting (avoiding needless blocking on the mutex); the mutex is the
       // actual mutual-exclusion guarantee between sendTask and the main loop.
-      // B1a: the reordering, time-scheduled transmit queue. data_queue stays as
-      // the handoff from producer tasks — it is a FreeRTOS queue and can be
-      // written from anywhere — and sendTask drains it into this, which is
-      // where ordering and eligibility are decided.
-      txqueue::Queue tx_queue_;
+      // data_queue (lora_tracker.cpp) stays the handoff from producer tasks — a
+      // FreeRTOS queue, writable from anywhere — and sendTask drains it into
+      // sched_, where ordering and eligibility are decided.
 
       // A frame is in the FIFO and the radio mutex is held, waiting for FIRE.
       bool tx_prepared_{false};
