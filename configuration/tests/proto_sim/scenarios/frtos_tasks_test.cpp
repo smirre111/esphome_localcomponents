@@ -36,6 +36,7 @@
 #include "frtosTasks.h"
 
 #include "CmdDispatcher.h"
+#include "CmdDispatcherTestPeer.h"   // review N19: private members via the peer
 #include "LoraInterface.h"
 #include "MotorCtrl.h"
 #include "SystemCtrl.h"
@@ -91,10 +92,10 @@ struct Probe : LoraInterface {
 // HW-2's sweep state is two protected members — a ModeTest is running AND a
 // deliberate arm offset is set. Exposed the same way Probe exposes
 // LoraInterface's internals, rather than adding a production setter for a test.
-struct DispProbe : CmdDispatcher {
+struct DispProbe : CmdDispatcherTestPeer {
     DispProbe(MotorCtrl *m, SystemCtrl *s, LoraInterface *l,
               portMUX_TYPE &mm, portMUX_TYPE &bm)
-        : CmdDispatcher(m, s, l, mm, bm) {}
+        : CmdDispatcherTestPeer(m, s, l, mm, bm) {}
 };
 
 void resetIrqSession();   // the Mode B section's session context (below)
@@ -113,14 +114,10 @@ struct Irq : public ::testing::Test {
         loranode::rec().reset();
         resetIrqSession();
         // The firmware's globals, as main.cpp would set them.
-        motCtrl       = &mot;
-        sysCtrl       = &sys;
-        loraIf        = &lif;
-        cmdDispatcher = &disp;
+        frtostasks::bind({&mot, &sys, &lif, &disp});   // as main.cpp binds them (N24)
     }
     void TearDown() override {
-        motCtrl = nullptr; sysCtrl = nullptr;
-        loraIf = nullptr;  cmdDispatcher = nullptr;
+        frtostasks::bind({});
     }
 
     const loranode::Recorder &r() const { return loranode::rec(); }
@@ -386,7 +383,7 @@ TEST_F(Irq, AWindowEndThatClosesNothingLeavesTheRadioAlone) {
 
 namespace {
 // A mark window of the given kind that started listening at `start_us`.
-void openMarkWindowAt(Probe &lif, CmdDispatcher &disp, int64_t start_us,
+void openMarkWindowAt(Probe &lif, CmdDispatcherTestPeer &disp, int64_t start_us,
                       LoraInterface::RxWindowKind kind = LoraInterface::RxWindowKind::Single) {
     proto_sim_timer_set_now_us(start_us);
     lif.setRxWindowKind(kind);
@@ -729,7 +726,7 @@ constexpr uint8_t kModeBSubnet = 2;
 // phrase), then every hubFrame sealed under the node's own
 // keys (CTR under K_enc, CMAC-8 under K_mac), as the hub seals in a session.
 struct IrqSession {
-    CmdDispatcher *disp{nullptr};
+    CmdDispatcherTestPeer *disp{nullptr};
     uint32_t       nonce{0};
 };
 IrqSession g_irq_session;
@@ -786,7 +783,7 @@ std::vector<uint8_t> kauthLogin(uint32_t nonce, uint32_t fcnt) {
     return f;
 }
 
-void irqSession(CmdDispatcher &disp) {
+void irqSession(CmdDispatcherTestPeer &disp) {
     ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
     constexpr uint32_t kNonce = 0x1A2B3C4Du;
     auto login = kauthLogin(kNonce, /*fcnt=*/1);
@@ -798,7 +795,7 @@ void irqSession(CmdDispatcher &disp) {
 
 // Seal a whole v1 frame (header already AUTH = SESSION) under the node's keys.
 void irqSeal(std::vector<uint8_t> &f, const macwire::WireHdr &h, size_t hlen, size_t body_len) {
-    CmdDispatcher &d = *g_irq_session.disp;
+    CmdDispatcherTestPeer &d = *g_irq_session.disp;
     uint8_t iv[framecrypto::kCtrBlockBytes];
     framecrypto::buildCtrInitialBlock(g_irq_session.nonce, h.dst, /*downlink=*/true, h.fcnt, 0, iv);
     std::vector<uint8_t> ct(body_len);
@@ -1100,7 +1097,7 @@ TEST_F(Irq, TheHandlersToleratePartlyWiredFirmware) {
     // cmdDispatcher in the interrupt path is guarded, and this is the test that
     // says so — with the dispatcher gone, a DIO1 timeout must still clear and
     // re-arm rather than fault.
-    cmdDispatcher = nullptr;
+    frtostasks::bind({&mot, &sys, &lif, nullptr});   // the dispatcher not wired yet
     dio1(LORA_IRQ_FLAG_RX_TIMEOUT);
     EXPECT_GE(r().count("lora_sleep"), 1u);
 

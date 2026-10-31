@@ -24,6 +24,7 @@
 #include "SystemCtrl.h"
 #include "LoraInterface.h"
 #include "CmdDispatcher.h"
+#include "CmdDispatcherTestPeer.h"   // review N19: private members via the peer
 
 extern "C" {
 #include "blinds.pb-c.h"
@@ -160,11 +161,11 @@ macwire::WireHdr dl_wire_hdr(const DlHdr &h, DownlinkCase c, macwire::Auth a) {
 // (RealNodeFixture::useSession), and pack_op then seals every frame the hub
 // seals in a session, under the node's own current keys.
 struct AutoSeal {
-    CmdDispatcher *disp{nullptr};
+    CmdDispatcherTestPeer *disp{nullptr};
     uint32_t       nonce{0};
 };
 AutoSeal g_auto_seal;
-std::vector<uint8_t> seal_op(CmdDispatcher &disp, const DownlinkView &inner, const DlHdr &h,
+std::vector<uint8_t> seal_op(CmdDispatcherTestPeer &disp, const DownlinkView &inner, const DlHdr &h,
                              uint32_t nonce);
 bool sealed_in_session(DownlinkCase c) {
     return c != DL_LOGIN && c != DL_GRIDBEACON && c != DL_GRIDDEMOTE;
@@ -185,7 +186,7 @@ std::vector<uint8_t> pack_op(const DlMsg &op) {
 
 // `inner` sealed (AUTH = SESSION) under the node's current session keys, as
 // the hub seals it for session id `nonce` (the LOGIN's hub_nonce).
-std::vector<uint8_t> seal_op(CmdDispatcher &disp, const DownlinkView &inner, const DlHdr &h,
+std::vector<uint8_t> seal_op(CmdDispatcherTestPeer &disp, const DownlinkView &inner, const DlHdr &h,
                              uint32_t nonce) {
     const macwire::WireHdr w = dl_wire_hdr(h, inner.cmd_case, macwire::Auth::Session);
     const std::vector<uint8_t> body = dl_body(inner);
@@ -237,11 +238,11 @@ std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce,
 // the unicast check is reached. A mutant restoring `if (mine)` therefore
 // SURVIVED (2026-09-20): the test could not see the behaviour it named.
 // Exposing the member lets a test neutralise one guard to isolate the other.
-struct NodeProbe : CmdDispatcher {
+struct NodeProbe : CmdDispatcherTestPeer {
     NodeProbe(MotorCtrl *m, SystemCtrl *s, LoraInterface *l,
               portMUX_TYPE &mm, portMUX_TYPE &bm)
-        : CmdDispatcher(m, s, l, mm, bm) {}
-    using CmdDispatcher::mac_ping_seq_hw_;       // the MAC ping high-water mark
+        : CmdDispatcherTestPeer(m, s, l, mm, bm) {}
+    using CmdDispatcherTestPeer::mac_ping_seq_hw_;       // the MAC ping high-water mark
     // What the HUB was last told, as distinct from what the console last saw.
     // The flicker test has to assert the state the hub ends up believing, and
     // that reason travels inside the beacon BODY (built later, in
@@ -253,8 +254,8 @@ struct NodeProbe : CmdDispatcher {
     // because as a plain member every deep-sleep wake reset it, so the node
     // announced on every wake and then sent its check-in beacon as well —
     // two uplinks for one fact, measured on fw 1.1.2 and again on 1.1.3.
-    using CmdDispatcher::simulateWakeForTest;
-    using CmdDispatcher::packUplinkFrame_;   // the v1 seal point, for the msgid guard
+    using CmdDispatcherTestPeer::simulateWakeForTest;
+    using CmdDispatcherTestPeer::packUplinkFrame_;   // the v1 seal point, for the msgid guard
 };
 
 struct RealNodeFixture : public ::testing::Test {
@@ -301,7 +302,7 @@ struct RealNodeFixture : public ::testing::Test {
         // simulateWakeForTest() instead: that clears what plain RAM loses and
         // keeps what RTC_DATA_ATTR retains, which is the distinction the bench
         // failed to model when it passed a fix that does nothing on hardware.
-        CmdDispatcher::resetModeAnnounceState();
+        CmdDispatcherTestPeer::resetModeAnnounceState();
         g_auto_seal = AutoSeal{};
     }
 
@@ -737,7 +738,7 @@ TEST(RealCmdDispatcherFresh, AnUnprovisionedNodeWithAStaleSessionStillAcceptsIts
     SystemCtrl    sys;          // cfgAddress=0: config lost
     LoraInterface lif;
     portMUX_TYPE  motorMux{}, buttonMux{};
-    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
     constexpr uint64_t kMac = 0xCAFEBABEFEEDULL;
     pinFactoryMac(kMac);
     disp.setBaseNonceForTest(1, 0xABCDEF01);   // the session NVS restored
@@ -755,7 +756,7 @@ TEST(RealCmdDispatcherFresh, AProvisionedNodeWithASessionStillRefusesPlaintextCo
     sys.setAddress(18, 2);      // provisioned
     LoraInterface lif;
     portMUX_TYPE  motorMux{}, buttonMux{};
-    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
     constexpr uint64_t kMac = 0xCAFEBABEFEEDULL;
     pinFactoryMac(kMac);
     disp.setBaseNonceForTest(1, 0xABCDEF01);
@@ -774,7 +775,7 @@ TEST(RealCmdDispatcherFresh, FreshNodeAcceptsClientConfigByMac) {
     SystemCtrl    sys;          // unconfigured: cfgAddress=0
     LoraInterface lif;
     portMUX_TYPE  motorMux{}, buttonMux{};
-    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
 
     // Pin the simulated factory MAC.
     constexpr uint64_t kFreshMac = 0xCAFEBABEFEEDULL;
@@ -1226,7 +1227,7 @@ sched::Entry sched_entry(uint16_t minute, uint8_t days,
 }
 
 // Give the node a clock via a real CMD_TIMESYNC, the only way it ever gets one.
-void give_clock(CmdDispatcher &disp, uint32_t msgid, uint64_t epoch, int32_t offset) {
+void give_clock(CmdDispatcherTestPeer &disp, uint32_t msgid, uint64_t epoch, int32_t offset) {
     auto f = pack_timesync_op(msgid, epoch, offset);
     disp.onReceiveNew(f.data(), static_cast<int>(f.size()));
 }
@@ -1569,7 +1570,7 @@ TEST_F(RealNodeFixture, NoOverrideMeansNoSuspension) {
 // ---------------------------------------------------------------------------
 
 namespace {
-bool drain_for_sleep(CmdDispatcher &d) {
+bool drain_for_sleep(CmdDispatcherTestPeer &d) {
     bool found = false;
     CmdDispatcher::tx_command_t c{};
     while (xQueueReceive(d.sysCmdQueueNew, &c, 0) == pdTRUE)
@@ -1579,7 +1580,7 @@ bool drain_for_sleep(CmdDispatcher &d) {
 
 // Entering auto mode arms a quiet-window timer rather than sleeping on the
 // spot, so a test that wants the sleep has to let that window elapse.
-bool drain_for_sleep_after_quiet_window(CmdDispatcher &d) {
+bool drain_for_sleep_after_quiet_window(CmdDispatcherTestPeer &d) {
     if (drain_for_sleep(d)) return true;   // should not happen; caller asserts
     proto_sim_timer_fire_all();
     return drain_for_sleep(d);
@@ -1690,7 +1691,7 @@ TEST_F(RealNodeFixture, RegisterRetryReSendsWhileUnprovisioned) {
 }
 
 namespace {
-bool queueHoldsRegister(CmdDispatcher &d) {
+bool queueHoldsRegister(CmdDispatcherTestPeer &d) {
     bool found = false;
     CmdDispatcher::tx_command_t cmd{};
     while (xQueueReceive(d.txCmdQueueNew, &cmd, 0) == pdTRUE)
@@ -1952,7 +1953,7 @@ TEST_F(RealNodeFixture, TimeSyncAloneDoesNotStartAutoModeWithoutASchedule) {
 // ---------------------------------------------------------------------------
 
 namespace {
-int drain_beacons(CmdDispatcher &d) {
+int drain_beacons(CmdDispatcherTestPeer &d) {
     int n = 0;
     CmdDispatcher::tx_command_t c{};
     while (xQueueReceive(d.txCmdQueueNew, &c, 0) == pdTRUE)
@@ -2098,7 +2099,7 @@ TEST_F(RealNodeFixture, BeaconRetriesAreBounded) {
         total += drain_beacons(disp);
     }
 
-    EXPECT_LE(total, CmdDispatcher::kMaxBeaconRetries)
+    EXPECT_LE(total, CmdDispatcherTestPeer::kMaxBeaconRetries)
         << "the ladder must stop and hand over to the REGISTER fallback — an "
            "unbounded retry against a hub that cannot answer (its own clock "
            "invalid, so it sends no TimeSync) would beacon forever";
@@ -2218,7 +2219,7 @@ TEST_F(RealNodeFixture, AZeroPostEventWindowNeverYieldsAnUnusableWindow) {
     sched::Entry e = sched_entry(450, sched::DAY_ALL);
     sys.setSchedule(1, 1, 1800, 600, 30, /*postEventWindow=*/0, 1800, &e, 1);
 
-    EXPECT_GE(disp.autoSleepQuietMs(), CmdDispatcher::kAutoSleepQuietMinMs)
+    EXPECT_GE(disp.autoSleepQuietMs(), CmdDispatcherTestPeer::kAutoSleepQuietMinMs)
         << "a zero push must never leave the node with a window too short to "
            "survive the hub's inter-frame gaps";
 }
@@ -2230,7 +2231,7 @@ TEST_F(RealNodeFixture, QuietWindowIsFlooredBelowTheHubsInterFrameGaps) {
     // reintroducing F8 from YAML.
     sys.setSchedule(1, 1, 1800, 600, 30, /*postEventWindow=*/2, 1800, &e, 1);
 
-    EXPECT_EQ(disp.autoSleepQuietMs(), CmdDispatcher::kAutoSleepQuietMinMs)
+    EXPECT_EQ(disp.autoSleepQuietMs(), CmdDispatcherTestPeer::kAutoSleepQuietMinMs)
         << "a window shorter than the hub's inter-frame gaps must be clamped, "
            "not honoured — honouring it makes the node unreachable";
 }
@@ -2414,7 +2415,7 @@ TEST(RealCmdDispatcherPersist, ASessionFromLoginSurvivesSaveAndLoad) {
     proto_sim_nvs_reset();
 
     {
-        CmdDispatcher d{&mot, &sys, &lif, mmux, bmux};
+        CmdDispatcherTestPeer d{&mot, &sys, &lif, mmux, bmux};
         sys.setAddress(kNodeAddr, kSubnet);
         ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
 
@@ -2423,7 +2424,7 @@ TEST(RealCmdDispatcherPersist, ASessionFromLoginSurvivesSaveAndLoad) {
         d.savePersistentState();
     }
 
-    CmdDispatcher d2{&mot, &sys, &lif, mmux, bmux};
+    CmdDispatcherTestPeer d2{&mot, &sys, &lif, mmux, bmux};
     d2.loadPersistentState();
 
     EXPECT_EQ(d2.uplinkAddress(), static_cast<uint32_t>(kHubAddr))
@@ -2453,7 +2454,7 @@ TEST(RealCmdDispatcherPersist, ResumedSessionHasWorkingKeysWithNoLogin) {
     iv[0] = 0x11; iv[15] = 0x22;
 
     {
-        CmdDispatcher d{&mot, &sys, &lif, mmux, bmux};
+        CmdDispatcherTestPeer d{&mot, &sys, &lif, mmux, bmux};
         sys.setAddress(kNodeAddr, kSubnet);
         ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
 
@@ -2466,7 +2467,7 @@ TEST(RealCmdDispatcherPersist, ResumedSessionHasWorkingKeysWithNoLogin) {
     }
 
     // A fresh dispatcher — the deep-sleep reboot. No LOGIN follows.
-    CmdDispatcher d2{&mot, &sys, &lif, mmux, bmux};
+    CmdDispatcherTestPeer d2{&mot, &sys, &lif, mmux, bmux};
     d2.loadPersistentState();
 
     EXPECT_EQ(d2.sessionGenerationForTest(), 1u)
@@ -2500,7 +2501,7 @@ TEST(RealCmdDispatcherFresh, UnprovisionedNodeIsNotMistakenForProvisioned) {
     LoraInterface lif;
     portMUX_TYPE  motorMux{};
     portMUX_TYPE  buttonMux{};
-    CmdDispatcher disp{&mot, &sys, &lif, motorMux, buttonMux};
+    CmdDispatcherTestPeer disp{&mot, &sys, &lif, motorMux, buttonMux};
 
     ASSERT_EQ(sys.getConfigAddress(), 0) << "precondition: fresh node";
     EXPECT_FALSE(disp.isProvisioned());
@@ -2613,7 +2614,7 @@ namespace {
 // window, and clears the interactive override (a file-level static an earlier
 // test leaves set to "forever" — see the harness notes in the README).
 // Returns the entry's minute-of-day.
-uint16_t arm_missed_entry(CmdDispatcher &d, SystemCtrl &s,
+uint16_t arm_missed_entry(CmdDispatcherTestPeer &d, SystemCtrl &s,
                           int minutes_ago, uint32_t catchup) {
     // Clear the interactive override FIRST, before the entry is computed.
     //
@@ -2645,7 +2646,7 @@ uint16_t arm_missed_entry(CmdDispatcher &d, SystemCtrl &s,
     return static_cast<uint16_t>(entry_minute);
 }
 
-int drain_closes(CmdDispatcher &d) {
+int drain_closes(CmdDispatcherTestPeer &d) {
     int n = 0;
     CmdDispatcher::tx_command_t c{};
     while (xQueueReceive(d.rxCmdQueueNew, &c, 0) == pdTRUE)
@@ -3291,7 +3292,7 @@ namespace {
 // mark after `near_us`. A phase sample must be near a mark to count: one further
 // than half a slot pitch is refused (2026-09-15), and an arbitrary rx instant is
 // typically hundreds of ms from any mark.
-int64_t rxOnMark(const CmdDispatcher &d, size_t len, int64_t near_us, int64_t err_us = 0) {
+int64_t rxOnMark(const CmdDispatcherTestPeer &d, size_t len, int64_t near_us, int64_t err_us = 0) {
     return gridstate::nextT0Us(d.gridState(), near_us) + err_us
          + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) len);
 }
@@ -3573,8 +3574,8 @@ TEST_F(RealNodeFixture, AFrameCarryingNoWindowGenerationResolvesNothing) {
     // not the sentinel existed — a mutation removing the sentinel SURVIVED
     // exactly that way (2026-09-20). Only when the unknown generation collides
     // with the armed one does the sentinel become separately observable.
-    disp.noteMarkArmed(CmdDispatcher::kNoWindowGen);
-    disp.noteMarkHit(CmdDispatcher::kNoWindowGen);
+    disp.noteMarkArmed(CmdDispatcherTestPeer::kNoWindowGen);
+    disp.noteMarkHit(CmdDispatcherTestPeer::kNoWindowGen);
     EXPECT_TRUE(disp.markWindowOpen())
         << "an unknown window must not resolve the mark, even one armed as unknown";
 }
@@ -3654,7 +3655,7 @@ TEST_F(RealNodeFixture, NoteMarkOutcomeCountsMissesWithoutDemoting) {
 // discriminator is time — see AckCache.h.
 
 namespace {
-int drain_acks(CmdDispatcher &d) {
+int drain_acks(CmdDispatcherTestPeer &d) {
     int n = 0;
     CmdDispatcher::tx_command_t c{};
     while (xQueueReceive(d.txCmdQueueNew, &c, 0) == pdTRUE)
@@ -4238,7 +4239,7 @@ BeaconSig beacon_mac(uint32_t key_id, uint32_t round, uint32_t slot, uint32_t ma
 // its own CURRENT session keys instead of re-deriving them — same trick as
 // DecryptedDownlinkProvesSessionEndToEnd above. `disp` must already hold a
 // session from a LOGIN carrying hub_nonce == `nonce`.
-std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, DownlinkView &inner,
+std::vector<uint8_t> encrypt_op(CmdDispatcherTestPeer &disp, DownlinkView &inner,
                                 uint32_t msgid, uint32_t nonce = kMtNonce,
                                 uint32_t burst_index = 0, bool on_mark = true) {
     DlHdr hdr;
@@ -4254,7 +4255,7 @@ std::vector<uint8_t> encrypt_op(CmdDispatcher &disp, DownlinkView &inner,
 // Encrypted CMD_SYSOP with caller-controlled burstIndex/onMark, for tests
 // that need to simulate stamped phase samples on a node that holds a
 // session (post-Tier-3, a plaintext SYSOP is refused once one does).
-std::vector<uint8_t> encrypted_sysop(CmdDispatcher &disp, uint32_t msgid, ClientOperation what,
+std::vector<uint8_t> encrypted_sysop(CmdDispatcherTestPeer &disp, uint32_t msgid, ClientOperation what,
                                      uint32_t burst_index = 0, bool on_mark = true,
                                      uint32_t nonce = kMtNonce) {
     DlMsg inner;
@@ -4263,7 +4264,7 @@ std::vector<uint8_t> encrypted_sysop(CmdDispatcher &disp, uint32_t msgid, Client
     return encrypt_op(disp, inner, msgid, nonce, burst_index, on_mark);
 }
 
-std::vector<uint8_t> encrypted_mode_test(CmdDispatcher &disp, ModeTest__Mode mode, uint32_t msgid,
+std::vector<uint8_t> encrypted_mode_test(CmdDispatcherTestPeer &disp, ModeTest__Mode mode, uint32_t msgid,
                                          uint32_t grid_period_ms = 1093,
                                          uint32_t seq = 0,
                                          int32_t arm_offset_us = 0,
@@ -4298,7 +4299,7 @@ std::vector<uint8_t> encrypted_mode_test(CmdDispatcher &disp, ModeTest__Mode mod
 // frame a sender that has never heard of the field produces. That used to mean
 // "pin the CPU at 240 MHz with light sleep off", which is the opposite of what
 // the field's own comment promised.
-std::vector<uint8_t> encrypted_mode_test_default_profile(CmdDispatcher &disp, uint32_t msgid) {
+std::vector<uint8_t> encrypted_mode_test_default_profile(CmdDispatcherTestPeer &disp, uint32_t msgid) {
     ModeTest mt = MODE_TEST__INIT;
     mt.enable       = true;
     mt.durations    = 60;
@@ -4313,7 +4314,7 @@ std::vector<uint8_t> encrypted_mode_test_default_profile(CmdDispatcher &disp, ui
 }
 
 // The hub's real "ModeTest OFF" frame — the path that restores the node's mode.
-std::vector<uint8_t> encrypted_mode_test_off(CmdDispatcher &disp, uint32_t msgid) {
+std::vector<uint8_t> encrypted_mode_test_off(CmdDispatcherTestPeer &disp, uint32_t msgid) {
     ModeTest mt = MODE_TEST__INIT;
     mt.enable = false;
     DlMsg inner;
@@ -4322,7 +4323,7 @@ std::vector<uint8_t> encrypted_mode_test_off(CmdDispatcher &disp, uint32_t msgid
     return encrypt_op(disp, inner, msgid);
 }
 
-std::vector<uint8_t> encrypted_grid_sync(CmdDispatcher &disp, uint32_t slot, uint32_t msgid,
+std::vector<uint8_t> encrypted_grid_sync(CmdDispatcherTestPeer &disp, uint32_t slot, uint32_t msgid,
                                         bool with_key = false,
                                         bool enable = true,
                                         uint32_t nonce = kMtNonce) {
@@ -4428,7 +4429,7 @@ std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid
 // on or off. crypto_on defaults false: most of the tests below are about the
 // ping/counter mechanics, not encryption, and MAC-2 off is the baseline they
 // were written against.
-void holdSessionAndArmTest(CmdDispatcher &disp, bool counter_on, bool crypto_on = false) {
+void holdSessionAndArmTest(CmdDispatcherTestPeer &disp, bool counter_on, bool crypto_on = false) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
     auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, 0, counter_on,
@@ -4439,7 +4440,7 @@ void holdSessionAndArmTest(CmdDispatcher &disp, bool counter_on, bool crypto_on 
 // An encrypted MAC ping, built the way a hub with MAC-2 on would send one:
 // the WHOLE operation message (header included) sealed under CMD_ENCRYPTED,
 // exactly like encrypt_op wraps any other command.
-std::vector<uint8_t> build_mac_ping_encrypted(CmdDispatcher &disp, uint32_t seq, bool want_echo,
+std::vector<uint8_t> build_mac_ping_encrypted(CmdDispatcherTestPeer &disp, uint32_t seq, bool want_echo,
                                               uint32_t msgid, uint32_t nonce = kMtNonce) {
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind     = MAC_CONTROL__KIND__MAC_PING;
@@ -5113,7 +5114,7 @@ constexpr int64_t kAimBound = 290000;
 // Walk the node onto the grid and give it enough on-mark samples that
 // phaseTrustworthy() is satisfied — the gate uplinkCadStartUs() applies before
 // it will aim at anything.
-int64_t settle_on_grid(CmdDispatcher &disp, uint32_t slot, uint32_t first_msgid) {
+int64_t settle_on_grid(CmdDispatcherTestPeer &disp, uint32_t slot, uint32_t first_msgid) {
     auto gs = build_grid_sync(/*enable=*/true, slot, first_msgid);
     const int64_t anchor_rx = 20'000'000;
     disp.noteDriftSample(anchor_rx);
@@ -5148,7 +5149,7 @@ TEST_F(RealNodeFixture, AnAckIsAimedAtTheMarkTheHubWillSubtract) {
 
     // The frame's T0 is one lead after the CAD start, and the hub recovers the
     // mark by subtracting the offset it published. That inverse is the contract.
-    const int64_t t0 = cad_start + CmdDispatcher::kUplinkAimLeadUs;
+    const int64_t t0 = cad_start + CmdDispatcherTestPeer::kUplinkAimLeadUs;
     EXPECT_EQ(t0 - (int64_t) disp.gridState().params.ul_offset_us, mark);
     EXPECT_EQ(disp.uplinkAimHits(), 1u);
     EXPECT_EQ(disp.uplinkAimMisses(), 0u);
@@ -5826,7 +5827,7 @@ std::vector<uint8_t> pack_stamped_sysop(uint32_t msgid, uint32_t fire_round,
 }
 
 // Deliver a stamped frame `err_us` after the instant it declares.
-void deliverStamped(CmdDispatcher &disp, const std::vector<uint8_t> &f,
+void deliverStamped(CmdDispatcherTestPeer &disp, const std::vector<uint8_t> &f,
                     uint32_t fire_round, uint32_t fire_offset_us, int64_t err_us) {
     const int64_t t0 = gridstate::t0ForHubInstantUs(disp.gridState(), fire_round, fire_offset_us);
     const int64_t rx = t0 + err_us + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
@@ -6177,7 +6178,7 @@ namespace {
 // Take a node from nothing to the edge of promotion: grid adopted, crystal,
 // and a phase baseline of `samples` addressed frames landing exactly on its
 // marks. Everything except the hub's confirmation.
-void bringNodeToTheEdgeOfPromotion(CmdDispatcher &disp, uint32_t samples = 8) {
+void bringNodeToTheEdgeOfPromotion(CmdDispatcherTestPeer &disp, uint32_t samples = 8) {
     disp.setTimedRxEnabled(true);
     disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);
 
@@ -6250,13 +6251,13 @@ TEST_F(RealNodeFixture, TheNodePromotesOnItsOwnPhaseEvidence) {
 // ---------------------------------------------------------------------------
 
 namespace {
-std::vector<CmdDispatcher::tx_command_t> drainTx(CmdDispatcher &d) {
+std::vector<CmdDispatcher::tx_command_t> drainTx(CmdDispatcherTestPeer &d) {
     std::vector<CmdDispatcher::tx_command_t> out;
     CmdDispatcher::tx_command_t c{};
     while (xQueueReceive(d.txCmdQueueNew, &c, 0) == pdTRUE) out.push_back(c);
     return out;
 }
-std::vector<CmdDispatcher::tx_command_t> gridSyncRequests(CmdDispatcher &d) {
+std::vector<CmdDispatcher::tx_command_t> gridSyncRequests(CmdDispatcherTestPeer &d) {
     std::vector<CmdDispatcher::tx_command_t> out;
     for (const auto &c : drainTx(d))
         if (c.cmd == (blinds_syscmd_base_t) BlindsStatusCmd::SYSCMD_GRIDSYNC_REQUEST)
@@ -6264,7 +6265,7 @@ std::vector<CmdDispatcher::tx_command_t> gridSyncRequests(CmdDispatcher &d) {
     return out;
 }
 // Addressed frames on this node's marks from `from_us` on, each `err_us` late.
-void framesOnMarks(CmdDispatcher &d, int64_t from_us, uint32_t count, int64_t err_us,
+void framesOnMarks(CmdDispatcherTestPeer &d, int64_t from_us, uint32_t count, int64_t err_us,
                    uint32_t first_msgid) {
     for (uint32_t i = 0; i < count; ++i) {
         const int64_t mark = gridstate::nextT0Us(
@@ -6338,7 +6339,7 @@ TEST_F(RealNodeFixture, InModeBTheBeaconNotTheTrialOwnsTheAnchor) {
 // these three tests announced once at reason 1 and the flicker case was
 // vacuous.) Promotion to reason 0, then a real ladder rung, is the edge.
 namespace {
-void promoteAndSettle(CmdDispatcher &disp) {
+void promoteAndSettle(CmdDispatcherTestPeer &disp) {
     bringNodeToTheEdgeOfPromotion(disp);
     ASSERT_EQ(disp.demotionReasonNow(), (uint8_t) timedmode::Demotion::None);
 }
@@ -6383,7 +6384,7 @@ TEST_F(RealNodeFixture, AModeChangeIsAnnouncedToTheHubExactlyOnce) {
     EXPECT_EQ(beacons[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED)
         << "a distinct reason: reusing TIMER_CHECKIN would be a beacon claiming "
            "a check-in that never happened";
-    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None)
+    EXPECT_EQ(CmdDispatcherTestPeer::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None)
         << "and the hub was told the state the node is actually in";
 
     // Nothing changed since, so nothing more is owed however often the arming
@@ -6409,7 +6410,7 @@ TEST_F(RealNodeFixture, AChangeInsideTheFloorIsHeldNotDropped) {
     (void) disp.timedRxActive();
     disp.announceModeChangeIfPending();
     drainTx(disp);   // the first announcement, asserted by the test above
-    ASSERT_EQ(CmdDispatcher::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None);
+    ASSERT_EQ(CmdDispatcherTestPeer::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None);
 
     // A REAL second change, immediately: off the crystal is BadClockSource, a
     // live rung of the ladder. Inside kModeAnnounceMinS it must NOT go out — an
@@ -6433,7 +6434,7 @@ TEST_F(RealNodeFixture, AChangeInsideTheFloorIsHeldNotDropped) {
     auto late = drainTx(disp);
     ASSERT_EQ(late.size(), 1u) << "the suppressed change must still be owed";
     EXPECT_EQ(late[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED);
-    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(),
+    EXPECT_EQ(CmdDispatcherTestPeer::lastReasonAnnounced(),
               (uint8_t) timedmode::Demotion::BadClockSource)
         << "and it carries the reason, not merely the fact that something moved";
 }
@@ -6456,7 +6457,7 @@ TEST_F(RealNodeFixture, TheLastStateWinsWhenTheModeFlickersInsideTheFloor) {
     (void) disp.timedRxActive();          // no grid yet -> GridDisabled (1)
     disp.announceModeChangeIfPending();   // first announcement, 0xFF -> 1
     drainTx(disp);
-    ASSERT_EQ(CmdDispatcher::lastReasonAnnounced(),
+    ASSERT_EQ(CmdDispatcherTestPeer::lastReasonAnnounced(),
               (uint8_t) timedmode::Demotion::GridDisabled)
         << "precondition: the hub has been told state 1";
 
@@ -6485,7 +6486,7 @@ TEST_F(RealNodeFixture, TheLastStateWinsWhenTheModeFlickersInsideTheFloor) {
     // told something. cmd.arg carries the WakeReason; the DEMOTION reason rides
     // the beacon body built later in processTxCommand, so this reads the field
     // the announcement committed to.
-    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(), settled)
+    EXPECT_EQ(CmdDispatcherTestPeer::lastReasonAnnounced(), settled)
         << "after a flicker that returned to its starting state, the hub must "
            "be left believing that state — not the excursion that raised the "
            "flag, which no longer holds";
@@ -6516,7 +6517,7 @@ TEST_F(RealNodeFixture, AWithdrawnGridIsAnnouncedAlthoughTimedRxIsNowOff) {
     (void) disp.timedRxActive();
     disp.announceModeChangeIfPending();
     drainTx(disp);
-    ASSERT_EQ(CmdDispatcher::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None)
+    ASSERT_EQ(CmdDispatcherTestPeer::lastReasonAnnounced(), (uint8_t) timedmode::Demotion::None)
         << "precondition: the hub has been told the node is in Mode B";
 
     // PAST THE FLOOR FIRST. Withdrawing inside kModeAnnounceMinS would be
@@ -6541,7 +6542,7 @@ TEST_F(RealNodeFixture, AWithdrawnGridIsAnnouncedAlthoughTimedRxIsNowOff) {
            "believing the last reason it was told and single shot is decided "
            "on a stale belief";
     EXPECT_EQ(beacons[0].arg, (uint32_t) WAKE_REASON__WAKE_MODE_CHANGED);
-    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(),
+    EXPECT_EQ(CmdDispatcherTestPeer::lastReasonAnnounced(),
               (uint8_t) timedmode::Demotion::GridDisabled)
         << "and it carries GridDisabled, not the None it used to be in";
 }
@@ -6601,7 +6602,7 @@ TEST_F(RealNodeFixture, AWakeWithAnUnchangedReasonSpendsOneUplinkNotTwo) {
     // evaluation is genuinely an edge and the announcement is owed.
     (void) disp.timedRxActive();
     disp.announceModeChangeIfPending();
-    const uint8_t told = CmdDispatcher::lastReasonAnnounced();
+    const uint8_t told = CmdDispatcherTestPeer::lastReasonAnnounced();
     drainTx(disp);
     ASSERT_NE(told, (uint8_t) 0xFF)
         << "precondition: the hub has been told a reason before the sleep";
@@ -6644,7 +6645,7 @@ TEST_F(RealNodeFixture, AWakeWithAnUnchangedReasonSpendsOneUplinkNotTwo) {
            "which is what hardware measured on fw 1.1.2 AND again on 1.1.3.";
     EXPECT_EQ(sent[0].arg, (uint32_t) WAKE_REASON__WAKE_TIMER_CHECKIN)
         << "and the one uplink is the check-in, not a separate announcement";
-    EXPECT_EQ(CmdDispatcher::lastReasonAnnounced(), told)
+    EXPECT_EQ(CmdDispatcherTestPeer::lastReasonAnnounced(), told)
         << "the wake kept what RTC_DATA_ATTR retains — if this is 0xFF the "
            "state did not survive and the whole defect is back";
 }
@@ -7116,7 +7117,7 @@ constexpr int64_t  kRefAnchor = 90'000'000;
 
 // A GridSync stamped as leaving on slot kRefSlot's mark of round 0, delivered at
 // kRefAnchor + that offset + `err_us`.
-void deliverStampedGridSync(CmdDispatcher &disp, uint32_t msgid, int64_t err_us) {
+void deliverStampedGridSync(CmdDispatcherTestPeer &disp, uint32_t msgid, int64_t err_us) {
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
     hdr.msgid = msgid; hdr.burstcount = 17; hdr.onmark = true;
@@ -7137,7 +7138,7 @@ void deliverStampedGridSync(CmdDispatcher &disp, uint32_t msgid, int64_t err_us)
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
 }
 
-gridstate::State truthAt(const CmdDispatcher &disp, int32_t rate_ppb) {
+gridstate::State truthAt(const CmdDispatcherTestPeer &disp, int32_t rate_ppb) {
     gridstate::State t = disp.gridState();
     t.anchor_us = kRefAnchor;
     t.rate_ppb  = rate_ppb;
@@ -7232,7 +7233,7 @@ TEST_F(RealNodeFixture, ABeaconBeyondHalfASlotPitchChangesNothing) {
 // ---------------------------------------------------------------------------
 
 namespace {
-void armModeBWithGrid(CmdDispatcher &disp) {
+void armModeBWithGrid(CmdDispatcherTestPeer &disp) {
     disp.setRtcSlowSrc(phase::RtcSlowSrc::Crystal);   // Mode B needs the crystal
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
@@ -7243,7 +7244,7 @@ void armModeBWithGrid(CmdDispatcher &disp) {
     disp.onReceiveNew(start.data(), static_cast<int>(start.size()));
 }
 
-void feedModeBMarks(CmdDispatcher &disp, const gridstate::State &truth) {
+void feedModeBMarks(CmdDispatcherTestPeer &disp, const gridstate::State &truth) {
     uint32_t msgid = 4;
     for (uint32_t r = 10; r < 70; ++r) {
         auto mark = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_B, msgid++, 1500,
@@ -7312,7 +7313,7 @@ std::vector<uint8_t> old_basenonce_frame(uint32_t msgid, uint32_t dest) {
     return out;
 }
 
-bool reg_queued(CmdDispatcher &disp, uint32_t *count = nullptr) {
+bool reg_queued(CmdDispatcherTestPeer &disp, uint32_t *count = nullptr) {
     uint32_t n = 0;
     CmdDispatcher::tx_command_t c{};
     std::vector<CmdDispatcher::tx_command_t> keep;
@@ -7543,7 +7544,7 @@ std::vector<uint8_t> admit_plain_ping(uint32_t sender, uint32_t seq, uint32_t ms
 
 // encrypt_op() with a burst position, which the tag covers like every header
 // byte (its own header never sets burstCount, which the freshness span depends on).
-std::vector<uint8_t> admit_enc_sysop_copy(CmdDispatcher &disp, uint32_t msgid,
+std::vector<uint8_t> admit_enc_sysop_copy(CmdDispatcherTestPeer &disp, uint32_t msgid,
                                           uint32_t burst_index, uint32_t burst_count) {
     DlMsg inner;
     inner.cmd_case = DL_SYSOP;
@@ -7555,7 +7556,7 @@ std::vector<uint8_t> admit_enc_sysop_copy(CmdDispatcher &disp, uint32_t msgid,
 }
 
 // Deliver `f` with its T0 on `mark`, as the radio would.
-void admit_deliver_on_mark(CmdDispatcher &d, const std::vector<uint8_t> &f, int64_t mark) {
+void admit_deliver_on_mark(CmdDispatcherTestPeer &d, const std::vector<uint8_t> &f, int64_t mark) {
     const int64_t rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
     d.noteDriftSample(rx);
     d.onReceiveNew(const_cast<uint8_t *>(f.data()), static_cast<int>(f.size()), rx);
@@ -7570,7 +7571,7 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionAcceptsPl
     SystemCtrl    sys;          // cfgAddress=0: config lost, session survived in NVS
     LoraInterface lif;
     portMUX_TYPE  motorMux{}, buttonMux{};
-    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
     disp.setBaseNonceForTest(1, 0xABCDEF01);
     ASSERT_EQ(sys.getConfigAddress(), 0u);
 
@@ -7596,7 +7597,7 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionStillRefu
     SystemCtrl    sys;          // cfgAddress=0
     LoraInterface lif;
     portMUX_TYPE  motorMux{}, buttonMux{};
-    CmdDispatcher disp(&mot, &sys, &lif, motorMux, buttonMux);
+    CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
     ASSERT_EQ(sys.getConfigAddress(), 0u);
 
     // CONTROL: with no session a provisioning frame is admitted in the clear
@@ -7825,7 +7826,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ThePingSeqHighWaterMarkOnlyAdvancesOnAccepted
 }
 
 namespace {
-std::vector<uint8_t> mac_config_frame(CmdDispatcher &disp, uint32_t msgid, bool disable_crypto) {
+std::vector<uint8_t> mac_config_frame(CmdDispatcherTestPeer &disp, uint32_t msgid, bool disable_crypto) {
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind          = MAC_CONTROL__KIND__MAC_CONFIG;
     mc.disablecrypto = disable_crypto;

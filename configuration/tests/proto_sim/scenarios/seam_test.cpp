@@ -29,6 +29,7 @@
 #include "esphome/components/homeassistant/time/homeassistant_time.h"
 
 #include "CmdDispatcher.h"
+#include "CmdDispatcherTestPeer.h"   // review N19: private members via the peer
 #include "MotorCtrl.h"
 #include "SystemCtrl.h"
 #include "LoraInterface.h"
@@ -81,7 +82,7 @@ struct Seam : public ::testing::Test {
     LoraInterface lif;
     portMUX_TYPE  motorMux{};
     portMUX_TYPE  buttonMux{};
-    CmdDispatcher disp{&mot, &sys, &lif, motorMux, buttonMux};
+    CmdDispatcherTestPeer disp{&mot, &sys, &lif, motorMux, buttonMux};
 
     void SetUp() override {
         ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);

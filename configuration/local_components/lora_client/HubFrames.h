@@ -32,12 +32,12 @@ namespace hubframes
 
 struct Hdr
 {
-    uint32_t destaddress{0};
-    uint32_t destsubnet{0};
-    uint32_t senderaddress{0};
+    uint8_t  destaddress{0};
+    uint8_t  destsubnet{0};
+    uint8_t  senderaddress{0};
     uint32_t msgid{0};          // the FCNT
-    uint32_t burstindex{0};
-    uint32_t burstcount{0};
+    uint8_t  burstindex{0};
+    uint8_t  burstcount{0};
     bool     onmark{false};
     bool     firestamped{false};
     uint32_t fireround{0};
