@@ -1086,6 +1086,52 @@ namespace esphome
       // Sending it is still better than dropping a command, but it must not claim
       // the mark, and it must be visible: the node anchors to arrival, so a late
       // GridSync moves every mark it will ever arm (measured 2026-09-14, -322 ms).
+      const bool on_mark_eff = this->burstClaimsMark_(on_mark, not_before_us);
+
+      if (canStamp)
+      {
+        // burstCount, and whether copy 0 sits on the destination's grid mark —
+        // the node's only licence to read this frame's arrival as a phase
+        // sample. Never claimed for an unplaced frame, whatever the caller asked.
+        frame.setBurst(burstCopies, on_mark_eff);
+      }
+
+      BurstCopy spec;
+      spec.encrypted    = encrypted;
+      spec.fire_stamp   = fire_stamp;
+      spec.on_mark      = on_mark_eff;
+      spec.sealer       = sealer;
+      spec.seal_binding = &seal_binding;
+      for (int cnt = 0; cnt < burstCopies; cnt++)
+      {
+        this->lora_tx_busy_ = true;
+
+        // This copy's instant: copy 0's plus cnt strides, when copy 0 was placed.
+        const int64_t copy_at_us = this->waitCopyInstant_(cnt, not_before_us, stride_eff_ms);
+
+        if (canStamp)
+          this->sendStampedCopy_(frame, cnt, copy_at_us, spec);
+        else
+          this->sendPacketAt(data, len, copy_at_us);
+
+        // An unplaced burst paces from the instant copy 0 actually LEFT, not from
+        // before whatever preceded it.
+        if (cnt == 0)
+          xLastWakeTime = xTaskGetTickCount();
+
+        // No gap after the final copy — the caller clears lora_tx_busy_ and the
+        // loop returns to RX immediately.
+        if (cnt + 1 < burstCopies)
+          this->rxGap_(not_before_us <= 0, &xLastWakeTime, xFrequency);
+      }
+    }
+
+    // A placed frame that reaches the radio after its mark is no longer ON it.
+    // Sending it is still better than dropping a command, but it must not claim
+    // the mark, and it must be visible: the node anchors to arrival, so a late
+    // GridSync moves every mark it will ever arm (measured 2026-09-14, -322 ms).
+    bool LORATracker::burstClaimsMark_(bool on_mark, int64_t not_before_us)
+    {
       bool on_mark_eff = on_mark && not_before_us > 0;
       if (not_before_us > 0)
       {
@@ -1097,161 +1143,148 @@ namespace esphome
           on_mark_eff = false;   // sent, but no longer claims the mark
         }
       }
+      return on_mark_eff;
+    }
 
-      if (canStamp)
+    // Copy `cnt`'s instant when copy 0 was placed (0 for an unplaced burst), after
+    // yielding the bulk of the wait for it.
+    int64_t LORATracker::waitCopyInstant_(int cnt, int64_t not_before_us, uint32_t stride_eff_ms)
+    {
+      int64_t copy_at_us = 0;
+      if (not_before_us > 0)
       {
-        // burstCount, and whether copy 0 sits on the destination's grid mark —
-        // the node's only licence to read this frame's arrival as a phase
-        // sample. Never claimed for an unplaced frame, whatever the caller asked.
-        frame.setBurst(burstCopies, on_mark_eff);
-      }
-
-      // for (int cnt = 0; cnt < 7; cnt++)
-      for (int cnt = 0; cnt < burstCopies; cnt++)
-      {
-        this->lora_tx_busy_ = true;
-
-        // This copy's instant: copy 0's plus cnt strides, when copy 0 was placed.
-        int64_t copy_at_us = 0;
-        if (not_before_us > 0)
+        copy_at_us = not_before_us + (int64_t) cnt * (int64_t) stride_eff_ms * 1000;
+        // Yield the bulk of the wait; firePacket busy-waits only the last
+        // prepare lead, and its ceiling (kMaxFireBusyWaitUs) is shorter than a
+        // stride. Copy 0 was released by the queue a prepare lead early already.
+        if (cnt > 0)
         {
-          copy_at_us = not_before_us + (int64_t) cnt * (int64_t) stride_eff_ms * 1000;
-          // Yield the bulk of the wait; firePacket busy-waits only the last
-          // prepare lead, and its ceiling (kMaxFireBusyWaitUs) is shorter than a
-          // stride. Copy 0 was released by the queue a prepare lead early already.
-          if (cnt > 0)
-          {
-            const int64_t wait_us = copy_at_us - esp_timer_get_time() - kPrepareLeadUs;
-            if (wait_us >= 1000)
-              vTaskDelay(pdMS_TO_TICKS((uint32_t) (wait_us / 1000)));
-          }
-        }
-
-        if (canStamp)
-        {
-          frame.setIndex(cnt);
-
-          // THE DECLARED FIRE INSTANT. Every copy states where its own T0 is on
-          // the hub grid, so every heard copy is a phase sample for the node —
-          // placed or not, on time or late. A copy is stamped only with an
-          // instant it can still reach: its placed instant, or kStampLeadUs from
-          // now if that has passed or it has none. firePacket then waits to it.
-          int64_t fire_at_us = copy_at_us;
-          bool stamped = false;
-          // Not the broadcast beacon (fire_stamp false, TxPolicy): it already
-          // declares its own round and slot, the node reads it on its own path,
-          // and the stamp would take it past kBeaconPayloadBytes — the size its
-          // fleet-wide airtime is budgeted on.
-          if (this->grid_started_ && fire_stamp)
-          {
-            const int64_t reachable = esp_timer_get_time() + kStampLeadUs;
-            if (fire_at_us < reachable)
-              fire_at_us = reachable;
-            uint32_t round = 0, offset = 0;
-            stamped = this->fireStampFor_(loratiming::t0FromFireInstantUs(fire_at_us, 0),
-                                          &round, &offset);
-            frame.setFireStamp(stamped, round, offset);
-          }
-
-          // Tier 3 (mac-separation-implementation-plan.md section 2(b)):
-          // the ciphertext was sealed ONCE, at pack time; the tag was only
-          // a placeholder then, because it must cover THIS copy's just-
-          // stamped burstIndex/burstCount/onMark/fireStamped/fireRound/
-          // fireOffsetUs — fields that do not exist until this point in
-          // the loop. Recompute it now, per copy, right before packing.
-          // A copy whose session has no keys (or has gone stale) is
-          // dropped rather than sent half-sealed.
-          //
-          // S4: through the frame's OWN sealer (TxPolicy::sealer), bound to the
-          // keys this frame was sealed under — never a client looked up by
-          // address. A frame sealed before a re-login is refused here (F4).
-          bool skip_copy = false;
-          if (encrypted)
-          {
-            // H-1: the wall-clock cost of this call, whether it succeeds or
-            // not — a session gone stale mid-burst is itself cheap to
-            // detect, but the acceptance gate is about the ordinary case,
-            // which is the overwhelming majority of samples.
-            const int64_t seal_t0 = esp_timer_get_time();
-            const bool sealed = frame.seal(sealer, &seal_binding);
-            const int64_t seal_t1 = esp_timer_get_time();
-            this->noteTagWriteLatencyUs_((uint32_t) (seal_t1 - seal_t0), seal_t1, cnt);
-            if (!sealed)
-            {
-              // No session, or the keys changed since the frame was sealed.
-              this->tx_seal_drops_++;
-              skip_copy = true;
-            }
-          }
-
-          // The copy is packed into the send task's own buffer: no heap per copy.
-          const size_t clen = skip_copy ? 0 : frame.packedSize();
-          if (!skip_copy && clen <= sizeof(this->copy_buf_))
-          {
-            frame.packInto(this->copy_buf_);
-            this->sendPacketAt(this->copy_buf_, clen, stamped ? fire_at_us : copy_at_us);
-            // The stamp check below compares against the stamp, which is moved
-            // later when the frame was released late — so a mark that left 20 ms
-            // after its instant, honestly stamped, was invisible. A Mode B node
-            // listens at the MARK. Measured against it here.
-            static constexpr int64_t kMarkLateToleranceUs = 3000;
-            if (cnt == 0 && on_mark_eff &&
-                this->last_fire_us_ - copy_at_us > kMarkLateToleranceUs)
-            {
-              this->tx_mark_late_++;
-              this->tx_last_mark_late_us_ = this->last_fire_us_ - copy_at_us;
-            }
-            if (stamped && this->last_fire_us_ - fire_at_us > kStampToleranceUs)
-              this->tx_stamp_misses_++;
-          }
-          // else: dropped -- the seal failed (counted above), or a copy that
-          // would not fit the buffer, which a frame of at most 255 B plus its
-          // stamp never is (counted, never sent half-built).
-          else if (!skip_copy)
-          {
-            this->tx_seal_drops_++;
-          }
-        }
-        else
-        {
-          this->sendPacketAt(data, len, copy_at_us);
-        }
-
-        // An unplaced burst paces from the instant copy 0 actually LEFT, not from
-        // before whatever preceded it.
-        if (cnt == 0)
-          xLastWakeTime = xTaskGetTickCount();
-        // sendPacketBytes((uint8_t *)&curTime, sizeof(curTime));
-
-        // Release the radio to RX during the idle gap between copies.  Holding
-        // it TX-busy for the whole 17-copy burst (~1.5 s) kept the hub deaf:
-        // it never opened an RX window to hear the node's MAC ACK, and the
-        // node's CAD saw a permanently busy channel and could not transmit the
-        // ACK either — so every cover op retransmitted to 4/4.  Clearing
-        // lora_tx_busy_ here lets the main loop's receive() read any incoming
-        // reply (in the main task, where the scheduler/NVS/publish are safe)
-        // during the gap.  No gap after the final copy — the caller clears
-        // lora_tx_busy_ and the loop returns to RX immediately.
-        if (cnt + 1 < burstCopies)
-        {
-          // Arm RX under the mutex, then drop the busy hint so the main loop can
-          // read the FIFO during the gap.  The mutex (not the flag) guarantees
-          // the next sendPacketBytes() cannot start until any in-progress read
-          // on the main loop has finished.
-          if (this->radio_mutex_ != nullptr)
-            xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
-          lora_receive(0);             // continuous RX for the duration of the gap
-          if (this->radio_mutex_ != nullptr)
-            xSemaphoreGive(this->radio_mutex_);
-
-          this->lora_tx_busy_ = false; // allow loop()->receive() to read the FIFO
-          // A placed burst waits for each copy's own instant at the top of the
-          // loop; only an unplaced one is paced by the tick schedule.
-          if (not_before_us <= 0)
-            vTaskDelayUntil(&xLastWakeTime, xFrequency);
+          const int64_t wait_us = copy_at_us - esp_timer_get_time() - kPrepareLeadUs;
+          if (wait_us >= 1000)
+            vTaskDelay(pdMS_TO_TICKS((uint32_t) (wait_us / 1000)));
         }
       }
+      return copy_at_us;
+    }
 
+    // One copy of a frame MAC-0 can stamp: its index, its fire stamp, its tag,
+    // then the radio.
+    void LORATracker::sendStampedCopy_(mac0::TxFrame &frame, int cnt, int64_t copy_at_us,
+                                       const BurstCopy &spec)
+    {
+      frame.setIndex(cnt);
+      int64_t fire_at_us = copy_at_us;
+      const bool stamped = this->stampCopy_(frame, spec.fire_stamp, &fire_at_us);
+      if (this->sealCopy_(frame, spec, cnt))
+        this->fireCopy_(frame, cnt, copy_at_us, stamped ? fire_at_us : 0, spec.on_mark);
+    }
+
+    // THE DECLARED FIRE INSTANT. Every copy states where its own T0 is on
+    // the hub grid, so every heard copy is a phase sample for the node —
+    // placed or not, on time or late. A copy is stamped only with an
+    // instant it can still reach: its placed instant, or kStampLeadUs from
+    // now if that has passed or it has none. firePacket then waits to it.
+    // Returns whether the copy was stamped; *fire_at_us is the stamped instant.
+    bool LORATracker::stampCopy_(mac0::TxFrame &frame, bool fire_stamp, int64_t *fire_at_us)
+    {
+      // Not the broadcast beacon (fire_stamp false, TxPolicy): it already
+      // declares its own round and slot, the node reads it on its own path,
+      // and the stamp would take it past kBeaconPayloadBytes — the size its
+      // fleet-wide airtime is budgeted on.
+      if (!(this->grid_started_ && fire_stamp))
+        return false;
+      const int64_t reachable = esp_timer_get_time() + kStampLeadUs;
+      if (*fire_at_us < reachable)
+        *fire_at_us = reachable;
+      uint32_t round = 0, offset = 0;
+      const bool stamped = this->fireStampFor_(loratiming::t0FromFireInstantUs(*fire_at_us, 0),
+                                               &round, &offset);
+      frame.setFireStamp(stamped, round, offset);
+      return stamped;
+    }
+
+    // Tier 3 (mac-separation-implementation-plan.md section 2(b)): the
+    // ciphertext was sealed ONCE, at pack time; the tag was only a placeholder
+    // then, because it must cover THIS copy's just-stamped burstIndex /
+    // burstCount / onMark / fireStamped / fireRound / fireOffsetUs — fields
+    // that do not exist until this point. Recompute it now, per copy, right
+    // before packing. A copy whose session has no keys (or has gone stale) is
+    // dropped rather than sent half-sealed.
+    //
+    // S4: through the frame's OWN sealer (TxPolicy::sealer), bound to the keys
+    // this frame was sealed under — never a client looked up by address. A
+    // frame sealed before a re-login is refused here (F4). False: drop the copy.
+    bool LORATracker::sealCopy_(mac0::TxFrame &frame, const BurstCopy &spec, int cnt)
+    {
+      if (!spec.encrypted)
+        return true;
+      // H-1: the wall-clock cost of this call, whether it succeeds or not — a
+      // session gone stale mid-burst is itself cheap to detect, but the
+      // acceptance gate is about the ordinary case, which is the overwhelming
+      // majority of samples.
+      const int64_t seal_t0 = esp_timer_get_time();
+      const bool sealed = frame.seal(spec.sealer, spec.seal_binding);
+      const int64_t seal_t1 = esp_timer_get_time();
+      this->noteTagWriteLatencyUs_((uint32_t) (seal_t1 - seal_t0), seal_t1, cnt);
+      if (!sealed)
+        this->tx_seal_drops_++;   // no session, or the keys changed since the frame was sealed
+      return sealed;
+    }
+
+    // Pack the copy into the send task's own buffer (no heap per copy) and fire
+    // it at its instant: the stamp (`stamp_at_us`, 0 = unstamped) or the placed
+    // instant. Then the mark and stamp checks.
+    void LORATracker::fireCopy_(mac0::TxFrame &frame, int cnt, int64_t copy_at_us,
+                                int64_t stamp_at_us, bool on_mark)
+    {
+      const size_t clen = frame.packedSize();
+      if (clen > sizeof(this->copy_buf_))
+      {
+        // A copy that would not fit the buffer, which a frame of at most 255 B
+        // plus its stamp never is (counted, never sent half-built).
+        this->tx_seal_drops_++;
+        return;
+      }
+      frame.packInto(this->copy_buf_);
+      this->sendPacketAt(this->copy_buf_, clen, (stamp_at_us != 0) ? stamp_at_us : copy_at_us);
+      // The stamp check below compares against the stamp, which is moved
+      // later when the frame was released late — so a mark that left 20 ms
+      // after its instant, honestly stamped, was invisible. A Mode B node
+      // listens at the MARK. Measured against it here.
+      static constexpr int64_t kMarkLateToleranceUs = 3000;
+      if (cnt == 0 && on_mark && this->last_fire_us_ - copy_at_us > kMarkLateToleranceUs)
+      {
+        this->tx_mark_late_++;
+        this->tx_last_mark_late_us_ = this->last_fire_us_ - copy_at_us;
+      }
+      if (stamp_at_us != 0 && this->last_fire_us_ - stamp_at_us > kStampToleranceUs)
+        this->tx_stamp_misses_++;
+    }
+
+    // Release the radio to RX during the idle gap between copies. Holding it
+    // TX-busy for the whole 17-copy burst (~1.5 s) kept the hub deaf: it never
+    // opened an RX window to hear the node's MAC ACK, and the node's CAD saw a
+    // permanently busy channel and could not transmit the ACK either — so every
+    // cover op retransmitted to 4/4. Clearing lora_tx_busy_ here lets the main
+    // loop's receive() read any incoming reply (in the main task, where the
+    // scheduler/NVS/publish are safe) during the gap.
+    void LORATracker::rxGap_(bool paced, TickType_t *last_wake, TickType_t frequency)
+    {
+      // Arm RX under the mutex, then drop the busy hint so the main loop can
+      // read the FIFO during the gap. The mutex (not the flag) guarantees the
+      // next sendPacketBytes() cannot start until any in-progress read on the
+      // main loop has finished.
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreTake(this->radio_mutex_, portMAX_DELAY);
+      lora_receive(0);             // continuous RX for the duration of the gap
+      if (this->radio_mutex_ != nullptr)
+        xSemaphoreGive(this->radio_mutex_);
+
+      this->lora_tx_busy_ = false; // allow loop()->receive() to read the FIFO
+      // A placed burst waits for each copy's own instant at the top of the
+      // loop; only an unplaced one is paced by the tick schedule.
+      if (paced)
+        vTaskDelayUntil(last_wake, frequency);
     }
 
     // The send task's anomaly counters, reported from the loop at most every

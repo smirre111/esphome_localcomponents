@@ -35,6 +35,11 @@
 // The transmit buffer pool and its buffer type (TxPool, review HB10).
 #include "tx_pool.h"
 
+namespace mac0
+{
+class WireBurstFrame;
+}  // namespace mac0
+
 namespace esphome
 {
   namespace lora_tracker
@@ -367,6 +372,30 @@ namespace esphome
                            uint32_t stride_ms = 0, int64_t not_before_us = 0,
                            bool on_mark = false, mac::CopySealer sealer = nullptr,
                            uint64_t seal_binding = 0, bool fire_stamp = true);
+
+    private:
+      // ---- the burst engine: sendPacketBurst's per-copy steps (HB10) ----
+      // Nothing here logs or allocates (HB8): send task, between a copy's stamp
+      // and its fire instant.
+      struct BurstCopy
+      {
+        bool             encrypted{false};
+        bool             fire_stamp{true};
+        bool             on_mark{false};
+        mac::CopySealer  sealer{nullptr};
+        uint64_t        *seal_binding{nullptr};
+      };
+      bool    burstClaimsMark_(bool on_mark, int64_t not_before_us);
+      int64_t waitCopyInstant_(int cnt, int64_t not_before_us, uint32_t stride_eff_ms);
+      void    sendStampedCopy_(mac0::WireBurstFrame &frame, int cnt, int64_t copy_at_us,
+                               const BurstCopy &spec);
+      bool    stampCopy_(mac0::WireBurstFrame &frame, bool fire_stamp, int64_t *fire_at_us);
+      bool    sealCopy_(mac0::WireBurstFrame &frame, const BurstCopy &spec, int cnt);
+      void    fireCopy_(mac0::WireBurstFrame &frame, int cnt, int64_t copy_at_us,
+                        int64_t stamp_at_us, bool on_mark);
+      void    rxGap_(bool paced, TickType_t *last_wake, TickType_t frequency);
+
+    public:
 
       // Drift test: emit ONE copy instead of txSlotsPerRound.
       //
