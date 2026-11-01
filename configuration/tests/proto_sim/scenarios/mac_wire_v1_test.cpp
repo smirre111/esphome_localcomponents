@@ -1061,6 +1061,98 @@ TEST(MacWireV1Listener, AForgedRegisterDoesNotMoveTheHighestSeq) {
     EXPECT_TRUE(takesRegister(hub, registerFrame(3))) << "the forgery's seq was never taken";
 }
 
+// Review "ota-hang" (node 1, 2026-10-31): a node that restored its counters after
+// a soft reset (tx + 64, rx + 16 with the margin marked seen) and whose boot
+// beacons were lost was deaf for 27 h: the hub advanced its downlink FCNT only on
+// a reset beacon. An authenticated uplink whose FCNT jumps >= 64 past the last
+// accepted one is that restore: the hub advances by 16 once (shared dedupe with
+// the beacon path), never for a smaller gap.
+namespace {
+void sessionUplink(Hub &hub, uint32_t session, uint32_t fcnt) {
+    macwire::WireHdr h = uplinkHdr(fcnt, macwire::kPortApp, macwire::Auth::Session);
+    Bytes up = proto_sim::v1_session_frame(session, kNodeNonce, kHub, kNode, false, h, availBody());
+    hub.rol.set_response(up.data(), up.size());
+}
+}  // namespace
+
+TEST(MacWireV1Listener, AnUplinkJumpOfSixtyFourOrMoreAdvancesTheDownlinkCounterOnce) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    const uint32_t session = openSession(hub);
+    ASSERT_TRUE(hub.rol.session_confirmed());
+    const uint32_t rx0 = hub.rol.sequencer().rxId();
+    const uint32_t tx0 = hub.rol.sequencer().txId();
+
+    sessionUplink(hub, session, rx0 + 63);
+    ASSERT_EQ(hub.rol.sequencer().rxId(), rx0 + 63) << "precondition: accepted";
+    EXPECT_EQ(hub.rol.sequencer().txId(), tx0) << "a gap of 63 is lost uplinks, not a reboot";
+
+    sessionUplink(hub, session, rx0 + 63 + 64);
+    ASSERT_EQ(hub.rol.sequencer().rxId(), rx0 + 127) << "precondition: accepted";
+    EXPECT_EQ(hub.rol.sequencer().txId(), tx0 + 16) << "a jump of 64 is the node's restore";
+
+    sessionUplink(hub, session, rx0 + 127 + 64);
+    EXPECT_EQ(hub.rol.sequencer().txId(), tx0 + 16)
+        << "a second jump right after (the same boot's next frame) advances nothing";
+
+    proto_sim_timer_advance_us(30'000'000);
+    sessionUplink(hub, session, rx0 + 191 + 64);
+    EXPECT_EQ(hub.rol.sequencer().txId(), tx0 + 32) << "a later reboot advances again";
+}
+
+TEST(MacWireV1Listener, ARestoredNodeGetsItsClockBackWithoutABeacon) {
+    // The node lost its RAM (wall clock, grid) and its reset beacon, whose
+    // answer would have been the TimeSync: the FCNT jump has to send it.
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    const uint32_t session = openSession(hub);
+    hub.clock.tick(1000);   // the login's own TimeSync
+    const int64_t first = hub.rol.last_timesync_sent_us_for_test();
+    ASSERT_GT(first, 0) << "precondition: the login sent one";
+    proto_sim_timer_advance_us(60'000'000);
+
+    sessionUplink(hub, session, hub.rol.sequencer().rxId() + 66);
+    hub.clock.tick(1000);
+    EXPECT_GT(hub.rol.last_timesync_sent_us_for_test(), first)
+        << "a node restored without a beacon gets the TimeSync the beacon would have earned";
+}
+
+TEST(MacWireV1Listener, AWakeFromACommandedSleepAdvancesButSendsNothingExtra) {
+    // A deep-sleep wake restores the counters the same way. The advance is
+    // harmless; the extra TimeSync is not (the node's beacon ladder drives it).
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    const uint32_t session = openSession(hub);
+    hub.clock.tick(1000);
+    const int64_t first = hub.rol.last_timesync_sent_us_for_test();
+    proto_sim_timer_advance_us(60'000'000);
+    hub.rol.last_sleep_epoch_ = 1787000100;   // a SLEEP acked...
+    hub.rol.last_heard_epoch_ = 1787000000;   // ...and the node not heard since
+    const uint32_t tx0 = hub.rol.sequencer().txId();
+
+    sessionUplink(hub, session, hub.rol.sequencer().rxId() + 66);
+    EXPECT_EQ(hub.rol.sequencer().txId(), tx0 + 16) << "the counter is still advanced";
+    hub.clock.tick(1000);
+    EXPECT_EQ(hub.rol.last_timesync_sent_us_for_test(), first);
+}
+
+TEST(MacWireV1Listener, AJumpBeforeTheSessionIsConfirmedAdvancesNothing) {
+    // The first authenticated uplink of a session the hub does not hold
+    // confirmed (after a hub restart, during a login) jumps from whatever the
+    // hub held: no evidence of a node reboot.
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    const uint32_t session = openSession(hub);
+    hub.rol.login_state_for_test().confirmed = false;
+    const uint32_t tx0 = hub.rol.sequencer().txId();
+    const uint32_t rx0 = hub.rol.sequencer().rxId();
+    sessionUplink(hub, session, rx0 + 200);
+    ASSERT_EQ(hub.rol.sequencer().rxId(), rx0 + 200) << "precondition: accepted";
+    EXPECT_EQ(hub.rol.sequencer().txId(), tx0);
+}
+
 TEST(MacWireV1Listener, APlaintextUplinkBeforeTheSessionIsHeard) {
     Hub hub;
     const uint32_t before = hub.rol.last_heard_epoch_;

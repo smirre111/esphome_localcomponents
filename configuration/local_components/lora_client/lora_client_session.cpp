@@ -601,6 +601,32 @@ namespace esphome
                (int) login.request_register);
     }
 
+    void HubSession::note_authentic_uplink(uint32_t fcnt, bool session_opening)
+    {
+      const uint32_t rx = this->seq_.rxId();
+      if (!rebootJump(this->login_.confirmed, session_opening, rx, fcnt))
+        return;
+      if (this->advance_tx_for_boot())
+        this->host_.session_node_restored(fcnt - rx);
+    }
+
+    bool HubSession::advance_tx_for_boot()
+    {
+      if (this->s_since_boot_advance() < modebsup::kRegridMinGapS)
+        return false;
+      const int64_t now_us = esp_timer_get_time();
+      this->last_boot_advance_us_ = (now_us > 0) ? now_us : 1;
+      this->set_counters_no_write(this->seq_.txId() + modebsup::kTxBootMargin, this->seq_.rxId());
+      return true;
+    }
+
+    uint32_t HubSession::s_since_boot_advance() const
+    {
+      return (this->last_boot_advance_us_ == 0)
+                 ? 0xFFFFFFFFu
+                 : (uint32_t) ((esp_timer_get_time() - this->last_boot_advance_us_) / 1000000);
+    }
+
     // The node acknowledged CMD_SLEEP: sleep ends the session; mint fresh on wake.
     void HubSession::end_for_sleep()
     {
@@ -717,6 +743,29 @@ namespace esphome
       // frames; a high-water mark from the old one means nothing here.
       this->plaintext_hwm_      = 0;
       this->have_plaintext_hwm_ = false;
+    }
+
+    // The node rebooted on its resumed session and the hub learnt it from the
+    // counters alone (its reset beacon was lost). The downlink counter is already
+    // past the node's restored floor; what remains is what a reset beacon would
+    // have triggered for a node that lost its RAM: confidence, the grid, the clock.
+    // Not for an automatic-mode node or one waking from a SLEEP the hub commanded:
+    // their deep-sleep wakes restore the same way, and their beacons (with the
+    // node's retry ladder) already drive the TimeSync and its weekly throttle.
+    void LORAListener::session_node_restored(uint32_t fcnt_jump)
+    {
+      ESP_LOGW(TAG, "[%s] Node restored its counters (uplink FCNT +%u, no reset beacon) — "
+                    "advanced tx_message_id by %u to %u",
+               this->get_name().c_str(), (unsigned) fcnt_jump,
+               (unsigned) modebsup::kTxBootMargin, (unsigned) this->session_.seq().txId());
+      const bool woke_from_commanded_sleep =
+          this->last_sleep_epoch_ != 0 && this->last_heard_epoch_ < this->last_sleep_epoch_;
+      if (this->auto_mode_ || woke_from_commanded_sleep)
+        return;
+      this->link_.note_node_rebooted();
+      if (this->regrid_node_("Node rebooted (counters restored) without a beacon"))
+        this->mbs_restart_();
+      this->set_timeout("timesync_push", 750, [this]() { this->send_timesync(); });
     }
 
     // Both counters restarted for the new session.
@@ -1123,6 +1172,10 @@ namespace esphome
     // inner payload on. `plaintext` is uplink_pt_.
     void LORAListener::uplink_accept_(EncUplink &up, uint8_t *plaintext)
     {
+      // The node's counters may show it rebooted (its beacons can be lost): read
+      // before the commit moves the mark.
+      this->session_.note_authentic_uplink(up.msgid, up.needs_candidate);
+
       // The tag verified: this frame is the node's, so its msgid is real and
       // the replay counter may finally move.
       this->commit_rx_msgid_(up.msg);

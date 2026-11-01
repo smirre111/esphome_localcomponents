@@ -28,6 +28,7 @@
 #include "esphome/components/lora_client/HubLinkSecurity.h"
 #include "esphome/components/lora_client/HubWire.h"
 #include "esphome/components/lora_client/MacWire.h"
+#include "esphome/components/lora_client/ModeBSupervisor.h"
 #include "esphome/components/lora_client/OnboardingGate.h"
 #include "esphome/components/lora_client/RegisterFreshness.h"
 #include "esphome/components/lora_client/SleepModel.h"
@@ -93,6 +94,11 @@ namespace esphome
       virtual void session_on_confirmed() = 0;
       // The first confirmation since the login was last unacknowledged.
       virtual void session_on_login_acknowledged() = 0;
+      // An authenticated uplink showed the node restored its counters after a
+      // reboot (FCNT jump `fcnt_jump`), and the downlink counter was advanced
+      // past its restored replay floor. The listener re-publishes the grid and
+      // sends a TimeSync for a node that lost its RAM.
+      virtual void session_node_restored(uint32_t fcnt_jump) = 0;
 
     protected:
       ~SessionHost() = default;
@@ -272,6 +278,30 @@ namespace esphome
 
       LoginState &login_state_for_test() { return this->login_; }
 
+      // ---- a node reboot, as MAC-1 sees it (review "ota-hang", 2026-10-31) ----
+      // A node that boots on a resumed session restores tx = persisted + 64 (its
+      // tx persist margin) and rx = persisted + 16 with that margin marked seen,
+      // so it drops every hub downlink at or below its restored floor. The hub
+      // must advance its downlink counter by kTxBootMargin once per node boot.
+      // A reset beacon says so (the listener's note_node_reset_); when the
+      // beacons are lost the counters still do: an authenticated uplink of a
+      // confirmed session whose FCNT jumps at least kRebootFcntJump past the last
+      // accepted one. A false positive (64 uplinks lost in a row) costs 16 ids.
+      static constexpr uint32_t kRebootFcntJump = 64;   // node tx_persist_margin
+      static constexpr bool rebootJump(bool confirmed, bool session_opening, uint32_t rx,
+                                       uint32_t fcnt)
+      {
+        return confirmed && !session_opening && fcnt > rx && fcnt - rx >= kRebootFcntJump;
+      }
+      // An authentic uplink, BEFORE its FCNT is committed (rxId is the last one).
+      void note_authentic_uplink(uint32_t fcnt, bool session_opening);
+      // Advance the downlink counter past the node's restored floor, once per boot:
+      // false (nothing moved) inside kRegridMinGapS of the last advance, whichever
+      // path (FCNT jump or reset beacon) made it.
+      bool advance_tx_for_boot();
+      // Seconds since the last boot advance (0xFFFFFFFF = never).
+      uint32_t s_since_boot_advance() const;
+
       // ---- the onboarding gate (OnboardingGate.h) ----
       // The hub has one downlink queue; bringing a node up costs ~8 frames
       // (~15 s), so two nodes started 3 s apart interleave and every ack timer
@@ -331,6 +361,8 @@ namespace esphome
       uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       static onboarding::Gate onboarding_gate_;
       LoginState login_{};
+      // When the downlink counter was last advanced for a node boot (0 = never).
+      int64_t  last_boot_advance_us_{0};
       // Security review finding 2: time-based REGISTER replay guard.
       int64_t  last_register_accepted_us_{0};
       // HB14: the highest register_seq this node has sent (RegisterFreshness.h).

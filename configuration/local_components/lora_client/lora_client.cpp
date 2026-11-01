@@ -1517,7 +1517,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       this->last_handled_reset_reason_ = b->resetreason;
       if (modebsup::bootAdvancesTx((uint32_t) b->reason, b->resetreason, changed, b->sessionresume,
                                    b->prevbeaconfcnt != this->last_wake_key_,
-                                   this->s_since_(this->last_boot_advance_us_)))
+                                   this->session_.s_since_boot_advance()))
         this->advance_tx_for_boot_(b);
       return changed;
     }
@@ -1531,10 +1531,8 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
     // replay mark kRxPersistMargin ahead of what it had persisted.
     void LORAListener::advance_tx_for_boot_(const ::NodeWakeBeacon *b)
     {
-      const int64_t now_us = esp_timer_get_time();
-      this->last_boot_advance_us_ = (now_us > 0) ? now_us : 1;
-      this->last_wake_key_        = b->prevbeaconfcnt;
-      this->mac1_skip_tx_(modebsup::kTxBootMargin);
+      this->last_wake_key_ = b->prevbeaconfcnt;
+      this->session_.advance_tx_for_boot();
       ESP_LOGI(TAG, "[%s] Node reset (%s%s) — advancing tx_message_id by %u to %u",
                this->get_name().c_str(), s_reset_reason_name(b->resetreason),
                b->resetreason == modebsup::kResetDeepSleep ? ", resumed wake" : ", non-deep-sleep",

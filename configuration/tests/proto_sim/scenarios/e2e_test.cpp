@@ -610,6 +610,106 @@ TEST_F(E2E, TheNodesBusyWindowCountReachesTheHubOnItsAck) {
 }
 
 // ---------------------------------------------------------------------------
+// Review "ota-hang" (node 1, 2026-10-31), end to end with the real node: the node
+// soft-resets (F-5 resume: tx + 64, rx + 16 marked seen), its boot beacons are
+// lost in another node's burst, and its next frame is a battery report. Before
+// the fix the hub kept its downlink FCNT inside the node's restored margin and
+// the node silently dropped every downlink.
+namespace {
+struct Rebooted {
+    E2E &f;
+    CmdDispatcherTestPeer node;
+    size_t delivered;
+    explicit Rebooted(E2E &fx)
+        : f(fx), node{&fx.mot, &fx.sys, &fx.lif, fx.motorMux, fx.buttonMux},
+          delivered(fx.radio.hub_to_node_frames().size()) {
+        node.loadPersistentState();
+    }
+    // Build and hand the node's queued uplinks to the hub; `drop` of them first are lost.
+    int up(int drop = 0) {
+        while (node.runOneTxCommand()) { }
+        int sent = 0;
+        for (auto &frame : f.lif.drain_tx_queue()) {
+            if (drop > 0) { --drop; continue; }
+            f.rol.set_response(frame.data(), frame.size());
+            ++sent;
+        }
+        return sent;
+    }
+    int down() {
+        const auto &fr = f.radio.hub_to_node_frames();
+        int n = 0;
+        for (; delivered < fr.size(); ++delivered) {
+            const auto &bytes = fr[delivered].bytes;
+            const int64_t t0 = (f.tracker.last_earliest_us > 0)
+                ? f.tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us
+                : esp_timer_get_time();
+            const int64_t rxdone = t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
+            node.onReceiveNew(const_cast<uint8_t *>(bytes.data()), (int) bytes.size(), rxdone);
+            ++n;
+        }
+        return n;
+    }
+    void settle() {
+        for (int i = 0; i < 8; ++i)
+            if (down() == 0 && up() == 0) return;
+    }
+};
+}  // namespace
+
+TEST_F(E2E, ANodeThatRestoredItsCountersWithoutABeaconStillHearsTheHub) {
+    tick(100'000);
+    bringUpSession();
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
+    settle();
+    ASSERT_FALSE(rol.awaitingAck()) << "precondition: a working session";
+    drainNodeOps();
+    disp.savePersistentState();   // what the node holds when it restarts
+    tick(30'000);
+
+    Rebooted r(*this);
+    r.node.sendWakeBeacon(WAKE_REASON__WAKE_MODE_CHANGED);
+    r.node.sendWakeBeacon(WAKE_REASON__WAKE_BOOT);
+    ASSERT_EQ(r.up(/*drop=*/2), 0) << "both boot beacons lost (the hub was bursting)";
+    r.node.sendBatteryVoltage();
+    ASSERT_EQ(r.up(), 1) << "the battery report reaches the hub";
+
+    rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_CLOSE, 0.0f);
+    r.settle();
+    blinds_syscmd_base_t c;
+    bool closed = false;
+    while (xQueueReceive(r.node.rxCmdQueueNew, &c, 0) == pdTRUE)
+        closed |= (c == BlindsOpCmd::SYSCMD_CLOSE);
+    EXPECT_TRUE(closed) << "the node must accept the hub's next downlink";
+    EXPECT_FALSE(rol.awaitingAck()) << "and its ack must close the command";
+}
+
+TEST_F(E2E, ABootBeaconAfterTheJumpDoesNotAdvanceTheCounterTwice) {
+    tick(100'000);
+    bringUpSession();
+    settle();
+    disp.savePersistentState();
+    tick(30'000);
+
+    Rebooted r(*this);
+    const uint32_t tx0 = rol.sequencer().txId();
+    r.node.sendWakeBeacon(WAKE_REASON__WAKE_BOOT);   // this one is heard
+    ASSERT_EQ(r.up(), 1);
+    EXPECT_EQ(rol.sequencer().txId(), tx0 + 16)
+        << "one advance for one boot: the FCNT jump and the reset beacon are the same event";
+}
+
+TEST_F(E2E, LostUplinksAloneDoNotAdvanceTheDownlinkCounter) {
+    tick(100'000);
+    bringUpSession();
+    settle();
+    const uint32_t tx0 = rol.sequencer().txId();
+    for (int i = 0; i < 10; ++i) disp.sendBatteryVoltage();
+    drop_uplinks_ = 9;
+    pumpUp();
+    EXPECT_EQ(rol.sequencer().txId(), tx0) << "a gap of 10 is lost frames, not a reboot";
+}
+
 TEST_F(E2E, AReflashedHubAndAProvisionedNodeConvergeOnASession) {
     // THE FIXTURE GAP THIS FILE HAD, and it is the reason the register/login
     // deadlock reached the bench (fixed in lora_client.cpp's send_login; the

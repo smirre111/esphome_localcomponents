@@ -1041,7 +1041,6 @@ namespace esphome
       // When we last advanced tx_message_id for a node boot (0 = never) and for which
       // wake (the beacon's prevBeaconMsgId); when the last reboot-driven re-publish
       // was decided; when a spent ladder last forced a LOGIN.
-      int64_t       last_boot_advance_us_{0};
       uint32_t      last_wake_key_{0};
       int64_t       last_regrid_us_{0};
       int64_t       last_forced_relogin_us_{0};
@@ -1383,6 +1382,7 @@ namespace esphome
       bool session_request_register() const override;
       void session_on_confirmed() override;
       void session_on_login_acknowledged() override;
+      void session_node_restored(uint32_t fcnt_jump) override;
       int64_t session_tx_drain_us() const override;
       bool session_schedule_outstanding() const override;
       // Move the replay counter. Called only for a frame that has been
