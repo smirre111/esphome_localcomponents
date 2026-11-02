@@ -183,6 +183,41 @@ namespace esphome
       int64_t after_listen(int64_t start_us, int64_t dur_us, int64_t now_us) const
       {
         std::lock_guard<std::mutex> lock(this->mutex_);
+        return this->after_listen_locked_(start_us, dur_us, now_us);
+      }
+      // Where an unplaced burst of dur_us handed over at now_us may start: now_us
+      // when no live listen window is in its way. Otherwise past the windows AND
+      // past everything already queued, placed or on the air -- two bursts
+      // deferred by one window must not share a start (review rollout-3 F3: the
+      // second left ~1.9 s late, its copies back to back) -- re-checked against
+      // the windows until both hold.
+      int64_t deferred_start(int64_t now_us, int64_t dur_us) const
+      {
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        int64_t start = this->after_listen_locked_(now_us, dur_us, now_us);
+        if (start == now_us)
+          return now_us;
+        for (size_t pass = 0; pass <= kMaxListenWindows; ++pass)
+        {
+          int64_t floor = start;
+          if (this->queued_air_end_us_ > floor)    floor = this->queued_air_end_us_;
+          if (this->placed_busy_until_us_ > floor) floor = this->placed_busy_until_us_;
+          if (this->burst_busy_until_us_ > floor)  floor = this->burst_busy_until_us_;
+          start = this->after_listen_locked_(floor, dur_us, now_us);
+          if (start == floor)
+            break;
+        }
+        return start;
+      }
+
+    private:
+      struct Reservation
+      {
+        int64_t start_us{0};
+        int64_t end_us{0};
+      };
+      int64_t after_listen_locked_(int64_t start_us, int64_t dur_us, int64_t now_us) const
+      {
         for (size_t pass = 0; pass <= kMaxListenWindows; ++pass)
         {
           bool moved = false;
@@ -199,13 +234,6 @@ namespace esphome
         }
         return start_us;
       }
-
-    private:
-      struct Reservation
-      {
-        int64_t start_us{0};
-        int64_t end_us{0};
-      };
       template <size_t N>
       static bool overlaps_locked_(const std::array<Reservation, N> &spans, int64_t now_us,
                                    int64_t start, int64_t end)

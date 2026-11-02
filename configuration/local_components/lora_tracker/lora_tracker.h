@@ -394,7 +394,7 @@ namespace esphome
         mac::CopySealer  sealer{nullptr};
         uint64_t        *seal_binding{nullptr};
       };
-      bool    burstClaimsMark_(bool on_mark, int64_t not_before_us);
+      bool    burstClaimsMark_(bool on_mark, int64_t not_before_us, bool *late);
       int64_t waitCopyInstant_(int cnt, int64_t not_before_us, uint32_t stride_eff_ms);
       void    sendStampedCopy_(mac0::WireBurstFrame &frame, int cnt, int64_t copy_at_us,
                                const BurstCopy &spec);

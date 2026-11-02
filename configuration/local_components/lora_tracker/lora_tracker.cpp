@@ -853,7 +853,7 @@ namespace esphome
       const int64_t dur_us =
           this->burstEndUs_(now_us, p.copies, p.stride_ms, this->onAirLen_(len, p.fire_stamp),
                             p.expects_reply) - now_us;
-      const int64_t start_us = this->sched_.after_listen(now_us, dur_us, now_us);
+      const int64_t start_us = this->sched_.deferred_start(now_us, dur_us);
       if (start_us > now_us)
         p.earliest_us = start_us;
       return p;
@@ -1002,7 +1002,15 @@ namespace esphome
       // Sending it is still better than dropping a command, but it must not claim
       // the mark, and it must be visible: the node anchors to arrival, so a late
       // GridSync moves every mark it will ever arm (measured 2026-09-14, -322 ms).
-      const bool on_mark_eff = this->burstClaimsMark_(on_mark, not_before_us);
+      bool late = false;
+      const bool on_mark_eff = this->burstClaimsMark_(on_mark, not_before_us, &late);
+      // A placed burst released LATE (behind a longer burst, a deferral) keeps its
+      // 88 ms geometry from when copy 0 actually leaves: its placed instants
+      // (not_before + k * stride) are all in the past, and firing every overdue
+      // copy at once would break the node's burstIndex x stride arithmetic and
+      // the Mode A window coverage (review rollout-3 F3).
+      int64_t base_us = not_before_us;
+      const int64_t burst_start_us = esp_timer_get_time();
 
       if (canStamp)
       {
@@ -1023,7 +1031,7 @@ namespace esphome
         this->lora_tx_busy_ = true;
 
         // This copy's instant: copy 0's plus cnt strides, when copy 0 was placed.
-        const int64_t copy_at_us = this->waitCopyInstant_(cnt, not_before_us, stride_eff_ms);
+        const int64_t copy_at_us = this->waitCopyInstant_(cnt, base_us, stride_eff_ms);
 
         if (canStamp)
           this->sendStampedCopy_(frame, cnt, copy_at_us, spec);
@@ -1033,7 +1041,12 @@ namespace esphome
         // An unplaced burst paces from the instant copy 0 actually LEFT, not from
         // before whatever preceded it.
         if (cnt == 0)
+        {
           xLastWakeTime = xTaskGetTickCount();
+          if (late)
+            base_us = (this->last_fire_us_ >= burst_start_us) ? this->last_fire_us_
+                                                              : esp_timer_get_time();
+        }
 
         // No gap after the final copy — the caller clears lora_tx_busy_ and the
         // loop returns to RX immediately.
@@ -1046,14 +1059,16 @@ namespace esphome
     // Sending it is still better than dropping a command, but it must not claim
     // the mark, and it must be visible: the node anchors to arrival, so a late
     // GridSync moves every mark it will ever arm (measured 2026-09-14, -322 ms).
-    bool LORATracker::burstClaimsMark_(bool on_mark, int64_t not_before_us)
+    bool LORATracker::burstClaimsMark_(bool on_mark, int64_t not_before_us, bool *late)
     {
       bool on_mark_eff = on_mark && not_before_us > 0;
+      *late = false;
       if (not_before_us > 0)
       {
         const int64_t late_us = esp_timer_get_time() - not_before_us;
         if (late_us > (int64_t) timedgrid::kGuardUs)
         {
+          *late = true;
           this->tx_late_placed_++;
           this->tx_last_late_us_ = late_us;
           on_mark_eff = false;   // sent, but no longer claims the mark

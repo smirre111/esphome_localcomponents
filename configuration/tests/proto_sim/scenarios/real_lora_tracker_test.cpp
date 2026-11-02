@@ -2014,3 +2014,94 @@ TEST(RealTrackerListen, APlacedBurstSkipsAMarkInsideTheWindowButASingleCopyDoesN
     EXPECT_GT(t.nextClearT0ForSlotUs(kSlot, a + 1'000'000, 0, 26, true), mark)
         << "a burst may not start on top of another node's ack";
 }
+
+// ---------------------------------------------------------------------------
+// Review rollout-3 F3 (regression): bursts deferred past a listen window.
+// Two unplaced bursts handed over while ONE listen window is live are both
+// given earliest = the window's end. They cannot both leave there: the second
+// is released only when the first ends (~1.9 s later), on the PLACED path,
+// whose copy instants (earliest + k * 88 ms) are then all in the past.
+// ---------------------------------------------------------------------------
+TEST(RealTrackerListen, TwoBurstsDeferredPastOneWindowGetDistinctStarts) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    DeferProbe t;
+    t.init();
+    const int64_t now = 10'000'000;
+    proto_sim_timer_set_now_us(now);
+    t.reserveListen(18, now + 500'000, now + 3'000'000);
+
+    auto frame = packedOperationFrame();
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), TxPolicy{}));
+    const int64_t end_a = t.placedBusyUntilUs();
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), TxPolicy{}));
+    const int64_t end_b = t.placedBusyUntilUs();
+    EXPECT_GT(end_b, end_a)
+        << "burst B was reserved on the SAME span as burst A (both start at the "
+           "window end); the queue can only send it after A, i.e. late";
+}
+
+TEST(RealTrackerListen, ASecondDeferredBurstKeepsItsEightyEightMsSpacing) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    DeferProbe t;
+    t.init();
+    const int64_t now = 10'000'000;
+    proto_sim_timer_set_now_us(now);
+    const int64_t w_end = now + 3'000'000;
+    t.reserveListen(18, now + 500'000, w_end);
+
+    auto frame = packedOperationFrame();
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), TxPolicy{}));   // A
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), TxPolicy{}));   // B
+
+    // A leaves at the window end.
+    proto_sim_timer_set_now_us(w_end);
+    ASSERT_TRUE(t.serviceTxQueue(w_end));
+    const size_t a_copies = lorahal::rec().tx_us.size();
+    ASSERT_EQ(a_copies, (size_t) 17);
+
+    // B is released when A (16 x 88 ms + air + response window) is over.
+    const int64_t b_release = t.busyUntilUs();
+    proto_sim_timer_set_now_us(b_release);
+    ASSERT_TRUE(t.serviceTxQueue(b_release));
+    ASSERT_EQ(lorahal::rec().tx_us.size(), a_copies + 17);
+    int64_t min_gap = INT64_MAX;
+    for (size_t k = a_copies + 1; k < a_copies + 17; ++k)
+        min_gap = std::min(min_gap, lorahal::rec().tx_us[k] - lorahal::rec().tx_us[k - 1]);
+    // In this harness vTaskDelay does not advance the clock: the only time that
+    // passes per copy is firePacket's busy wait toward the copy's instant,
+    // capped at kMaxFireBusyWaitUs (46.875 ms), so an ON-TIME burst also shows
+    // 46.875 ms here. Copies fired back to back (every instant overdue) show 0.
+    EXPECT_GE(min_gap, 40'000)
+        << "B's copies left back to back: a late PLACED burst fires every overdue "
+           "copy at once (waitCopyInstant_ has nothing to wait for)";
+}
+
+TEST(RealTrackerListen, ALatePlacedBurstKeepsItsSpacingFromWhenCopyZeroLeaves) {
+    // F3 (b), any late placed burst (behind a longer burst, a deferral): its
+    // placed instants are all past, and it must not fire them back to back.
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    DeferProbe t;
+    t.init();
+    const int64_t now = 10'000'000;
+    proto_sim_timer_set_now_us(now);
+    auto frame = packedOperationFrame();
+    TxPolicy placed;
+    placed.earliest_us = now + 100'000;
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), placed));
+
+    const int64_t late = now + 2'000'000;   // released 1.9 s after its instant
+    proto_sim_timer_set_now_us(late);
+    ASSERT_TRUE(t.serviceTxQueue(late));
+    ASSERT_EQ(lorahal::rec().tx_us.size(), (size_t) 17);
+    int64_t min_gap = INT64_MAX;
+    for (size_t k = 1; k < 17; ++k)
+        min_gap = std::min(min_gap, lorahal::rec().tx_us[k] - lorahal::rec().tx_us[k - 1]);
+    // In this harness vTaskDelay does not advance the clock: the only time that
+    // passes per copy is firePacket's busy wait toward the copy's instant,
+    // capped at kMaxFireBusyWaitUs (46.875 ms), so an ON-TIME burst also shows
+    // 46.875 ms here. Copies fired back to back (every instant overdue) show 0.
+    EXPECT_GE(min_gap, 40'000) << "the copies keep the 88 ms stride, re-based from copy 0";
+}
