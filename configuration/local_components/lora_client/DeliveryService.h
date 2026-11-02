@@ -110,7 +110,8 @@ namespace esphome
       CH_CONTROL = 0,   // cover operations and sysops
       CH_CONFIG  = 1,   // ScheduleConfig
       CH_MAC     = 2,   // GridSync (enable)
-      kDeliveryChannels = 3,
+      CH_SETUP   = 3,   // ClientConfig / CoverConfig, acked (one at a time, in order)
+      kDeliveryChannels = 4,
       // A Fire request (TimeSync, ClientConfig, CoverConfig) occupies no channel: it
       // is sent once and forgotten, and never touches a slot.
       CH_NONE    = 0xFF
@@ -126,7 +127,9 @@ namespace esphome
       // A relogin is under way: no session to seal an attempt under.
       virtual bool dlv_relogin_pending() const = 0;
       // Frame `op` under a fresh FCNT (header, pack, seal).
-      virtual bool dlv_frame(hubframes::Down *op, DeliveryFrame *out) = 0;
+      // `ack_req`: ask for a MAC ack whatever the route table says (an Acked
+      // request's frame must be answerable).
+      virtual bool dlv_frame(hubframes::Down *op, DeliveryFrame *out, bool ack_req) = 0;
       // Put a Fire request's frame on the air the way `shape` says.
       virtual bool dlv_place_fire(deliverypolicy::Shape shape, const DeliveryFrame &f,
                                   const char *what) = 0;

@@ -65,6 +65,7 @@ using esphome::lora_tracker::LORAClient;
 using esphome::time::RealTimeClock;
 
 extern "C" void proto_sim_timer_set_now_us(int64_t us);
+extern "C" void proto_sim_set_factory_mac(const uint8_t mac[6]);
 
 namespace {
 
@@ -762,7 +763,10 @@ TEST_F(E2E, AReflashedHubAndAProvisionedNodeConvergeOnASession) {
             rol.set_response(frame.data(), frame.size());
         }
         if (rol.config_synced_) break;
-        rol.send_login();
+        // A confirmed session is finishing its ACKED config push (review
+        // rollout-3 D1): let it, rather than restart the session under it.
+        if (!rol.session_confirmed())
+            rol.send_login();
     }
 
     EXPECT_LE(registers, 1)
@@ -1016,4 +1020,54 @@ TEST_F(TwoNodes, ASleepThatCannotGoOutYetDoesNotHoldTheOthersBack) {
     ASSERT_FALSE(SP(rol_1).ctl().awaiting_ack) << "precondition: node 1's SLEEP is deferred, not sent";
     rol_2.enterSleep();
     EXPECT_TRUE(SP(rol_2).ctl().awaiting_ack) << "node 2 need not wait for a SLEEP that is not on the air";
+}
+
+// ---------------------------------------------------------------------------
+// Review rollout-3 D1: the encrypted ClientConfig/CoverConfig push is ACKED
+// (Config setup channel, placed, retried); the hub records the node as in sync
+// only on the acks, and a push that is never acked does not cost the session.
+// ---------------------------------------------------------------------------
+namespace {
+// The node applies (and so acks) a ClientConfig only when it names ITS MAC.
+struct NodeMacIs {
+    explicit NodeMacIs(uint64_t m) {
+        uint8_t mac[6];
+        for (int i = 0; i < 6; ++i) mac[i] = (uint8_t) (m >> (40 - 8 * i));
+        proto_sim_set_factory_mac(mac);
+    }
+    ~NodeMacIs() {
+        const uint8_t def[6] = {0xE0, 0x8C, 0xFE, 0x5F, 0x9E, 0xC4};
+        proto_sim_set_factory_mac(def);
+    }
+};
+}  // namespace
+
+TEST_F(E2E, AConfigPushIsSyncedOnlyWhenTheNodeAcknowledgesIt) {
+    NodeMacIs same_node(kMac);
+    rol.config_synced_ = false;           // a provisioned node, config changed in the hub
+    rol.config_push_pending_ = true;      // what its REGISTER leaves for the session
+    rol.pending_register_notice_ = true;
+    bringUpSession();
+    EXPECT_TRUE(rol.config_synced_) << "the node acked the encrypted ClientConfig";
+    EXPECT_TRUE(rol.config_hash_acked_);
+    EXPECT_FALSE(rol.config_push_pending_);
+}
+
+TEST_F(E2E, AConfigPushNeverAcknowledgedLeavesTheNodeUnsyncedButTheSessionAlone) {
+    NodeMacIs same_node(kMac);
+    rol.config_synced_ = false;
+    rol.config_push_pending_ = true;
+    rol.pending_register_notice_ = true;
+    // The LOGIN goes through (and the node's session-opening reply); every
+    // later downlink -- the config push and its retries among them -- is lost.
+    const size_t first = radio.hub_to_node_frames().size();
+    for (size_t i = 1; i < 128; ++i) drop_downlink_.push_back(first + i);
+    rol.send_login();
+    settle();
+    ASSERT_TRUE(rol.session_confirmed()) << "precondition";
+    for (int i = 0; i < 60; ++i) { settle(); tick(1000); }
+    EXPECT_FALSE(rol.config_hash_acked_)
+        << "never acked: the acknowledged hash does not move, so the next hub boot pushes again";
+    EXPECT_TRUE(rol.session_confirmed()) << "a lost config push does not tear the session down";
+    EXPECT_FALSE(rol.commandFailed());
 }

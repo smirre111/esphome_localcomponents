@@ -54,6 +54,7 @@
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -832,8 +833,9 @@ namespace esphome
       // `op` carries the payload only. The first form allocates the msgid from
       // the session counter and encrypts iff the session is confirmed; the
       // second is the MAC ping's (reserved / dedicated msgids, its own choice).
-      bool mac_frame_(hubframes::Down *op, MacFrame *out);
-      bool mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt, MacFrame *out);
+      bool mac_frame_(hubframes::Down *op, MacFrame *out, bool ack_req = false);
+      bool mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt, MacFrame *out,
+                      bool ack_req = false);
       // THE MAC-0 data request: every frame this listener puts on the air
       // passes here, with its copy sealer attached when it is sealed.
       bool mac0_send_(const uint8_t *buf, size_t len, TxPolicy policy, const mac2::FrameSeal &seal);
@@ -985,6 +987,29 @@ namespace esphome
       // handle_register_ defers a provisioned node's config push to
       // confirm_session_, the first moment it can be encrypted.
       bool                 config_push_pending_{false};
+      // ---- the acked config push (review rollout-3 D1) ----
+      // While collecting, send_remote_config / send_cover_config queue ACKED
+      // requests for the setup channel instead of firing; they go one at a time,
+      // and the node is recorded in sync (config_synced_, the persisted hash)
+      // only when every one was acked.
+      bool                 setup_collect_{false};
+      bool                 setup_failed_{false};
+      std::deque<DeliveryRequest> setup_queue_;
+      // The config hash the node last ACKNOWLEDGED (restored, or set when a push
+      // is acked): what is persisted while the current config is not in sync.
+      uint32_t             synced_config_hash_{0};
+      // The CURRENT config was acknowledged by the node (restored hash match, or
+      // an acked push this boot): only then is the current hash persisted.
+      bool                 config_hash_acked_{false};
+      void push_config_acked_(bool notify_children);
+      bool setup_in_progress_() const
+      {
+        return !this->setup_queue_.empty() || this->dlv_.slot(CH_SETUP).awaiting_ack;
+      }
+      void enqueue_setup_(DeliveryRequest req);
+      void setup_next_();
+      DeliveryRequest acked_setup_request_(const char *what,
+                                           std::function<void(hubframes::Down *)> fill);
       // A REGISTER whose children notice (on_register) waits for the session.
       bool pending_register_notice_{false};
       // Duplicate suppression for PLAINTEXT uplinks before a session exists
@@ -1487,7 +1512,7 @@ namespace esphome
       const char *dlv_name() const override;
       bool dlv_has_radio() const override;
       bool dlv_relogin_pending() const override;
-      bool dlv_frame(hubframes::Down *op, DeliveryFrame *out) override;
+      bool dlv_frame(hubframes::Down *op, DeliveryFrame *out, bool ack_req) override;
       bool dlv_place_fire(deliverypolicy::Shape shape, const DeliveryFrame &f,
                           const char *what) override;
       void dlv_yield_warmup() override;
@@ -1527,7 +1552,8 @@ namespace esphome
       bool     delivery_busy_() const
       {
         return this->ctl().awaiting_ack || this->ctl_cmd_.deferred_until_login ||
-               this->cfg().awaiting_ack || this->mac().awaiting_ack;
+               this->cfg().awaiting_ack || this->mac().awaiting_ack ||
+               this->setup_in_progress_();
       }
       bool     command_failed_{false};
       binary_sensor::BinarySensor *command_failed_bsensor_{nullptr};
@@ -1652,6 +1678,12 @@ namespace esphome
       // unknown: a record from before this field; the current config is used).
       uint32_t last_sleep_duration_s_{0};
       SleepRecord saved_sleep_rec_{0, 0};   // what sleep_pref_ holds
+      uint32_t interactive_wake_epoch_() const
+      {
+        return (this->last_sleep_epoch_ == 0) ? 0 : this->last_sleep_epoch_ + this->commanded_sleep_s_();
+      }
+      void restore_sleep_record_();
+      void restore_config_sync_(uint32_t acked_hash);
       uint32_t commanded_sleep_s_() const
       {
         return this->last_sleep_duration_s_ != 0 ? this->last_sleep_duration_s_

@@ -300,9 +300,9 @@ namespace esphome
     const char *LORAListener::dlv_name() const { return this->get_name().c_str(); }
     bool LORAListener::dlv_has_radio() const { return this->parent_ != nullptr; }
     bool LORAListener::dlv_relogin_pending() const { return this->session_.relogin_pending(); }
-    bool LORAListener::dlv_frame(hubframes::Down *op, DeliveryFrame *out)
+    bool LORAListener::dlv_frame(hubframes::Down *op, DeliveryFrame *out, bool ack_req)
     {
-      return this->mac_frame_(op, out);
+      return this->mac_frame_(op, out, ack_req);
     }
     bool LORAListener::dlv_place_fire(deliverypolicy::Shape shape, const DeliveryFrame &f,
                                       const char *what)
@@ -331,7 +331,7 @@ namespace esphome
 
     const char *DeliveryService::timer_name(DeliveryChannel ch)
     {
-      static const char *const kNames[kDeliveryChannels] = {"dlv_ctl", "dlv_cfg", "dlv_mac"};
+      static const char *const kNames[kDeliveryChannels] = {"dlv_ctl", "dlv_cfg", "dlv_mac", "dlv_set"};
       return kNames[ch];
     }
 
@@ -391,7 +391,7 @@ namespace esphome
       req.fill(&op_message);
 
       DeliveryFrame f;
-      if (!this->host_.dlv_frame(&op_message, &f))
+      if (!this->host_.dlv_frame(&op_message, &f, /*ack_req=*/false))
       {
         ESP_LOGE(TAG, "[%s] Failed to pack %s", this->host_.dlv_name(), req.what);
         return false;
@@ -500,8 +500,9 @@ namespace esphome
         ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing", this->host_.dlv_name());
       DeliveryFrame f;
       bool framed = false;
-      const DeliveryRequest::FrameFn frame = [this, &f, &framed](hubframes::Down *op) {
-        framed = this->host_.dlv_frame(op, &f);
+      const bool ack_req = s.req.policy.mode == deliverypolicy::Mode::Acked;
+      const DeliveryRequest::FrameFn frame = [this, &f, &framed, ack_req](hubframes::Down *op) {
+        framed = this->host_.dlv_frame(op, &f, ack_req);
         return framed;
       };
       if (s.req.encode)

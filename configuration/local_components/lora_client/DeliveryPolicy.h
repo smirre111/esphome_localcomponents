@@ -253,6 +253,15 @@ constexpr Policy kTimeSyncPolicy = {Mode::Fire, Shape::ClassA, Resend::SameBytes
 constexpr Policy kConfigPushPolicy = {Mode::Fire, Shape::Bare, Resend::SameBytes, 0, 0,
                                       GiveUpAction::FailKeep, false, false, false, false};
 
+// ClientConfig / CoverConfig to a node holding a session (review rollout-3 D1):
+// ACKED on the setup channel, placed (Shape::Auto: the node's mark, a single
+// shot, or the burst), the same bytes re-sent up to 3 times, 5 s apart. A push
+// never acknowledged is only logged and left unsynced (re-pushed at the next
+// login): no relogin, nothing failed. The plaintext push to an UNPROVISIONED
+// node stays kConfigPushPolicy (it has no session to ack under).
+constexpr Policy kConfigAckedPolicy = {Mode::Acked, Shape::Auto, Resend::SameBytes, 3, 5000,
+                                       GiveUpAction::FailKeep, false, false, true};
+
 // Whether a Fire request is held back now. An Acked request is never held here (its
 // own ladder defers its retries, see onAckTimeout).
 constexpr bool fireDeferred(const Policy &p, bool relogin_pending)

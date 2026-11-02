@@ -192,7 +192,10 @@ namespace esphome
       // HubAppPdu behind the fixed header (hubwire::routeDownlink picks PORT and
       // ACK_REQ), sealed (AUTH = SESSION) exactly when encrypt && a session id
       // exists for the node.
-      bool frame(hubframes::Down *op, uint32_t fcnt, bool encrypt, DeliveryFrame *out);
+      // `ack_req`: FLAGS.ACK_REQ even where the route table does not ask for it
+      // (an Acked delivery of a fire-and-forget kind: ClientConfig/CoverConfig).
+      bool frame(hubframes::Down *op, uint32_t fcnt, bool encrypt, DeliveryFrame *out,
+                 bool ack_req = false);
       // LOGIN (PORT 1, AUTH = K_AUTH; the tag replaces LoginMsg.mic).
       bool login_frame(const ::LoginMsg &login, uint32_t fcnt, DeliveryFrame *out);
       // GridDemote (broadcast, PORT 0, AUTH = NONE, FCNT 0).

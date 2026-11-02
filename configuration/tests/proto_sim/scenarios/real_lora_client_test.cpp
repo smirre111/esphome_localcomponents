@@ -440,6 +440,7 @@ struct AckProbe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
     using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::ctl_request_;
+    using esphome::lora_tracker::LORAListener::setup_queue_;
     // A Control-channel command "in flight" the way the glue would have left it:
     // sent under every id in `ids`, with the slot's command as it stands. No timer
     // is armed (the tests that need one send for real).
@@ -495,19 +496,31 @@ struct AckProbe : LORAClient {
         s.retry_count  = 0;
         s.acks.clear();
     }
-    // No push on record at all.
+    // No push on record at all (schedule, nor config).
     void noPush() {
         this->cancel_timeout("dlv_cfg");
         auto &s = this->dlv_slot_for_test(esphome::lora_tracker::CH_CONFIG);
         s.awaiting_ack = false;
         s.retry_count  = 0;
         s.acks.clear();
+        this->cancel_timeout("dlv_set");
+        this->dlv_slot_for_test(esphome::lora_tracker::CH_SETUP).awaiting_ack = false;
+        this->setup_queue_.clear();
     }
 };
 void deliverAck(LORAClient &rol, uint32_t msgid) {
     static_cast<AckProbe &>(rol).handle_command_ack_(msgid);
 }
 AckProbe &AK(LORAClient &rol) { return static_cast<AckProbe &>(rol); }
+// The node acks the ACKED config push (review rollout-3 D1): ClientConfig, then
+// each CoverConfig, one at a time on the setup channel.
+void ackConfigPushes(LORAClient &rol) {
+    for (int i = 0; i < 8; ++i) {
+        auto &s = rol.dlv_slot_for_test(esphome::lora_tracker::CH_SETUP);
+        if (!s.awaiting_ack) break;
+        deliverAck(rol, s.last_msgid);
+    }
+}
 }  // namespace
 
 TEST(RealLoraClient, AnUnconfirmedGridSyncIsRepublishedUntilTheNodeAcksIt) {
@@ -1584,6 +1597,8 @@ TEST(RealLoraClient, AProvisionedNodesConfigPushWaitsForEncryption) {
     const uint32_t base = drive_session(clock, radio, rol);
     ASSERT_NE(base, 0u);
     ASSERT_TRUE(rol.session_confirmed());
+    EXPECT_FALSE(rol.config_synced_) << "in sync only on the node's acks (review rollout-3 D1)";
+    ackConfigPushes(rol);
 
     EXPECT_TRUE(rol.config_synced_)
         << "the deferred push must actually happen once the session exists";
@@ -1642,7 +1657,8 @@ TEST(RealLoraClient, AProvisionedNodesCoverConfigIsEncryptedToo) {
     ASSERT_NE(base, 0u);
     ASSERT_TRUE(rol.session_confirmed())
         << "the plaintext-on-a-confirmed-session case needs a confirmed session";
-    ASSERT_TRUE(rol.config_synced_) << "the deferred push must have run";
+    ackConfigPushes(rol);
+    ASSERT_TRUE(rol.config_synced_) << "the deferred push must have run (and been acked)";
 
     int plaintext_cover_config = 0;
     int encrypted_cover_config = 0;
@@ -5264,6 +5280,7 @@ TEST(ConfigHashPersistence, AnUnchangedConfigSkipsRegisterAcrossAHubReboot) {
 
         rol1.registered_    = true;
         rol1.config_synced_ = true;   // what a real confirmed config push sets
+        rol1.config_hash_acked_ = true;
         rol1.save_state_for_test();
     }
 
@@ -5383,6 +5400,48 @@ TEST(ConfigHashPersistence, HearingTheNodeAfterItsSleepConsumesTheRecord) {
         rol2.setup();
         EXPECT_EQ(rol2.last_sleep_epoch_, 0u) << "and a hub restart does not bring it back";
         EXPECT_EQ(rol2.ms_until_node_awake_for_test(), 0u);
+    }
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+// Review rollout-3 D1: the persisted config hash is the one the node
+// ACKNOWLEDGED. Saving the current hash on every NVS write (any FCNT persist)
+// made one lost ClientConfig a permanent desync: the next hub boot read
+// "Config unchanged" and never pushed again.
+TEST(ConfigHashPersistence, AnUnacknowledgedConfigChangeIsStillPushedAfterAReboot) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    auto boot = [](LORATracker &tr, LORAClient &r, uint64_t sleep_s) {
+        r.set_name("rol"); r.set_short_address(18); r.set_subnet_address(2);
+        r.set_sleep_duration(sleep_s);
+        r.set_battery_update_interval(3600);
+        r.set_address(kMacRol2);
+        tr.register_client(&r);
+        r.setup();
+    };
+    {
+        LORATracker tracker1; LORAClient rol1;
+        boot(tracker1, rol1, 600);
+        rol1.registered_ = true;
+        rol1.config_synced_ = true;     // config 600 acknowledged
+        rol1.config_hash_acked_ = true;
+        rol1.save_state_for_test();
+    }
+    {
+        LORATracker tracker2; LORAClient rol2;
+        boot(tracker2, rol2, 21600);    // a new YAML: not yet delivered
+        ASSERT_FALSE(rol2.config_synced_) << "precondition: the change is seen";
+        rol2.save_state_for_test();     // an FCNT persist before the push lands
+    }
+    {
+        LORATracker tracker3; LORAClient rol3;
+        boot(tracker3, rol3, 21600);
+        EXPECT_FALSE(rol3.config_synced_)
+            << "the node never acknowledged 21600: it must still be pushed";
     }
     esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
     esphome::shim_hooks::set_active_clock(nullptr);
@@ -11423,6 +11482,53 @@ TEST(FireDelivery, ATimeSyncWithoutAValidHubClockIsSkippedAndNothingIsSent) {
     EXPECT_EQ(occurrences(log, "TimeSync skipped — hub clock not valid yet"), 1) << log;
 }
 
+// Review rollout-3 D1: an acked config push in flight is the config sync; the
+// resume-path re-login (which asks the node to REGISTER so config can be pushed)
+// must not restart the session under it -- the ack ids would be forgotten.
+TEST(FireDelivery, AnAckedConfigPushInFlightIsNotInterruptedByAConfigSyncRelogin) {
+    ensure_psa_ready();
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    LORATracker tracker;
+    LORAClient  rol;
+    rol.set_name("rol");
+    rol.set_short_address(18);
+    rol.set_subnet_address(2);
+    rol.set_sleep_duration(21600);
+    rol.set_address(kMacRol2);
+    RealTimeClock time; time.set_now(1787000000, /*valid=*/true);
+    rol.set_time(&time);
+    tracker.register_client(&rol);
+
+    auto reg = real_helpers::serialize_register(kMacRol2, /*needs_config=*/false);
+    rol.set_response(reg.data(), reg.size());
+    const uint32_t base = drive_session(clock, radio, rol);
+    ASSERT_NE(base, 0u);
+    const size_t frames = radio.hub_to_node_frames().size();
+    auto logins_since = [&](size_t from) {
+        size_t n = 0;
+        const auto f = radio.hub_to_node_frames();
+        for (size_t i = from; i < f.size(); ++i) {
+            macwire::WireHdr h;
+            size_t off = 0, blen = 0;
+            if (macwire::decode(f[i].bytes.data(), f[i].bytes.size(), &h, &off, &blen) &&
+                h.port == macwire::kPortSession)
+                ++n;
+        }
+        return n;
+    };
+    clock.tick(1000);   // the 500 ms config-sync re-login would have fired
+    EXPECT_EQ(logins_since(frames), 0u) << "no re-login while the acked push is on its way";
+    ackConfigPushes(rol);
+    EXPECT_TRUE(rol.config_synced_);
+
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
 TEST(FireDelivery, TheDeferredConfigPushAfterAConfirmedSessionStillSetsConfigSynced) {
     // The REGISTER flow: a provisioned node's push waits for the session, then
     // confirm_session_ sends ClientConfig and (via the stored REGISTER) CoverConfig.
@@ -11452,6 +11558,7 @@ TEST(FireDelivery, TheDeferredConfigPushAfterAConfirmedSessionStillSetsConfigSyn
     const uint32_t base = drive_session(clock, radio, rol);
     const std::string log = testing::internal::GetCapturedStderr();
     ASSERT_NE(base, 0u);
+    ackConfigPushes(rol);
 
     EXPECT_TRUE(rol.config_synced_);
     EXPECT_EQ(occurrences(log, "Session confirmed — sending the deferred config push"), 1) << log;

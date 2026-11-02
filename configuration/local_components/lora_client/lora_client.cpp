@@ -76,35 +76,14 @@ namespace esphome
                  restore->logged_in ? "yes" : "no",
                  (unsigned)restore->last_sleep_epoch);
         restore->apply(this);
-        SleepRecord rec{0, 0};
-        if (this->sleep_pref_.load(&rec) && rec.epoch != 0 && rec.epoch == this->last_sleep_epoch_)
-          this->last_sleep_duration_s_ = rec.duration_s;
-        this->saved_sleep_rec_ = rec;
+        this->restore_sleep_record_();
         ESP_LOGI(TAG, "[%s] After apply — rx_id=%u tx_id=%u (tx+64) registered=%s",
                  this->get_name().c_str(),
                  (unsigned)this->session_.seq().rxId(),
                  (unsigned)this->session_.seq().txId(),
                  this->registered_ ? "yes" : "no");
 
-        // finding 2: only an UNCHANGED config skips the REGISTER round trip a
-        // hub boot would otherwise force on every node. A real YAML edit (or a
-        // stub from before this field existed, config_hash == 0 by construction)
-        // leaves config_synced_ false, which is exactly today's behaviour.
-        const uint32_t current_hash = this->currentConfigHash_();
-        if (restore->config_hash == current_hash)
-        {
-          this->config_synced_ = true;
-          ESP_LOGI(TAG, "[%s] Config unchanged since last boot (hash 0x%08x) — "
-                        "REGISTER will not be requested",
-                   this->get_name().c_str(), (unsigned) current_hash);
-        }
-        else
-        {
-          ESP_LOGI(TAG, "[%s] Config hash changed (0x%08x -> 0x%08x) — "
-                        "REGISTER will be requested to push it",
-                   this->get_name().c_str(),
-                   (unsigned) restore->config_hash, (unsigned) current_hash);
-        }
+        this->restore_config_sync_(restore->config_hash);
       }
       else
       {
@@ -189,6 +168,41 @@ namespace esphome
       }
     }
 
+    // The sleep record that belongs to the restored last_sleep_epoch_ (review
+    // rollout-3 D2): the duration the node was given with that sleep.
+    void LORAListener::restore_sleep_record_()
+    {
+      SleepRecord rec{0, 0};
+      if (this->sleep_pref_.load(&rec) && rec.epoch != 0 && rec.epoch == this->last_sleep_epoch_)
+        this->last_sleep_duration_s_ = rec.duration_s;
+      this->saved_sleep_rec_ = rec;
+    }
+
+    // finding 2: only an UNCHANGED config skips the REGISTER round trip a hub boot
+    // would otherwise force on every node. A real YAML edit (or a stub from before
+    // this field existed, config_hash == 0 by construction) leaves config_synced_
+    // false, which is exactly today's behaviour. The persisted hash is the one the
+    // node ACKNOWLEDGED (review rollout-3 D1).
+    void LORAListener::restore_config_sync_(uint32_t acked_hash)
+    {
+      const uint32_t current_hash = this->currentConfigHash_();
+      this->synced_config_hash_ = acked_hash;
+      if (acked_hash == current_hash)
+      {
+        this->config_synced_     = true;
+        this->config_hash_acked_ = true;
+        ESP_LOGI(TAG, "[%s] Config unchanged since last boot (hash 0x%08x) — "
+                      "REGISTER will not be requested",
+                 this->get_name().c_str(), (unsigned) current_hash);
+      }
+      else
+      {
+        ESP_LOGI(TAG, "[%s] Config hash changed (0x%08x -> 0x%08x) — "
+                      "REGISTER will be requested to push it",
+                 this->get_name().c_str(), (unsigned) acked_hash, (unsigned) current_hash);
+      }
+    }
+
     optional<LORAClientRestoreState> LORAListener::restore_state_()
     {
       this->rtc_ = this->make_entity_preference<LORAClientRestoreState>();
@@ -239,7 +253,11 @@ namespace esphome
         restore.tx_message_id    = this->session_.seq().txId();
         restore.logged_in        = this->registered_;
         restore.last_sleep_epoch = this->last_sleep_epoch_;
-        restore.config_hash      = this->currentConfigHash_();
+        // The hash the node ACKNOWLEDGED (review rollout-3 D1): the current one
+        // only once it is in sync, else the last acknowledged one -- an NVS save
+        // before a push lands must not record the push as done.
+        restore.config_hash      = this->config_hash_acked_ ? this->currentConfigHash_()
+                                                            : this->synced_config_hash_;
 
         this->rtc_.save(&restore);
         // Written only when it changes: the restore state is saved on every
@@ -304,8 +322,7 @@ namespace esphome
       // duration it was given then (not today's config: review rollout-3 D2).
       // No record: nothing to predict, it is awake.
       if (!this->auto_mode_)
-        return (this->last_sleep_epoch_ == 0) ? 0
-                                              : this->last_sleep_epoch_ + this->commanded_sleep_s_();
+        return this->interactive_wake_epoch_();
 
       // Automatic mode: the earlier of the next scheduled event (minus the
       // beacon lead) and the periodic check-in.
@@ -1024,15 +1041,15 @@ namespace esphome
     // frames (MIC-authenticated / unsealed broadcast) but leave through
     // mac0_send_ too.
 
-    bool LORAListener::mac_frame_(hubframes::Down *op, MacFrame *out)
+    bool LORAListener::mac_frame_(hubframes::Down *op, MacFrame *out, bool ack_req)
     {
-      return this->mac_frame_(op, this->incrTxMessageId(), this->session_.confirmed(), out);
+      return this->mac_frame_(op, this->incrTxMessageId(), this->session_.confirmed(), out, ack_req);
     }
 
     bool LORAListener::mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt,
-                                  MacFrame *out)
+                                  MacFrame *out, bool ack_req)
     {
-      return this->v1_frame_(op, msgid, encrypt, out);
+      return this->session_.frame(op, msgid, encrypt, out, ack_req);
     }
 
     // ---- S8: MAC wire v1 framing (docs/mac-wire-format.md) -------------------
@@ -1795,6 +1812,15 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // the header, msgid, encryption and placement are the mechanism's.
     bool LORAListener::send_cover_config(const ::CoverConfig &cc)
     {
+      if (this->setup_collect_)
+      {
+        this->enqueue_setup_(this->acked_setup_request_(
+            "CoverConfig", [payload = cc](hubframes::Down *op) mutable {
+              op->cmd_case    = hubframes::DL_COVERCONFIG;
+              op->coverconfig = &payload;
+            }));
+        return true;   // queued, acked on the setup channel
+      }
       bool sent = false;
       DeliveryRequest req;
       req.what    = "downlink";
@@ -1806,6 +1832,82 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       req.on_sent = [&sent](uint32_t) { sent = true; };
       this->deliver_(CH_NONE, std::move(req));
       return sent;
+    }
+
+    // An ACKED setup request: the payload `fill` writes, framed with ACK_REQ,
+    // placed like any other placed frame, the same bytes re-sent.
+    DeliveryRequest LORAListener::acked_setup_request_(const char *what,
+                                                       std::function<void(hubframes::Down *)> fill)
+    {
+      DeliveryRequest req;
+      req.what   = what;
+      req.policy = deliverypolicy::kConfigAckedPolicy;
+      req.encode = [fill](bool, uint32_t *, const DeliveryRequest::FrameFn &frame) {
+        hubframes::Down op{};
+        fill(&op);
+        return frame(&op);
+      };
+      req.place = [this](const MacFrame &f, const DeliveryAttempt &) {
+        this->send_aligned_(f.bytes.data(), f.bytes.size(), f.seal);
+      };
+      req.on_delivered = [this, what](const DeliveryConfirm &) {
+        ESP_LOGI(TAG, "[%s] %s acknowledged", this->get_name().c_str(), what);
+        return true;
+      };
+      req.on_fail = [this, what]() {
+        this->setup_failed_ = true;
+        ESP_LOGW(TAG, "[%s] %s not acknowledged after its retries", this->get_name().c_str(), what);
+      };
+      req.on_done = [this]() { this->setup_next_(); };
+      return req;
+    }
+
+    void LORAListener::enqueue_setup_(DeliveryRequest req)
+    {
+      this->setup_queue_.push_back(std::move(req));
+    }
+
+    // Collect the config pushes (ClientConfig, and each child's CoverConfig when
+    // the node registered) as acked requests and send the first.
+    void LORAListener::push_config_acked_(bool notify_children)
+    {
+      this->setup_queue_.clear();
+      this->setup_failed_  = false;
+      this->setup_collect_ = true;
+      this->send_remote_config();
+      if (notify_children)
+        for (auto *node : this->nodes_)
+          node->on_register();
+      this->setup_collect_ = false;
+      this->setup_next_();
+    }
+
+    // The previous setup request is done (acked or given up): the next, or the
+    // verdict. In sync only if every one was acked.
+    void LORAListener::setup_next_()
+    {
+      if (!this->setup_queue_.empty())
+      {
+        DeliveryRequest req = std::move(this->setup_queue_.front());
+        this->setup_queue_.pop_front();
+        this->deliver_(CH_SETUP, std::move(req));
+        return;
+      }
+      if (this->setup_failed_)
+      {
+        // Degrade to the pre-ack behaviour for this boot: treated as in sync (no
+        // re-login loop over a node that does not ack), but the acknowledged
+        // hash is NOT moved, so the next hub boot pushes the config again.
+        this->config_synced_ = true;
+        ESP_LOGW(TAG, "[%s] Config push not acknowledged — treated as in sync until the next "
+                      "hub boot, which pushes it again", this->get_name().c_str());
+        return;
+      }
+      this->config_synced_      = true;
+      this->config_hash_acked_  = true;
+      this->synced_config_hash_ = this->currentConfigHash_();
+      this->save_state_(true);
+      ESP_LOGI(TAG, "[%s] Config acknowledged by the node — in sync", this->get_name().c_str());
     }
 
     void LORAListener::send_remote_config()
@@ -1821,6 +1923,14 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // The hub then set config_synced_ = true regardless and never retried, so
       // a config change flashed into the hub was lost silently.
       ClientConfig initial = CLIENT_CONFIG__INIT;
+      if (this->setup_collect_)
+      {
+        this->enqueue_setup_(this->acked_setup_request_(
+            "ClientConfig", [this, payload = initial](hubframes::Down *op) mutable {
+              this->fill_client_config_(op, &payload);
+            }));
+        return;
+      }
       DeliveryRequest req;
       req.what   = "ClientConfig";
       req.policy = deliverypolicy::kConfigPushPolicy;

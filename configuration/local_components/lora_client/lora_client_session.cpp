@@ -187,16 +187,11 @@ namespace esphome
       if (this->config_push_pending_)
       {
         this->config_push_pending_ = false;
-        ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred config push",
+        ESP_LOGI(TAG, "[%s] Session confirmed — sending the deferred config push (acked)",
                  this->get_name().c_str());
-        this->send_remote_config();
-        if (this->pending_register_notice_)
-        {
-          for (auto *node : this->nodes_)
-            node->on_register();
-          this->pending_register_notice_ = false;
-        }
-        this->config_synced_ = true;
+        const bool notify = this->pending_register_notice_;
+        this->pending_register_notice_ = false;
+        this->push_config_acked_(notify);
       }
     }
 
@@ -744,7 +739,11 @@ namespace esphome
           // can send its own configuration (LoraCoverComponent: CoverConfig).
           for (auto *node : this->nodes_)
             node->on_register();
-          this->config_synced_ = true;
+          // Fire-and-forget in the clear (the node has no session to ack under):
+          // NOT recorded as in sync. The first confirmed session re-sends it
+          // encrypted and acked (review rollout-3 D1).
+          this->config_push_pending_     = true;
+          this->pending_register_notice_ = true;
         }
         else if (push_config)
         {
@@ -966,7 +965,8 @@ namespace esphome
     // unchanged): a fresh login when config is still unsynced this boot.
     void LORAListener::schedule_config_sync_relogin_()
     {
-      if (!this->config_synced_)
+      // An acked config push already on its way settles it (review rollout-3 D1).
+      if (!this->config_synced_ && !this->setup_in_progress_())
       {
         ESP_LOGI(TAG, "[%s] Session resumed without config sync this boot — scheduling re-login to push config",
                  this->get_name().c_str());
@@ -976,7 +976,7 @@ namespace esphome
           // so this also respects acquire_onboarding_() and arms a retry
           // instead of being a one-shot that silently does nothing if
           // this particular LoginMsg is lost.
-          if (!this->config_synced_)
+          if (!this->config_synced_ && !this->setup_in_progress_())
             this->do_login_and_arm_retry_();
         });
       }
@@ -1456,8 +1456,14 @@ namespace esphome
       return this->parent_->send(const_cast<uint8_t *>(buf), len, policy);
     }
 
+    // FLAGS.ACK_REQ: the route's, or forced by an Acked delivery (review rollout-3 D1).
+    static uint8_t ackReqFlag(bool route_acked, bool forced)
+    {
+      return (route_acked || forced) ? macwire::kFlagAckReq : 0;
+    }
+
     bool HubSession::frame(hubframes::Down *op, uint32_t fcnt, bool encrypt,
-                                 DeliveryFrame *out)
+                                 DeliveryFrame *out, bool ack_req)
     {
       out->msgid = fcnt;
       out->bytes.clear();
@@ -1479,7 +1485,7 @@ namespace esphome
       const bool seal = encrypt && s_keys().sessionId(static_cast<mac::Addr>(this->host_.session_peer()),
                                                       &unused_session_id);
       macwire::WireHdr h;
-      h.flags  = macwire::withAuth(r.ack_req ? macwire::kFlagAckReq : 0,
+      h.flags  = macwire::withAuth(ackReqFlag(r.ack_req, ack_req),
                                    seal ? macwire::Auth::Session : macwire::Auth::None);
       h.dst    = static_cast<uint8_t>(this->host_.session_peer());
       h.src    = static_cast<uint8_t>(kHubAddress);
