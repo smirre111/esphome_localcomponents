@@ -101,7 +101,19 @@ namespace esphome
       int64_t next_placement_t0(int64_t now_us, int copies, size_t len, bool expects_reply) const;
       // One copy in this node's next OPEN Class A window (RX1, else RX2).
       ClassAPlacement send_into_class_a_window(const uint8_t *buf, size_t len,
-                                               const mac2::FrameSeal &seal);
+                                               const mac2::FrameSeal &seal)
+      {
+        return this->send_into_class_a_window_from(buf, len, seal, this->last_uplink_t0_us_);
+      }
+      // The same, off an explicit uplink T0 (an uplink not committed: the
+      // keyless one that shows a node with a pending login is listening).
+      ClassAPlacement send_into_class_a_window_from(const uint8_t *buf, size_t len,
+                                                    const mac2::FrameSeal &seal, int64_t t0_uplink);
+      // One copy on a Mode B node's own mark, recovered from its uplink's T0
+      // (the node transmits at its mark + kUplinkOffsetUs). False: not placed
+      // (no or a stale stamp, or the queue refused it).
+      bool send_on_uplink_mark(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
+                               int64_t t0_uplink);
 
       // ---- evidence ----
       // This node's authenticated uplink: its T0 stamp and uncertainty, and

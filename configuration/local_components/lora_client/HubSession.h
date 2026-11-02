@@ -77,6 +77,12 @@ namespace esphome
       virtual uint32_t session_ack_wait_ms(uint32_t base_ms) const = 0;
       // Hand one frame (the LOGIN) to MAC-0.
       virtual bool session_send(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal) = 0;
+      // The receive stamp (T0) of the uplink being processed.
+      virtual int64_t session_rx_t0_us() const = 0;
+      // Place one copy where the node listens after the uplink at t0_uplink
+      // (its Class A RX1/RX2, or its Mode B mark). False: it cannot be aimed.
+      virtual bool session_send_after_uplink(const uint8_t *buf, size_t len,
+                                             const mac2::FrameSeal &seal, int64_t t0_uplink) = 0;
 
       // ---- the lifecycle's events ----
       // An admitted REGISTER from this node: it is registered, heard, rebooted.
@@ -267,10 +273,10 @@ namespace esphome
       // Arm the startup login, respecting the node's sleep window and stagger.
       void schedule_startup_login();
       // A login challenge now (through the onboarding gate) and its retry ladder.
-      void do_login_and_arm_retry();
+      void do_login_and_arm_retry(bool into_uplink_window = false);
       void login_retry_step();
       // The LoginMsg of a (new or retried) challenge.
-      void send_login();
+      void send_login(bool into_uplink_window = false);
       // A frame from the node decrypted under this session.
       void confirm();
       // A REGISTER (bypasses the replay window; checked here, see register_admitted_).
@@ -346,7 +352,8 @@ namespace esphome
       bool register_admitted_(const ::ClientRegister *reg, const uint8_t *data, size_t len);
       void note_keyless_uplink_();
       static constexpr int64_t kKeylessLoginGapUs = 5000000;   // the node's LOGIN rate limit
-      void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base);
+      void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base,
+                             bool into_uplink_window);
       bool verify_uplink_(EncUplink &up);
       mac2::LinkSecurity::Verify tag_verdict_(EncUplink &up);
       void drop_candidate_(EncUplink &up);
@@ -365,6 +372,8 @@ namespace esphome
       LoginState login_{};
       // When a keyless uplink last re-sent the LOGIN (0 = never).
       int64_t  last_keyless_login_us_{0};
+      // That uplink's T0: where the re-sent LOGIN is aimed (review rollout-3 F1).
+      int64_t  keyless_t0_us_{0};
       // When the downlink counter was last advanced for a node boot (0 = never).
       int64_t  last_boot_advance_us_{0};
       // Security review finding 2: time-based REGISTER replay guard.

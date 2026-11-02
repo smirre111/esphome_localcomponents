@@ -1376,6 +1376,9 @@ namespace esphome
       uint32_t session_ms_until_awake() const override;
       uint32_t session_ack_wait_ms(uint32_t base_ms) const override;
       bool session_send(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal) override;
+      int64_t session_rx_t0_us() const override;
+      bool session_send_after_uplink(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
+                                     int64_t t0_uplink) override;
       void session_register_accepted() override;
       bool session_register_config(bool needs_config) override;
       void session_challenge_started() override;

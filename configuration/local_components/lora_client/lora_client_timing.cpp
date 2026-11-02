@@ -607,6 +607,28 @@ namespace esphome
     uint32_t LORAListener::link_node_mode() const { return this->node_mode_; }
     void LORAListener::link_class_a_offered() { this->class_a_stats_.offered++; }
 
+    bool NodeLinkTiming::send_on_uplink_mark(const uint8_t *buf, size_t len,
+                                             const mac2::FrameSeal &seal, int64_t t0_uplink)
+    {
+      const int64_t now   = esp_timer_get_time();
+      const int64_t round = (int64_t) timedgrid::kRoundUs;
+      // A stamp older than a few rounds is too far from the node's clock to
+      // aim one copy with (and it may be another frame's).
+      if (!this->host_.link_has_radio() || buf == nullptr || len == 0 || t0_uplink <= 0 ||
+          now - t0_uplink > 4 * round)
+        return false;
+      int64_t mark = t0_uplink - (int64_t) NodeLinkTiming::kUplinkOffsetUs;
+      const int64_t earliest_usable = now + txqueue::kPrepareLeadUs;
+      while (loratiming::fireInstantUs(mark, 0) < earliest_usable)
+        mark += round;
+      TxPolicy p;
+      p.copies      = 1;
+      p.stride_ms   = 0;
+      p.earliest_us = loratiming::fireInstantUs(mark, 0);
+      p.priority    = 0;
+      return this->host_.link_send(buf, len, p, seal);
+    }
+
     void NodeLinkTiming::note_uplink_placement(int64_t t0_uplink_us)
     {
       if (!this->host_.link_has_radio() || t0_uplink_us <= 0)
@@ -782,7 +804,8 @@ namespace esphome
     // which case the caller must fall back to today's behaviour rather than
     // guess an origin.
     ClassAPlacement
-    NodeLinkTiming::send_into_class_a_window(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
+    NodeLinkTiming::send_into_class_a_window_from(const uint8_t *buf, size_t len,
+                                                  const mac2::FrameSeal &seal, int64_t t0_uplink)
     {
       if (!this->host_.link_has_radio() || buf == nullptr || len == 0)
         return ClassAPlacement::NotSendable;
@@ -817,10 +840,9 @@ namespace esphome
         return ClassAPlacement::NotClassA;
       }
 
-      // This node's own last uplink, committed in commit_rx_msgid_ — never the
-      // tracker's live stamp, which by now belongs to whichever node
-      // transmitted most recently.
-      const int64_t t0_uplink = this->last_uplink_t0_us_;
+      // This node's own uplink (by default the last one committed in
+      // commit_rx_msgid_) — never the tracker's live stamp, which by now belongs
+      // to whichever node transmitted most recently.
       if (t0_uplink <= 0)
         return ClassAPlacement::NoUplinkStamp;
 

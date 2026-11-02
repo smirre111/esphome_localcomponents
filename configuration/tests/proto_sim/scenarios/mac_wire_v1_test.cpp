@@ -27,6 +27,8 @@
 #include "sim/crypto.h"
 
 #include <psa/crypto.h>
+#include "ClassAWindows.h"
+#include "LoraTiming.h"
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -1194,6 +1196,69 @@ TEST(MacWireV1Listener, AKeylessUplinkDuringAPendingLoginResendsTheLoginOnce) {
     sessionUplink(hub, session, 52);
     hub.clock.tick(10);
     EXPECT_EQ(loginsOnAir(hub.radio), logins + 2) << "after the gap, again";
+}
+
+// Review rollout-3 F1: the LOGIN a keyless uplink triggers is aimed at where
+// that node listens after it transmitted: its Class A RX1 (Mode C), or its own
+// mark, recovered from the uplink's T0 (Mode B: the uplink leaves at the mark
+// + the uplink offset). A Mode A node gets the burst (its window free-runs).
+namespace {
+// LOGIN pending; returns the session id the node would (not) be using.
+uint32_t pendingLogin(Hub &hub) {
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    hub.rol.send_login();
+    const Bytes login = lastDown(hub.radio);
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    EXPECT_TRUE(macwire::decode(login.data(), login.size(), &h, &off, &blen));
+    LoginMsg *lm = login_msg__unpack(nullptr, blen, login.data() + off);
+    const uint32_t session = lm ? lm->nonce : 0;
+    if (lm) login_msg__free_unpacked(lm, nullptr);
+    return session;
+}
+}  // namespace
+
+TEST(MacWireV1Listener, AKeylessUplinksLoginGoesIntoAClassANodesReceiveWindow) {
+    Hub hub;
+    const uint32_t session = pendingLogin(hub);
+    hub.rol.node_mode_ = (uint32_t) NODE_MODE__MODE_AUTO;   // Mode C: RX1/RX2 after its uplink
+    const int64_t t0 = esp_timer_get_time();
+    hub.tracker.last_rx_t0_us_v = t0;
+    sessionUplink(hub, session, 50);
+    hub.clock.tick(10);
+    EXPECT_EQ(hub.tracker.last_copies, 1) << "one copy, aimed";
+    EXPECT_EQ(hub.tracker.last_earliest_us,
+              loratiming::fireInstantUs(t0 + (int64_t) classa::kRx1DelayUs, 0))
+        << "into RX1 of the uplink that showed the node is listening";
+}
+
+TEST(MacWireV1Listener, AKeylessUplinksLoginGoesOnAModeBNodesOwnMark) {
+    Hub hub;
+    const uint32_t session = pendingLogin(hub);
+    hub.rol.enable_timed_mode(true);   // a Mode B node (the hub's grid may be newer than the node's)
+    ASSERT_TRUE(hub.rol.timed_mode_enabled());
+    const int64_t t0 = esp_timer_get_time();
+    hub.tracker.last_rx_t0_us_v = t0;
+    sessionUplink(hub, session, 50);
+    hub.clock.tick(10);
+    EXPECT_EQ(hub.tracker.last_copies, 1);
+    const int64_t mark = t0 - 60'000;   // the node's mark (uplink offset 60 ms)
+    const int64_t fire = hub.tracker.last_earliest_us;
+    const int64_t since = loratiming::t0FromFireInstantUs(fire, 0) - mark;
+    EXPECT_GT(since, 0);
+    EXPECT_EQ(since % 1'500'000, 0) << "on one of the node's own marks, a whole number of rounds on";
+}
+
+TEST(MacWireV1Listener, AKeylessUplinksLoginToAModeANodeIsTheBurst) {
+    Hub hub;
+    const uint32_t session = pendingLogin(hub);
+    hub.tracker.last_rx_t0_us_v = esp_timer_get_time();
+    sessionUplink(hub, session, 50);
+    hub.clock.tick(10);
+    EXPECT_NE(hub.tracker.last_copies, 1) << "a free-running window is not aimed at";
 }
 
 TEST(MacWireV1Listener, AKeylessUplinkWithNoLoginPendingSendsNoLogin) {

@@ -245,7 +245,7 @@ namespace esphome
       }
     }
 
-    void HubSession::do_login_and_arm_retry()
+    void HubSession::do_login_and_arm_retry(bool into_uplink_window)
     {
       // Do NOT bail on login_acked here.  After a hub reboot the node may have
       // already sent a status message (setting login_acked=true via the incoming-
@@ -283,7 +283,7 @@ namespace esphome
       this->login_.login_acked       = false;
       this->login_.login_retry_count = 0;
 
-      this->send_login();   // resets frame counters to 0 + sends LoginMsg
+      this->send_login(into_uplink_window);   // resets frame counters to 0 + sends LoginMsg
 
       // Retry every hour; give up after kMaxLoginRetries (24 h).  One-shot,
       // self-re-arming — NOT set_interval (whose random initial phase fired the
@@ -508,7 +508,7 @@ namespace esphome
       }
     }
 
-    void HubSession::send_login()
+    void HubSession::send_login(bool into_uplink_window)
     {
       // Base-nonce policy:
       //   * Mint a fresh esp_random() ONLY for the first send of a challenge.
@@ -584,18 +584,27 @@ namespace esphome
 
       // The frame's K_AUTH tag (over every raw byte, recomputed per burst copy)
       // authenticates LOGIN (spec 4.3).
-      this->send_login_frame_(login, fcnt, base);
+      this->send_login_frame_(login, fcnt, base, into_uplink_window);
     }
 
     // The v1 LOGIN of send_login: frame, send, log.
-    void HubSession::send_login_frame_(const LoginMsg &login, uint32_t fcnt, uint32_t base)
+    void HubSession::send_login_frame_(const LoginMsg &login, uint32_t fcnt, uint32_t base,
+                                       bool into_uplink_window)
     {
       DeliveryFrame f;
-      if (this->login_frame(login, fcnt, &f))
-        this->host_.session_send(f.bytes.data(), f.bytes.size(), f.seal);
-      else
+      if (!this->login_frame(login, fcnt, &f))
         ESP_LOGE(TAG, "[%s] v1 LOGIN could not be framed/authenticated — not sent",
                  this->host_.session_name());
+      // Aimed where the node listens after the uplink that triggered it (review
+      // rollout-3 F1: a Mode B node hears an unplaced burst ~1/3 of the time);
+      // the burst when it cannot be aimed. The retry ladder's LOGINs stay bursts.
+      else if (into_uplink_window &&
+               this->host_.session_send_after_uplink(f.bytes.data(), f.bytes.size(), f.seal,
+                                                     this->keyless_t0_us_))
+        ESP_LOGI(TAG, "[%s] LoginMsg aimed at the node's receive window after its uplink",
+                 this->host_.session_name());
+      else
+        this->host_.session_send(f.bytes.data(), f.bytes.size(), f.seal);
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
                this->host_.session_name(), (unsigned) base, (unsigned) this->seq().txId(),
                (int) login.request_register);
@@ -624,10 +633,12 @@ namespace esphome
       if (this->last_keyless_login_us_ != 0 && now_us - this->last_keyless_login_us_ < kKeylessLoginGapUs)
         return;
       this->last_keyless_login_us_ = (now_us > 0) ? now_us : 1;
+      this->keyless_t0_us_         = this->host_.session_rx_t0_us();
       ESP_LOGI(TAG, "[%s] Node transmits without the new session — re-sending its LOGIN now",
                this->host_.session_name());
       this->host_.session_cancel_timeout("login_retry");
-      this->host_.session_set_timeout("login_keyless", 0, [this]() { this->do_login_and_arm_retry(); });
+      this->host_.session_set_timeout("login_keyless", 0,
+                                      [this]() { this->do_login_and_arm_retry(/*into_uplink_window=*/true); });
     }
 
     bool HubSession::advance_tx_for_boot()
@@ -668,6 +679,16 @@ namespace esphome
     uint32_t LORAListener::session_ack_wait_ms(uint32_t base_ms) const
     {
       return this->ack_wait_ms_(base_ms);
+    }
+    int64_t LORAListener::session_rx_t0_us() const { return this->rx_ticket_.ticket.t0_us; }
+    bool LORAListener::session_send_after_uplink(const uint8_t *buf, size_t len,
+                                                 const mac2::FrameSeal &seal, int64_t t0_uplink)
+    {
+      if (this->link_.send_into_class_a_window_from(buf, len, seal, t0_uplink) == ClassAPlacement::Placed)
+        return true;
+      if (this->timed_mode_enabled_ && this->grid_aligned_)
+        return this->link_.send_on_uplink_mark(buf, len, seal, t0_uplink);
+      return false;   // Mode A: the window free-runs, only the burst covers it
     }
     bool LORAListener::session_send(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
     {
