@@ -845,3 +845,175 @@ TEST_F(E2E, ANodeThatLogsInWhileTimedModeIsOnGetsTheGrid) {
     EXPECT_TRUE(disp.hasNetKey())
         << "and the fleet key, which only an encrypted GridSync carries";
 }
+
+// ---------------------------------------------------------------------------
+// Two real nodes on one hub: the nightly SLEEP (2026-11-01 23:00). Node 1 was
+// deaf (a lost reset beacon, review-ota-hang), so its SLEEP went unanswered and
+// the hub burst its retry -- and node 2's ack of ITS SLEEP, sent in that burst,
+// was lost: the hub cannot receive while it transmits. Both were recorded as
+// "SLEEP UNCONFIRMED". The hub now sends the next node's SLEEP only after the
+// previous one is acked or has definitively failed.
+//
+// This shim harness has no air time (a hub send is instantaneous), so it cannot
+// lose an ack to a burst by itself; what it can check is the ORDER that makes
+// the collision impossible, and that the healthy node's sleep is recorded.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr uint64_t kMac1 = 0x0011223317ULL;
+
+struct SleepProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::ctl;
+};
+const SleepProbe &SP(const LORAClient &r) { return static_cast<const SleepProbe &>(r); }
+
+struct TwoNodes : public ::testing::Test {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    LORATracker   tracker;
+    LORAClient    rol_1;
+    LORAClient    rol_2;
+    RealTimeClock ha_time;
+
+    MotorCtrl     mot1, mot2;
+    SystemCtrl    sys1, sys2;
+    LoraInterface lif1, lif2;
+    portMUX_TYPE  mm1{}, bm1{}, mm2{}, bm2{};
+    CmdDispatcherTestPeer node1{&mot1, &sys1, &lif1, mm1, bm1};
+    CmdDispatcherTestPeer node2{&mot2, &sys2, &lif2, mm2, bm2};
+
+    size_t delivered{0};
+    bool   node1_deaf{false};
+
+    void SetUp() override {
+        ASSERT_EQ(psa_crypto_init(), PSA_SUCCESS);
+        esphome::lora_tracker::LORAListener::reset_onboarding_gate_for_test();
+        esphome::lora_tracker::LORAListener::reset_sleep_gate_for_test();
+        esphome::shim_hooks::set_active_clock(&clock);
+        esphome::shim_hooks::reset_nvs();
+        esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+        proto_sim_timer_reset();
+        proto_sim_timer_set_now_us(1'000'000);
+        ha_time.set_now(1787000000, /*valid=*/true);
+        struct { LORAClient *r; const char *name; uint8_t addr; uint64_t mac; } hubs[] = {
+            {&rol_1, "rol_1", 17, kMac1}, {&rol_2, "rol_2", kAddr, kMac}};
+        for (auto &h : hubs) {
+            h.r->set_name(h.name);
+            h.r->set_short_address(h.addr);
+            h.r->set_subnet_address(kSubnet);
+            h.r->set_sleep_duration(21600);
+            h.r->set_address(h.mac);
+            h.r->set_time(&ha_time);
+            tracker.register_client(h.r);
+            h.r->registered_    = true;
+            h.r->config_synced_ = true;
+        }
+        sys1.setAddress(17, kSubnet);
+        sys2.setAddress(kAddr, kSubnet);
+    }
+    void TearDown() override {
+        esphome::lora_tracker::LORAListener::reset_onboarding_gate_for_test();
+        esphome::lora_tracker::LORAListener::reset_sleep_gate_for_test();
+        esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+        esphome::shim_hooks::set_active_clock(nullptr);
+    }
+
+    static void deliver(CmdDispatcherTestPeer &n, const std::vector<uint8_t> &bytes) {
+        const int64_t rxdone = esp_timer_get_time() +
+                               (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
+        n.onReceiveNew(const_cast<uint8_t *>(bytes.data()), (int) bytes.size(), rxdone);
+    }
+    int pump() {
+        int moved = 0;
+        const auto f = radio.hub_to_node_frames();
+        for (; delivered < f.size(); ++delivered, ++moved) {
+            if (!node1_deaf) deliver(node1, f[delivered].bytes);
+            deliver(node2, f[delivered].bytes);
+        }
+        struct { CmdDispatcherTestPeer *n; LoraInterface *l; LORAClient *r; } ends[] = {
+            {&node1, &lif1, &rol_1}, {&node2, &lif2, &rol_2}};
+        for (auto &e : ends) {
+            while (e.n->runOneTxCommand()) { }
+            for (auto &frame : e.l->drain_tx_queue()) {
+                e.r->set_response(frame.data(), frame.size());
+                ++moved;
+            }
+        }
+        return moved;
+    }
+    void settle() { for (int i = 0; i < 8 && pump() > 0; ++i) { } }
+    void tick(uint32_t ms) {
+        proto_sim_timer_set_now_us(esp_timer_get_time() + (int64_t) ms * 1000);
+        clock.tick(ms);
+    }
+};
+
+}  // namespace
+
+TEST_F(TwoNodes, ADeafNodeDoesNotCostAHealthyNodeItsSleepAck) {
+    tick(100'000);
+    rol_1.send_login();
+    rol_2.send_login();
+    for (int i = 0; i < 20; ++i) { settle(); tick(1000); }
+    ASSERT_TRUE(rol_1.session_confirmed() && rol_2.session_confirmed()) << "precondition";
+
+    node1_deaf = true;   // node 1 drops every downlink from here on
+    rol_1.enterSleep();
+    rol_2.enterSleep();   // the 23:00 automation asks both at once
+
+    // Until node 1's SLEEP is settled (it never will be acked), node 2's SLEEP
+    // must not be on the air at all: its ack would be due while the hub bursts
+    // node 1's retries.
+    bool node1_settled = false;
+    size_t node2_first_frame = SIZE_MAX, node1_settled_at = SIZE_MAX;
+    for (int i = 0; i < 120 && !(node1_settled && rol_2.last_sleep_epoch_ != 0); ++i) {
+        const size_t n_before = radio.hub_to_node_frames().size();
+        settle();
+        if (node2_first_frame == SIZE_MAX && SP(rol_2).ctl().first_msgid != 0 &&
+            rol_2.ctl_cmd().sysop == CLIENT_OPERATION__CMD_SLEEP)
+            node2_first_frame = n_before;
+        if (!node1_settled && rol_1.ctl_cmd().sleep_unconfirmed) {
+            node1_settled = true;
+            node1_settled_at = radio.hub_to_node_frames().size();
+        }
+        tick(1000);
+    }
+    ASSERT_TRUE(node1_settled) << "the deaf node's SLEEP must end UNCONFIRMED";
+    ASSERT_NE(node2_first_frame, SIZE_MAX) << "node 2's SLEEP must eventually go out";
+    EXPECT_GE(node2_first_frame, node1_settled_at)
+        << "node 2's SLEEP must wait until node 1's has definitively failed";
+    EXPECT_NE(rol_2.last_sleep_epoch_, 0u) << "the healthy node's ack must be heard and its sleep recorded";
+    EXPECT_FALSE(rol_2.ctl_cmd().sleep_unconfirmed);
+}
+
+TEST_F(TwoNodes, AnAckedSleepLetsTheNextNodeGoAtOnce) {
+    tick(100'000);
+    rol_1.send_login();
+    rol_2.send_login();
+    for (int i = 0; i < 20; ++i) { settle(); tick(1000); }
+    ASSERT_TRUE(rol_1.session_confirmed() && rol_2.session_confirmed()) << "precondition";
+
+    rol_1.enterSleep();
+    rol_2.enterSleep();
+    EXPECT_TRUE(SP(rol_1).ctl().awaiting_ack);
+    EXPECT_FALSE(SP(rol_2).ctl().awaiting_ack) << "the second node waits its turn";
+    settle();
+    ASSERT_NE(rol_1.last_sleep_epoch_, 0u) << "node 1 acked";
+    tick(1000);   // the next poll of the sleep gate
+    settle();
+    EXPECT_NE(rol_2.last_sleep_epoch_, 0u) << "and node 2 followed within a poll";
+}
+
+TEST_F(TwoNodes, ASleepThatCannotGoOutYetDoesNotHoldTheOthersBack) {
+    tick(100'000);
+    rol_1.send_login();
+    rol_2.send_login();
+    for (int i = 0; i < 20; ++i) { settle(); tick(1000); }
+    ASSERT_TRUE(rol_1.session_confirmed() && rol_2.session_confirmed()) << "precondition";
+
+    rol_1.login_state_for_test().relogin_pending = true;   // node 1's session is being rebuilt
+    rol_1.enterSleep();
+    ASSERT_FALSE(SP(rol_1).ctl().awaiting_ack) << "precondition: node 1's SLEEP is deferred, not sent";
+    rol_2.enterSleep();
+    EXPECT_TRUE(SP(rol_2).ctl().awaiting_ack) << "node 2 need not wait for a SLEEP that is not on the air";
+}

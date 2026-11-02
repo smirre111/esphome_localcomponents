@@ -142,6 +142,8 @@ namespace esphome
     // session change; a second one would only repeat it).
     void LORAListener::on_ctl_abandoned_()
     {
+      if (this->op_is_sleep_())
+        this->release_sleep_gate_();   // a refused or abandoned SLEEP is settled
       this->dlv_.forget_ack_ids(CH_CONTROL);
       this->set_command_failed_(true);
     }

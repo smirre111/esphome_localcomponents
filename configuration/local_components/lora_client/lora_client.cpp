@@ -19,12 +19,15 @@ namespace esphome
 
     uint8_t LORAListener::s_next_login_slot_ = 0;
 
+    onboarding::Gate LORAListener::s_sleep_gate_;
+
     LORAListener::~LORAListener()
     {
       // The three esp_timer callbacks hold `this`: stop and delete them before
       // the object goes (review HB22; a real hub never destroys a listener,
       // the host harness does so constantly).
       this->session_.leave_onboarding_gate();
+      this->release_sleep_gate_();
       // Tier 3: this node's keys, otherwise never freed — fine for the
       // handful of LORAListener instances a real hub constructs once at
       // boot, but the host test harness constructs many short-lived ones
@@ -763,17 +766,46 @@ namespace esphome
 
       // A second request while one is in flight would only bump the generation
       // and supersede the frame that is about to be acked.
-      if (this->sleep_pending_())
+      if (this->sleep_pending_() || this->sleep_waiting_)
       {
         ESP_LOGI(TAG, "[%s] Sleep already pending — ignoring the repeated request",
                  this->get_name().c_str());
         return;
       }
+      this->sleep_waiting_ = true;
+      this->try_start_sleep_();
+    }
 
+    // One node's SLEEP on the air at a time (see s_sleep_gate_).
+    void LORAListener::try_start_sleep_()
+    {
+      if (this->auto_mode_)
+      {
+        this->sleep_waiting_ = false;   // switched to automatic while waiting
+        this->release_sleep_gate_();
+        return;
+      }
+      if (!s_sleep_gate_.tryAcquire(this))
+      {
+        if (!this->sleep_wait_logged_)
+        {
+          this->sleep_wait_logged_ = true;
+          ESP_LOGI(TAG, "[%s] Sleep waits for another node's SLEEP to be settled (%u in line)",
+                   this->get_name().c_str(), (unsigned) s_sleep_gate_.waiting());
+        }
+        this->set_timeout("sleep_gate", kSleepGatePollMs, [this]() { this->try_start_sleep_(); });
+        return;
+      }
+      this->sleep_waiting_     = false;
+      this->sleep_wait_logged_ = false;
       ESP_LOGI(TAG, "Device %s entering sleep mode (tracked, effects on ack)",
                this->address_str());
       this->send_tracked_sysop_(CLIENT_OPERATION__CMD_SLEEP);
       this->arm_pending_sleep_expiry_();
+      // Not on the air now (deferred behind a relogin, or waiting behind another
+      // command): its ack is not due, so the next node may go.
+      if (!(this->op_is_sleep_() && this->ctl().awaiting_ack))
+        this->release_sleep_gate_();
     }
 
     bool LORAListener::op_is_sleep_() const
@@ -791,6 +823,7 @@ namespace esphome
     // code did eagerly happens here instead.
     void LORAListener::on_sleep_acknowledged_()
     {
+      this->release_sleep_gate_();   // settled: acked
       this->ctl_cmd_.sleep_unconfirmed = false;
       // Whatever waited behind the sleep must not be sent into a sleeping node: it
       // goes out when the node is back (confirm_session_).
@@ -879,6 +912,7 @@ namespace esphome
     // normal path handles; one that did not is simply heard.
     void LORAListener::on_sleep_unconfirmed_()
     {
+      this->release_sleep_gate_();   // settled: unconfirmed
       this->dlv_.clear_awaiting(CH_CONTROL);
       this->ctl_cmd_.sleep_unconfirmed = true;
       this->refresh_sleep_status_();

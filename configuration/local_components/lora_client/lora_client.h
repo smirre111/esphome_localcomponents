@@ -648,6 +648,7 @@ namespace esphome
       // The onboarding gate is process-wide, so a test must be able to start
       // from a free one and see who holds it.
       static void reset_onboarding_gate_for_test() { HubSession::reset_onboarding_gate_for_test(); }
+      static void reset_sleep_gate_for_test() { s_sleep_gate_.reset(); }
       bool onboarding_held_for_test() const { return this->session_.onboarding_held(); }
       int64_t last_timesync_sent_us_for_test() const { return this->last_timesync_sent_us_; }
       void reset_timesync_policy_for_test() { this->last_timesync_sent_us_ = 0; }
@@ -1612,6 +1613,21 @@ namespace esphome
       // A CMD_SLEEP stuck behind a relogin (deferred, or its retries deferred)
       // must not outlive the night: a sleep sent hours late is worse than none.
       void     arm_pending_sleep_expiry_();
+      // ---- the nightly SLEEP, one node at a time (2026-11-01 23:00) ----
+      // The hub cannot receive while it transmits. With every node's SLEEP on
+      // the air at once, one node that does not answer (deaf, out of range)
+      // makes the hub burst its retries exactly while the healthy nodes' acks
+      // are due, and those acks are lost: every node ends "UNCONFIRMED". So a
+      // node's SLEEP goes out only while it holds this process-wide gate (the
+      // OnboardingGate class: one holder, FIFO), released when that SLEEP is
+      // acked, unconfirmed, refused or dropped -- or at once when it did not go
+      // on the air (deferred behind a relogin, or queued behind another command).
+      static onboarding::Gate s_sleep_gate_;
+      static constexpr uint32_t kSleepGatePollMs = 500;
+      bool     sleep_waiting_{false};       // asked for, waiting for the gate
+      bool     sleep_wait_logged_{false};
+      void     try_start_sleep_();
+      void     release_sleep_gate_() { s_sleep_gate_.release(this); }
       void     expire_pending_sleep_();
       static constexpr uint32_t kPendingSleepExpiryMs = 180000;
 
