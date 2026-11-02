@@ -76,6 +76,10 @@ namespace esphome
                  restore->logged_in ? "yes" : "no",
                  (unsigned)restore->last_sleep_epoch);
         restore->apply(this);
+        SleepRecord rec{0, 0};
+        if (this->sleep_pref_.load(&rec) && rec.epoch != 0 && rec.epoch == this->last_sleep_epoch_)
+          this->last_sleep_duration_s_ = rec.duration_s;
+        this->saved_sleep_rec_ = rec;
         ESP_LOGI(TAG, "[%s] After apply — rx_id=%u tx_id=%u (tx+64) registered=%s",
                  this->get_name().c_str(),
                  (unsigned)this->session_.seq().rxId(),
@@ -188,6 +192,7 @@ namespace esphome
     optional<LORAClientRestoreState> LORAListener::restore_state_()
     {
       this->rtc_ = this->make_entity_preference<LORAClientRestoreState>();
+      this->sleep_pref_ = this->make_entity_preference<SleepRecord>(kSleepRecordVersion);
       LORAClientRestoreState recovered{};
       if (!this->rtc_.load(&recovered))
       {
@@ -237,6 +242,15 @@ namespace esphome
         restore.config_hash      = this->currentConfigHash_();
 
         this->rtc_.save(&restore);
+        // Written only when it changes: the restore state is saved on every
+        // FCNT persist, and the sleep record moves twice a night at most.
+        if (this->last_sleep_epoch_ != this->saved_sleep_rec_.epoch ||
+            this->last_sleep_duration_s_ != this->saved_sleep_rec_.duration_s)
+        {
+          SleepRecord rec{this->last_sleep_epoch_, this->last_sleep_duration_s_};
+          this->sleep_pref_.save(&rec);
+          this->saved_sleep_rec_ = rec;
+        }
         ESP_LOGD(TAG, "[%s] NVS save — rx_id=%u tx_id=%u logged_in=%s last_sleep=%u",
                  this->get_name().c_str(),
                  (unsigned)restore.rx_message_id,
@@ -286,8 +300,12 @@ namespace esphome
       if (this->time == nullptr || !this->time->now().is_valid())
         return 0;                       // no clock — cannot predict
 
+      // An interactive node sleeps only on a SLEEP the hub commanded, for the
+      // duration it was given then (not today's config: review rollout-3 D2).
+      // No record: nothing to predict, it is awake.
       if (!this->auto_mode_)
-        return sleep_ref + static_cast<uint32_t>(this->sleep_duration_);
+        return (this->last_sleep_epoch_ == 0) ? 0
+                                              : this->last_sleep_epoch_ + this->commanded_sleep_s_();
 
       // Automatic mode: the earlier of the next scheduled event (minus the
       // beacon lead) and the periodic check-in.
@@ -375,6 +393,18 @@ namespace esphome
       this->last_heard_us_ = esp_timer_get_time();
       if (this->time != nullptr && this->time->now().is_valid())
         this->last_heard_epoch_ = static_cast<uint32_t>(this->time->now().timestamp);
+      // Heard AFTER its recorded sleep: that sleep is over, and its record must
+      // not predict a wake ever again (it survives a hub restart, where the RAM
+      // last_heard_epoch_ does not: review rollout-3 D2).
+      // (An automatic-mode node sleeps on its own; the hub's model for it is its beacons.)
+      if (!this->auto_mode_ && this->node_mode_ != (uint32_t) NODE_MODE__MODE_AUTO &&
+          this->last_sleep_epoch_ != 0 &&
+          this->last_heard_epoch_ > this->last_sleep_epoch_)
+      {
+        this->last_sleep_epoch_      = 0;
+        this->last_sleep_duration_s_ = 0;
+        this->save_state_(true);
+      }
       this->refresh_sleep_status_();   // hearing the node ends "asleep" at once
     }
 
@@ -845,7 +875,8 @@ namespace esphome
       if (this->time == nullptr || !this->time->now().is_valid())
         return;
       const uint32_t now = static_cast<uint32_t>(this->time->now().timestamp);
-      this->last_sleep_epoch_ = std::max(now, this->last_heard_epoch_ + 1);
+      this->last_sleep_epoch_       = std::max(now, this->last_heard_epoch_ + 1);
+      this->last_sleep_duration_s_  = (uint32_t) this->sleep_duration_;   // what the node was given
     }
 
     // Schedule a login challenge slightly after the node is expected to wake up.

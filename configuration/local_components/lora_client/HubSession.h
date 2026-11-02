@@ -344,6 +344,8 @@ namespace esphome
       void schedule_login_retry_();
       bool register_authentic_(const uint8_t *data, size_t len);
       bool register_admitted_(const ::ClientRegister *reg, const uint8_t *data, size_t len);
+      void note_keyless_uplink_();
+      static constexpr int64_t kKeylessLoginGapUs = 5000000;   // the node's LOGIN rate limit
       void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base);
       bool verify_uplink_(EncUplink &up);
       mac2::LinkSecurity::Verify tag_verdict_(EncUplink &up);
@@ -361,6 +363,8 @@ namespace esphome
       uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       static onboarding::Gate onboarding_gate_;
       LoginState login_{};
+      // When a keyless uplink last re-sent the LOGIN (0 = never).
+      int64_t  last_keyless_login_us_{0};
       // When the downlink counter was last advanced for a node boot (0 = never).
       int64_t  last_boot_advance_us_{0};
       // Security review finding 2: time-based REGISTER replay guard.

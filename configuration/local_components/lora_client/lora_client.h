@@ -1635,6 +1635,25 @@ namespace esphome
       static constexpr uint32_t kPendingSleepExpiryMs = 180000;
 
       ESPPreferenceObject rtc_;
+      // The sleep record's commanded duration (review rollout-3 D2), in its own
+      // preference so the restore state's layout (and kRestoreStateVersion) is
+      // untouched. `epoch` ties it to the restore state's last_sleep_epoch.
+      struct SleepRecord
+      {
+        uint32_t epoch;
+        uint32_t duration_s;
+      } __attribute__((packed));
+      static constexpr uint32_t kSleepRecordVersion = 0x5EE90001u;
+      ESPPreferenceObject sleep_pref_;
+      // The sleep duration the node was given with the recorded SLEEP (0 =
+      // unknown: a record from before this field; the current config is used).
+      uint32_t last_sleep_duration_s_{0};
+      SleepRecord saved_sleep_rec_{0, 0};   // what sleep_pref_ holds
+      uint32_t commanded_sleep_s_() const
+      {
+        return this->last_sleep_duration_s_ != 0 ? this->last_sleep_duration_s_
+                                                 : (uint32_t) this->sleep_duration_;
+      }
     };
 
     inline void LORAClientRestoreState::apply(LORAListener *listener)

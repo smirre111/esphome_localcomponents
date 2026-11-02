@@ -1138,6 +1138,77 @@ TEST(MacWireV1Listener, AWakeFromACommandedSleepAdvancesButSendsNothingExtra) {
     EXPECT_EQ(hub.rol.last_timesync_sent_us_for_test(), first);
 }
 
+// Review rollout-3 D2: a node whose login is pending keeps transmitting (its
+// RX windows follow each uplink) while the hub, holding no keys, drops every
+// frame -- and a stale sleep record could stretch the next login retry by
+// hours. A keyless uplink re-sends the LOGIN at once (rate-limited), without
+// counting the node as heard (the frame is unauthenticated).
+namespace {
+size_t loginsOnAir(const proto_sim::SimRadio &r) {
+    size_t n = 0;
+    for (const auto &f : r.hub_to_node_frames()) {
+        macwire::WireHdr h;
+        size_t off = 0, blen = 0;
+        if (macwire::decode(f.bytes.data(), f.bytes.size(), &h, &off, &blen) &&
+            h.port == macwire::kPortSession)
+            ++n;
+    }
+    return n;
+}
+}  // namespace
+
+TEST(MacWireV1Listener, AKeylessUplinkDuringAPendingLoginResendsTheLoginOnce) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    hub.rol.send_login();
+    const Bytes login = lastDown(hub.radio);
+    LoginMsg *lm = nullptr;
+    {
+        macwire::WireHdr h;
+        size_t off = 0, blen = 0;
+        ASSERT_TRUE(macwire::decode(login.data(), login.size(), &h, &off, &blen));
+        lm = login_msg__unpack(nullptr, blen, login.data() + off);
+    }
+    ASSERT_NE(lm, nullptr);
+    const uint32_t session = lm->nonce;
+    login_msg__free_unpacked(lm, nullptr);
+    ASSERT_TRUE(hub.rol.relogin_pending()) << "precondition: the login is pending";
+    const size_t logins = loginsOnAir(hub.radio);
+    const uint32_t heard = hub.rol.last_heard_epoch_;
+
+    // The node did not hear the LOGIN: it still uses its old session (keys the
+    // hub does not hold), not a session-opening frame.
+    sessionUplink(hub, session, 50);
+    hub.clock.tick(10);
+    EXPECT_EQ(loginsOnAir(hub.radio), logins + 1) << "the LOGIN goes again, now";
+    EXPECT_EQ(hub.rol.last_heard_epoch_, heard) << "an unauthenticated frame is not 'heard'";
+
+    sessionUplink(hub, session, 51);
+    hub.clock.tick(10);
+    EXPECT_EQ(loginsOnAir(hub.radio), logins + 1) << "rate-limited: not again within 5 s";
+
+    proto_sim_timer_advance_us(6'000'000);
+    sessionUplink(hub, session, 52);
+    hub.clock.tick(10);
+    EXPECT_EQ(loginsOnAir(hub.radio), logins + 2) << "after the gap, again";
+}
+
+TEST(MacWireV1Listener, AKeylessUplinkWithNoLoginPendingSendsNoLogin) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    const uint32_t session = openSession(hub);
+    ASSERT_FALSE(hub.rol.relogin_pending());
+    const size_t logins = loginsOnAir(hub.radio);
+    // A frame under a session the hub does not hold keys for (a forgery, or an
+    // old copy): no login is pending, so it is just dropped.
+    sessionUplink(hub, session + 1, hub.rol.sequencer().rxId() + 1);
+    hub.clock.tick(10);
+    EXPECT_EQ(loginsOnAir(hub.radio), logins);
+}
+
 TEST(MacWireV1Listener, AJumpBeforeTheSessionIsConfirmedAdvancesNothing) {
     // The first authenticated uplink of a session the hub does not hold
     // confirmed (after a hub restart, during a login) jumps from whatever the

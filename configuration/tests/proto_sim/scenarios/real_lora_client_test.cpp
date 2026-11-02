@@ -4409,10 +4409,13 @@ TEST(RealLoraClient, AHeardNodeIsAwakeForItsListeningWindowNotForTheModel) {
     EXPECT_EQ(h.rol.ms_until_node_awake_for_test(), 0u)
         << "an interactive node keeps listening for its interactive timeout";
 
-    // Past it: the model governs again.
+    // Past it: the REGISTER, heard after the recorded sleep, consumed that
+    // record (review rollout-3 D2), so no stale wake is predicted any more: an
+    // interactive node sleeps only on the next SLEEP the hub commands.
     h.time.set_now(kNow + 1801, true);
-    EXPECT_GT(h.rol.ms_until_node_awake_for_test(), 0u)
-        << "once the listening window is over, hearing it no longer says anything";
+    EXPECT_EQ(h.rol.ms_until_node_awake_for_test(), 0u)
+        << "a sleep the node has demonstrably ended predicts nothing";
+    EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
 }
 
 TEST(RealLoraClient, AHeardClassANodeIsAwakeOnlyThroughItsReceiveWindows) {
@@ -5291,6 +5294,100 @@ TEST(ConfigHashPersistence, AnUnchangedConfigSkipsRegisterAcrossAHubReboot) {
 // is delayed (5 s + stagger + onboarding gate, or the node's modelled wake).
 // relogin_pending_ defaulted to false, so a cover op in that window was packed
 // PLAINTEXT, refused by the node, and ended in FailRelogin after ~15 s.
+// Review rollout-3 D2: the sleep record survives a hub restart, so its wake
+// must be predicted with the sleep duration the node was actually given, not
+// the hub's current YAML (bench 600 s, then a production build at 21600 s
+// stretched the login retry by 4.9 h).
+namespace {
+struct SleepRecProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::stamp_sleep_epoch_;
+};
+}  // namespace
+
+TEST(ConfigHashPersistence, AWakeIsPredictedWithTheSleepDurationTheNodeWasGiven) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    RealTimeClock t;
+    constexpr uint32_t kSleptAt = 1'789'000'000u;
+    {
+        LORATracker tracker1;
+        SleepRecProbe rol1;
+        rol1.set_name("rol"); rol1.set_short_address(18); rol1.set_subnet_address(2);
+        rol1.set_sleep_duration(600);   // the bench build
+        rol1.set_address(kMacRol2);
+        t.set_now(kSleptAt, true);
+        rol1.set_time(&t);
+        tracker1.register_client(&rol1);
+        rol1.setup();
+        rol1.registered_ = true;
+        rol1.stamp_sleep_epoch_();      // the node acknowledged a SLEEP (600 s)
+        rol1.save_state_for_test();
+    }
+    {
+        LORATracker tracker2;
+        LORAClient  rol2;
+        rol2.set_name("rol"); rol2.set_short_address(18); rol2.set_subnet_address(2);
+        rol2.set_sleep_duration(21600); // the production build after the restart
+        rol2.set_address(kMacRol2);
+        t.set_now(kSleptAt + 700, true);
+        rol2.set_time(&t);
+        tracker2.register_client(&rol2);
+        rol2.setup();
+        ASSERT_EQ(rol2.last_sleep_epoch_, kSleptAt) << "precondition: the record survived";
+        EXPECT_EQ(rol2.ms_until_node_awake_for_test(), 0u)
+            << "the node was told 600 s: 700 s later it is awake, not 5.8 h away";
+    }
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
+TEST(ConfigHashPersistence, HearingTheNodeAfterItsSleepConsumesTheRecord) {
+    proto_sim::SimClock clock;
+    proto_sim::SimRadio radio;
+    esphome::shim_hooks::set_active_clock(&clock);
+    esphome::shim_hooks::reset_nvs();
+    esphome::lora_tracker::shim_hooks::set_active_radio(&radio);
+    RealTimeClock t;
+    constexpr uint32_t kSleptAt = 1'789'000'000u;
+    {
+        LORATracker tracker1;
+        SleepRecProbe rol1;
+        rol1.set_name("rol"); rol1.set_short_address(18); rol1.set_subnet_address(2);
+        rol1.set_sleep_duration(21600);
+        rol1.set_address(kMacRol2);
+        t.set_now(kSleptAt, true);
+        rol1.set_time(&t);
+        tracker1.register_client(&rol1);
+        rol1.setup();
+        rol1.registered_ = true;
+        rol1.stamp_sleep_epoch_();
+        rol1.save_state_for_test();
+
+        t.set_now(kSleptAt + 100, true);   // the node is back (a REGISTER: heard)
+        auto reg = real_helpers::serialize_register(kMacRol2, /*needs_config=*/false);
+        rol1.set_response(reg.data(), reg.size());
+        EXPECT_EQ(rol1.last_sleep_epoch_, 0u) << "the sleep is over: the record is spent";
+    }
+    {
+        LORATracker tracker2;
+        LORAClient  rol2;
+        rol2.set_name("rol"); rol2.set_short_address(18); rol2.set_subnet_address(2);
+        rol2.set_sleep_duration(21600);
+        rol2.set_address(kMacRol2);
+        t.set_now(kSleptAt + 200, true);
+        rol2.set_time(&t);
+        tracker2.register_client(&rol2);
+        rol2.setup();
+        EXPECT_EQ(rol2.last_sleep_epoch_, 0u) << "and a hub restart does not bring it back";
+        EXPECT_EQ(rol2.ms_until_node_awake_for_test(), 0u);
+    }
+    esphome::lora_tracker::shim_hooks::set_active_radio(nullptr);
+    esphome::shim_hooks::set_active_clock(nullptr);
+}
+
 TEST(ConfigHashPersistence, ACommandAfterAHubRebootWaitsForTheSessionInsteadOfGoingPlaintext) {
     proto_sim::SimClock clock;
     proto_sim::SimRadio radio;
@@ -11598,7 +11695,9 @@ TEST(SleepGate, ANodeHeardSinceTheSleepStaysAwakeAfterTheHeardWindowLapses) {
     h.time.set_now(kModeBNow + 100, true);
     GP(h).note_node_heard_();
     h.time.set_now(kModeBNow + 100 + 7200, true);        // well past the 30 min window
-    ASSERT_FALSE(GP(h).is_node_awake_()) << "precondition: the clock model alone says asleep again";
+    // Since review rollout-3 D2 the hearing consumes the sleep record, so the
+    // clock model itself no longer says asleep again.
+    EXPECT_TRUE(GP(h).is_node_awake_());
     ASSERT_LT(kModeBNow + 100 + 7200, kWakeAt - 100);
     EXPECT_FALSE(GP(h).node_asleep_());
     sendOpen(h);

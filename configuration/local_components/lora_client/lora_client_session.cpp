@@ -610,6 +610,26 @@ namespace esphome
         this->host_.session_node_restored(fcnt - rx);
     }
 
+    // The node is transmitting (and listens after each uplink) while the hub
+    // holds no keys because its LOGIN has not landed: re-send it now instead of
+    // at the next back-off step, which a stale sleep record could stretch by
+    // hours (review rollout-3 D2). Rate-limited (the node accepts one LoginMsg
+    // per 5 s); not "heard" -- the frame is unauthenticated, and forging one
+    // costs the attacker a LOGIN burst per kKeylessLoginGapUs at most.
+    void HubSession::note_keyless_uplink_()
+    {
+      if (!this->login_.relogin_pending)
+        return;
+      const int64_t now_us = esp_timer_get_time();
+      if (this->last_keyless_login_us_ != 0 && now_us - this->last_keyless_login_us_ < kKeylessLoginGapUs)
+        return;
+      this->last_keyless_login_us_ = (now_us > 0) ? now_us : 1;
+      ESP_LOGI(TAG, "[%s] Node transmits without the new session — re-sending its LOGIN now",
+               this->host_.session_name());
+      this->host_.session_cancel_timeout("login_retry");
+      this->host_.session_set_timeout("login_keyless", 0, [this]() { this->do_login_and_arm_retry(); });
+    }
+
     bool HubSession::advance_tx_for_boot()
     {
       if (this->s_since_boot_advance() < modebsup::kRegridMinGapS)
@@ -1110,6 +1130,7 @@ namespace esphome
       {
         ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", up.sender);
         this->drop_candidate_(up);
+        this->note_keyless_uplink_();
         return false;
       }
 
