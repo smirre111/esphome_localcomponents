@@ -321,6 +321,13 @@ namespace esphome
       // frame is clear if it ends before that frame starts.
       int64_t   nextClearT0ForSlotUs(uint8_t slot, int64_t now_us, int copies,
                                      size_t len, bool expects_reply) const;
+      // A node (`key`, its short address) owes the hub a reply in [start, end):
+      // no burst is started in that window (TxScheduler listen windows).
+      void      reserveListen(uint32_t key, int64_t start_us, int64_t end_us)
+      {
+        this->sched_.reserve_listen(key, start_us, end_us);
+      }
+      void      releaseListen(uint32_t key) { this->sched_.release_listen(key); }
       uint32_t  msUntilNextClearT0(uint8_t slot) const;
 
       // Returns false when the frame was DROPPED rather than queued — no free
@@ -589,6 +596,7 @@ namespace esphome
       // This T0 as the hub grid describes it: round since the anchor and the
       // offset into that round. False without a grid, or before the anchor.
       bool fireStampFor_(int64_t t0_us, uint32_t *round, uint32_t *offset_us) const;
+      TxPolicy deferPastListen_(const TxPolicy &in, size_t len) const;
       // One expression for when a burst stops occupying the channel.
       int64_t burstEndUs_(int64_t start_us, int copies, uint32_t stride_ms,
                           size_t len, bool expects_reply = true) const;

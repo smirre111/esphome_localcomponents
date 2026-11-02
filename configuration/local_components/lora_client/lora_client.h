@@ -1544,6 +1544,9 @@ namespace esphome
       // deferred ACK arrives and cancels the retransmit before it fires.
       static constexpr uint32_t kOpRetryIntervalMs = 3000;
       static constexpr uint8_t  kOpMaxRetries      = 4;
+      // How long after the mark of a single placed tracked command its ack is
+      // listened for (other nodes' bursts wait): the single-shot ack wait ceiling.
+      static constexpr uint32_t kAckListenMs       = 3000;
 
       bool     encode_ctl_(const DeliveryRequest::FrameFn &frame);   // the cover/sys op's payload
       void     place_ctl_(const MacFrame &f, const DeliveryAttempt &a);

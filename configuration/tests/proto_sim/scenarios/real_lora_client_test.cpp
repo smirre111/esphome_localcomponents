@@ -2457,6 +2457,32 @@ TEST(RealLoraClient, APhaseReportEarnsASingleCopyDownlink) {
         << "the downlink must go out as ONE placed copy, not a 17-copy burst";
 }
 
+TEST(RealLoraClient, ASingleShotCommandHoldsOtherNodesBurstsUntilItsAck) {
+    // 2026-11-01 23:00: the ack of a single placed copy is due ~1.7-2 s after
+    // the mark. The listener tells the tracker, which holds every other node's
+    // burst past that window; the ack (or giving up) releases it.
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    h.rol.registered_ = true;
+    h.rol.node_fw_version_ = 0x00010203;
+    h.rol.enable_timed_mode(true);
+    give_phase_report(h);
+    ASSERT_EQ(h.rol.txPolicyNow(), timedmode::TxPolicy::SingleShot) << "precondition";
+
+    h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION,
+                               COV_OPERATION__CMD_OPEN, 0.0f);
+    ASSERT_EQ(h.tracker.last_copies, 1) << "precondition: one placed copy";
+    ASSERT_EQ(h.tracker.listen_windows.count(18), 1u) << "the ack window is announced";
+    const auto w = h.tracker.listen_windows[18];
+    EXPECT_EQ(w.start_us, h.rol.link_timing().last_placed_t0_us()) << "from the mark";
+    EXPECT_EQ(w.end_us - w.start_us,
+              (int64_t) 3000 * 1000) << "the single-shot ack wait ceiling";
+
+    deliverAck(h.rol, AK(h.rol).ctl().last_msgid);
+    ASSERT_FALSE(h.rol.awaitingAck()) << "precondition: acked";
+    EXPECT_EQ(h.tracker.listen_windows.count(18), 0u) << "the ack releases the window";
+}
+
 TEST(RealLoraClient, ANodeThatSaysItIsNotInModeBKeepsTheHubOnBursts) {
     // Decided 2026-09-14: the node is the authority on its own promotion. It
     // applies the phase test itself (enough samples, all inside the guard,

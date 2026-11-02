@@ -123,29 +123,81 @@ namespace esphome
       }
       // Walk `t0` forward a round at a time (at most max_rounds) to the first
       // mark whose span (span_of(t0, &start, &end)) overlaps no live
-      // reservation. False: none found; t0 is then max_rounds rounds on.
+      // reservation -- and, for a burst (`respect_listen`), no live listen
+      // window. False: none found; t0 is then max_rounds rounds on.
       template <class SpanFn>
       bool first_clear(int64_t &t0, int64_t now_us, uint32_t max_rounds, int64_t round_us,
-                       SpanFn span_of) const
+                       SpanFn span_of, bool respect_listen = false) const
       {
         std::lock_guard<std::mutex> lock(this->mutex_);
         for (uint32_t n = 0; n < max_rounds; ++n, t0 += round_us)
         {
           int64_t start = 0, end = 0;
           span_of(t0, &start, &end);
-          bool clear = true;
-          for (const Reservation &r : this->reservations_)
-          {
-            if (r.end_us > now_us && start < r.end_us && r.start_us < end)
-            {
-              clear = false;
-              break;
-            }
-          }
-          if (clear)
+          if (!overlaps_locked_(this->reservations_, now_us, start, end) &&
+              !(respect_listen && overlaps_locked_(this->listen_, now_us, start, end)))
             return true;
         }
         return false;
+      }
+
+      // ---- listen windows: a reply another node owes the hub ----
+      // The hub cannot receive while it transmits. A node that was sent ONE
+      // placed copy of a tracked command acks it inside [start, end); a burst
+      // for any other node started in that window would make the hub deaf to
+      // the ack (2026-11-01 23:00: node 2's SLEEP ack lost in node 1's retry
+      // burst). Bursts are placed past live windows; single copies are not held
+      // (one copy is as short as the ack it might meet). One window per node
+      // (`key`); a full table evicts the window that ends first.
+      static constexpr size_t kMaxListenWindows = 8;
+      void reserve_listen(uint32_t key, int64_t start_us, int64_t end_us)
+      {
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        size_t slot = 0;
+        for (size_t i = 0; i < kMaxListenWindows; ++i)
+        {
+          if (this->listen_keys_[i] == key)
+          {
+            slot = i;
+            break;
+          }
+          if (this->listen_[i].end_us < this->listen_[slot].end_us)
+            slot = i;
+        }
+        this->listen_keys_[slot]     = key;
+        this->listen_[slot].start_us = start_us;
+        this->listen_[slot].end_us   = end_us;
+      }
+      void release_listen(uint32_t key)
+      {
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        for (size_t i = 0; i < kMaxListenWindows; ++i)
+          if (this->listen_keys_[i] == key)
+          {
+            this->listen_keys_[i] = 0;
+            this->listen_[i]      = Reservation{};
+          }
+      }
+      // The first start >= start_us at which a span of dur_us overlaps no live
+      // listen window.
+      int64_t after_listen(int64_t start_us, int64_t dur_us, int64_t now_us) const
+      {
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        for (size_t pass = 0; pass <= kMaxListenWindows; ++pass)
+        {
+          bool moved = false;
+          for (const Reservation &w : this->listen_)
+          {
+            if (w.end_us > now_us && start_us < w.end_us && w.start_us < start_us + dur_us)
+            {
+              start_us = w.end_us;
+              moved    = true;
+            }
+          }
+          if (!moved)
+            break;
+        }
+        return start_us;
       }
 
     private:
@@ -154,6 +206,15 @@ namespace esphome
         int64_t start_us{0};
         int64_t end_us{0};
       };
+      template <size_t N>
+      static bool overlaps_locked_(const std::array<Reservation, N> &spans, int64_t now_us,
+                                   int64_t start, int64_t end)
+      {
+        for (const Reservation &r : spans)
+          if (r.end_us > now_us && start < r.end_us && r.start_us < end)
+            return true;
+        return false;
+      }
       void reserve_locked_(int64_t start_us, int64_t end_us)   // caller holds mutex_
       {
         size_t victim = 0;
@@ -179,6 +240,8 @@ namespace esphome
       // burst_busy_until_us_ only knows the frame currently on the air.
       int64_t queued_air_end_us_{0};
       std::array<Reservation, kMaxReservations> reservations_{};
+      std::array<Reservation, kMaxListenWindows> listen_{};
+      std::array<uint32_t, kMaxListenWindows>    listen_keys_{};
     };
 
   }  // namespace lora_tracker

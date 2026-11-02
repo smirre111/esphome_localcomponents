@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <map>
 #include <vector>
 
 // Production's real lora_tracker.h pulls in lora_client.h transitively;
@@ -97,6 +98,14 @@ public:
     int64_t  nextClearT0ForSlotUs(uint8_t slot, int64_t now_us, int copies,
                                   size_t len, bool expects_reply) const;
     uint32_t msUntilNextClearT0(uint8_t slot) const;
+    // Listen windows (the real TxScheduler holds bursts past them). The shim
+    // records them: key -> [start, end); a release clears the key.
+    struct ListenWindow { int64_t start_us{0}; int64_t end_us{0}; };
+    std::map<uint32_t, ListenWindow> listen_windows;
+    void reserveListen(uint32_t key, int64_t start_us, int64_t end_us) {
+        listen_windows[key] = ListenWindow{start_us, end_us};
+    }
+    void releaseListen(uint32_t key) { listen_windows.erase(key); }
     // Test seam: stand a burst in the way of the grid.
     int64_t  busy_until_us{0};
     // Test seam for txDrainUs(): production prices the frames queued behind the

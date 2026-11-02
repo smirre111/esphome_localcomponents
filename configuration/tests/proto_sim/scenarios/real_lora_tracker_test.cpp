@@ -1959,3 +1959,58 @@ TEST(RealTrackerSealer, AFrameAskingForNoFireStampIsNotStampedEvenOnAGrid) {
         freeView(m);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Listen windows (2026-11-01 23:00): node 2's SLEEP ack was due while the hub
+// burst node 1's retry, and the hub cannot receive while it transmits. A burst
+// is held past another node's pending-ack window; a single copy is not.
+// ---------------------------------------------------------------------------
+TEST(RealTrackerListen, AnUnplacedBurstWaitsForAnotherNodesAckWindow) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    DeferProbe t;
+    t.init();
+    proto_sim_timer_set_now_us(10'000'000);
+    const int64_t now = 10'000'000;
+    t.reserveListen(18, now + 500'000, now + 3'000'000);   // node 18 owes an ack
+
+    auto frame = packedOperationFrame();
+    TxPolicy burst;                                        // 17 copies, unplaced
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), burst));
+    EXPECT_GE(t.placedBusyUntilUs(), now + 3'000'000)
+        << "the burst is placed after the window, not on top of the ack";
+}
+
+TEST(RealTrackerListen, ASingleCopyAndAReleasedWindowAreNotHeld) {
+    lorahal::rec().reset();
+    proto_sim_timer_reset();
+    DeferProbe t;
+    t.init();
+    proto_sim_timer_set_now_us(10'000'000);
+    const int64_t now = 10'000'000;
+    t.reserveListen(18, now + 100'000, now + 3'000'000);   // overlaps even one copy
+
+    auto frame = packedOperationFrame();
+    TxPolicy one;
+    one.copies = 1;
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), one));
+    EXPECT_EQ(t.placedBusyUntilUs(), 0) << "one copy goes as asked";
+
+    t.releaseListen(18);   // the ack arrived
+    TxPolicy burst;
+    ASSERT_TRUE(t.send(frame.data(), frame.size(), burst));
+    EXPECT_EQ(t.placedBusyUntilUs(), 0) << "nothing to wait for any more";
+}
+
+TEST(RealTrackerListen, APlacedBurstSkipsAMarkInsideTheWindowButASingleCopyDoesNot) {
+    DeferProbe t;
+    t.startGrid();
+    const int64_t a = t.gridAnchorUs();
+    constexpr uint8_t kSlot = 1;
+    const int64_t mark = t.nextT0ForSlotUs(kSlot, a + 1'000'000);
+    t.reserveListen(18, mark - 100'000, mark + 1'000'000);
+    EXPECT_EQ(t.nextClearT0ForSlotUs(kSlot, a + 1'000'000, 1, 26, true), mark)
+        << "a single copy may use the mark";
+    EXPECT_GT(t.nextClearT0ForSlotUs(kSlot, a + 1'000'000, 0, 26, true), mark)
+        << "a burst may not start on top of another node's ack";
+}

@@ -61,6 +61,9 @@ namespace esphome
     // would supersede the frame it is a retry of).
     void LORAListener::place_ctl_(const MacFrame &f, const DeliveryAttempt &a)
     {
+      // This node's own pending-ack window must not hold back its own retry burst.
+      if (this->parent_ != nullptr)
+        this->parent_->releaseListen(this->short_address_);
       // The tracked command downlink is the one B1's gate is about: with
       // alignment on, this is the burst that must observably start on the
       // grid. With it off (the default) behaviour is byte-for-byte as before.
@@ -75,6 +78,14 @@ namespace esphome
       if (!a.resent_stored)
         this->dlv_.set_mark_us(CH_CONTROL, this->link_.last_placed_single_shot()
                                                ? this->link_.last_placed_t0_us() : 0);
+      // ONE copy went out: its ack is due within the ack wait after the mark, and
+      // no other node's burst may make the hub deaf in that window.
+      if (this->link_.last_placed_single_shot() && this->parent_ != nullptr)
+      {
+        const int64_t mark = this->link_.last_placed_t0_us();
+        this->parent_->reserveListen(this->short_address_, mark,
+                                     mark + (int64_t) kAckListenMs * 1000);
+      }
     }
 
     // The Control channel's request: the command the slot describes, delivered by
@@ -125,6 +136,8 @@ namespace esphome
 
     bool LORAListener::on_ctl_acked_(uint32_t ack_msg_id)
     {
+      if (this->parent_ != nullptr)
+        this->parent_->releaseListen(this->short_address_);   // the ack is in
       this->dlv_.clear_awaiting(CH_CONTROL);
       this->set_command_failed_(false);
       ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
@@ -142,6 +155,8 @@ namespace esphome
     // session change; a second one would only repeat it).
     void LORAListener::on_ctl_abandoned_()
     {
+      if (this->parent_ != nullptr)
+        this->parent_->releaseListen(this->short_address_);
       if (this->op_is_sleep_())
         this->release_sleep_gate_();   // a refused or abandoned SLEEP is settled
       this->dlv_.forget_ack_ids(CH_CONTROL);
@@ -155,6 +170,8 @@ namespace esphome
     {
       // A late ack of a command given up on must not revive it.
       this->dlv_.forget_ack_ids(CH_CONTROL);
+      if (this->parent_ != nullptr)
+        this->parent_->releaseListen(this->short_address_);
       if (this->op_is_sleep_())
       {
         this->on_sleep_unconfirmed_();

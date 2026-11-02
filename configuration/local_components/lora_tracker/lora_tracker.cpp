@@ -824,7 +824,7 @@ namespace esphome
         *end   = this->burstEndUs_(fire, copies, 0, this->onAirLen_(len, true), expects_reply);
       };
       if (this->sched_.first_clear(t0, now_us, kMaxClearSearchRounds, (int64_t) timedgrid::kRoundUs,
-                                   span_of))
+                                   span_of, /*respect_listen=*/copies != 1))
         return t0;
       ESP_LOGW(TAG, "no clear mark for slot %u in %u rounds", (unsigned) slot,
                (unsigned) kMaxClearSearchRounds);
@@ -841,8 +841,27 @@ namespace esphome
       return d <= 0 ? 0u : (uint32_t) ((d + 999) / 1000);
     }
 
-    bool LORATracker::send(uint8_t *data, size_t len, const TxPolicy &policy)
+    // An unplaced BURST is held past every live listen window (another node's
+    // ack is due there and the hub is deaf while it transmits); a single copy,
+    // or a frame a placement already put on a clear mark, goes as asked.
+    TxPolicy LORATracker::deferPastListen_(const TxPolicy &in, size_t len) const
     {
+      TxPolicy p = in;
+      if (p.copies == 1 || p.earliest_us != 0)
+        return p;
+      const int64_t now_us = esp_timer_get_time();
+      const int64_t dur_us =
+          this->burstEndUs_(now_us, p.copies, p.stride_ms, this->onAirLen_(len, p.fire_stamp),
+                            p.expects_reply) - now_us;
+      const int64_t start_us = this->sched_.after_listen(now_us, dur_us, now_us);
+      if (start_us > now_us)
+        p.earliest_us = start_us;
+      return p;
+    }
+
+    bool LORATracker::send(uint8_t *data, size_t len, const TxPolicy &in_policy)
+    {
+      const TxPolicy policy = this->deferPastListen_(in_policy, len);
       // Validate inputs first
       if (!data || len == 0)
       {
