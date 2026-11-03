@@ -165,8 +165,8 @@ TEST(HubWireRoute, EveryAckedDeliveryAndOnlyThoseAskForAMacAck) {
         {hubframes::DL_OPERATION,    macwire::kPortApp,      true},
         {hubframes::DL_SYSOP,        macwire::kPortApp,      true},
         {hubframes::DL_SCHEDULE,     macwire::kPortApp,      true},
-        {hubframes::DL_CLIENTCONFIG, macwire::kPortApp,      false},
-        {hubframes::DL_COVERCONFIG,  macwire::kPortApp,      false},
+        {hubframes::DL_CLIENTCONFIG, macwire::kPortApp,      true},   // sealed only (D1)
+        {hubframes::DL_COVERCONFIG,  macwire::kPortApp,      true},
         {hubframes::DL_TIMESYNC,     macwire::kPortApp,      false},
         {hubframes::DL_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
         {hubframes::DL_MODETEST,     macwire::kPortMac0Mgmt, false},
@@ -190,8 +190,10 @@ TEST(HubWireRoute, EveryAckedDeliveryAndOnlyThoseAskForAMacAck) {
         {hubframes::DL_SCHEDULE,     deliverypolicy::kSchedulePolicy},
         {hubframes::DL_GRIDSYNC,     deliverypolicy::kGridSyncPolicy},
         {hubframes::DL_TIMESYNC,     deliverypolicy::kTimeSyncPolicy},
-        {hubframes::DL_CLIENTCONFIG, deliverypolicy::kConfigPushPolicy},
-        {hubframes::DL_COVERCONFIG,  deliverypolicy::kConfigPushPolicy},
+        // Sealed only: the bootstrap plaintext push (kConfigPushPolicy, no
+        // session) goes without ACK_REQ -- HubSession::frame ANDs it with seal.
+        {hubframes::DL_CLIENTCONFIG, deliverypolicy::kConfigAckedPolicy},
+        {hubframes::DL_COVERCONFIG,  deliverypolicy::kConfigAckedPolicy},
     };
     for (const P2 &x : pol)
         EXPECT_EQ(hubwire::routeDownlink(x.c).ack_req, x.p.mode == Mode::Acked) << x.c;

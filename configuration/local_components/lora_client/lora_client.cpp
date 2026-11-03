@@ -1812,13 +1812,15 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // the header, msgid, encryption and placement are the mechanism's.
     bool LORAListener::send_cover_config(const ::CoverConfig &cc)
     {
-      if (this->setup_collect_)
+      if (this->config_goes_acked_())   // CoverConfig: acked on a session
       {
         this->enqueue_setup_(this->acked_setup_request_(
             "CoverConfig", [payload = cc](hubframes::Down *op) mutable {
               op->cmd_case    = hubframes::DL_COVERCONFIG;
               op->coverconfig = &payload;
             }));
+        if (!this->setup_collect_)
+          this->start_setup_();
         return true;   // queued, acked on the setup channel
       }
       bool sent = false;
@@ -1842,10 +1844,13 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       DeliveryRequest req;
       req.what   = what;
       req.policy = deliverypolicy::kConfigAckedPolicy;
-      req.encode = [fill](bool, uint32_t *, const DeliveryRequest::FrameFn &frame) {
+      req.encode = [this, what, fill](bool, uint32_t *, const DeliveryRequest::FrameFn &frame) {
         hubframes::Down op{};
         fill(&op);
-        return frame(&op);
+        if (frame(&op))
+          return true;
+        ESP_LOGE(TAG, "[%s] Failed to pack %s", this->get_name().c_str(), what);
+        return false;
       };
       req.place = [this](const MacFrame &f, const DeliveryAttempt &) {
         this->send_aligned_(f.bytes.data(), f.bytes.size(), f.seal);
@@ -1871,15 +1876,32 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // the node registered) as acked requests and send the first.
     void LORAListener::push_config_acked_(bool notify_children)
     {
-      this->setup_queue_.clear();
-      this->setup_failed_  = false;
       this->setup_collect_ = true;
       this->send_remote_config();
       if (notify_children)
         for (auto *node : this->nodes_)
           node->on_register();
       this->setup_collect_ = false;
+      this->start_setup_();
+    }
+
+    // Send the queued setup requests unless a sequence is already on its way
+    // (it picks them up in order).
+    void LORAListener::start_setup_()
+    {
+      if (this->dlv_.slot(CH_SETUP).awaiting_ack)
+        return;
+      this->setup_failed_ = false;
       this->setup_next_();
+    }
+
+    // Every config that will go out ENCRYPTED (a confirmed session) is an acked
+    // setup request (review rollout-3 D1); only the plaintext bootstrap to an
+    // unprovisioned node is fired. (push_config_acked_ runs only from the session
+    // confirmation, so the session is already confirmed while it collects.)
+    bool LORAListener::config_goes_acked_() const
+    {
+      return this->session_.confirmed();
     }
 
     // The previous setup request is done (acked or given up): the next, or the
@@ -1923,12 +1945,14 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       // The hub then set config_synced_ = true regardless and never retried, so
       // a config change flashed into the hub was lost silently.
       ClientConfig initial = CLIENT_CONFIG__INIT;
-      if (this->setup_collect_)
+      if (this->config_goes_acked_())   // ClientConfig: acked on a session
       {
         this->enqueue_setup_(this->acked_setup_request_(
             "ClientConfig", [this, payload = initial](hubframes::Down *op) mutable {
               this->fill_client_config_(op, &payload);
             }));
+        if (!this->setup_collect_)
+          this->start_setup_();
         return;
       }
       DeliveryRequest req;

@@ -1002,6 +1002,8 @@ namespace esphome
       // an acked push this boot): only then is the current hash persisted.
       bool                 config_hash_acked_{false};
       void push_config_acked_(bool notify_children);
+      void start_setup_();
+      bool config_goes_acked_() const;
       bool setup_in_progress_() const
       {
         return !this->setup_queue_.empty() || this->dlv_.slot(CH_SETUP).awaiting_ack;

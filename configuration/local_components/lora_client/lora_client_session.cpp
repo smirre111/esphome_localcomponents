@@ -1485,7 +1485,11 @@ namespace esphome
       const bool seal = encrypt && s_keys().sessionId(static_cast<mac::Addr>(this->host_.session_peer()),
                                                       &unused_session_id);
       macwire::WireHdr h;
-      h.flags  = macwire::withAuth(ackReqFlag(r.ack_req, ack_req),
+      // A route's ACK_REQ on SEALED frames only: the plaintext bootstrap
+      // ClientConfig/CoverConfig to an unprovisioned node stays ACK_REQ = 0
+      // (node portmap::ackReqExpected = acked && sealed). Every other acked
+      // route is only ever sent sealed.
+      h.flags  = macwire::withAuth(ackReqFlag(r.ack_req && seal, ack_req),
                                    seal ? macwire::Auth::Session : macwire::Auth::None);
       h.dst    = static_cast<uint8_t>(this->host_.session_peer());
       h.src    = static_cast<uint8_t>(kHubAddress);

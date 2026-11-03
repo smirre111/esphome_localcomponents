@@ -195,6 +195,17 @@ struct GoldenHub {
         p.handle_command_ack_(p.ctl().last_msgid);
     }
 
+    // The node acks every acked config push in turn (review rollout-3 D1): the
+    // setup channel sends the next one only after the last one's ack.
+    void ackSetup() {
+        auto &p = static_cast<GProbe &>(rol);
+        for (int i = 0; i < 8; ++i) {
+            auto &s = rol.dlv_slot_for_test(esphome::lora_tracker::CH_SETUP);
+            if (!s.awaiting_ack) break;
+            p.handle_command_ack_(s.last_msgid);
+        }
+    }
+
     // Everything sent so far, both streams.
     std::string dump() const {
         std::ostringstream s;
@@ -261,9 +272,11 @@ TEST(GoldenHubFrames, EncryptedCoverOpAndSysop) {
 TEST(GoldenHubFrames, EncryptedFirePushes) {
     GoldenHub h;
     h.session();
+    h.ackSetup();                  // the session's own config push (D1)
     h.rol.send_timesync();
-    h.rol.send_remote_config();
+    h.rol.send_remote_config();    // on a session: acked, one at a time (D1)
     h.cover.send_remote_config();
+    h.ackSetup();
     h.tick(10);
     EXPECT_TRUE(golden::matches("hub_encrypted_fire_pushes", h.dump()));
 }

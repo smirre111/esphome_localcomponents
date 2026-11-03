@@ -11103,6 +11103,7 @@ TEST(FireDelivery, AFrameThatCannotBePackedSendsNothingAndNamesItselfInTheLog) {
     makeCover(r.rol, cover);
     r.session();
     ASSERT_TRUE(r.rol.session_confirmed());
+    ackConfigPushes(r.rol);   // the session's own acked config push is done
     // A session whose keys are gone (a new challenge cleared them): sealing is
     // impossible, and falling back to plaintext would be refused by the node.
     FP(r.rol).clearSessionKeys_();
@@ -11114,8 +11115,11 @@ TEST(FireDelivery, AFrameThatCannotBePackedSendsNothingAndNamesItselfInTheLog) {
 
     EXPECT_EQ(r.tracker.sent_copies.size(), sends0) << "nothing is sent in the clear instead";
     EXPECT_EQ(occurrences(log, "[rol] Failed to pack TimeSync"), 1) << log;
+    // On a session the config goes acked (D1), one at a time on the setup
+    // channel: the ClientConfig's failed pack names itself; the CoverConfig waits
+    // behind it.
     EXPECT_EQ(occurrences(log, "[rol] Failed to pack ClientConfig"), 1) << log;
-    EXPECT_EQ(occurrences(log, "[rol] Failed to pack downlink"), 1) << log;
+    EXPECT_EQ(occurrences(log, "[rol] Failed to pack CoverConfig"), 0) << log;
     EXPECT_EQ(occurrences(log, "TimeSync sent"), 0);
 }
 
@@ -11128,10 +11132,12 @@ TEST(FireDelivery, TheThreeFramesAreSealedOnAConfirmedSessionAndNeverInTheClear)
     makeCover(r.rol, cover);
     r.session();
     ASSERT_TRUE(r.rol.session_confirmed());
+    ackConfigPushes(r.rol);   // the session's own acked config push is done
     r.secs(5);
     const size_t n0 = airSeen(r.radio, r.base).size();
 
     fireAllThree(r.rol, cover);
+    ackConfigPushes(r.rol);   // the setup channel sends the CoverConfig after the ClientConfig's ack
 
     const auto seen = airSeen(r.radio, r.base);
     ASSERT_GE(seen.size(), n0 + 3);
@@ -11140,6 +11146,37 @@ TEST(FireDelivery, TheThreeFramesAreSealedOnAConfirmedSessionAndNeverInTheClear)
         for (size_t i = n0; i < seen.size(); ++i)
             if (seen[i].cmd == c) EXPECT_TRUE(seen[i].sealed) << "a readable frame is refused by the node";
     }
+}
+
+// On a confirmed session EVERY config is an acked setup request (review rollout-3
+// D1, node 747c88a), not only the one deferred to the session: a ClientConfig or
+// CoverConfig the node does not ack is sent again, the same bytes, and the next
+// one waits behind it. (The sealed frame carries ACK_REQ either way -- the route
+// says so -- so only the retry tells the two paths apart.)
+TEST(FireDelivery, AConfigSentOnASessionIsRetriedUntilTheNodeAcksIt) {
+    ensure_psa_ready();
+    ModeBRig r;
+    esphome::loracov::LoraCoverComponent cover;
+    makeCover(r.rol, cover);
+    r.session();
+    ASSERT_TRUE(r.rol.session_confirmed());
+    ackConfigPushes(r.rol);   // the session's own acked config push is done
+    r.secs(5);
+    const size_t n0 = airSeen(r.radio, r.base).size();
+    auto &setup = r.rol.dlv_slot_for_test(esphome::lora_tracker::CH_SETUP);
+
+    r.rol.send_remote_config();
+    cover.send_remote_config();
+    EXPECT_TRUE(setup.awaiting_ack) << "the ClientConfig waits for its ack";
+    r.secs(6);                // past the first ack wait, no ack
+    auto seen = airSeen(r.radio, r.base);
+    EXPECT_EQ(countCmd(seen, OpCmd::ClientConfig, n0), 2u) << "retried";
+    EXPECT_EQ(countCmd(seen, OpCmd::CoverConfig, n0), 0u) << "queued behind the ClientConfig";
+
+    ackConfigPushes(r.rol);
+    seen = airSeen(r.radio, r.base);
+    EXPECT_EQ(countCmd(seen, OpCmd::CoverConfig, n0), 1u) << "sent once the ClientConfig is acked";
+    EXPECT_FALSE(setup.awaiting_ack);
 }
 
 TEST(FireDelivery, TheThreeFramesGoInTheClearBeforeAnySessionExistsTheBootstrap) {
@@ -12300,6 +12337,7 @@ TEST(F4PerFrameSeal, TheCopySealerRefusesAFrameAfterAClearAndAfterAReKey) {
         << "re-keyed since the frame was sealed";
     EXPECT_EQ(f.rol.staleSessionDropsForTest(), before + 1);
     // A frame sealed under the NEW keys is fine...
+    ackConfigPushes(f.rol);   // the setup channel takes the next config once the last is acked
     f.rol.send_remote_config();
     uint64_t fresh = f.tracker.sent_policy.back().seal_binding;
     EXPECT_TRUE(mac2::LinkSecurity::copySealerV1(&fresh, hdr, cb.data(), cb.size(), tag));

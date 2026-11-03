@@ -26,8 +26,8 @@ static constexpr RouteRow kRoutes[] = {
     {hubframes::DL_OPERATION,    macwire::kPortApp,      true},
     {hubframes::DL_SYSOP,        macwire::kPortApp,      true},
     {hubframes::DL_SCHEDULE,     macwire::kPortApp,      true},
-    {hubframes::DL_CLIENTCONFIG, macwire::kPortApp,      false},
-    {hubframes::DL_COVERCONFIG,  macwire::kPortApp,      false},
+    {hubframes::DL_CLIENTCONFIG, macwire::kPortApp,      true},   // sealed only (D1)
+    {hubframes::DL_COVERCONFIG,  macwire::kPortApp,      true},   // sealed only (D1)
     {hubframes::DL_TIMESYNC,     macwire::kPortApp,      false},
 };
 
