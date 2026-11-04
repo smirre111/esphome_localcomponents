@@ -755,6 +755,128 @@ TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin
            "converge";
 }
 
+// ---------------------------------------------------------------------------
+// The LOGIN that answers a REGISTER from a Mode B node (rollout-4, 2026-11-03).
+//
+// After a hub flash that changes the config hash the hub asks every node to
+// REGISTER, and answers each REGISTER with a LOGIN 4 s later. A node still in
+// Mode B (a hub reboot does not demote it: its GridDemote is rate-limited to one
+// per hour) listens only in one ~29 ms window per 1.5 s round, at its own mark.
+// The LOGIN was an unplaced 17-copy burst, and its start was a fixed delay after
+// the REGISTER -- itself sent at the node's mark + ulOffset -- so every LOGIN of
+// a REGISTER cycle met the node's window at the same phase: node 1 missed 20 in a
+// row (5 REGISTER cycles, 16:55:45..16:59:46) and needed ~6 min to log in.
+//
+// The REGISTER's receive stamp is the node's mark (+ ulOffset). The LOGIN goes
+// out as the same burst, but with copy 0 placed on one of those marks: a Mode B
+// node catches copy 0 in its window, a Mode A node (free-running window) still
+// has all 17 copies.
+//
+// The node's half is real: its grid comes from the hub's real GridSync, the
+// REGISTER's T0 is where the node's own uplink aim (gridstate::aimUplink) puts
+// it, and "caught" is judged against the window the node itself would arm.
+TEST_F(Seam, TheLoginAnsweringAModeBNodesRegisterLandsInItsOwnWindow) {
+    proto_sim_timer_set_now_us(1'000'000);
+    bringUpSession();
+    tracker.startGrid();
+    rol.enable_timed_mode(true);
+    const auto gridsync = lastDownlink();
+    ASSERT_GT(tracker.last_earliest_us, 0) << "precondition: the GridSync is placed";
+    const int64_t gs_t0 = tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us;
+    deliverAtT0(gridsync, gs_t0);
+    ASSERT_TRUE(disp.gridState().active) << "precondition: the node holds the grid";
+
+    // Some rounds later the node REGISTERs, at the instant its uplink aim picks.
+    proto_sim_timer_set_now_us(gs_t0 + 20'000'000);
+    const gridstate::UplinkAim aim =
+        gridstate::aimUplink(disp.gridState(), esp_timer_get_time(),
+                             CmdDispatcherTestPeer::kUplinkAimLeadUs, (int64_t) timedgrid::kRoundUs);
+    ASSERT_TRUE(aim.aimed) << "precondition: a node on the grid aims its uplink";
+    rol.config_synced_ = false;   // the hub's config changed: the push waits for the session
+    disp.sendRegister();
+    while (disp.runOneTxCommand()) {}
+    auto up = lif.drain_tx_queue();
+    ASSERT_FALSE(up.empty());
+    uint64_t mac = 0;
+    ASSERT_TRUE(proto_sim::wire::registerMac(up.back(), &mac));
+    rol.set_address(mac);
+    proto_sim_timer_set_now_us(aim.t0_us + 50'000);   // received, being processed
+    tracker.last_rx_t0_us_v = aim.t0_us;
+    rol.set_response(up.back().data(), up.back().size());
+    ASSERT_TRUE(rol.relogin_pending()) << "precondition: the hub took the REGISTER";
+
+    // The LOGIN the REGISTER schedules.
+    const size_t from = tracker.sent_raw.size();
+    size_t li = 0;
+    int64_t sent_at = 0;
+    for (int i = 0; i < 100 && li == 0; ++i) {
+        proto_sim_timer_set_now_us(esp_timer_get_time() + 100'000);
+        clock.tick(100);
+        for (size_t k = from; k < tracker.sent_raw.size(); ++k) {
+            bool rr = true;
+            if (proto_sim::wire::loginRequestRegister(tracker.sent_raw[k], &rr)) {
+                li = k;
+                sent_at = esp_timer_get_time();
+                break;
+            }
+        }
+    }
+    ASSERT_NE(li, 0u) << "the hub must answer the REGISTER with a LOGIN";
+    EXPECT_NE(tracker.sent_copies[li], 1)
+        << "still a burst: a node whose window free-runs (Mode A) needs the copies";
+
+    // Copy 0, judged by the node's own window.
+    const int64_t fire0 = (tracker.sent_policy[li].earliest_us > 0)
+                              ? tracker.sent_policy[li].earliest_us : sent_at;
+    const int64_t t0 = fire0 + (int64_t) loratiming::kDownlinkPreambleToT0Us;
+    const std::vector<uint8_t> login = tracker.sent_raw[li];
+    const int64_t arm = disp.nextArmInstantUs(t0 - 100'000);
+    ASSERT_GT(arm, 0);
+    const proto_sim::RxWindow win{arm, timedgrid::kWindowUs};
+    const proto_sim::Transmission tx{t0, (uint32_t) login.size(), /*tx_id=*/1, /*seq=*/0};
+    EXPECT_TRUE(proto_sim::caught(win, tx, timedgrid::kDetectUs))
+        << "copy 0 at T0 " << t0 << ", the node's window [" << win.open_us << ", "
+        << win.close_us() << ")";
+
+    // And the conversation it carries: the node adopts the LOGIN, its answer
+    // confirms the session on the hub.
+    proto_sim_timer_set_now_us(t0 + 1000);
+    deliverAtT0(login, t0);
+    while (disp.runOneTxCommand()) {}
+    for (auto &frame : lif.drain_tx_queue())
+        rol.set_response(frame.data(), frame.size());
+    EXPECT_TRUE(rol.session_confirmed());
+}
+
+// A REGISTER whose stamp is too old to say where the node listens: the LOGIN is
+// the unplaced burst, as before.
+TEST_F(Seam, ALoginLongAfterTheRegisterIsTheUnplacedBurst) {
+    proto_sim_timer_set_now_us(1'000'000);
+    rol.config_synced_ = false;
+    disp.sendRegister();
+    while (disp.runOneTxCommand()) {}
+    auto up = lif.drain_tx_queue();
+    ASSERT_FALSE(up.empty());
+    uint64_t mac = 0;
+    ASSERT_TRUE(proto_sim::wire::registerMac(up.back(), &mac));
+    rol.set_address(mac);
+    tracker.last_rx_t0_us_v = esp_timer_get_time() - 1000;
+    rol.set_response(up.back().data(), up.back().size());
+    ASSERT_TRUE(rol.relogin_pending());
+    // The clock jumps: the stamp is minutes old when the LOGIN goes out.
+    proto_sim_timer_set_now_us(esp_timer_get_time() + 300'000'000);
+    const size_t from = tracker.sent_raw.size();
+    for (int i = 0; i < 100; ++i) clock.tick(100);
+    size_t li = 0;
+    for (size_t k = from; k < tracker.sent_raw.size(); ++k) {
+        bool rr = true;
+        if (proto_sim::wire::loginRequestRegister(tracker.sent_raw[k], &rr)) li = k;
+    }
+    ASSERT_NE(li, 0u);
+    EXPECT_EQ(tracker.sent_policy[li].earliest_us, 0) << "nothing to aim at: sent as it always was";
+    EXPECT_NE(tracker.sent_copies[li], 1);
+}
+
 TEST_F(Seam, ARealMacPingReachesANodeThatHoldsASession) {
     // Every existing MAC ping test runs on a fresh node with no session, where a
     // plaintext frame is accepted. A node in the field holds a session, and its

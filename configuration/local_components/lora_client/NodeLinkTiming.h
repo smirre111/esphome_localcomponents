@@ -114,6 +114,20 @@ namespace esphome
       // (no or a stale stamp, or the queue refused it).
       bool send_on_uplink_mark(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
                                int64_t t0_uplink);
+      // The normal BURST with copy 0 on one of those marks, not before
+      // `not_before_us` (the queue's drain): a Mode B node catches copy 0 in its
+      // window, a Mode A node still has every copy (rollout-4: the LOGIN that
+      // answers a REGISTER). False: not placed (no stamp, one older than
+      // kUplinkMarkBurstMaxAgeUs, or the queue refused it).
+      bool send_burst_on_uplink_mark(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
+                                     int64_t t0_uplink, int64_t not_before_us);
+      // How old an uplink stamp may be to place a burst from: a REGISTER is
+      // re-sent every 60 s, and 75 s of +-20 ppm is +-1.5 ms of a 14 ms guard.
+      static constexpr int64_t kUplinkMarkBurstMaxAgeUs = 75000000;
+
+      // The fire instant of the first of the node's marks (uplink T0 minus the
+      // uplink offset, plus whole rounds) that fires at or after `earliest_usable`.
+      static int64_t uplink_mark_fire_(int64_t t0_uplink, int64_t earliest_usable);
 
       // ---- evidence ----
       // This node's authenticated uplink: its T0 stamp and uncertainty, and

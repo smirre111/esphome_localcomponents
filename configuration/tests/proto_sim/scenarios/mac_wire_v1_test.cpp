@@ -1263,6 +1263,30 @@ TEST(MacWireV1Listener, AKeylessUplinksLoginToAModeANodeIsTheBurst) {
     EXPECT_NE(hub.tracker.last_copies, 1) << "a free-running window is not aimed at";
 }
 
+// Rollout-4: the LOGIN that answers a REGISTER is the burst with copy 0 on the
+// node's mark (the REGISTER's T0 minus the uplink offset, whole rounds on), and
+// on the first such mark AFTER what the queue still holds.
+TEST(MacWireV1Listener, TheLoginAnsweringARegisterIsPlacedOnTheNodesMarkAfterTheQueue) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    const int64_t t0 = esp_timer_get_time();
+    hub.tracker.last_rx_t0_us_v = t0;
+    hub.tracker.tx_drain_us = 3'000'000;   // the queue is busy for another 3 s
+    const size_t logins = loginsOnAir(hub.radio);
+    Bytes f = registerFrame(1);
+    hub.rol.set_response(f.data(), f.size());
+    ASSERT_TRUE(hub.rol.registered_);
+    for (int i = 0; i < 60 && loginsOnAir(hub.radio) == logins; ++i)
+        hub.clock.tick(100);
+    ASSERT_EQ(loginsOnAir(hub.radio), logins + 1);
+    const int64_t fire = hub.tracker.last_earliest_us;
+    EXPECT_GE(fire, t0 + 3'000'000) << "after what is queued";
+    const int64_t since = loratiming::t0FromFireInstantUs(fire, 0) - (t0 - 60'000);
+    EXPECT_EQ(since % 1'500'000, 0) << "on one of the node's own marks";
+    EXPECT_NE(hub.tracker.last_copies, 1) << "and still the burst";
+    EXPECT_FALSE(hub.tracker.last_on_mark) << "the node's mark, not the hub grid's";
+}
+
 TEST(MacWireV1Listener, AKeylessUplinkWithNoLoginPendingSendsNoLogin) {
     Hub hub;
     proto_sim_timer_advance_us(100'000'000);

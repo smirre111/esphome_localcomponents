@@ -423,6 +423,9 @@ namespace esphome
           return;
 
         ESP_LOGI(TAG, "%s, Registered with LORA server", this->host_.session_name());
+        // Where the node listens: it sends its REGISTER at its own mark + the
+        // uplink offset when it is on a grid (rollout-4, see send_login_frame_).
+        this->register_t0_us_ = this->host_.session_rx_t0_us();
         this->host_.session_register_accepted();
         const bool push_config = this->host_.session_register_config(reg->needs_config);
 
@@ -598,6 +601,14 @@ namespace esphome
                                                      this->keyless_t0_us_))
         ESP_LOGI(TAG, "[%s] LoginMsg aimed at the node's receive window after its uplink",
                  this->host_.session_name());
+      // After a REGISTER, the burst with copy 0 on the node's mark (rollout-4: a
+      // Mode B node missed every unplaced burst of a REGISTER cycle, which all
+      // met its one window per round at the same phase).
+      // (A zero stamp -- no REGISTER yet -- is refused there.)
+      else if (this->host_.session_send_on_register_mark(f.bytes.data(), f.bytes.size(), f.seal,
+                                                         this->register_t0_us_))
+        ESP_LOGI(TAG, "[%s] LoginMsg burst placed on the node's mark from its REGISTER",
+                 this->host_.session_name());
       else
         this->host_.session_send(f.bytes.data(), f.bytes.size(), f.seal);
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
@@ -684,6 +695,14 @@ namespace esphome
       if (this->timed_mode_enabled_ && this->grid_aligned_)
         return this->link_.send_on_uplink_mark(buf, len, seal, t0_uplink);
       return false;   // Mode A: the window free-runs, only the burst covers it
+    }
+    // Whatever the hub believes about the node's mode: placing costs at most a
+    // round's wait and the copies still cover a free-running window.
+    bool LORAListener::session_send_on_register_mark(const uint8_t *buf, size_t len,
+                                                     const mac2::FrameSeal &seal, int64_t t0_uplink)
+    {
+      return this->link_.send_burst_on_uplink_mark(buf, len, seal, t0_uplink,
+                                                   esp_timer_get_time() + this->session_tx_drain_us());
     }
     bool LORAListener::session_send(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
     {

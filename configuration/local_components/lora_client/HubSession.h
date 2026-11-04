@@ -83,6 +83,10 @@ namespace esphome
       // (its Class A RX1/RX2, or its Mode B mark). False: it cannot be aimed.
       virtual bool session_send_after_uplink(const uint8_t *buf, size_t len,
                                              const mac2::FrameSeal &seal, int64_t t0_uplink) = 0;
+      // The burst, copy 0 placed on the node's mark recovered from the uplink at
+      // t0_uplink (its REGISTER), after the queue drains. False: not placed.
+      virtual bool session_send_on_register_mark(const uint8_t *buf, size_t len,
+                                                 const mac2::FrameSeal &seal, int64_t t0_uplink) = 0;
 
       // ---- the lifecycle's events ----
       // An admitted REGISTER from this node: it is registered, heard, rebooted.
@@ -355,6 +359,9 @@ namespace esphome
       bool register_admitted_(const ::ClientRegister *reg, const uint8_t *data, size_t len);
       void note_keyless_uplink_();
       static constexpr int64_t kKeylessLoginGapUs = 5000000;   // the node's LOGIN rate limit
+      // The receive stamp of the node's last admitted REGISTER: every LOGIN of
+      // the challenge it starts is placed from it while it is fresh (0: none).
+      int64_t register_t0_us_{0};
       void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base,
                              bool into_uplink_window);
       bool verify_uplink_(EncUplink &up);

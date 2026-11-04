@@ -60,3 +60,36 @@ hash) only on the acks. The plaintext ClientConfig/CoverConfig to an UNPROVISION
    hub route table (HubWire.cpp:29-30, still `false`) against `portmap::ackedWhenExecuted`. When the
    node change lands the hub flips HubWire.cpp:29-30 to `true` in the same step (hub side, then the
    per-request ACK_REQ override for the setup channel becomes a no-op).
+
+## 2026-11-04 — rollout-4: the LOGIN after a REGISTER misses a Mode B node (hub branch hub-regfix)
+
+**Observed (logs/20261103_163727_review_rollout4, hub f0c5929, fw 1.1.57).** After a hub flash that
+changed the config hash, node 1 (Mode B before the flash) needed 368 s to log in: 7 request_register
+LOGINs before its REGISTER (16:53:49..16:55:43), then 5 REGISTER cycles 60 s apart
+(16:55:45..16:59:46) with 4 unanswered LoginMsg bursts each. Node 2 logged in on the first
+post-REGISTER LOGIN both times, but only because it had already demoted to Mode A (16:50:12
+`timed RX: reason 4 ... Grid arming off`; at 16:53 it was still in Mode A). The hub's startup
+GridDemote is ignored by the node (`GridDemote: rate-limited ... (min 3600000 ms)`,
+MacManagement.h:127), so a node keeps its old-grid Mode B windows across a hub reboot.
+
+**Hub side (done on hub-regfix):** every LOGIN of a challenge started by a REGISTER is now the
+normal burst with copy 0 placed on the node's mark (REGISTER T0 - ulOffset + whole rounds, after
+the hub's queue drains). This relies on the node sending its REGISTER aimed at mark + ulOffset
+(`Mac0Access::uplinkCadStartUs`, retry_count 0, phase trusted); when it is not aimed the burst
+still covers a free-running window, as before.
+
+**Proposed node change (not required by the hub fix; makes it independent of the uplink aim):**
+1. When `SessionEntity::sendRegister()` gives up the session, also stop grid arming until the next
+   accepted CMD_LOGIN (back to the free-running Mode A window, as phase loss does:
+   `LoraInterface` "Grid arming off — back to the free-running RX window"). A node that is
+   re-registering has, by definition, no session with the hub that owns the grid it is armed on,
+   and the hub demotes it at the LOGIN anyway (`Hub reports it rebooted — demoting to Mode A`).
+   Cost: Mode A duty (~6 % RX) for the seconds until the LOGIN lands, instead of minutes of Mode B
+   misses.
+2. Same idea for the request_register LOGINs that precede the REGISTER (the slow first 116 s for
+   node 1): the hub has no fresh uplink stamp then. A node in Mode B whose mark windows have caught
+   nothing addressed to it for N rounds already demotes (reason 4, took ~97 s on node 2 at 16:50);
+   a shorter N while no session-proving downlink has arrived since the last hub GridBeacon would cut
+   that. Needs a node-side decision on N (power vs recovery time).
+3. Test (node host suite): after `sendRegister()` the node's next armed window is the free-running
+   one (no mark arming) until a LOGIN is accepted; a LOGIN arriving in a Mode A window is adopted.

@@ -617,16 +617,35 @@ namespace esphome
       if (!this->host_.link_has_radio() || buf == nullptr || len == 0 || t0_uplink <= 0 ||
           now - t0_uplink > 4 * round)
         return false;
-      int64_t mark = t0_uplink - (int64_t) NodeLinkTiming::kUplinkOffsetUs;
-      const int64_t earliest_usable = now + txqueue::kPrepareLeadUs;
-      while (loratiming::fireInstantUs(mark, 0) < earliest_usable)
-        mark += round;
       TxPolicy p;
       p.copies      = 1;
       p.stride_ms   = 0;
-      p.earliest_us = loratiming::fireInstantUs(mark, 0);
+      p.earliest_us = uplink_mark_fire_(t0_uplink, now + txqueue::kPrepareLeadUs);
       p.priority    = 0;
       return this->host_.link_send(buf, len, p, seal);
+    }
+
+    bool NodeLinkTiming::send_burst_on_uplink_mark(const uint8_t *buf, size_t len,
+                                                   const mac2::FrameSeal &seal, int64_t t0_uplink,
+                                                   int64_t not_before_us)
+    {
+      const int64_t now = esp_timer_get_time();
+      if (!this->host_.link_has_radio() || buf == nullptr || len == 0 || t0_uplink <= 0 ||
+          now - t0_uplink > kUplinkMarkBurstMaxAgeUs)
+        return false;
+      const int64_t lead = now + txqueue::kPrepareLeadUs;
+      TxPolicy p;   // the normal burst; on_mark stays false (the node's mark, not the hub grid's)
+      p.earliest_us = uplink_mark_fire_(t0_uplink, (not_before_us > lead) ? not_before_us : lead);
+      return this->host_.link_send(buf, len, p, seal);
+    }
+
+    int64_t NodeLinkTiming::uplink_mark_fire_(int64_t t0_uplink, int64_t earliest_usable)
+    {
+      const int64_t round = (int64_t) timedgrid::kRoundUs;
+      int64_t mark = t0_uplink - (int64_t) NodeLinkTiming::kUplinkOffsetUs;
+      while (loratiming::fireInstantUs(mark, 0) < earliest_usable)
+        mark += round;
+      return loratiming::fireInstantUs(mark, 0);
     }
 
     void NodeLinkTiming::note_uplink_placement(int64_t t0_uplink_us)
