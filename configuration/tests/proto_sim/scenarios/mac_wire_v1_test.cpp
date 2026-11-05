@@ -1287,6 +1287,53 @@ TEST(MacWireV1Listener, TheLoginAnsweringARegisterIsPlacedOnTheNodesMarkAfterThe
     EXPECT_FALSE(hub.tracker.last_on_mark) << "the node's mark, not the hub grid's";
 }
 
+// Hardware check 2026-11-05: node 1 missed placed bursts it should have
+// caught. A placed LOGIN that is not acked is followed by the classic UNPLACED
+// burst, and the ladder alternates: placed, unplaced, placed, ...
+TEST(MacWireV1Listener, AnUnackedPlacedRegisterLoginAlternatesWithTheUnplacedBurst) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.tracker.last_rx_t0_us_v = esp_timer_get_time();
+    Bytes f = registerFrame(1);
+    hub.rol.set_response(f.data(), f.size());
+    ASSERT_TRUE(hub.rol.registered_);
+    std::vector<int64_t> earliest;
+    std::vector<int> copies;
+    size_t seen = loginsOnAir(hub.radio);
+    for (int i = 0; i < 400 && earliest.size() < 4; ++i) {
+        hub.clock.tick(100);
+        proto_sim_timer_advance_us(100'000);
+        if (loginsOnAir(hub.radio) > seen) {
+            seen = loginsOnAir(hub.radio);
+            earliest.push_back(hub.tracker.last_earliest_us);
+            copies.push_back(hub.tracker.last_copies);
+        }
+    }
+    ASSERT_EQ(earliest.size(), 4u) << "the first LOGIN and three retries, none acked";
+    EXPECT_GT(earliest[0], 0) << "1st: placed on the node's mark";
+    EXPECT_EQ(earliest[1], 0) << "2nd: the classic unplaced burst";
+    EXPECT_GT(earliest[2], 0) << "3rd: placed again";
+    EXPECT_EQ(earliest[3], 0) << "4th: unplaced again";
+    for (int c : copies) EXPECT_NE(c, 1) << "every one a burst";
+
+    // The node's next REGISTER starts a new challenge: placed first again, also
+    // after an odd number of sends.
+    hub.tracker.last_rx_t0_us_v = 0;
+    for (int i = 0; i < 400 && loginsOnAir(hub.radio) == seen; ++i) {   // a 5th, unacked
+        hub.clock.tick(100);
+        proto_sim_timer_advance_us(100'000);
+    }
+    ASSERT_EQ(loginsOnAir(hub.radio), seen + 1);
+    seen = loginsOnAir(hub.radio);
+    proto_sim_timer_advance_us(6'000'000);   // past the REGISTER rate limit
+    hub.tracker.last_rx_t0_us_v = esp_timer_get_time();
+    Bytes g = registerFrame(2);
+    hub.rol.set_response(g.data(), g.size());
+    for (int i = 0; i < 100 && loginsOnAir(hub.radio) == seen; ++i) hub.clock.tick(100);
+    ASSERT_EQ(loginsOnAir(hub.radio), seen + 1);
+    EXPECT_GT(hub.tracker.last_earliest_us, 0) << "the new REGISTER's first LOGIN is placed";
+}
+
 TEST(MacWireV1Listener, AKeylessUplinkWithNoLoginPendingSendsNoLogin) {
     Hub hub;
     proto_sim_timer_advance_us(100'000'000);

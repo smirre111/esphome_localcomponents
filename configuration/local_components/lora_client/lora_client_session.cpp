@@ -425,7 +425,8 @@ namespace esphome
         ESP_LOGI(TAG, "%s, Registered with LORA server", this->host_.session_name());
         // Where the node listens: it sends its REGISTER at its own mark + the
         // uplink offset when it is on a grid (rollout-4, see send_login_frame_).
-        this->register_t0_us_ = this->host_.session_rx_t0_us();
+        this->register_t0_us_      = this->host_.session_rx_t0_us();
+        this->register_login_sends_ = 0;
         this->host_.session_register_accepted();
         const bool push_config = this->host_.session_register_config(reg->needs_config);
 
@@ -604,8 +605,11 @@ namespace esphome
       // After a REGISTER, the burst with copy 0 on the node's mark (rollout-4: a
       // Mode B node missed every unplaced burst of a REGISTER cycle, which all
       // met its one window per round at the same phase).
-      // (A zero stamp -- no REGISTER yet -- is refused there.)
-      else if (this->host_.session_send_on_register_mark(f.bytes.data(), f.bytes.size(), f.seal,
+      // (A zero stamp -- no REGISTER yet -- is refused there.) Alternating with
+      // the classic unplaced burst: a node whose mark the stamp does not give
+      // (hardware check 2026-11-05: node 1) is still reached the old way.
+      else if (this->next_register_send_placed_() &&
+               this->host_.session_send_on_register_mark(f.bytes.data(), f.bytes.size(), f.seal,
                                                          this->register_t0_us_))
         ESP_LOGI(TAG, "[%s] LoginMsg burst placed on the node's mark from its REGISTER",
                  this->host_.session_name());
@@ -614,6 +618,12 @@ namespace esphome
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
                this->host_.session_name(), (unsigned) base, (unsigned) this->seq().txId(),
                (int) login.request_register);
+    }
+
+    // Placed, unplaced, placed, ... over the LOGINs of a REGISTER's challenge.
+    bool HubSession::next_register_send_placed_()
+    {
+      return (this->register_login_sends_++ % 2u) == 0;
     }
 
     void HubSession::note_authentic_uplink(uint32_t fcnt, bool session_opening)
@@ -802,6 +812,8 @@ namespace esphome
       // frames; a high-water mark from the old one means nothing here.
       this->plaintext_hwm_      = 0;
       this->have_plaintext_hwm_ = false;
+      // A LOGIN is going out: no other node's Mode B warm-up starts over it.
+      mbs_arbiter_().holdOff(this->mbs_now_s_(), modebsup::kLoginHoldOffS);
     }
 
     // The node rebooted on its resumed session and the hub learnt it from the

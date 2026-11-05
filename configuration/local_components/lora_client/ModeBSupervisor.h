@@ -73,6 +73,11 @@ static constexpr uint32_t kJitterMaxS = 20;
 // A hub-wide op (any node) postpones the next grant by this long.
 static constexpr uint32_t kOpHoldOffS = 10;
 
+// Every LOGIN sent (any node) postpones the next grant by this long: a warm-up's
+// marks every round leave no clear span for a placed LOGIN burst, and a login
+// matters more (hardware check 2026-11-05). Longer than the ladder's early gaps.
+static constexpr uint32_t kLoginHoldOffS = 30;
+
 // After a SUCCESS: no new warm-up for this long (flap guard).
 static constexpr uint32_t kRearmHoldS = 300;
 

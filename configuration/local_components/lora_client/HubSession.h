@@ -362,6 +362,9 @@ namespace esphome
       // The receive stamp of the node's last admitted REGISTER: every LOGIN of
       // the challenge it starts is placed from it while it is fresh (0: none).
       int64_t register_t0_us_{0};
+      // The LOGINs sent since that REGISTER (even: placed, odd: the unplaced burst).
+      uint32_t register_login_sends_{0};
+      bool next_register_send_placed_();
       void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base,
                              bool into_uplink_window);
       bool verify_uplink_(EncUplink &up);

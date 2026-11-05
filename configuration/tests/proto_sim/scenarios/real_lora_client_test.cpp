@@ -7550,6 +7550,7 @@ TEST(ModeBListener, AnOpOnOneNodeHoldsOffTheTokenForEveryone) {
     ensure_psa_ready();
     ModeBRig r;
     r.session();
+    r.secs(modebsup::kLoginHoldOffS);   // past the session's own LOGIN hold-off
     r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     auto &arb = LORAClient::mbs_arbiter_();
     const uint32_t now_s = r.rol.mbs_now_s_();
@@ -7557,6 +7558,22 @@ TEST(ModeBListener, AnOpOnOneNodeHoldsOffTheTokenForEveryone) {
     EXPECT_FALSE(arb.granted(77, now_s)) << "a command was just issued";
     EXPECT_FALSE(arb.granted(77, now_s + modebsup::kOpHoldOffS - 1));
     EXPECT_TRUE(arb.granted(77, now_s + modebsup::kOpHoldOffS));
+}
+
+// Hardware check 2026-11-05 (flash d): node 2's Mode B warm-up started 1 s after
+// node 1's onboarding gate was released as "node silent", while node 1's LOGIN
+// challenge was still running; 60 s of marks every round leave no clear span for
+// a placed LOGIN burst. Every LOGIN sent holds the next warm-up grant off.
+TEST(ModeBListener, ALoginOnAnyNodeHoldsOffTheNextWarmupGrant) {
+    ensure_psa_ready();
+    ModeBRig r;
+    r.rol.send_login();
+    auto &arb = LORAClient::mbs_arbiter_();
+    const uint32_t now_s = r.rol.mbs_now_s_();
+    ASSERT_TRUE(arb.request(77));
+    EXPECT_FALSE(arb.granted(77, now_s)) << "a LOGIN was just sent";
+    EXPECT_FALSE(arb.granted(77, now_s + modebsup::kLoginHoldOffS - 1));
+    EXPECT_TRUE(arb.granted(77, now_s + modebsup::kLoginHoldOffS));
 }
 
 TEST(ModeBListener, AHubWhoseGridAlignmentIsOffDoesNotRunMarks) {
@@ -8632,6 +8649,7 @@ TEST(SchedPush, AScheduleUnlikeACoverOpDoesNotHoldOtherNodesWarmUpsOff) {
     {
         ModeBRig r;
         r.session();
+        r.secs(modebsup::kLoginHoldOffS);   // past the session's own LOGIN hold-off
         r.rol.send_schedule_config();
         auto &arb = LORAClient::mbs_arbiter_();
         ASSERT_TRUE(arb.request(777));
