@@ -877,6 +877,120 @@ TEST_F(Seam, ALoginLongAfterTheRegisterIsTheUnplacedBurst) {
     EXPECT_NE(tracker.sent_copies[li], 1);
 }
 
+// ---------------------------------------------------------------------------
+// A plain hub restart (no REGISTER) and a node that stays on its Mode B grid
+// (round 5, 2026-11-06 09:55:50: node 1 logged in at +2m22s, node 2 at +3m28s,
+// after 6 resp. 7 LoginMsgs; neither node sent an uplink the hub could aim
+// from). The node keeps its old grid -- the startup GridDemote is rate-limited
+// on the node -- and listens only in its own ~29 ms mark window per round. The
+// restarted hub has no stamp of the node, so it cannot aim; what it can do is
+// make its LOGIN bursts, between them, cover every phase of the round.
+//
+// Parameterised over where the node's mark falls relative to the restarted hub
+// (the hub boots at a different instant of the node's round): for EVERY phase,
+// one of the first four LOGINs must have a copy the node's own window catches.
+namespace {
+struct SeamRestart : Seam, ::testing::WithParamInterface<int> {};
+// The restarted hub's own startup login (the setup() path), driven directly.
+struct BootLoginProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::do_login_and_arm_retry_;
+};
+}  // namespace
+
+TEST_P(SeamRestart, OneOfTheFirstFourLoginsAfterAHubRestartReachesAModeBNode) {
+    proto_sim_timer_set_now_us(1'000'000);
+    bringUpSession();
+    tracker.startGrid();
+    rol.enable_timed_mode(true);
+    const auto gridsync = lastDownlink();
+    ASSERT_GT(tracker.last_earliest_us, 0);
+    const int64_t gs_t0 = tracker.last_earliest_us + (int64_t) loratiming::kDownlinkPreambleToT0Us;
+    deliverAtT0(gridsync, gs_t0);
+    ASSERT_TRUE(disp.gridState().active) << "precondition: the node holds the grid";
+
+    // The hub restarts some time later: a new hub, no keys, the node registered
+    // and in sync (no REGISTER), at a phase of the node's round set by the param.
+    proto_sim_timer_set_now_us(gs_t0 + 30'000'000 + (int64_t) GetParam() * 25'000);
+    esphome::lora_tracker::LORAListener::reset_onboarding_gate_for_test();
+    LORATracker tracker2;
+    BootLoginProbe rol2;
+    rol2.set_name("rol2");
+    rol2.set_short_address(kAddr);
+    rol2.set_subnet_address(kSubnet);
+    rol2.set_sleep_duration(21600);
+    rol2.set_address(kMac);
+    rol2.set_time(&ha_time);
+    tracker2.register_client(&rol2);
+    rol2.registered_    = true;
+    rol2.config_synced_ = true;
+    rol2.do_login_and_arm_retry_();
+
+    // Nobody answers: the hub's first LOGIN and its retries, with their send time.
+    int caught_in = -1;
+    size_t seen = 0;
+    int logins = 0;
+    int64_t first_at = 0, fourth_at = 0;
+    for (int step = 0; step < 40000 && logins < 4; ++step) {   // 5 ms steps, 200 s
+        if (seen < tracker2.sent_raw.size()) {
+            for (; seen < tracker2.sent_raw.size(); ++seen) {
+                bool rr = true;
+                if (!proto_sim::wire::loginRequestRegister(tracker2.sent_raw[seen], &rr))
+                    continue;
+                const int64_t base = (tracker2.sent_policy[seen].earliest_us > 0)
+                                         ? tracker2.sent_policy[seen].earliest_us
+                                         : esp_timer_get_time();
+                const int copies = (tracker2.sent_copies[seen] > 0) ? tracker2.sent_copies[seen] : 17;
+                for (int j = 0; j < copies && caught_in < 0; ++j) {
+                    const int64_t t0 = base + (int64_t) j * 88'000 +
+                                       (int64_t) loratiming::kDownlinkPreambleToT0Us;
+                    const int64_t arm = disp.nextArmInstantUs(t0 - 100'000);
+                    const proto_sim::RxWindow win{arm, timedgrid::kWindowUs};
+                    const proto_sim::Transmission tx{t0, (uint32_t) tracker2.sent_raw[seen].size(), 1, 0};
+                    if (arm > 0 && proto_sim::caught(win, tx, timedgrid::kDetectUs))
+                        caught_in = logins;
+                }
+                if (logins == 0) first_at = base;
+                if (logins == 3) fourth_at = base;
+                ++logins;
+            }
+        }
+        proto_sim_timer_set_now_us(esp_timer_get_time() + 5'000);
+        clock.tick(5);
+    }
+    ASSERT_GE(logins, 4) << "the hub must keep trying";
+    EXPECT_GE(caught_in, 0) << "no copy of the first four LOGINs met the node's window "
+                               "(node phase offset " << GetParam() * 25 << " ms)";
+    EXPECT_LT(fourth_at - first_at, 25'000'000)
+        << "the four LOGINs that cover the round go out within ~20 s, not on the doubling ladder";
+}
+
+INSTANTIATE_TEST_SUITE_P(EveryPhaseOfTheRound, SeamRestart, ::testing::Range(0, 60));   // 25 ms steps
+
+// The sweep table against the node's real window: for every phase of a Mode B
+// node's mark (0.25 ms steps), one copy of one of the four bursts is caught.
+TEST(LoginSweep, FourBurstsCoverEveryPhaseOfTheRound) {
+    using esphome::lora_tracker::HubSession;
+    const int64_t round = (int64_t) timedgrid::kRoundUs;
+    int uncovered = 0;
+    for (int64_t m = 0; m < round; m += 250) {
+        bool caught_any = false;
+        for (uint32_t k = 0; k < HubSession::kLoginSweepBursts && !caught_any; ++k)
+            for (int j = 0; j < 17 && !caught_any; ++j) {
+                const int64_t fire = 10 * round + HubSession::kLoginSweepOffsetsUs[k] + (int64_t) j * 88'000;
+                const int64_t t0 = fire + (int64_t) loratiming::kDownlinkPreambleToT0Us;
+                // The node's windows at phase m, in the rounds around the copy.
+                for (int64_t r = 9; r <= 12 && !caught_any; ++r) {
+                    const proto_sim::RxWindow win{timedgrid::windowOpenUs(r * round + m),
+                                                  timedgrid::kWindowUs};
+                    caught_any = proto_sim::caught(win, proto_sim::Transmission{t0, 34, 1, 0},
+                                                   timedgrid::kDetectUs);
+                }
+            }
+        if (!caught_any) ++uncovered;
+    }
+    EXPECT_EQ(uncovered, 0);
+}
+
 TEST_F(Seam, ARealMacPingReachesANodeThatHoldsASession) {
     // Every existing MAC ping test runs on a fresh node with no session, where a
     // plaintext frame is accepted. A node in the field holds a session, and its

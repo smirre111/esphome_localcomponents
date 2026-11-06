@@ -254,8 +254,11 @@ namespace esphome
       // before the log so a wait is one line, not one per poll.
       if (this->host_.session_has_radio() && !this->acquire_onboarding())
       {
-        this->host_.session_set_timeout("login_startup", onboarding::kPollMs,
-                                        [this]() { this->do_login_and_arm_retry(); });
+        // The aim survives the wait (round 5: a keyless re-send waited for the
+        // gate and went out as a plain burst); a stamp too old by then is refused.
+        this->host_.session_set_timeout("login_startup", onboarding::kPollMs, [this, into_uplink_window]() {
+          this->do_login_and_arm_retry(into_uplink_window);
+        });
         return;
       }
       ESP_LOGI(TAG, "[%s] Login challenge firing (parent=%s)",
@@ -292,7 +295,11 @@ namespace esphome
       // Self-re-arming ONE-SHOT set_timeout with exponential backoff: fast early
       // retries (a transient handshake loss recovers in seconds) growing to the
       // 1 h ceiling.  delay = base << retry_count, capped at kLoginRetryIntervalMs.
-      const uint32_t shift = (this->login_.login_retry_count < 20) ? this->login_.login_retry_count : 20;
+      // The first kFastLoginRetries at the base delay (the phase sweep), then
+      // doubling from there.
+      const uint32_t n     = this->login_.login_retry_count;
+      const uint32_t steps = (n < kFastLoginRetries) ? 0 : n - kFastLoginRetries + 1;
+      const uint32_t shift = (steps < 20) ? steps : 20;
       uint64_t delay = static_cast<uint64_t>(kLoginRetryBaseMs) << shift;
       if (delay > kLoginRetryIntervalMs)
         delay = kLoginRetryIntervalMs;
@@ -476,6 +483,7 @@ namespace esphome
     {
       this->login_.confirmed       = true;
       this->login_.relogin_pending = false;
+      this->register_t0_us_        = 0;   // later challenges have no REGISTER to aim from
 
       // The settle clock for the onboarding gate starts here: the pushes that
       // follow a confirmation are queued over the next ~2 s.
@@ -528,6 +536,8 @@ namespace esphome
       {
         base = esp_random();
         this->login_.pending_login_nonce = base;
+        this->sweep_base_us_ = 0;   // a new challenge sweeps the round afresh
+        this->sweep_sends_   = 0;
         // A genuinely NEW challenge: whatever session keys are live belong
         // to the session this challenge supersedes. Clear them now so a
         // downlink packed before the new session-opening uplink arrives is
@@ -613,11 +623,32 @@ namespace esphome
                                                          this->register_t0_us_))
         ESP_LOGI(TAG, "[%s] LoginMsg burst placed on the node's mark from its REGISTER",
                  this->host_.session_name());
+      // No REGISTER of this challenge to aim from: the phase sweep. (A REGISTER's
+      // odd sends stay the classic unplaced burst, as the user chose.)
+      else if (this->register_t0_us_ == 0 && this->send_swept_(f))
+        ESP_LOGI(TAG, "[%s] LoginMsg burst %u of the phase sweep", this->host_.session_name(),
+                 (unsigned) this->sweep_sends_);
       else
         this->host_.session_send(f.bytes.data(), f.bytes.size(), f.seal);
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
                this->host_.session_name(), (unsigned) base, (unsigned) this->seq().txId(),
                (int) login.request_register);
+    }
+
+    // The k-th burst of the sweep at the first one's phase + kLoginSweepOffsetsUs.
+    bool HubSession::send_swept_(const DeliveryFrame &f)
+    {
+      const int64_t phase =
+          (this->sweep_base_us_ == 0)
+              ? 0
+              : this->sweep_base_us_ + kLoginSweepOffsetsUs[this->sweep_sends_ % kLoginSweepBursts];
+      const int64_t fire = this->host_.session_send_burst_at(f.bytes.data(), f.bytes.size(), f.seal, phase);
+      if (fire == 0)
+        return false;
+      if (this->sweep_base_us_ == 0)
+        this->sweep_base_us_ = fire;
+      ++this->sweep_sends_;
+      return true;
     }
 
     // Placed, unplaced, placed, ... over the LOGINs of a REGISTER's challenge.
@@ -705,6 +736,12 @@ namespace esphome
       if (this->timed_mode_enabled_ && this->grid_aligned_)
         return this->link_.send_on_uplink_mark(buf, len, seal, t0_uplink);
       return false;   // Mode A: the window free-runs, only the burst covers it
+    }
+    int64_t LORAListener::session_send_burst_at(const uint8_t *buf, size_t len,
+                                                const mac2::FrameSeal &seal, int64_t phase_fire_us)
+    {
+      return this->link_.send_burst_at_phase(buf, len, seal, phase_fire_us,
+                                             esp_timer_get_time() + this->session_tx_drain_us());
     }
     // Whatever the hub believes about the node's mode: placing costs at most a
     // round's wait and the copies still cover a free-running window.

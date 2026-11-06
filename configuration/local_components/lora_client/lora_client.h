@@ -1406,6 +1406,8 @@ namespace esphome
       int64_t session_rx_t0_us() const override;
       bool session_send_on_register_mark(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
                                          int64_t t0_uplink) override;
+      int64_t session_send_burst_at(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
+                                    int64_t phase_fire_us) override;
       bool session_send_after_uplink(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
                                      int64_t t0_uplink) override;
       void session_register_accepted() override;

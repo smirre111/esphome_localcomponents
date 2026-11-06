@@ -121,6 +121,12 @@ namespace esphome
       // kUplinkMarkBurstMaxAgeUs, or the queue refused it).
       bool send_burst_on_uplink_mark(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
                                      int64_t t0_uplink, int64_t not_before_us);
+      // The normal BURST with copy 0 at `phase_fire_us` + whole rounds, the first
+      // such instant not before `not_before_us` (and the prepare lead); a phase of
+      // 0 means "as soon as possible". Returns the fire instant (0: not sent). The
+      // LOGIN phase sweep after a hub restart (HubSession::kLoginSweepOffsetsUs).
+      int64_t send_burst_at_phase(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal,
+                                  int64_t phase_fire_us, int64_t not_before_us);
       // How old an uplink stamp may be to place a burst from: a REGISTER is
       // re-sent every 60 s, and 75 s of +-20 ppm is +-1.5 ms of a 14 ms guard.
       static constexpr int64_t kUplinkMarkBurstMaxAgeUs = 75000000;
@@ -128,6 +134,8 @@ namespace esphome
       // The fire instant of the first of the node's marks (uplink T0 minus the
       // uplink offset, plus whole rounds) that fires at or after `earliest_usable`.
       static int64_t uplink_mark_fire_(int64_t t0_uplink, int64_t earliest_usable);
+      // `phase_us` + whole rounds, the first at or after `earliest_usable`.
+      static int64_t next_at_phase_(int64_t phase_us, int64_t earliest_usable);
 
       // ---- evidence ----
       // This node's authenticated uplink: its T0 stamp and uncertainty, and

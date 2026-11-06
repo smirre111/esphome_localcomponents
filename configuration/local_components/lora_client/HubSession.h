@@ -87,6 +87,10 @@ namespace esphome
       // t0_uplink (its REGISTER), after the queue drains. False: not placed.
       virtual bool session_send_on_register_mark(const uint8_t *buf, size_t len,
                                                  const mac2::FrameSeal &seal, int64_t t0_uplink) = 0;
+      // The burst with copy 0 at `phase_fire_us` + whole rounds after the queue
+      // drains (0: as soon as possible). Returns its fire instant, 0: not sent.
+      virtual int64_t session_send_burst_at(const uint8_t *buf, size_t len,
+                                            const mac2::FrameSeal &seal, int64_t phase_fire_us) = 0;
 
       // ---- the lifecycle's events ----
       // An admitted REGISTER from this node: it is registered, heard, rebooted.
@@ -254,6 +258,19 @@ namespace esphome
       // battery node's awake window.
       static constexpr uint32_t kRegisterToLoginFastMs  = 800;
       static constexpr int64_t  kRegisterRateLimitUs    = 5000000; // 5 s, matches the node's LOGIN_RATE_LIMIT_MS
+      // THE LOGIN PHASE SWEEP (round 5, 2026-11-06: after a plain hub restart both
+      // Mode B nodes needed 6-7 LoginMsgs, 2-3.5 min). A Mode B node listens in one
+      // window per round at its own mark; one 17-copy burst (88 ms apart) meets it
+      // only if a copy falls inside its +-14 ms guard, ~1 in 3, and with no uplink
+      // stamp the hub cannot aim. Copy 0 of the k-th LOGIN burst of a challenge
+      // goes at the first burst's phase + kLoginSweepOffsetsUs[k % 4] (+ whole
+      // rounds): the four bursts' teeth, 22 ms apart, cover every phase of the
+      // round (pinned against the node's window in seam_test).
+      static constexpr uint32_t kLoginSweepBursts = 4;
+      static constexpr int64_t  kLoginSweepOffsetsUs[kLoginSweepBursts] = {0, 22000, 44000, 66000};
+      // ...and those four go out at the base retry delay, not on the doubling
+      // ladder (5, 5, 5 s, then 10, 20, 40 s, ...).
+      static constexpr uint8_t  kFastLoginRetries = kLoginSweepBursts - 1;
 
       bool     confirmed() const { return this->login_.confirmed; }
       bool     login_acked() const { return this->login_.login_acked; }
@@ -365,6 +382,11 @@ namespace esphome
       // The LOGINs sent since that REGISTER (even: placed, odd: the unplaced burst).
       uint32_t register_login_sends_{0};
       bool next_register_send_placed_();
+      // The phase sweep of a challenge with no REGISTER stamp: the first burst's
+      // fire instant (0: none yet) and the bursts sent.
+      int64_t  sweep_base_us_{0};
+      uint32_t sweep_sends_{0};
+      bool send_swept_(const DeliveryFrame &f);
       void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base,
                              bool into_uplink_window);
       bool verify_uplink_(EncUplink &up);

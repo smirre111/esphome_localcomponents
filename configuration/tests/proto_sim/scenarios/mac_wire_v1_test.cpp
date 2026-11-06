@@ -105,6 +105,7 @@ struct V1Probe : LORAClient {
     using esphome::lora_tracker::LORAListener::v1_demote_frame_;
     using esphome::lora_tracker::LORAListener::ctl;
     using esphome::lora_tracker::LORAListener::ctl_cmd_;
+    using esphome::lora_tracker::LORAListener::do_login_and_arm_retry_;
 };
 V1Probe &P(LORAClient &r) { return static_cast<V1Probe &>(r); }
 
@@ -1254,6 +1255,41 @@ TEST(MacWireV1Listener, AKeylessUplinksLoginGoesOnAModeBNodesOwnMark) {
     EXPECT_EQ(since % 1'500'000, 0) << "on one of the node's own marks, a whole number of rounds on";
 }
 
+// Round 5 (09:58:03): a keyless uplink's re-send had to wait for the onboarding
+// gate (another node's login) and then went out as a plain burst. The aim
+// survives the wait while the stamp is still fresh.
+TEST(MacWireV1Listener, AKeylessUplinksLoginKeepsItsAimThroughAShortOnboardingWait) {
+    Hub hub;
+    const uint32_t session = pendingLogin(hub);
+    hub.rol.enable_timed_mode(true);
+    esphome::lora_tracker::LORAListener::reset_onboarding_gate_for_test();
+    LORAClient other;   // another node, whose login holds the gate
+    {
+        other.set_name("other");
+        other.set_short_address(19);
+        other.set_subnet_address(0x02);
+        other.set_address(kMac + 1);
+        other.set_time(&hub.time);
+        hub.tracker.register_client(&other);
+        other.registered_    = true;
+        other.config_synced_ = true;
+        P(other).do_login_and_arm_retry_();
+        const int64_t t0 = esp_timer_get_time();
+        hub.tracker.last_rx_t0_us_v = t0;
+        const size_t logins = loginsOnAir(hub.radio);
+        sessionUplink(hub, session, 50);
+        hub.clock.tick(10);
+        ASSERT_EQ(loginsOnAir(hub.radio), logins) << "precondition: held by the gate";
+        hub.clock.tick(1000);
+        proto_sim_timer_advance_us(1'000'000);
+    }
+    esphome::lora_tracker::LORAListener::reset_onboarding_gate_for_test();   // its onboarding ends
+    const size_t logins = loginsOnAir(hub.radio);
+    for (int i = 0; i < 20 && loginsOnAir(hub.radio) == logins; ++i) hub.clock.tick(100);
+    ASSERT_EQ(loginsOnAir(hub.radio), logins + 1);
+    EXPECT_EQ(hub.tracker.last_copies, 1) << "still one copy on the node's mark";
+}
+
 TEST(MacWireV1Listener, AKeylessUplinksLoginToAModeANodeIsTheBurst) {
     Hub hub;
     const uint32_t session = pendingLogin(hub);
@@ -1332,6 +1368,25 @@ TEST(MacWireV1Listener, AnUnackedPlacedRegisterLoginAlternatesWithTheUnplacedBur
     for (int i = 0; i < 100 && loginsOnAir(hub.radio) == seen; ++i) hub.clock.tick(100);
     ASSERT_EQ(loginsOnAir(hub.radio), seen + 1);
     EXPECT_GT(hub.tracker.last_earliest_us, 0) << "the new REGISTER's first LOGIN is placed";
+}
+
+// A session opened after a REGISTER ends that REGISTER's aim: the next plain
+// LOGIN challenge is the phase sweep (its first burst as soon as the queue
+// allows), not a placement from the old REGISTER nor the classic burst.
+TEST(MacWireV1Listener, ALoginAfterARegistersSessionIsConfirmedIsThePhaseSweep) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.tracker.last_rx_t0_us_v = esp_timer_get_time() - 7'000;
+    Bytes f = registerFrame(1);
+    hub.rol.set_response(f.data(), f.size());
+    ASSERT_TRUE(hub.rol.registered_);
+    (void) openSession(hub);
+    ASSERT_TRUE(hub.rol.session_confirmed());
+    proto_sim_timer_advance_us(10'000'000);
+    const int64_t now = esp_timer_get_time();
+    hub.rol.send_login();
+    EXPECT_EQ(hub.tracker.last_earliest_us, now + txqueue::kPrepareLeadUs) << "sweep burst 1: at once";
+    EXPECT_NE(hub.tracker.last_copies, 1);
 }
 
 TEST(MacWireV1Listener, AKeylessUplinkWithNoLoginPendingSendsNoLogin) {

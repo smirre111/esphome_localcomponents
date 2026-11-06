@@ -641,11 +641,28 @@ namespace esphome
 
     int64_t NodeLinkTiming::uplink_mark_fire_(int64_t t0_uplink, int64_t earliest_usable)
     {
+      const int64_t mark = t0_uplink - (int64_t) NodeLinkTiming::kUplinkOffsetUs;
+      return next_at_phase_(loratiming::fireInstantUs(mark, 0), earliest_usable);
+    }
+
+    int64_t NodeLinkTiming::next_at_phase_(int64_t phase_us, int64_t earliest_usable)
+    {
       const int64_t round = (int64_t) timedgrid::kRoundUs;
-      int64_t mark = t0_uplink - (int64_t) NodeLinkTiming::kUplinkOffsetUs;
-      while (loratiming::fireInstantUs(mark, 0) < earliest_usable)
-        mark += round;
-      return loratiming::fireInstantUs(mark, 0);
+      // (A phase already at or after `earliest_usable` stays: the quotient is 0.)
+      return phase_us + ((earliest_usable - phase_us + round - 1) / round) * round;
+    }
+
+    int64_t NodeLinkTiming::send_burst_at_phase(const uint8_t *buf, size_t len,
+                                                const mac2::FrameSeal &seal, int64_t phase_fire_us,
+                                                int64_t not_before_us)
+    {
+      if (!this->host_.link_has_radio() || buf == nullptr || len == 0)
+        return 0;
+      const int64_t lead  = esp_timer_get_time() + txqueue::kPrepareLeadUs;
+      const int64_t floor = (not_before_us > lead) ? not_before_us : lead;
+      TxPolicy p;   // the normal burst, not on any mark
+      p.earliest_us = (phase_fire_us > 0) ? next_at_phase_(phase_fire_us, floor) : floor;
+      return this->host_.link_send(buf, len, p, seal) ? p.earliest_us : 0;
     }
 
     void NodeLinkTiming::note_uplink_placement(int64_t t0_uplink_us)
