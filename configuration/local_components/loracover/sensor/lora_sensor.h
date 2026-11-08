@@ -18,7 +18,6 @@ namespace esphome
       // void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
       //                          esp_ble_gattc_cb_param_t *param) override;
       void on_app_indication(const esphome::lora_tracker::AppIndication &ind) override;
-      void on_register() override;
       void publish_battery_(float voltage);
       void publish_link_rssi_();
 
@@ -42,7 +41,6 @@ namespace esphome
       void on_clock_offset(float offset_s) override;
       // void set_illuminance(sensor::Sensor *illuminance) { illuminance_ = illuminance; }
 
-      void send_remote_config() override;
     protected:
       uint16_t char_handle_;
       // bool registered_;
@@ -54,7 +52,6 @@ namespace esphome
       sensor::Sensor *calib_nominal_run_{nullptr};
       sensor::Sensor *clock_offset_{nullptr};
       // sensor::Sensor *illuminance_{nullptr};
-      uint8_t current_sensor_;
       // The LoraCov often gets into a state where it spams loads of battery update
       // notifications. Here we will limit to no more than every 10s.
       uint8_t last_battery_update_;

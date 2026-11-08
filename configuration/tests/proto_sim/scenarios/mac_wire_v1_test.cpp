@@ -1515,7 +1515,6 @@ TEST(MacWireV1Listener, APlaintextUplinkBeforeTheSessionIsHeard) {
 
 namespace {
 struct CaptureNode : esphome::lora_tracker::LORAClientNode {
-    void send_remote_config() override {}
     void on_app_indication(const esphome::lora_tracker::AppIndication &ind) override {
         ++count;
         last_case = ind.msg ? ind.msg->proto_case : hubframes::UL_NOT_SET;

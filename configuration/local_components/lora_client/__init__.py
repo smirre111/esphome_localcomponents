@@ -71,7 +71,6 @@ TIME_SCHEMA = cv.Schema(
 )
 
 
-# SleepAction = lora_tracker_ns.class_("SleepAction", automation.Action)
 
 
 # )
@@ -260,22 +259,6 @@ SLEEP_ACTION_SCHEMA = automation.maybe_simple_id(
     }
 )
 
-
-SLEEP_CONTROL_ACTION_SCHEMA = automation.maybe_simple_id(
-    {
-        cv.Required(CONF_ID): cv.use_id(LORAListener),
-        # cv.Required(CONF_STATE): cv.templatable(cv.boolean),
-    }
-)
-
-
-@automation.register_action(
-    "lora_tracker.sleep_control", SleepAction, SLEEP_CONTROL_ACTION_SCHEMA
-)
-async def sleep_control_to_code(config, action_id, template_arg, args):
-    paren = await cg.get_variable(config[CONF_ID])
-    var = cg.new_Pvariable(action_id, template_arg, paren)
-    return var
 
 @automation.register_action("loracover.on_sleep_start", SleepAction, SLEEP_ACTION_SCHEMA)
 async def tracker_sleep_start_to_code(config, action_id, template_arg, args):

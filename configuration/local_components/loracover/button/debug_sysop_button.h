@@ -29,7 +29,6 @@ namespace esphome
 
       void dump_config() override;
 
-      void send_remote_config() override;
 
     protected:
       void press_action() override;

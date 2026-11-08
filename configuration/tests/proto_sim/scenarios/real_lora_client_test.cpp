@@ -1084,7 +1084,6 @@ struct RecordingNode : esphome::lora_tracker::LORAClientNode {
                           beacon ? ind.msg->beacon->nodeepoch : 0});
     }
     void on_register() override { ++registers; }
-    void send_remote_config() override {}
 };
 
 // A LoginMsg body on PORT 1 without K_AUTH: no node ever sends one.
