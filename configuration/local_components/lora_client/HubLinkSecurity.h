@@ -15,7 +15,7 @@
 // installed session id). It replaces the listener members k_enc_key_id_,
 // k_mac_key_id_, session_generation_, installed_session_id_ and the five static
 // maps s_k_enc_map, s_k_mac_map, s_session_generation_map,
-// s_seal_generation_map, s_base_nonce_map.
+// s_seal_generation_map and the session-id map.
 //
 // The API speaks mac::MacHdr + bytes (MacSap.h), never protobuf: lora_client
 // decodes the protobuf header into a MacHdr (refusing values that do not fit,

@@ -452,7 +452,7 @@ namespace esphome
         this->login_.login_acked             = false;
         this->login_.login_retry_count       = 0;
         this->login_.relogin_pending         = true;  // the node restarted: its old session is gone
-        this->login_.pending_login_nonce     = 0;     // node just (re-)registered → mint fresh
+        this->login_.pending_session_id     = 0;     // node just (re-)registered → mint fresh
         // The node rebooted (its REGISTER says so): the old session's keys and
         // any stored ciphertext are void on both sides, so drop them now rather
         // than at the next LOGIN challenge.
@@ -502,7 +502,7 @@ namespace esphome
       // config push: on EVERY confirm that finds one waiting.
       this->host_.session_on_confirmed();
 
-      // U2 (Tier-1 interim mitigation, round 12): clear pending_login_nonce
+      // U2 (Tier-1 interim mitigation, round 12): clear pending_session_id
       // unconditionally on every confirm, not only on the first ack. Three
       // call paths reach send_login() while login_acked is already true
       // (config_sync_relogin, the node-LOGIN path, the missing-nonce path),
@@ -512,7 +512,7 @@ namespace esphome
       // issue (send_login's own unconditional tx/rx reset is the deeper
       // bug; Tier 3's session redesign is the real fix) but removes this
       // specific repeat-clear gap cheaply in the meantime.
-      this->login_.pending_login_nonce = 0;
+      this->login_.pending_session_id = 0;
       if (!this->login_.login_acked)
       {
         this->login_.login_acked       = true;
@@ -526,25 +526,25 @@ namespace esphome
 
     void HubSession::send_login(bool into_uplink_window)
     {
-      // Base-nonce policy:
+      // Session-id policy:
       //   * Mint a fresh esp_random() ONLY for the first send of a challenge.
-      //   * On every retry (pending_login_nonce != 0) reuse the same value.
+      //   * On every retry (pending_session_id != 0) reuse the same value.
       // Rationale: the node rate-limits CMD_LOGIN to one accepted message per
       // 5 s.  If the hub regenerated the nonce on retry, the node would keep the
       // FIRST nonce it saw (the rate-limited retry is silently dropped) while
       // the hub's session id would be the LAST one — the two
       // sides then permanently disagree and every encrypted reply fails the
-      // IV check.  pending_login_nonce is cleared when the node's first valid
+      // IV check.  pending_session_id is cleared when the node's first valid
       // reply confirms the session (confirm()), and at sleep.
-      uint32_t base;
-      if (this->login_.pending_login_nonce != 0)
+      uint32_t session_id;
+      if (this->login_.pending_session_id != 0)
       {
-        base = this->login_.pending_login_nonce;
+        session_id = this->login_.pending_session_id;
       }
       else
       {
-        base = esp_random();
-        this->login_.pending_login_nonce = base;
+        session_id = esp_random();
+        this->login_.pending_session_id = session_id;
         this->sweep_base_us_ = 0;   // a new challenge sweeps the round afresh
         this->sweep_sends_   = 0;
         // A genuinely NEW challenge: whatever session keys are live belong
@@ -571,18 +571,18 @@ namespace esphome
       this->login_.confirmed       = false;
       this->login_.relogin_pending = true;
 
-      // Store the base-nonce on the hub side before sending so it is ready to
+      // Store the session id on the hub side before sending so it is ready to
       // validate the first encrypted response the node sends back.
       {
-        s_keys().setSessionId(static_cast<mac::Addr>(this->host_.session_peer()), base);
+        s_keys().setSessionId(static_cast<mac::Addr>(this->host_.session_peer()), session_id);
       }
 
       const uint32_t fcnt = this->allocate_tx();
 
       LoginMsg login = LOGIN_MSG__INIT;
-      // nonce carries the base-nonce (session id) for the CTR counter block.
+      // nonce carries the session id for the CTR counter block.
       // The node stores it as its base_nonce on receipt of CMD_LOGIN.
-      login.nonce = base;
+      login.nonce = session_id;
       // Ask the node to REGISTER when this hub boot has not pushed its config
       // yet -- but not while a push is already waiting for this session (the
       // listener's session_request_register explains the deadlock).
@@ -602,11 +602,11 @@ namespace esphome
 
       // The frame's K_AUTH tag (over every raw byte, recomputed per burst copy)
       // authenticates LOGIN (spec 4.3).
-      this->send_login_frame_(login, fcnt, base, into_uplink_window);
+      this->send_login_frame_(login, fcnt, session_id, into_uplink_window);
     }
 
     // The v1 LOGIN of send_login: frame, send, log.
-    void HubSession::send_login_frame_(const LoginMsg &login, uint32_t fcnt, uint32_t base,
+    void HubSession::send_login_frame_(const LoginMsg &login, uint32_t fcnt, uint32_t session_id,
                                        bool into_uplink_window)
     {
       DeliveryFrame f;
@@ -640,7 +640,7 @@ namespace esphome
       else
         this->host_.session_send(f.bytes.data(), f.bytes.size(), f.seal);
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
-               this->host_.session_name(), (unsigned) base, (unsigned) this->seq().txId(),
+               this->host_.session_name(), (unsigned) session_id, (unsigned) this->seq().txId(),
                (int) login.request_register);
     }
 
@@ -731,7 +731,7 @@ namespace esphome
     {
       this->login_.login_acked         = false;
       this->login_.login_retry_count   = 0;
-      this->login_.pending_login_nonce = 0;   // sleep ends the session; mint fresh on wake
+      this->login_.pending_session_id = 0;   // sleep ends the session; mint fresh on wake
       this->host_.session_cancel_timeout("login_retry");   // ("login_startup" is replaced by the arming below)
     }
 
@@ -1175,7 +1175,7 @@ namespace esphome
     // a hub reboot (see above). Do not "harden" this by checking a tag first.
     //
     // False = the frame is discarded (a login was started).
-    bool HubSession::check_base_nonce(const EncUplink &up)
+    bool HubSession::check_session_id(const EncUplink &up)
     {
       uint32_t unused_session_id = 0;
       if (up.sender <= 0xFF &&
@@ -1205,7 +1205,7 @@ namespace esphome
     // False = derivation failed, the frame is dropped.
     bool HubSession::select_keys(EncUplink &up)
     {
-      // uplink_check_base_nonce_ ran first: the sender has a session id.
+      // uplink_check_session_id_ ran first: the sender has a session id.
       s_keys().sessionId(static_cast<mac::Addr>(up.sender), &up.session_id);
       const mac::Addr self = static_cast<mac::Addr>(this->host_.session_peer());
       up.keys = s_keys().liveKeys(self);
@@ -1351,7 +1351,7 @@ namespace esphome
       up.msg    = rcv_message;
       up.sender = rcv_message->header ? rcv_message->header->senderaddress : 0;
 
-      if (!this->session_.check_base_nonce(up))
+      if (!this->session_.check_session_id(up))
         return;
       if (!this->session_.select_keys(up))
         return;

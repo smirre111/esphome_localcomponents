@@ -633,7 +633,7 @@ namespace esphome
       bool     session_confirmed() const { return this->session_.confirmed(); }
       bool     login_acked() const { return this->session_.login_acked(); }
       bool     relogin_pending() const { return this->session_.relogin_pending(); }
-      uint32_t pending_login_nonce() const { return this->session_.pending_login_nonce(); }
+      uint32_t pending_session_id() const { return this->session_.pending_session_id(); }
       uint8_t  login_retry_count() const { return this->session_.login_retry_count(); }
       bool     startup_login_initiated() const { return this->session_.startup_login_initiated(); }
       // For tests: set a precondition of the session's state machine.

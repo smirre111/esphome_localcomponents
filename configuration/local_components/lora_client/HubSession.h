@@ -216,7 +216,7 @@ namespace esphome
 
       // ---- the security stages of the encrypted-uplink pipeline ----
       // Each returns false when the frame is dropped (candidate destroyed).
-      bool     check_base_nonce(const EncUplink &up);
+      bool     check_session_id(const EncUplink &up);
       bool     select_keys(EncUplink &up);
       bool     verify(EncUplink &up);
       // CTR-decrypt into the session's own buffer; nullptr on failure.
@@ -238,7 +238,7 @@ namespace esphome
         bool     relogin_pending{false};
         // The base nonce of the challenge in flight, reused on every retry
         // (the node keeps the FIRST LoginMsg it accepts per 5 s).
-        uint32_t pending_login_nonce{0};
+        uint32_t pending_session_id{0};
         uint8_t  login_retry_count{0};
         // The startup login path was initiated (never cleared by incoming
         // frames, so an NTP resync does not restart a running session).
@@ -275,7 +275,7 @@ namespace esphome
       bool     confirmed() const { return this->login_.confirmed; }
       bool     login_acked() const { return this->login_.login_acked; }
       bool     relogin_pending() const { return this->login_.relogin_pending; }
-      uint32_t pending_login_nonce() const { return this->login_.pending_login_nonce; }
+      uint32_t pending_session_id() const { return this->login_.pending_session_id; }
       uint8_t  login_retry_count() const { return this->login_.login_retry_count; }
       bool     startup_login_initiated() const { return this->login_.startup_login_initiated; }
       // A node restored as registered still holds its NVS session, but the hub
@@ -388,7 +388,7 @@ namespace esphome
       int64_t  sweep_base_us_{0};
       uint32_t sweep_sends_{0};
       bool send_swept_(const DeliveryFrame &f);
-      void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base,
+      void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t session_id,
                              bool into_uplink_window);
       bool verify_uplink_(EncUplink &up);
       mac2::LinkSecurity::Verify tag_verdict_(EncUplink &up);

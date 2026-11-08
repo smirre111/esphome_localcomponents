@@ -269,14 +269,14 @@ TEST(RealLoraClient, SendLoginReusesPendingNonceAcrossRetries) {
 
     // First challenge.
     rol_2.send_login();
-    const uint32_t pending_first = rol_2.pending_login_nonce();
+    const uint32_t pending_first = rol_2.pending_session_id();
     ASSERT_NE(pending_first, 0u);
 
     // Two more retries before any ACK.
     rol_2.send_login();
     rol_2.send_login();
 
-    EXPECT_EQ(rol_2.pending_login_nonce(), pending_first)
+    EXPECT_EQ(rol_2.pending_session_id(), pending_first)
         << "REAL LORAListener::send_login() must reuse pending nonce on "
            "every retry — this is the production-side guarantee that "
            "the harness model also enforces.";
@@ -7548,7 +7548,7 @@ void sleepReady(real_helpers::RealHubHarness &h) {
     h.rol.registered_ = true;
     h.time.set_now(kModeBNow, /*valid=*/true);
     h.rol.login_state_for_test().login_acked = true;
-    h.rol.login_state_for_test().pending_login_nonce = 0x1234;
+    h.rol.login_state_for_test().pending_session_id = 0x1234;
 }
 
 // The node's CommandAck for the sleep in flight.
@@ -7581,7 +7581,7 @@ TEST(NightlySleep, GoesOutAsATrackedOpAndMutatesNothingUntilTheAck) {
     // ...and the hub's picture of the node is exactly what it was.
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "no sleep is recorded before the node says so";
     EXPECT_TRUE(h.rol.login_acked()) << "the session is still live";
-    EXPECT_EQ(h.rol.pending_login_nonce(), 0x1234u);
+    EXPECT_EQ(h.rol.pending_session_id(), 0x1234u);
     esphome::lora_tracker::LORAClientRestoreState before{};
     ASSERT_TRUE(SP(h.rol).rtc_.load(&before));
     EXPECT_EQ(before.last_sleep_epoch, 0u) << "and nothing was persisted either";
@@ -7593,7 +7593,7 @@ TEST(NightlySleep, GoesOutAsATrackedOpAndMutatesNothingUntilTheAck) {
     EXPECT_EQ(h.rol.last_sleep_epoch_, (uint32_t) kModeBNow + 1)
         << "stamped at the ack, one second past the uplink that carried it";
     EXPECT_FALSE(h.rol.login_acked());
-    EXPECT_EQ(h.rol.pending_login_nonce(), 0u);
+    EXPECT_EQ(h.rol.pending_session_id(), 0u);
     esphome::lora_tracker::LORAClientRestoreState after{};
     ASSERT_TRUE(SP(h.rol).rtc_.load(&after));
     EXPECT_EQ(after.last_sleep_epoch, (uint32_t) kModeBNow + 1) << "persisted on the ack";
@@ -7717,7 +7717,7 @@ TEST(NightlySleep, ExhaustedRetriesKeepTheSessionAndRecordNoSleep) {
     // The teardown "Command failed after retries - clearing session" is NOT applied.
     EXPECT_TRUE(h.rol.session_confirmed()) << "the session is kept";
     EXPECT_TRUE(h.rol.login_acked());
-    EXPECT_EQ(h.rol.pending_login_nonce(), 0x1234u);
+    EXPECT_EQ(h.rol.pending_session_id(), 0x1234u);
     EXPECT_EQ(countLoginFrames(h), logins0) << "and no forced re-login is sent into the night";
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u) << "a sleep nobody confirmed is not recorded";
 }
@@ -7769,7 +7769,7 @@ TEST(NightlySleep, AnAutoModeNodeIsSkippedExactlyAsBefore) {
     EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "nothing is sent";
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
     EXPECT_TRUE(h.rol.login_acked()) << "the session is not discarded";
-    EXPECT_EQ(h.rol.pending_login_nonce(), 0x1234u);
+    EXPECT_EQ(h.rol.pending_session_id(), 0x1234u);
 }
 
 TEST(NightlySleep, ASecondRequestWhileOneIsPendingChangesNothing) {
@@ -11714,7 +11714,7 @@ TEST(SleepGate, TwoNodesAreGatedIndependently) {
     for (LORAClient *r : {&h.rol_1, &h.rol_2}) {
         r->registered_ = true;
         r->login_state_for_test().login_acked = true;
-        r->login_state_for_test().pending_login_nonce = 0x1234;
+        r->login_state_for_test().pending_session_id = 0x1234;
         GP(*r).login_slot_ = 0;
     }
     h.rol_1.last_sleep_epoch_ = kModeBNow + 1;           // node 17 sleeps, node 18 does not
@@ -12289,7 +12289,7 @@ TEST(Mac1HubS3, ALoginResetZeroesBothCountersWithoutAWriteAndTheNextIdIsOne) {
     f.rol.registered_ = true;
     f.rol.incrTxMessageId();
     ASSERT_GT(f.rol.sequencer().txId(), 0u);
-    f.rol.login_state_for_test().pending_login_nonce = 0;                      // a FRESH challenge
+    f.rol.login_state_for_test().pending_session_id = 0;                      // a FRESH challenge
     const int n0 = esphome::prefs_save_count();
     f.rol.send_login();
     EXPECT_EQ(f.rol.sequencer().rxId(), 0u);
