@@ -66,8 +66,8 @@ METRICS = {
     "client.raw_parent_send": ([CLIENT], r"\bparent_->send\s*\(",
                                "direct parent_->send calls in lora_client.cpp"),
     # Hand-built frames: each allocates its own MAC-1 counter (V15).
-    "client.msgid_alloc_sites": ([CLIENT], r"(?<!::)\bincrTxMessageId\s*\(\s*\)",
-                                 "incrTxMessageId() call sites"),
+    "client.msgid_alloc_sites": ([CLIENT], r"(?<!::)\bincrTxFcnt\s*\(\s*\)",
+                                 "incrTxFcnt() call sites"),
     # Hand-built frames: each seals itself (V15).
     "client.pack_sites": ([CLIENT], r"(?<!::)\bpack_operation_\s*\(",
                           "pack_operation_ call sites"),

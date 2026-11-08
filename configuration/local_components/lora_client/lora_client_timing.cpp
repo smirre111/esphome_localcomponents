@@ -526,7 +526,7 @@ namespace esphome
     // the same guard the node's phase tracking uses, so "in slot" means the
     // same thing at both ends.
     // The stamp is captured with the frame and committed once the frame earned
-    // it (MAC-1's commit, commit_rx_msgid_); the same stamp answers whether
+    // it (MAC-1's commit, commit_rx_fcnt_); the same stamp answers whether
     // the uplink landed where the grid says this node transmits.
     void NodeLinkTiming::commit_uplink_stamp(int64_t t0_us, uint32_t unc_us)
     {
@@ -877,7 +877,7 @@ namespace esphome
       }
 
       // This node's own uplink (by default the last one committed in
-      // commit_rx_msgid_) — never the tracker's live stamp, which by now belongs
+      // commit_rx_fcnt_) — never the tracker's live stamp, which by now belongs
       // to whichever node transmitted most recently.
       if (t0_uplink <= 0)
         return ClassAPlacement::NoUplinkStamp;

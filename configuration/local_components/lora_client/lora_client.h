@@ -109,8 +109,8 @@ namespace esphome
     struct LORAClientRestoreState
     {
       uint8_t  version;           // must equal LORAListener::kRestoreStateVersion; otherwise discarded
-      uint32_t rx_message_id;
-      uint32_t tx_message_id;
+      uint32_t rx_fcnt;
+      uint32_t tx_fcnt;
       bool     logged_in;
       uint32_t last_sleep_epoch;  // Unix timestamp when enterSleep() was last called; 0 = unknown
       // What ClientConfig's fields hashed to when this was saved. A hub reboot
@@ -487,12 +487,12 @@ namespace esphome
       }
       // Capture this node's own uplink T0 and score it against the grid. Called
       // only for a frame that has earned the replay counter — see
-      // commit_rx_msgid_.
+      // commit_rx_fcnt_.
       // MAC-0 receive ticket (S5, mirrors the node's RxTicket/commitTiming): what
       // MAC-0 knows about the frame being processed -- the tracker's T0 stamp,
       // its uncertainty and the on-air length (always a trustworthy T0 input in
       // v1). Captured at admission (set_response),
-      // committed by MAC-1 only once the frame has earned it (commit_rx_msgid_).
+      // committed by MAC-1 only once the frame has earned it (commit_rx_fcnt_).
       struct Mac0Rx
       {
         mac::RxTicket ticket{};
@@ -898,7 +898,7 @@ namespace esphome
 
       // N-3 (hub side): the last resetReason this listener has already acted
       // on, so a run of beacons from the SAME boot (every Mode-C wake reports
-      // the same value) only advances tx_message_id once per actual reboot,
+      // the same value) only advances tx_fcnt once per actual reboot,
       // not once per beacon. 0xFFFFFFFF never matches a real IDF reset-reason
       // code, so the very first beacon always counts as "new".
       uint32_t    last_handled_reset_reason_{0xFFFFFFFFu};
@@ -946,7 +946,7 @@ namespace esphome
       // Duplicate suppression for PLAINTEXT uplinks before a session exists
       // (accept_plaintext_uplink_, review HB4). Separate from the MAC-1 rx
       // mark, which an unauthenticated frame never moves; never persisted;
-      // reset by every LOGIN and kept with the counter by commit_rx_msgid_.
+      // reset by every LOGIN and kept with the counter by commit_rx_fcnt_.
       uint32_t plaintext_hwm_{0};
       bool     have_plaintext_hwm_{false};
       uint32_t node_sched_version_{0};
@@ -995,7 +995,7 @@ namespace esphome
       int64_t       last_gridsync_ack_us_{0};
       // A re-publish after a node reboot / NoGrid refusal is scheduled and not yet sent.
       bool          regrid_pending_{false};
-      // When we last advanced tx_message_id for a node boot (0 = never) and for which
+      // When we last advanced tx_fcnt for a node boot (0 = never) and for which
       // wake (the beacon's prevBeaconMsgId); when the last reboot-driven re-publish
       // was decided; when a spent ladder last forced a LOGIN.
       uint32_t      last_wake_key_{0};
@@ -1052,8 +1052,8 @@ namespace esphome
       // Call it after send(), so the frame just sent is counted as well.
       uint32_t ack_wait_ms_(uint32_t base_ms) const { return this->dlv_.ack_wait_ms(base_ms); }
       virtual void send_remote_config();
-      uint32_t incrTxMessageId() { return this->session_.allocate_tx(); }
-      void setRxMessageId(uint32_t msg_id) { this->session_.commit_rx(msg_id); }
+      uint32_t incrTxFcnt() { return this->session_.allocate_tx(); }
+      void setRxFcnt(uint32_t msg_id) { this->session_.commit_rx(msg_id); }
 
       // The ONE way a child cover hands its CoverConfig to the radio: a Fire request
       // through the delivery mechanism, so it is encrypted whenever the session is
@@ -1161,7 +1161,7 @@ namespace esphome
       void set_counters_no_write_(uint32_t tx, uint32_t rx) { this->session_.set_counters_no_write(tx, rx); }
       // ---- the MAC-1 counter interface ------------------------------------
       // The only operations the application uses to move the counters (the
-      // allocation and the commit are incrTxMessageId / setRxMessageId);
+      // allocation and the commit are incrTxFcnt / setRxFcnt);
       // tools/layer_lint.py counts every other writer. None writes NVS.
       // A new session (or no persisted state): both directions restart at 0.
       void mac1_restart_session_() { this->set_counters_no_write_(0, 0); }
@@ -1329,7 +1329,7 @@ namespace esphome
       bool session_gridsync_outstanding() const override;
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
-      void commit_rx_msgid_(const hubframes::Up *rcv_message);
+      void commit_rx_fcnt_(const hubframes::Up *rcv_message);
       void dispatch_payload_(hubframes::Up *msg);
       void dispatch_mac_payload_(hubframes::Up *msg);
       // S6: the listener's own handling (dispatch_payload_, demultiplexed by
@@ -1602,7 +1602,7 @@ namespace esphome
 
     inline void LORAClientRestoreState::apply(LORAListener *listener)
     {
-      listener->mac1_restore_(this->tx_message_id + 64, this->rx_message_id);
+      listener->mac1_restore_(this->tx_fcnt + 64, this->rx_fcnt);
       listener->registered_       = this->logged_in;
       listener->last_sleep_epoch_ = this->last_sleep_epoch;
     }

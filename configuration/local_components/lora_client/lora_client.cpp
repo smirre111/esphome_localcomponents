@@ -71,8 +71,8 @@ namespace esphome
                  "logged_in=%s last_sleep=%u",
                  this->get_name().c_str(),
                  (unsigned)restore->version,
-                 (unsigned)restore->rx_message_id,
-                 (unsigned)restore->tx_message_id,
+                 (unsigned)restore->rx_fcnt,
+                 (unsigned)restore->tx_fcnt,
                  restore->logged_in ? "yes" : "no",
                  (unsigned)restore->last_sleep_epoch);
         restore->apply(this);
@@ -249,8 +249,8 @@ namespace esphome
         LORAClientRestoreState restore{};
         memset(&restore, 0, sizeof(restore));
         restore.version          = kRestoreStateVersion;
-        restore.rx_message_id    = this->session_.seq().rxId();
-        restore.tx_message_id    = this->session_.seq().txId();
+        restore.rx_fcnt    = this->session_.seq().rxId();
+        restore.tx_fcnt    = this->session_.seq().txId();
         restore.logged_in        = this->registered_;
         restore.last_sleep_epoch = this->last_sleep_epoch_;
         // The hash the node ACKNOWLEDGED (review rollout-3 D1): the current one
@@ -271,8 +271,8 @@ namespace esphome
         }
         ESP_LOGD(TAG, "[%s] NVS save — rx_id=%u tx_id=%u logged_in=%s last_sleep=%u",
                  this->get_name().c_str(),
-                 (unsigned)restore.rx_message_id,
-                 (unsigned)restore.tx_message_id,
+                 (unsigned)restore.rx_fcnt,
+                 (unsigned)restore.tx_fcnt,
                  restore.logged_in ? "yes" : "no",
                  (unsigned)restore.last_sleep_epoch);
       }
@@ -826,7 +826,7 @@ namespace esphome
       this->stamp_sleep_epoch_();
       this->refresh_sleep_status_();
       this->session_.end_for_sleep();
-      // incrTxMessageId() no longer persists last_sleep_epoch_ as a side effect.
+      // incrTxFcnt() no longer persists last_sleep_epoch_ as a side effect.
       this->save_state_(true);
       this->arm_post_sleep_login_fallback_();
     }
@@ -991,7 +991,7 @@ namespace esphome
 
     bool LORAListener::mac_frame_(hubframes::Down *op, MacFrame *out, bool ack_req)
     {
-      return this->mac_frame_(op, this->incrTxMessageId(), this->session_.confirmed(), out, ack_req);
+      return this->mac_frame_(op, this->incrTxFcnt(), this->session_.confirmed(), out, ack_req);
     }
 
     bool LORAListener::mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt,

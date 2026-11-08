@@ -40,7 +40,7 @@ namespace esphome
       uint32_t msgid = 0;
 
       // MAC-2 OFF (the default): a DEDICATED counter, deliberately not
-      // incrTxMessageId().
+      // incrTxFcnt().
       //
       // Two reasons, both load-bearing. (1) That call advances the session TX
       // id the node's replay window tracks. The node hears only a fraction of
@@ -48,7 +48,7 @@ namespace esphome
       // does not advance its rx_id_ at all — so hub and node diverge by one per
       // ping. At 250 ms spacing a 300 s run emits 1200 pings and the next real
       // command lands outside the node's 1024-wide accept window: every command
-      // rejected as a "huge jump" until the next LOGIN. (2) incrTxMessageId()
+      // rejected as a "huge jump" until the next LOGIN. (2) incrTxFcnt()
       // persists to NVS, and this runs in an esp_timer task while the ESPHome
       // main loop owns that backend — hundreds of writes per run, off-loop.
       //

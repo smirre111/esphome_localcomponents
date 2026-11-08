@@ -52,7 +52,7 @@ namespace esphome
         // until the next login resets it. MAC-1's read-only check (S3).
         if (rcv_message->header && this->session_.seq().check(rcv_message->header->msgid))
         {
-          // CHECKED here, COMMITTED later — see commit_rx_msgid_().
+          // CHECKED here, COMMITTED later — see commit_rx_fcnt_().
           //
           // This used to assign (and persist) the counter right here, before a
           // single byte had been authenticated. The window is a ratchet, so one
@@ -94,7 +94,7 @@ namespace esphome
     // the hub aimed one frame at a window derived from someone else's uplink
     // and the node heard nothing.
     //
-    // Called from commit_rx_msgid_, NOT from admit_frame_. Admission checks the
+    // Called from commit_rx_fcnt_, NOT from admit_frame_. Admission checks the
     // address and the replay window, neither of which is authentication: a
     // crafted plaintext frame, or an encrypted one that later fails its CMAC
     // tag, was admitted and moved both of these. That gave an attacker in radio
@@ -141,11 +141,11 @@ namespace esphome
     // with and the counter is the only sequencing there is. A plaintext frame
     // arriving while the session IS confirmed is still processed exactly as
     // before — it just cannot ratchet the counter on its way through.
-    void LORAListener::commit_rx_msgid_(const hubframes::Up *m)
+    void LORAListener::commit_rx_fcnt_(const hubframes::Up *m)
     {
       if (m && m->header)
       {
-        this->setRxMessageId(m->header->msgid);
+        this->setRxFcnt(m->header->msgid);
         // Keep the plaintext high-water mark with the authenticated counter, so
         // a value left behind by a forged frame cannot outlive the session it
         // was injected into. See the plaintext path in set_response().
@@ -1309,7 +1309,7 @@ namespace esphome
 
       // The tag verified: this frame is the node's, so its msgid is real and
       // the replay counter may finally move.
-      this->commit_rx_msgid_(up.msg);
+      this->commit_rx_fcnt_(up.msg);
 
       // The candidate (if one was derived) just proved itself by verifying
       // THIS frame — install it as the live session now, replacing

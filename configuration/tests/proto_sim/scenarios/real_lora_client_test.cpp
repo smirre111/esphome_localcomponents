@@ -1820,7 +1820,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkMovesNeitherTheBeliefNorTheClassAOrig
 
 TEST(RealLoraClient, APlaintextFrameOnAConfirmedSessionCannotBeReplayedWithoutLimit) {
     // Duplicate rejection used to be a SIDE EFFECT of admit_frame_ assigning the
-    // replay counter: the frame moved rx_message_id, so the next copy failed the
+    // replay counter: the frame moved rx_fcnt, so the next copy failed the
     // "msgid > rx_message_id" window. Taking that assignment away — correctly,
     // so an unauthenticated frame cannot ratchet the counter — removed the
     // dedup with it and nothing replaced it. The SAME captured frame was then
@@ -1877,7 +1877,7 @@ TEST(RealLoraClient, AForgedPlaintextUplinkCannotRatchetTheHubsReplayCounter) {
     // The hub's mirror of the node's counter ratchet.
     //
     // admit_frame_ accepts any forward jump inside (rx, rx + 1024] and used to
-    // ASSIGN rx there, before a byte had been authenticated — and setRxMessageId
+    // ASSIGN rx there, before a byte had been authenticated — and setRxFcnt
     // persists, so the damage outlived a reboot. Anyone in radio range can read
     // the plaintext LoraHeader off a real uplink and send one frame at
     // msgid + 1000 claiming to be the node. Every genuine uplink after that was
@@ -5630,19 +5630,19 @@ TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     ASSERT_TRUE(f.rol.session_confirmed());
 
     f.rol.setCountersForTest(0x7FFFFFFDu, f.rol.sequencer().rxId());
-    EXPECT_EQ(f.rol.incrTxMessageId(), 0x7FFFFFFEu);
-    EXPECT_EQ(f.rol.incrTxMessageId(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
+    EXPECT_EQ(f.rol.incrTxFcnt(), 0x7FFFFFFEu);
+    EXPECT_EQ(f.rol.incrTxFcnt(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
     EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
 
     const size_t before = f.radio.transcript().size();
-    const uint32_t got = f.rol.incrTxMessageId();
+    const uint32_t got = f.rol.incrTxFcnt();
     EXPECT_EQ(got, framecrypto::kMsgidCtrLimit) << "the out-of-space marker";
     EXPECT_FALSE(framecrypto::msgidFitsCtr(got));
     EXPECT_EQ(f.rol.sequencer().txId(), 0x7FFFFFFFu) << "the counter must not wrap or advance";
     EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
 
     // A second refusal asks for nothing more, and the id is still refused.
-    EXPECT_EQ(f.rol.incrTxMessageId(), framecrypto::kMsgidCtrLimit);
+    EXPECT_EQ(f.rol.incrTxFcnt(), framecrypto::kMsgidCtrLimit);
     EXPECT_EQ(f.rol.msgidReloginRequestsForTest(), 1u) << "a repeat refusal must not ask again";
 
     // The relogin goes out on the next tick: one LOGIN, counters restarted,
@@ -12217,14 +12217,14 @@ std::vector<uint8_t> plainAvail(uint8_t sender, uint32_t msgid) {
 TEST(Mac1HubS3, EveryHandedOutMsgidIsPersistedAtOnceOneWriteEach) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    const uint32_t tx0 = h.rol.incrTxMessageId();
+    const uint32_t tx0 = h.rol.incrTxFcnt();
     const int n0 = esphome::prefs_save_count();
-    const uint32_t a = h.rol.incrTxMessageId();
-    const uint32_t b = h.rol.incrTxMessageId();
+    const uint32_t a = h.rol.incrTxFcnt();
+    const uint32_t b = h.rol.incrTxFcnt();
     EXPECT_EQ(a, tx0 + 1);
     EXPECT_EQ(b, tx0 + 2);
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 2) << "one write per msgid";
-    EXPECT_EQ(lastSaved().tx_message_id, b) << "written before it is used";
+    EXPECT_EQ(lastSaved().tx_fcnt, b) << "written before it is used";
 }
 
 TEST(Mac1HubS3, TheReceiveWindowIsStrictlyForwardAndAtMost1024Wide) {
@@ -12244,7 +12244,7 @@ TEST(Mac1HubS3, TheReceiveWindowIsStrictlyForwardAndAtMost1024Wide) {
     feed_sealed(h.rol, edge);
     EXPECT_EQ(h.rol.sequencer().rxId(), 10u + 1024u) << "the window's far edge is in";
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 1) << "one write per committed uplink";
-    EXPECT_EQ(lastSaved().rx_message_id, 10u + 1024u);
+    EXPECT_EQ(lastSaved().rx_fcnt, 10u + 1024u);
 }
 
 // A refused id is not ACTED ON either (nothing forwarded), and an id the mark
@@ -12281,13 +12281,13 @@ TEST(Mac1HubS3, AnAuthenticatedUplinkCommitsAndPersistsOnceAForgedOneNeither) {
     f.rol.set_response(good.data(), good.size());
     EXPECT_EQ(f.rol.sequencer().rxId(), rx + 1);
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 1);
-    EXPECT_EQ(lastSaved().rx_message_id, rx + 1);
+    EXPECT_EQ(lastSaved().rx_fcnt, rx + 1);
 }
 
 TEST(Mac1HubS3, ALoginResetZeroesBothCountersWithoutAWriteAndTheNextIdIsOne) {
     real_helpers::RealHubHarness f{18, kMacRol2};      // no login-ack sink on this radio
     f.rol.registered_ = true;
-    f.rol.incrTxMessageId();
+    f.rol.incrTxFcnt();
     ASSERT_GT(f.rol.sequencer().txId(), 0u);
     f.rol.login_state_for_test().pending_session_id = 0;                      // a FRESH challenge
     const int n0 = esphome::prefs_save_count();
@@ -12295,22 +12295,22 @@ TEST(Mac1HubS3, ALoginResetZeroesBothCountersWithoutAWriteAndTheNextIdIsOne) {
     EXPECT_EQ(f.rol.sequencer().rxId(), 0u);
     EXPECT_EQ(f.rol.sequencer().txId(), 1u) << "the LOGIN itself took id 1";
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 1) << "only the LOGIN's id was written";
-    EXPECT_EQ(lastSaved().tx_message_id, 1u);
+    EXPECT_EQ(lastSaved().tx_fcnt, 1u);
 }
 
 TEST(Mac1HubS3, TheBootMarginMovesTxWithoutAWriteAndTheNextIdIsPersisted) {
     using namespace real_helpers;
     RealHubHarness h{18, kMacRol2};
-    const uint32_t tx = h.rol.incrTxMessageId();
+    const uint32_t tx = h.rol.incrTxFcnt();
     ::NodeWakeBeacon b = NODE_WAKE_BEACON__INIT;
     const int n0 = esphome::prefs_save_count();
     h.rol.advance_tx_for_boot_(&b);
     EXPECT_EQ(h.rol.sequencer().txId(), tx + modebsup::kTxBootMargin);
     EXPECT_EQ(esphome::prefs_save_count(), n0) << "the margin itself writes nothing";
-    const uint32_t next = h.rol.incrTxMessageId();
+    const uint32_t next = h.rol.incrTxFcnt();
     EXPECT_EQ(next, tx + modebsup::kTxBootMargin + 1);
     EXPECT_EQ(esphome::prefs_save_count(), n0 + 1);
-    EXPECT_EQ(lastSaved().tx_message_id, next);
+    EXPECT_EQ(lastSaved().tx_fcnt, next);
 }
 
 TEST(Mac1HubS3, TheNvsApplyRestoresRxAndTxPlus64) {
@@ -12318,17 +12318,17 @@ TEST(Mac1HubS3, TheNvsApplyRestoresRxAndTxPlus64) {
     RealHubHarness h{18, kMacRol2};
     esphome::lora_tracker::LORAClientRestoreState r{};
     r.version = esphome::lora_tracker::LORAListener::kRestoreStateVersion;
-    r.rx_message_id = 100;
-    r.tx_message_id = 200;
+    r.rx_fcnt = 100;
+    r.tx_fcnt = 200;
     r.logged_in = true;
     const int n0 = esphome::prefs_save_count();
     r.apply(&h.rol);
     EXPECT_EQ(h.rol.sequencer().rxId(), 100u);
     EXPECT_EQ(h.rol.sequencer().txId(), 264u);
     EXPECT_EQ(esphome::prefs_save_count(), n0);
-    EXPECT_EQ(h.rol.incrTxMessageId(), 265u);
-    EXPECT_EQ(lastSaved().tx_message_id, 265u);
-    EXPECT_EQ(lastSaved().rx_message_id, 100u);
+    EXPECT_EQ(h.rol.incrTxFcnt(), 265u);
+    EXPECT_EQ(lastSaved().tx_fcnt, 265u);
+    EXPECT_EQ(lastSaved().rx_fcnt, 100u);
 }
 
 TEST(Mac1HubS3, AMacPingReservationTakesABlockAndPersistsItsEnd) {
@@ -12338,7 +12338,7 @@ TEST(Mac1HubS3, AMacPingReservationTakesABlockAndPersistsItsEnd) {
     f.rol.start_mac_ping(/*duration_s=*/10, /*grid_ms=*/1000, true, 0, /*crypto=*/true);
     // frames = 10 s / 1 s + 2 = 12: ids tx+1 .. tx+12 reserved.
     EXPECT_EQ(f.rol.sequencer().txId(), tx + 12);
-    EXPECT_EQ(lastSaved().tx_message_id, tx + 12) << "the reservation's end is persisted";
+    EXPECT_EQ(lastSaved().tx_fcnt, tx + 12) << "the reservation's end is persisted";
     f.rol.stop_mac_ping();
 }
 
