@@ -231,114 +231,6 @@ int lora_read_reg(int reg)
 }
 
 /**
- * Write a value to a register.
- * @param reg Register index.
- * @param val Value to write.
- */
-void lora_write_reg1(int reg, int val)
-{
-   // uint8_t out[1] = {static_cast<uint8_t>(val)};
-   // uint8_t in[2];
-
-   // spi_transaction_t t = {
-   //     .flags = 0,
-   //     .cmd = 0,
-   //     .addr = uint64_t(static_cast<uint8_t>(0x80) | static_cast<uint8_t>(reg)),
-   //     .length = 8,
-   //     .rxlength = 8,
-   //     .user = NULL,
-   //     .tx_buffer = out,
-   //     .rx_buffer = in};
-   uint8_t reg8, val8;
-   reg8 = static_cast<uint8_t>(reg);
-   val8 = static_cast<uint8_t>(val);
-   uint8_t cRead = 0x80;
-
-   uint8_t cmd = static_cast<uint8_t>(cRead | reg8);
-   uint8_t out[2] = {cmd, val8};
-   uint8_t in[2];
-
-   spi_transaction_t t{};
-   t.flags = 0;
-   t.length = 8 * sizeof(out);
-   t.tx_buffer = out;
-   t.rx_buffer = in;
-
-   // static BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-   // if (xSemaphoreTakeFromISR(xSemaphore, &xHigherPriorityTaskWoken))
-   {
-      /* We were able to obtain the semaphore and can now access the
-            shared resource. */
-
-      gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 0);
-      spi_device_transmit(__spi, &t);
-      gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 1);
-
-      /* We have finished accessing the shared resource.  Release the
-            semaphore. */
-      // xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
-   }
-   // else
-   {
-      /* We could not obtain the semaphore and can therefore not access
-            the shared resource safely. */
-   }
-}
-
-/**
- * Read the current value of a register.
- * @param reg Register index.
- * @return Value of the register.
- */
-int lora_read_reg1(int reg)
-{
-   // uint8_t out[2] = {static_cast<uint8_t>(reg), 0xff};
-   // uint8_t rx_buf[2];
-
-   // spi_transaction_t t = {
-   //     .flags = 0,
-   //     .cmd = 0,
-   //     .addr = uint64_t(reg),
-   //     .length = 8,
-   //     .rxlength = 8,
-   //     .user = NULL,
-   //     .tx_buffer = out,
-   //     .rx_buffer = (void *)rx_buf};
-
-   uint8_t out[2] = {static_cast<uint8_t>(reg), static_cast<uint8_t>(0xff)};
-   uint8_t in[2];
-
-   spi_transaction_t t{};
-   t.flags = 0;
-   t.length = 8 * sizeof(out);
-   t.tx_buffer = out;
-   t.rx_buffer = in;
-
-   // static BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-   // if (xSemaphoreTakeFromISR(xSemaphore, &xHigherPriorityTaskWoken))
-   {
-      /* We were able to obtain the semaphore and can now access the
-            shared resource. */
-
-      gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 0);
-      spi_device_transmit(__spi, &t);
-      gpio_set_level(gpio_num_t(CONFIG_CS_GPIO), 1);
-
-      /* We have finished accessing the shared resource.  Release the
-            semaphore. */
-      // xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
-   }
-   // else
-   {
-      /* We could not obtain the semaphore and can therefore not access
-            the shared resource safely. */
-   }
-
-   // return rx_buf[1];
-   return in[1];
-}
-
-/**
  * Perform hardware initialization.
  */
 int lora_init(void)
@@ -423,18 +315,6 @@ int lora_init(void)
    return 1;
 }
 
-void lora_end()
-{
-   // put in sleep mode
-   lora_sleep();
-
-// stop SPI
-#ifdef TODO
-#pragma warning("Stop SPI to do")
-   _spi->end();
-#endif
-}
-
 int lora_beginPacket(int implicitHeader)
 {
    if (lora_isTransmitting())
@@ -498,23 +378,6 @@ int lora_waitTxDone(void)
    }
    g_last_txdone_us = esp_timer_get_time();
    lora_clearInterrupts(LORA_IRQ_FLAG_TX_DONE);
-   return 1;
-}
-
-int lora_endPacket(bool async)
-{
-   // BW: 7800 kHz, SF: 12, Preamble: 12 => Whole packet time: 16 935.4 ms
-   if (async)
-   {
-      // lora_write_reg(REG_DIO_MAPPING_1, 0x40); // DIO0 => TXDONE
-      lora_setInterruptMode(0 /* DIO0 */, LORA_IRQ_DIO0_TXDONE);
-   }
-
-   lora_tx();
-
-   if (!async)
-      return lora_waitTxDone();
-
    return 1;
 }
 
@@ -606,39 +469,6 @@ float lora_packetSnr(void)
    return ((int8_t)lora_read_reg(REG_PKT_SNR_VALUE)) * 0.25;
 }
 
-float lora_packetFrequencyError()
-{
-   int32_t freqError = 0;
-   freqError = static_cast<int32_t>(lora_read_reg(REG_FREQ_ERROR_MSB) & 0b111);
-   freqError <<= 8L;
-   freqError += static_cast<int32_t>(lora_read_reg(REG_FREQ_ERROR_MID));
-   freqError <<= 8L;
-   freqError += static_cast<int32_t>(lora_read_reg(REG_FREQ_ERROR_LSB));
-
-   if (lora_read_reg(REG_FREQ_ERROR_MSB) & 0b1000)
-   {                       // Sign bit is on
-      freqError -= 524288; // B1000'0000'0000'0000'0000
-   }
-
-   const float fXtal = 32E6;                                                                                              // FXOSC: crystal oscillator (XTAL) frequency (2.5. Chip Specification, p. 14)
-   const float fError = ((static_cast<float>(freqError) * (1L << 24)) / fXtal) * (lora_getSignalBandwidth() / 500000.0f); // p. 37
-
-   return fError;
-}
-
-int lora_rssi()
-{
-   return (lora_read_reg(REG_RSSI_VALUE) - (__frequency < RF_MID_BAND_THRESHOLD ? RSSI_OFFSET_LF_PORT : RSSI_OFFSET_HF_PORT));
-}
-
-void lora_compensateFrequencyOffset(const float &fError)
-{
-   const int8_t ppmOffset = static_cast<int8_t>(0.95f * (fError * 10E6f / __frequency));
-
-   lora_setFrequency(static_cast<long>(__frequency - fError));
-   lora_write_reg(REG_PPM_CORRECTION, reinterpret_cast<const uint8_t &>(ppmOffset));
-}
-
 size_t lora_write(const uint8_t *buffer, size_t size)
 {
    int currentLength = lora_read_reg(REG_PAYLOAD_LENGTH);
@@ -711,42 +541,6 @@ size_t lora_write(uint8_t byte)
    return lora_write(const_cast<uint8_t *>(&byte), sizeof(byte));
 }
 
-int lora_available()
-{
-   return (lora_read_reg(REG_RX_NB_BYTES) - _packetIndex);
-}
-
-int lora_read()
-{
-   if (!lora_available())
-   {
-      return -1;
-   }
-
-   _packetIndex++;
-
-   return lora_read_reg(REG_FIFO);
-}
-
-int lora_peek()
-{
-   if (!lora_available())
-   {
-      return -1;
-   }
-
-   // store current FIFO address
-   int currentAddress = lora_read_reg(REG_FIFO_ADDR_PTR);
-
-   // read
-   uint8_t b = lora_read_reg(REG_FIFO);
-
-   // restore FIFO address
-   lora_write_reg(REG_FIFO_ADDR_PTR, currentAddress);
-
-   return b;
-}
-
 /**
  * Sets the radio transceiver in receive mode.
  * Incoming packets will be received.
@@ -811,17 +605,6 @@ void lora_sleep(void)
    // vTaskDelay(1);
    esphome::delay(1);
 
-}
-
-void lora_cad()
-{
-   lora_idle();
-   //lora_write_reg(REG_DIO_MAPPING_1, 0b10100000);
-   lora_write_reg(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_CAD);
-   // vTaskDelay(1);
-   esphome::delay(1);
-
-   //delayMicroseconds(120); // IDLE -> CAD takes about ~120 µs
 }
 
 void lora_tx()
@@ -937,7 +720,6 @@ void lora_setFrequency(long frequency)
 
 int lora_getSpreadingFactor()
 {
-   int retval = 0;
    return (lora_read_reg(REG_MODEM_CONFIG_2) >> 4);
 }
 
@@ -1080,30 +862,6 @@ void lora_setPreambleLength(long length)
    lora_write_reg(REG_PREAMBLE_LSB, (uint8_t)(length >> 0));
 }
 
-void lora_setSymbolTimeout(uint16_t symbols)
-{
-   if (symbols > 1023)
-   { // p. 40
-      symbols = 1023;
-   }
-   else if (symbols < 4)
-   {
-      symbols = 4;
-   }
-
-   const uint8_t currentMCValue = lora_read_reg(REG_MODEM_CONFIG_2) & 0b11111100;
-   lora_write_reg(REG_MODEM_CONFIG_2, currentMCValue | ((uint8_t)(symbols >> 8)));
-   lora_write_reg(REG_SYMB_TIMEOUT_LSB, (uint8_t)(symbols >> 0));
-}
-
-uint16_t lora_getSymbolTimeout()
-{
-   uint16_t status = (lora_read_reg(REG_MODEM_CONFIG_2) & 0b00000011);
-   status <<= 8;
-   status |= lora_read_reg(REG_SYMB_TIMEOUT_LSB);
-   return status;
-}
-
 /**
  * Change radio sync word.
  * @param sw New sync word to use.
@@ -1113,23 +871,6 @@ void lora_setSyncWord(int sw)
    lora_write_reg(REG_SYNC_WORD, sw);
 }
 
-void lora_setMaxPayloadLength(const uint8_t payloadLength)
-{
-   lora_write_reg(REG_MAX_PAYLOAD_LENGTH, payloadLength);
-}
-
-void lora_enableLowDataRateOptimize(bool enabled)
-{
-   uint8_t regValue = lora_read_reg(REG_MODEM_CONFIG_3);
-   lora_write_reg(REG_MODEM_CONFIG_3, bitWrite(regValue, 3, enabled));
-}
-
-void lora_enableTcxo(const bool enabled)
-{
-   uint8_t regValue = lora_read_reg(REG_TCXO);
-   lora_write_reg(REG_TCXO, bitWrite(regValue, 4, enabled));
-}
-
 /**
  * Enable appending/verifying packet CRC.
  */
@@ -1137,26 +878,6 @@ void lora_enableCrc(void)
 {
 
    lora_write_reg(REG_MODEM_CONFIG_2, lora_read_reg(REG_MODEM_CONFIG_2) | 0x04);
-}
-
-/**
- * Disable appending/verifying packet CRC.
- */
-void lora_disableCrc(void)
-{
-   lora_write_reg(REG_MODEM_CONFIG_2, lora_read_reg(REG_MODEM_CONFIG_2) & 0xfb);
-}
-
-void lora_enableInvertIQ()
-{
-   lora_write_reg(REG_INVERTIQ, 0x66);
-   lora_write_reg(REG_INVERTIQ2, 0x19);
-}
-
-void lora_disableInvertIQ()
-{
-   lora_write_reg(REG_INVERTIQ, 0x27);
-   lora_write_reg(REG_INVERTIQ2, 0x1d);
 }
 
 void lora_setOCP(uint8_t mA)
@@ -1173,36 +894,6 @@ void lora_setOCP(uint8_t mA)
    }
 
    lora_write_reg(REG_OCP, 0x20 | (0x1F & ocpTrim));
-}
-
-void lora_setGain(uint8_t gain)
-{
-   // check allowed range
-   if (gain > 6)
-   {
-      gain = 6;
-   }
-
-   // set to standby
-   lora_idle();
-
-   // set gain
-   if (gain == 0)
-   {
-      // if gain = 0, enable AGC
-      lora_write_reg(REG_MODEM_CONFIG_3, 0x04);
-   }
-   else
-   {
-      // disable AGC
-      lora_write_reg(REG_MODEM_CONFIG_3, 0x00);
-
-      // clear Gain and set LNA boost
-      lora_write_reg(REG_LNA, 0x03);
-
-      // set gain
-      lora_write_reg(REG_LNA, lora_read_reg(REG_LNA) | (gain << 5));
-   }
 }
 
 void lora_setInterruptMode(uint8_t pin, uint8_t mode)
@@ -1231,24 +922,6 @@ uint8_t lora_readInterrupts()
 void lora_clearInterrupts(uint8_t irqFlags)
 {
    lora_write_reg(REG_IRQ_FLAGS, irqFlags);
-}
-
-uint8_t lora_random()
-{
-   return lora_read_reg(REG_RSSI_WIDEBAND);
-}
-
-void lora_dump_registers(void)
-{
-   int i;
-   printf("00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F\n");
-   for (i = 0; i < 0x40; i++)
-   {
-      printf("%02X ", lora_read_reg(i));
-      if ((i & 0x0f) == 0x0f)
-         printf("\n");
-   }
-   printf("\n");
 }
 
 uint8_t lora_getDeviceMode()
@@ -1307,36 +980,6 @@ void lora_reset(void)
 }
 
 /**
- * Send a packet.
- * @param buf Data to be sent
- * @param size Size of data.
- */
-void lora_send_packet(uint8_t *buf, int size)
-{
-   /*
-    * Transfer data to radio.
-    */
-   lora_idle();
-   lora_write_reg(REG_FIFO_ADDR_PTR, 0);
-
-   for (int i = 0; i < size; i++)
-      lora_write_reg(REG_FIFO, *buf++);
-
-   lora_write_reg(REG_PAYLOAD_LENGTH, size);
-
-   /*
-    * Start transmission and wait for conclusion.
-    */
-   lora_write_reg(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_TX);
-   while ((lora_read_reg(REG_IRQ_FLAGS) & IRQ_TX_DONE_MASK) == 0)
-   {
-      // vTaskDelay(2);
-      esphome::delay(2);
-   }
-   lora_write_reg(REG_IRQ_FLAGS, IRQ_TX_DONE_MASK);
-}
-
-/**
  * Read a received packet.
  * @param buf Buffer for the data.
  * @param size Available size in buffer (bytes).
@@ -1375,28 +1018,4 @@ int lora_receive_packet(uint8_t *buf, int size)
       *buf++ = lora_read_reg(REG_FIFO);
 
    return len;
-}
-
-/**
- * Returns non-zero if there is data to read (packet received).
- */
-int lora_received(void)
-{
-   if (lora_read_reg(REG_IRQ_FLAGS) & IRQ_RX_DONE_MASK)
-      return 1;
-   return 0;
-}
-
-/**
- * Shutdown hardware.
- */
-void lora_close(void)
-{
-   lora_sleep();
-   //   close(__spi);  FIXME: end hardware features after lora_close
-   //   close(__cs);
-   //   close(__rst);
-   //   __spi = -1;
-   //   __cs = -1;
-   //   __rst = -1;
 }
