@@ -1062,7 +1062,7 @@ namespace esphome
         this->set_timeout("config_sync_relogin", 500, [this]() {
           // Same reasoning as finding 9's handle_encrypted_ fix: go
           // through do_login_and_arm_retry_(), not a bare send_login(),
-          // so this also respects acquire_onboarding_() and arms a retry
+          // so this also respects acquire_onboarding() and arms a retry
           // instead of being a one-shot that silently does nothing if
           // this particular LoginMsg is lost.
           if (!this->config_synced_ && !this->setup_in_progress_())
@@ -1167,7 +1167,7 @@ namespace esphome
     // hub holds no session for makes the hub start a LOGIN. An attacker in
     // radio range can therefore trigger LOGIN exchanges for such a node, e.g.
     // right after a hub reboot. The cost is one LOGIN exchange (airtime and node
-    // battery), bounded by the onboarding gate (acquire_onboarding_) and the
+    // battery), bounded by the onboarding gate (acquire_onboarding) and the
     // login retry ladder. It cannot install keys or confirm a session (the LOGIN
     // is MIC-authenticated and only the real node can answer it); what
     // send_login() does reset — this node's key ids and frame counters on the
@@ -1183,7 +1183,7 @@ namespace esphome
         return true;
       // Security review finding 9: go through do_login_and_arm_retry_(),
       // not a bare send_login(). The bare call bypassed
-      // acquire_onboarding_() (the 2026-09-26 onboarding-storm fix —
+      // acquire_onboarding() (the 2026-09-26 onboarding-storm fix —
       // two nodes re-provisioning at once could still pile their
       // ~1.85 s/frame downlink queues onto each other here) and armed
       // no retry, so a dropped re-provisioning LoginMsg had no recovery

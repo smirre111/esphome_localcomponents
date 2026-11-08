@@ -63,7 +63,7 @@ namespace esphome
     namespace
     {
     // Marks an esp_timer callback as running for its whole body, so a stop on
-    // the loop can wait for it (LORAListener::wait_callback_idle_, HB2).
+    // the loop can wait for it (wait_until_idle, HB2).
     struct CallbackBusy
     {
       explicit CallbackBusy(std::atomic<bool> &b) : busy(b) { busy.store(true); }

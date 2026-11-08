@@ -230,10 +230,8 @@ namespace esphome
       uint32_t  latePlacedFrames() const { return this->tx_late_placed_; }
       // Copies dropped because their sealer refused them (HB8: counted, not logged per copy).
       uint32_t  txSealDrops() const { return this->tx_seal_drops_; }
-      uint32_t  rxUnrouted() const { return this->rx_unrouted_; }
       // On-mark frames that left more than kMarkLateToleranceUs after their mark
       // but inside the guard, so they still claimed it. Should stay 0.
-      uint32_t  lateMarks() const { return this->tx_mark_late_; }
       // How long sendTask holds the radio in RX after the frame it just sent:
       // the response window if a node answers that frame, otherwise nothing.
       uint32_t  postTxHoldMs() const
@@ -337,7 +335,6 @@ namespace esphome
       // resource as spent when the frame never entered the queue.
       bool send(uint8_t *data, size_t len) { return this->send(data, len, TxPolicy{}); }
       bool send(uint8_t *data, size_t len, const TxPolicy &policy);
-      void sendPacketOnce(uint8_t *data, size_t len);
       // How early the scheduler releases a PLACED frame so the caller has time
       // to prepare before firing, and what firePacket then busy-waits out. Well
       // inside kMaxFireBusyWaitUs, which is the ceiling for a MISCOMPUTED
@@ -447,7 +444,6 @@ namespace esphome
       // checkReception() before the packet is dispatched, so a client that
       // accepts the packet can read the value that belongs to it.
       int get_last_rssi() const { return this->last_packet_rssi_; }
-      float get_last_snr() const { return this->last_packet_snr_; }
 
       // --- Bx: hub RX timestamping -----------------------------------------
       //
@@ -532,7 +528,6 @@ namespace esphome
       uint32_t tx_mark_late_{0};
       // HB8: send-task counters (no logging there) and what loop() last reported.
       uint32_t tx_seal_drops_{0};
-      uint32_t rx_unrouted_{0};   // uplinks no listener was addressed by (HB23)
       int64_t  tx_last_late_us_{0};
       int64_t  tx_last_mark_late_us_{0};
       uint32_t rep_late_{0}, rep_mark_{0}, rep_stamp_{0}, rep_seal_{0}, rep_supers_{0};

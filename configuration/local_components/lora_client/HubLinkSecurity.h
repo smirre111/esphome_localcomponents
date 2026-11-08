@@ -166,7 +166,6 @@ public:
     static bool deriveRootKey(uint8_t out[kRootKeyBytes]);
     // Idempotent; derives K_auth from K_root on first use.
     bool initAuthKey();
-    bool authKeyReady() const { return auth_key_ != PSA_KEY_ID_NULL; }
     // Test seam (S8 shared vectors fix K_auth): swap the K_auth handle; returns
     // the previous one so the test can restore it. No ownership transfer.
     psa_key_id_t swapAuthKeyForTest(psa_key_id_t id)

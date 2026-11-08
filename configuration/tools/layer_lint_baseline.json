@@ -3,7 +3,7 @@
   "children.wire_unpack": 0,
   "client.app_arq_by_msgid": 0,
   "client.app_picks_encryption": 0,
-  "client.mac1_counter_writes": 7,
+  "client.mac1_counter_writes": 6,
   "client.msgid_alloc_sites": 1,
   "client.pack_sites": 0,
   "client.psa_calls": 0,

@@ -178,13 +178,6 @@ namespace esphome
             this->listen_[i]      = Reservation{};
           }
       }
-      // The first start >= start_us at which a span of dur_us overlaps no live
-      // listen window.
-      int64_t after_listen(int64_t start_us, int64_t dur_us, int64_t now_us) const
-      {
-        std::lock_guard<std::mutex> lock(this->mutex_);
-        return this->after_listen_locked_(start_us, dur_us, now_us);
-      }
       // Where an unplaced burst of dur_us handed over at now_us may start: now_us
       // when no live listen window is in its way. Otherwise past the windows AND
       // past everything already queued, placed or on the air -- two bursts

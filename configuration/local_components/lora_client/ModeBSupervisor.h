@@ -416,11 +416,6 @@ public:
     Phase    phase() const    { return this->phase_; }
     uint32_t failures() const { return this->failures_; }
     uint32_t notBefore() const { return this->not_before_; }
-    bool     warmupInFlight() const
-    {
-        return this->phase_ == Phase::Warming || this->phase_ == Phase::Verifying;
-    }
-
 private:
     Event dropOut(Arbiter &arb, uint32_t id)
     {

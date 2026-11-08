@@ -328,7 +328,6 @@ namespace esphome
         if (this->parent_ == nullptr)
           return;
         this->mbs_owns_test_ = this->mbs_starting_;
-        this->mode_test_.clear_last_report();
         this->mode_test_.start(duration_s, grid_ms, mode, copies, keep_power_profile,
                                enable_counter, enable_crypto, mac_echo, arm_offset_us);
       }
@@ -376,7 +375,7 @@ namespace esphome
       // (SHA-256(fleet key phrase)[0:16]). A wrong byte here is invisible to
       // anything that derives and compares on the SAME side, so a test pins it.
       static bool deriveRootKeyForTest(uint8_t out[16]);
-      // For tests: the msgid / CTR-space guard (see requestMsgidRelogin_).
+      // For tests: the msgid / CTR-space guard (see HubSession::request_msgid_relogin).
       bool msgidReloginPendingForTest() const { return this->session_.msgid_relogin_pending(); }
       uint32_t msgidReloginRequestsForTest() const { return this->session_.msgid_relogin_requests(); }
       void clearMsgidReloginForTest() { this->session_.clear_msgid_relogin(); }
@@ -422,7 +421,6 @@ namespace esphome
       // `help` entity fell into. The NUMBERS below are what belongs in HA, one
       // per sensor, because B3's gate ("reception >= Mode A over a week") is a
       // week of history and a string cannot be graphed.
-      const std::string &last_mode_test_report() const { return this->mode_test_.last_report(); }
 
       // --- The last ModeTest report, as numbers ---------------------------
       //
@@ -542,7 +540,6 @@ namespace esphome
 
       // §4.6: did this uplink land where the grid says this node transmits?
       // Called with the node's own T0, from admit_frame_.
-      void noteUplinkPlacement_(int64_t t0_uplink_us) { this->link_.note_uplink_placement(t0_uplink_us); }
       // belief_ with confirmation_age_s filled in from the clock — the one
       // field that is a function of now rather than of an event.
       timedmode::HubBelief hubBeliefNow_() const { return this->link_.belief_now(); }
@@ -646,7 +643,6 @@ namespace esphome
       static void reset_sleep_gate_for_test() { s_sleep_gate_.reset(); }
       bool onboarding_held_for_test() const { return this->session_.onboarding_held(); }
       int64_t last_timesync_sent_us_for_test() const { return this->last_timesync_sent_us_; }
-      void reset_timesync_policy_for_test() { this->last_timesync_sent_us_ = 0; }
       // Simulates the config-confirmed-and-saved moment without driving a full
       // REGISTER/LOGIN exchange, for the reboot-persistence tests.
       void save_state_for_test() { this->save_state_(true); }
@@ -738,7 +734,7 @@ namespace esphome
 
      protected:
       // block == nullptr: a fresh FCNT (loop only); else the run's reserved
-      // block (any task). See pack_test_frame_.
+      // block (any task). See pack_stream_frame.
       void handle_mode_test_report_(const ::ModeTestReport *rep) { this->mode_test_.on_report(rep); }
 
       // Same shape as the drift frame, and for the same reason: the NEXT frame
@@ -873,8 +869,6 @@ namespace esphome
       // 0 = never (the sentinel every other "last X" field in this class uses).
       int64_t  last_timesync_sent_us_{0};
       // The onboarding gate: HubSession's (see HubSession.h).
-      bool     acquire_onboarding_() { return this->session_.acquire_onboarding(); }
-      void     release_onboarding_(const char *why) { this->session_.release_onboarding(why); }
 
 
       // Grid slot, claimed in declaration order exactly as login_slot_ is, so
@@ -1115,12 +1109,7 @@ namespace esphome
       void set_asleep_binary_sensor(binary_sensor::BinarySensor *bs) { this->asleep_bsensor_ = bs; }
       void set_sleep_status_text_sensor(text_sensor::TextSensor *ts) { this->sleep_status_tsensor_ = ts; }
 
-      // std::string address_str() const;
-      uint64_t address_uint64() const { return this->address_uint64_; };
 
-      const uint8_t *address() const { return (const uint8_t *)(&this->address_); }
-      uint8_t *get_remote_bda() { return this->remote_bda_; }
-      uint64_t get_address() const { return this->address_uint64_; }
       virtual void set_address(uint64_t address)
       {
         this->address_uint64_ = address;
@@ -1131,12 +1120,6 @@ namespace esphome
         this->remote_bda_[1] = (address >> 8) & 0xFF;
         this->remote_bda_[0] = (address >> 0) & 0xFF;
 
-        this->address_[5] = (address >> 40) & 0xFF;
-        this->address_[4] = (address >> 32) & 0xFF;
-        this->address_[3] = (address >> 24) & 0xFF;
-        this->address_[2] = (address >> 16) & 0xFF;
-        this->address_[1] = (address >> 8) & 0xFF;
-        this->address_[0] = (address >> 0) & 0xFF;
 
         if (address == 0)
         {
@@ -1148,7 +1131,6 @@ namespace esphome
         }
       }
       const char *address_str() const { return this->address_str_; }
-      bool check_addr(esp_bd_addr_t &addr) { return memcmp(addr, this->remote_bda_, sizeof(esp_bd_addr_t)) == 0; }
 
       void set_time(time::RealTimeClock *time) { this->time = time; }
 
@@ -1178,9 +1160,6 @@ namespace esphome
 
       // Group 1: 8-byte types
       uint64_t address_uint64_{0};
-      esp_bd_addr_t address_{
-          0,
-      };
 
     public:
       // For tests (S4): retag one stamped copy exactly as the tracker does for a
@@ -1212,11 +1191,6 @@ namespace esphome
       // tools/layer_lint.py counts every other writer. None writes NVS.
       // A new session (or no persisted state): both directions restart at 0.
       void mac1_restart_session_() { this->set_counters_no_write_(0, 0); }
-      // The node rebooted on a resumed session: skip n tx ids it may have seen.
-      void mac1_skip_tx_(uint32_t n)
-      {
-        this->set_counters_no_write_(this->session_.seq().txId() + n, this->session_.seq().rxId());
-      }
       // Install a persisted (tx, rx) snapshot.
       void mac1_restore_(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
       // FCNT blocks for the esp_timer streams: HubSession's (see HubSession.h).
@@ -1231,14 +1205,12 @@ namespace esphome
       {
         return this->session_.sealed_in_epoch(f, r);
       }
-      bool pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block, MacFrame *f);
       // Placement for a frame built on the esp_timer task with an explicit
       // shape (MAC ping): touches no loop-owned state (last_placed_*, belief).
       bool send_placed_from_timer_(const uint8_t *buf, size_t len, TxPolicy policy,
                                    const mac2::FrameSeal &seal, int64_t *last_mark_t0_us);
       // Spin until an esp_timer callback that may still be running has
       // returned (its timer is already stopped and its active flag false).
-      static void wait_callback_idle_(const std::atomic<bool> &busy);
     public:
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
@@ -1445,7 +1417,6 @@ namespace esphome
       void     do_login_and_arm_retry_() { this->session_.do_login_and_arm_retry(); }
 
       // Msgid / CTR-space guard: HubSession::request_msgid_relogin.
-      void     requestMsgidRelogin_(const char *where) { this->session_.request_msgid_relogin(where); }
       // Arm a ONE-SHOT login retry that re-arms itself.  Uses set_timeout rather than set_interval: an
       // interval's first firing is randomly phased within [0, interval), which
       // fired the "hourly" login retry within ~0.6 s of the challenge, stepping

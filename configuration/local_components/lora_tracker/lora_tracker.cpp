@@ -314,12 +314,10 @@ namespace esphome
         // frame reaches only the listener it came from (a REGISTER, matched on
         // the MAC in its body, reaches all of them), not every listener's full
         // decode.
-        const size_t routed = uplinkdemux::dispatch(
+        (void) uplinkdemux::dispatch(
             buf_, (size_t) rxLen, this->clients_,
             [](const LORAClient *c) { return c->short_address(); },
             [this, rxLen](LORAClient *c) { c->set_response(buf_, rxLen); });
-        if (routed == 0)
-          this->rx_unrouted_++;
       }
     }
 
@@ -1343,12 +1341,6 @@ namespace esphome
                (long long) (this->tag_latency_report_max_at_us_ / 1000));
     }
 
-    void LORATracker::sendPacketOnce(uint8_t *data, size_t len)
-    {
-
-      this->sendPacketBytes(data, len);
-    }
-
     // ---- B5: PREPARE / FIRE -------------------------------------------
     //
     // Everything a transmit does splits cleanly in two. PREPARE is idling the
@@ -1682,31 +1674,6 @@ namespace esphome
       }
 
       return ESP_OK;
-    }
-
-    // Increment reference count (for multiple consumers)
-    esp_err_t TxPool::ref_inc(tx_buffer_t *buffer)
-    {
-      if (!this->validate(buffer))
-      {
-        return ESP_ERR_INVALID_ARG;
-      }
-
-      if (xSemaphoreTake(this->mutex_, portMAX_DELAY) == pdTRUE)
-      {
-        if (!buffer->in_use)
-        {
-          ESP_LOGE(TAG, "Attempting to ref unused buffer %p", buffer);
-          xSemaphoreGive(this->mutex_);
-          return ESP_ERR_INVALID_STATE;
-        }
-
-        buffer->ref_count++;
-        xSemaphoreGive(this->mutex_);
-        return ESP_OK;
-      }
-
-      return ESP_FAIL;
     }
 
     // Validate buffer belongs to pool and has correct magic number

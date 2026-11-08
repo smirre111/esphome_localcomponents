@@ -86,7 +86,6 @@ namespace esphome
       // Drop one reference; the last one returns the buffer (thread-safe).
       esp_err_t put(tx_buffer_t *buffer);
       // One more reference (for multiple consumers).
-      esp_err_t ref_inc(tx_buffer_t *buffer);
       // In the pool's bounds and carrying the magic.
       bool validate(tx_buffer_t *buffer);
       uint32_t allocation_failures() const { return this->stats_.allocation_failures; }

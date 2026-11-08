@@ -447,7 +447,6 @@ namespace esphome
       sum.residual_samples         = rep->residualsamples;
       this->summary_ = sum;
 
-      this->last_report_ = buf;
       ESP_LOGW(TAG, "[%s] ModeTest REPORT: %s", this->host_.stream_name(), buf);
     }
 
@@ -481,12 +480,6 @@ namespace esphome
       return true;
     }
 
-    bool LORAListener::pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block,
-                                        MacFrame *f)
-    {
-      return pack_stream_frame(*this, op, block, f);
-    }
-
     bool LORAListener::send_placed_from_timer_(const uint8_t *buf, size_t len, TxPolicy policy,
                                                const mac2::FrameSeal &seal,
                                                int64_t *last_mark_t0_us)
@@ -505,11 +498,6 @@ namespace esphome
         return false;
       *last_mark_t0_us = t0;
       return true;
-    }
-
-    void LORAListener::wait_callback_idle_(const std::atomic<bool> &busy)
-    {
-      wait_until_idle(busy);
     }
 
     // ---- StreamHost --------------------------------------------------------

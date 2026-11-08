@@ -190,7 +190,6 @@ namespace esphome
       // One enable=false frame for a node that may still be running a test.
       void send_stop_frame();
       bool active() const { return this->active_; }
-      uint32_t marks_sent() const { return this->seq_; }
       // The running test's request, as the node is told it on every mark.
       uint32_t duration_s() const { return this->duration_s_; }
       uint32_t grid_ms() const { return this->grid_ms_; }
@@ -209,8 +208,6 @@ namespace esphome
       void on_report(const ::ModeTestReport *rep);
       const ModeTestSummary &summary() const { return this->summary_; }
       ModeTestSummary &summary_for_test() { return this->summary_; }
-      const std::string &last_report() const { return this->last_report_; }
-      void clear_last_report() { this->last_report_.clear(); }
 
     private:
       void build_frame_(bool enable, mac1::FcntReservation *block = nullptr);
@@ -238,7 +235,6 @@ namespace esphome
       uint8_t  frame_[160]{};
       size_t   frame_len_{0};
       mac2::FrameSeal seal_{};
-      std::string     last_report_{};
       ModeTestSummary summary_{};
     };
 
