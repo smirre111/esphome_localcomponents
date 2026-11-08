@@ -1,5 +1,7 @@
 # LoRa Blinds — Message Sequence Charts & Conformance Review
 
+> **SUPERSEDED (noted 2026-11-08).** These charts describe the v0 envelope (`CommandAck`, plaintext `BaseNonceExchange`, AES-GCM) that MAC wire v1 replaced on 2026-10-19; read them as history. Current wire: `docs/mac-wire-format.md`; current behaviour: `docs/project-state.md`.
+
 Intended message flows for every operation, followed by a review of whether each
 actually works, and a check of the implementation against the chart.
 

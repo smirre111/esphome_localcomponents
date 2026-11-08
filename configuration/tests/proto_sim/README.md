@@ -1,5 +1,7 @@
 # LoRa Blinds protocol simulation tests
 
+> **Note (2026-11-08):** the hand-written model layer (`sim/hub_model.*`, `sim/node_model.*`, the GCM helpers in `sim/crypto.*`) and the scenarios built only on it still simulate the deleted v0 protocol (AES-GCM, base nonce, `LoraClientOperationMessage`); they are legacy, kept until a decision on porting or deleting them (review 2026-11-08 D8). The tests that drive the real hub and node code (`real_*`, `e2e_test`, `seam_test`, `mac_wire_v1*`, the golden and policy tests) are the ones that describe MAC wire v1. Parts of the text below describe the v0 era.
+
 Host-native GoogleTest harness for the protocol that lives across the hub
 (ESPHome `local_components/lora_client/`, `local_components/lora_tracker/`,
 `local_components/loracover/`) and the node (`BlindsESP/main/CmdDispatcher.cpp`,
