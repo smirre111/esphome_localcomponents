@@ -16,10 +16,6 @@
 #include "lora.h"
 
 
-// #define CONFIG_CS_GPIO    19
-// #define CONFIG_RST_GPIO   16
-// #define CONFIG_MISO_GPIO  5
-// #define CONFIG_MOSI_GPIO  18
 // #define CONFIG_SCK_GPIO   17  
 
 #define CONFIG_SCK_GPIO  5 // GPIO5  -- SX1278's SCK
@@ -1294,38 +1290,6 @@ void lora_implicitHeaderMode()
    lora_write_reg(REG_MODEM_CONFIG_1, lora_read_reg(REG_MODEM_CONFIG_1) | 0x01);
    //lora_write_reg(REG_PAYLOAD_LENGTH, size);
 }
-
-// void lora_handleDio0RiseRx()
-// {
-//   const uint8_t irqFlags = lora_readInterrupts();
-
-//   if (irqFlags) {
-//     lora_clearInterrupts(irqFlags);
-//   }
-
-//   if ((irqFlags & LORA_IRQ_FLAG_PAYLOAD_CRC_ERROR) == 0) {
-
-//     if ((irqFlags & LORA_IRQ_FLAG_RX_DONE) != 0) {
-//       // received a packet
-//       _packetIndex = 0;
-
-//       // read packet length
-//     int packetLength = lora_getPayloadLength();
-
-//       // set FIFO address to current RX address
-//       lora_write_reg(REG_FIFO_ADDR_PTR, lora_read_reg(REG_FIFO_RX_CURRENT_ADDR));
-
-//       if (_onReceive) {
-//         _onReceive(packetLength);
-//       }
-//     }
-//     else if ((irqFlags & LORA_IRQ_FLAG_TX_DONE) != 0) {
-//       if (_onTxDone) {
-//         _onTxDone();
-//       }
-//     }
-//   }
-// }
 
 /**
  * Perform physical reset on the Lora chip

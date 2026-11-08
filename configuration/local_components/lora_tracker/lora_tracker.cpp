@@ -219,44 +219,6 @@ namespace esphome
       this->drainTxAnomalyReport_();
       this->logStackWatermarks_();
       esphome::delay(10);
-      // this->sendPacketBytes(txBuf, len);
-
-      // tx_buffer_t *rx_buffer;
-
-      // ESP_LOGI(TAG, "Data processing task started");
-
-      // while (1)
-      // {
-      // if (xQueueReceive(data_queue, &rx_buffer, 0) == pdTRUE)
-      // {
-      //   // Validate before processing
-      //   if (!this->validate_buffer(rx_buffer))
-      //   {
-      //     ESP_LOGE(TAG, "Received invalid buffer, skipping");
-      //     return;
-      //   }
-
-      //   // Additional bounds check
-      //   if (rx_buffer->length > loratx::kBufferSize)
-      //   {
-      //     ESP_LOGE(TAG, "Buffer length %d exceeds max %d",
-      //              rx_buffer->length, loratx::kBufferSize);
-      //     this->pool_.put(rx_buffer);
-      //     return;
-      //   }
-
-      //   ESP_LOGI(TAG, "Processing %d bytes from buffer %p",
-      //            rx_buffer->length, rx_buffer);
-
-      //   // Simulate processing
-      //   // vTaskDelay(50 / portTICK_PERIOD_MS);
-      //   this->sendPacketBurst(rx_buffer->data, rx_buffer->length);
-      //   // Safe hex dump with length check
-      //   if (rx_buffer->length > 0)
-      //   {
-      //     ESP_LOG_BUFFER_HEX(TAG, rx_buffer->data, rx_buffer->length);
-      //   }
-
     }
 
     void LORATracker::checkReception()
