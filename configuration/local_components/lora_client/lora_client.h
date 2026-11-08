@@ -1419,7 +1419,7 @@ namespace esphome
       void session_on_login_acknowledged() override;
       void session_node_restored(uint32_t fcnt_jump) override;
       int64_t session_tx_drain_us() const override;
-      bool session_schedule_outstanding() const override;
+      bool session_gridsync_outstanding() const override;
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
       void commit_rx_msgid_(const hubframes::Up *rcv_message);

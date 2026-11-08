@@ -106,6 +106,7 @@ struct V1Probe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
     using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::do_login_and_arm_retry_;
+    using esphome::lora_tracker::LORAListener::schedule_startup_login_;
 };
 V1Probe &P(LORAClient &r) { return static_cast<V1Probe &>(r); }
 
@@ -1288,6 +1289,91 @@ TEST(MacWireV1Listener, AKeylessUplinksLoginKeepsItsAimThroughAShortOnboardingWa
     for (int i = 0; i < 20 && loginsOnAir(hub.radio) == logins; ++i) hub.clock.tick(100);
     ASSERT_EQ(loginsOnAir(hub.radio), logins + 1);
     EXPECT_EQ(hub.tracker.last_copies, 1) << "still one copy on the node's mark";
+}
+
+namespace {
+// The session id (nonce) of a LOGIN frame.
+uint32_t pendingSessionOf(const Bytes &login) {
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    if (!macwire::decode(login.data(), login.size(), &h, &off, &blen) || h.port != macwire::kPortSession)
+        return 0;
+    LoginMsg *lm = login_msg__unpack(nullptr, blen, login.data() + off);
+    const uint32_t s = lm ? lm->nonce : 0;
+    if (lm) login_msg__free_unpacked(lm, nullptr);
+    return s;
+}
+// The LOGIN frames the tracker took since `from`: bursts (copies != 1) and
+// single copies.
+void countLogins(const Hub &hub, size_t from, int *bursts, int *singles) {
+    for (size_t k = from; k < hub.tracker.sent_raw.size(); ++k) {
+        if (pendingSessionOf(hub.tracker.sent_raw[k]) == 0) continue;   // not a LOGIN
+        if (hub.tracker.sent_copies[k] == 1) ++*singles; else ++*bursts;
+    }
+}
+}  // namespace
+
+// Review 2026-11-08 R4: every check-in uplink of a deaf node re-sent its LOGIN
+// and RESTARTED the ladder (retry 5/24 -> 1/24), so the fast retries repeated
+// every 15 min: 103 LoginMsgs to node 1 in 2 h. The ladder now continues.
+TEST(MacWireV1Listener, ADeafNodesCheckInsDoNotRestartTheLoginLadder) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    const size_t from = hub.tracker.sent_raw.size();
+    P(hub.rol).do_login_and_arm_retry_();
+    const uint32_t session = pendingSessionOf(lastDown(hub.radio));
+    uint32_t fcnt = 50;
+    for (int s = 1; s <= 7200; ++s) {   // two hours, a check-in every 15 min
+        proto_sim_timer_advance_us(1'000'000);
+        hub.clock.tick(1000);
+        if (s % 900 == 0) sessionUplink(hub, session, fcnt++);
+    }
+    int bursts = 0, singles = 0;
+    countLogins(hub, from, &bursts, &singles);
+    EXPECT_LE(bursts, 30) << "LOGIN bursts in 2 h to a node that never answers (" << singles
+                          << " single copies)";
+    EXPECT_GE(hub.rol.login_retry_count(), 8u) << "the ladder went on, it was not restarted";
+}
+
+// R4: a node's uplink 2.7 s after a hub boot started a challenge, and the
+// startup timer a second one 2.3 s later (one wasted burst per boot).
+TEST(MacWireV1Listener, AnUplinkAtBootStartsOneLoginChallengeNotTwo) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    P(hub.rol).schedule_startup_login_();   // "login challenge in 5 s"
+    const size_t from = hub.tracker.sent_raw.size();
+    for (int i = 0; i < 27; ++i) { proto_sim_timer_advance_us(100'000); hub.clock.tick(100); }
+    hub.tracker.last_rx_t0_us_v = esp_timer_get_time() - 1000;
+    sessionUplink(hub, 0x1234u, 5);          // a session the rebooted hub does not know
+    for (int i = 0; i < 38; ++i) { proto_sim_timer_advance_us(100'000); hub.clock.tick(100); }
+    int bursts = 0, singles = 0;
+    countLogins(hub, from, &bursts, &singles);
+    EXPECT_EQ(bursts + singles, 1) << "one challenge within 6.5 s of the boot";
+}
+
+// R4 / round 5: after a hub reboot a node's first uplink names a session the
+// hub never held ("No base nonce"): its LOGIN goes on that node's mark too.
+TEST(MacWireV1Listener, AnUplinkTheRebootedHubHoldsNoSessionForIsAnsweredOnTheNodesMark) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    hub.rol.enable_timed_mode(true);
+    const int64_t t0 = esp_timer_get_time();
+    hub.tracker.last_rx_t0_us_v = t0;
+    sessionUplink(hub, 0x1234u, 5);
+    hub.clock.tick(10);
+    EXPECT_EQ(hub.tracker.last_copies, 1) << "one copy, aimed";
+    const int64_t since = loratiming::t0FromFireInstantUs(hub.tracker.last_earliest_us, 0) - (t0 - 60'000);
+    EXPECT_GT(since, 0);
+    EXPECT_EQ(since % 1'500'000, 0) << "on the node's own mark";
 }
 
 TEST(MacWireV1Listener, AKeylessUplinksLoginToAModeANodeIsTheBurst) {

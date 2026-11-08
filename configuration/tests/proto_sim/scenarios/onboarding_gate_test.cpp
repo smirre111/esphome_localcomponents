@@ -157,11 +157,33 @@ TEST(OnboardingHold, AConfirmedSessionWithFramesStillQueuedIsNotSettled) {
     EXPECT_EQ(assess(s), Verdict::Keep) << "its own pushes are still on the way out";
 }
 
-TEST(OnboardingHold, AConfirmedSessionWithAScheduleUnackedIsNotSettled) {
+// Review 2026-11-08 R3/R6: the gate waits for the grid, not for the schedule
+// (acked on its own channel; a deaf node held the gate 40-51 s for it).
+TEST(OnboardingHold, AConfirmedSessionWaitsForItsGridSyncButNotForEver) {
     HoldState s = confirmedAndQuiet();
-    s.schedule_outstanding = true;
-    EXPECT_EQ(assess(s), Verdict::Keep)
-        << "the schedule push and its retries are part of bringing the node up";
+    s.gridsync_outstanding = true;
+    s.since_confirm_ms = kGridSyncWaitMaxMs - 1;
+    EXPECT_EQ(assess(s), Verdict::Keep) << "the grid is part of bringing a Timed Mode node up";
+    s.since_confirm_ms = kGridSyncWaitMaxMs;
+    EXPECT_EQ(assess(s), Verdict::Settled) << "an unacked grid retries on its own channel";
+}
+
+TEST(OnboardingHold, ARepeatSilentNodeHoldsOnlyOneBurstWhileAnotherWaits) {
+    HoldState s;
+    s.repeat_silent  = true;
+    s.others_waiting = true;
+    s.age_ms = kRepeatSilentAfterMs - 1;
+    EXPECT_EQ(assess(s), Verdict::Keep);
+    s.age_ms = kRepeatSilentAfterMs;
+    EXPECT_EQ(assess(s), Verdict::NodeSilent) << "silent last turn, silent again: next node";
+    s.others_waiting = false;
+    EXPECT_EQ(assess(s), Verdict::Keep) << "nobody waits: the full 15 s cost nobody anything";
+    s.others_waiting = true;
+    s.repeat_silent  = false;
+    EXPECT_EQ(assess(s), Verdict::Keep) << "a first turn keeps the full 15 s";
+    s.repeat_silent = true;
+    s.node_heard    = true;
+    EXPECT_EQ(assess(s), Verdict::Keep) << "heard: not silent";
 }
 
 TEST(OnboardingHold, ANodeThatNeverAnswersReleasesTheGateForTheOthers) {
@@ -197,13 +219,13 @@ TEST(OnboardingHold, NoHoldOutlastsTheCapWhateverElseIsTrue) {
     s.age_ms = kMaxHoldMs;
     s.node_heard = true;
     s.tx_drain_us = 9'000'000;
-    s.schedule_outstanding = true;
+    s.gridsync_outstanding = true;
     EXPECT_EQ(assess(s), Verdict::Capped)
         << "a state nobody anticipated must not park the gate for the whole fleet";
 
     HoldState c = confirmedAndQuiet();
     c.age_ms = kMaxHoldMs;
-    c.schedule_outstanding = true;
+    c.gridsync_outstanding = true;
     EXPECT_EQ(assess(c), Verdict::Capped);
 }
 

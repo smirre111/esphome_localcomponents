@@ -278,8 +278,17 @@ namespace esphome
       // ordering that matches the production semantic
       // ("login is unacknowledged at the start of a challenge") regardless
       // of when the reply happens to arrive.
-      this->login_.login_acked       = false;
-      this->login_.login_retry_count = 0;
+      this->login_.login_acked = false;
+      // A re-send aimed at a deaf node's check-in uplink continues the running
+      // challenge: it does NOT restart the ladder, or every check-in would buy
+      // another round of fast retries (review 2026-11-08 R4: 103 LoginMsgs to
+      // node 1 in 2 h).
+      if (!into_uplink_window)
+        this->login_.login_retry_count = 0;
+      // Whatever started this challenge, the boot-time one is now redundant (R4:
+      // an uplink at boot + 2.7 s started one, the startup timer a second 2.3 s
+      // later).
+      this->host_.session_cancel_timeout("login_startup");   // the boot timer
 
       this->send_login(into_uplink_window);   // resets frame counters to 0 + sends LoginMsg
 
@@ -679,10 +688,22 @@ namespace esphome
       const int64_t now_us = esp_timer_get_time();
       if (this->last_keyless_login_us_ != 0 && now_us - this->last_keyless_login_us_ < kKeylessLoginGapUs)
         return;
-      this->last_keyless_login_us_ = (now_us > 0) ? now_us : 1;
-      this->keyless_t0_us_         = this->host_.session_rx_t0_us();
       ESP_LOGI(TAG, "[%s] Node transmits without the new session — re-sending its LOGIN now",
                this->host_.session_name());
+      this->login_from_uplink_();
+    }
+
+    // A LOGIN aimed where the node listens after the uplink being processed,
+    // through the onboarding gate and the ladder; at most one per
+    // kKeylessLoginGapUs (the node's LOGIN rate limit; the frame is
+    // unauthenticated). Also the "no base nonce" path after a hub boot.
+    void HubSession::login_from_uplink_()
+    {
+      const int64_t now_us = esp_timer_get_time();
+      if (this->last_keyless_login_us_ != 0 && now_us - this->last_keyless_login_us_ < kKeylessLoginGapUs)
+        return;
+      this->last_keyless_login_us_ = (now_us > 0) ? now_us : 1;
+      this->keyless_t0_us_         = this->host_.session_rx_t0_us();
       this->host_.session_cancel_timeout("login_retry");
       this->host_.session_set_timeout("login_keyless", 0,
                                       [this]() { this->do_login_and_arm_retry(/*into_uplink_window=*/true); });
@@ -1168,7 +1189,7 @@ namespace esphome
       // no retry, so a dropped re-provisioning LoginMsg had no recovery
       // until this node happened to send another encrypted uplink.
       ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", up.sender);
-      this->host_.session_relogin();
+      this->login_from_uplink_();   // aimed at this uplink, once per 5 s
       return false;
     }
 
@@ -1459,7 +1480,7 @@ namespace esphome
     {
       return (this->parent_ != nullptr) ? this->parent_->txDrainUs() : 0;
     }
-    bool LORAListener::session_schedule_outstanding() const { return this->sched_push_outstanding_(); }
+    bool LORAListener::session_gridsync_outstanding() const { return this->mac().awaiting_ack; }
     void LORAListener::session_set_timeout(const char *name, uint32_t ms, std::function<void()> fn)
     {
       this->set_timeout(name, ms, std::move(fn));
@@ -1795,12 +1816,15 @@ namespace esphome
       s.since_confirm_ms = this->onboarding_since_confirm_ms_;
       s.node_heard       = this->onboarding_heard_;
       s.tx_drain_us      = this->host_.session_tx_drain_us();
-      // A schedule push is part of bringing the node up while it can still be
-      // retried. Once the ladder is spent nothing more will be sent, so the
-      // stale msgid (kept to recognise a late ack) must not hold the gate.
-      s.schedule_outstanding = this->host_.session_schedule_outstanding();
+      s.gridsync_outstanding = this->host_.session_gridsync_outstanding();
+      s.repeat_silent        = this->onboarding_was_silent_;
+      s.others_waiting       = onboarding_gate_.waiting() > 0;
 
-      switch (onboarding::assess(s))
+      const onboarding::Verdict v = onboarding::assess(s);
+      // Every hold that ends records whether it ended silent (R3).
+      if (v != onboarding::Verdict::Keep)
+        this->onboarding_was_silent_ = (v == onboarding::Verdict::NodeSilent);
+      switch (v)
       {
       case onboarding::Verdict::Keep:
         this->host_.session_set_timeout("onboarding_poll", onboarding::kPollMs, [this]() { this->onboarding_poll_(); });

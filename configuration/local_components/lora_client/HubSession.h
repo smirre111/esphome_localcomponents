@@ -61,8 +61,8 @@ namespace esphome
       virtual void session_cancel_timeout(const char *name) = 0;
       // The transmit queue's drain estimate (0 without a radio).
       virtual int64_t session_tx_drain_us() const = 0;
-      // A schedule push that can still be retried is outstanding.
-      virtual bool session_schedule_outstanding() const = 0;
+      // A published GridSync is not yet acknowledged.
+      virtual bool session_gridsync_outstanding() const = 0;
 
       // ---- what the login lifecycle needs to know or do ----
       // A tracker to send through.
@@ -375,6 +375,7 @@ namespace esphome
       bool register_authentic_(const uint8_t *data, size_t len);
       bool register_admitted_(const ::ClientRegister *reg, const uint8_t *data, size_t len);
       void note_keyless_uplink_();
+      void login_from_uplink_();
       static constexpr int64_t kKeylessLoginGapUs = 5000000;   // the node's LOGIN rate limit
       // The receive stamp of the node's last admitted REGISTER: every LOGIN of
       // the challenge it starts is placed from it while it is fresh (0: none).
@@ -419,6 +420,8 @@ namespace esphome
       bool     onboarding_waiting_logged_{false};   // log the wait once, not per poll
       bool     onboarding_confirmed_{false};
       bool     onboarding_heard_{false};
+      // The previous hold ended NodeSilent and the node has not been heard since.
+      bool     onboarding_was_silent_{false};
       uint32_t onboarding_age_ms_{0};
       uint32_t onboarding_since_confirm_ms_{0};
     };

@@ -4776,45 +4776,55 @@ TEST(OnboardingGateHub, ANodeThatHasBeenHeardKeepsTheGateUntilTheCapNotTheSilenc
     EXPECT_GE(h.loginsTo(18), 1) << "but the cap releases it";
 }
 
-TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheSchedulePushIsUnacknowledged) {
-    // The schedule push is part of bringing a node up: it is one of the frames
-    // in the queue, and its retries are more of them.
+TEST(OnboardingGateHub, AnUnacknowledgedSchedulePushDoesNotHoldTheGate) {
+    // Review 2026-11-08 R3/R6: a deaf node 1 answered its login and then never
+    // acked its ScheduleConfig; it held the gate 40-51 s for it while node 2
+    // waited. The schedule is acked and retried on its own channel.
     TwoNodeHub h(/*answer_1=*/true, /*answer_2=*/true);
     h.bothRegister();
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
-
-    // Past confirmation and the settle delay, but the node has not acked the
-    // ScheduleConfig it was sent.
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
     ASSERT_TRUE(h.rol_1.session_confirmed());
     ASSERT_NE(h.rol_1.schedulePushMsgid(), 0u) << "precondition: a ScheduleConfig is outstanding";
-    EXPECT_TRUE(h.rol_1.onboarding_held_for_test())
-        << "still bringing node 17 up: its schedule has not landed";
-    EXPECT_EQ(h.loginsTo(18), 0);
-
-    // The node acknowledges it: the gate frees within a poll or two.
-    static_cast<AckProbe&>(h.rol_1).handle_command_ack_(h.rol_1.schedulePushMsgid());
-    h.clock.tick(2 * onboarding::kPollMs + 100);
-    EXPECT_FALSE(h.rol_1.onboarding_held_for_test());
+    EXPECT_FALSE(h.rol_1.onboarding_held_for_test()) << "node 17 is up: login confirmed, no grid to wait for";
+    h.clock.tick(3000);
+    EXPECT_GE(h.loginsTo(18), 1) << "node 18 goes next";
 }
 
-TEST(OnboardingGateHub, ASchedulePushWithNoRetryLeftNoLongerHoldsTheGate) {
-    // The last wait of the ladder (every retry spent) is not part of bringing the
-    // node up any more: nothing more will be sent, so the other nodes go ahead.
+TEST(OnboardingGateHub, ATimedModeNodeHoldsTheGateForItsGridSyncAckButNotForEver) {
     TwoNodeHub h(/*answer_1=*/true, /*answer_2=*/true);
+    h.tracker.startGrid();
+    h.rol_1.enable_timed_mode(true);
     h.bothRegister();
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
     ASSERT_TRUE(h.rol_1.session_confirmed());
-    ASSERT_TRUE(h.rol_1.onboarding_held_for_test()) << "precondition: the push holds the gate";
+    ASSERT_TRUE(h.rol_1.gridSyncAwaitingAck()) << "precondition: the grid was published";
+    EXPECT_TRUE(h.rol_1.onboarding_held_for_test()) << "waiting for the grid";
+    h.clock.tick(onboarding::kGridSyncWaitMaxMs);
+    EXPECT_FALSE(h.rol_1.onboarding_held_for_test()) << "not for ever";
+}
 
-    AK(h.rol_1).pushInFlight(7, LORAClient::kSchedMaxRetries - 1, h.rol_1.schedule_version());
-    h.clock.tick(2 * onboarding::kPollMs + 100);
-    EXPECT_TRUE(h.rol_1.onboarding_held_for_test()) << "one retry left: still bringing the node up";
-
-    AK(h.rol_1).pushInFlight(7, LORAClient::kSchedMaxRetries, h.rol_1.schedule_version());
-    h.clock.tick(2 * onboarding::kPollMs + 100);
-    EXPECT_FALSE(h.rol_1.onboarding_held_for_test()) << "every retry spent: the gate is released";
+TEST(OnboardingGateHub, ANodeSilentOnItsLastTurnHoldsTheNextOnlyBrieflyWhileAnotherWaits) {
+    // Review 2026-11-08 R3: both deaf; each LOGIN retry of node 17 took the gate
+    // for another 15 s, and node 18's sweep bursts were spread over the turns.
+    TwoNodeHub h(/*answer_1=*/false, /*answer_2=*/false);
+    h.bothRegister();
+    std::vector<uint32_t> holds;   // node 17's hold lengths, ms
+    uint32_t held_ms = 0;
+    for (int i = 0; i < 1200; ++i) {   // 120 s in 100 ms steps
+        h.clock.tick(100);
+        if (h.rol_1.onboarding_held_for_test()) {
+            held_ms += 100;
+        } else if (held_ms > 0) {
+            holds.push_back(held_ms);
+            held_ms = 0;
+        }
+    }
+    ASSERT_GE(holds.size(), 2u) << "node 17 took the gate more than once";
+    EXPECT_GE(holds[0], onboarding::kSilentAfterMs) << "its first turn: the full wait";
+    for (size_t t = 1; t < holds.size(); ++t)
+        EXPECT_LT(holds[t], onboarding::kSilentAfterMs) << "turn " << t << ": one burst, then node 18";
 }
 
 TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheNodesOwnFramesAreStillQueued) {
@@ -4824,12 +4834,9 @@ TEST(OnboardingGateHub, TheGateIsNotReleasedWhileTheNodesOwnFramesAreStillQueued
     TwoNodeHub h(/*answer_1=*/true, /*answer_2=*/true);
     h.bothRegister();
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
+    h.tracker.tx_drain_us = 20'000'000;   // its pushes are queued from the confirmation on
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
     ASSERT_TRUE(h.rol_1.session_confirmed());
-    ASSERT_NE(h.rol_1.schedulePushMsgid(), 0u);
-
-    h.tracker.tx_drain_us = 20'000'000;
-    static_cast<AckProbe&>(h.rol_1).handle_command_ack_(h.rol_1.schedulePushMsgid());
     h.clock.tick(10000);
     EXPECT_TRUE(h.rol_1.onboarding_held_for_test())
         << "20 s of its own frames are still queued";
