@@ -702,34 +702,6 @@ namespace esphome
       // Plaintext uplinks refused because this node holds a confirmed session.
       uint32_t plaintextRefused() const { return this->plaintext_refused_; }
       uint32_t opRetryCount() const    { return this->ctl().retry_count; }
-      // Why the node says it is NOT in Mode B, and whether it says it IS. Both
-      // arrive in every decrypted beacon's PhaseReport and were stored in
-      // belief_ without ever being published — so a bench operator could only
-      // infer the node's arming state from side effects.
-      //
-      // That inference cost two void HW-2 points (2026-09-19): a sweep started
-      // inside the 600 s anti-flap hold (Demotion::RecentlyDemoted) armed
-      // nothing and reported `windows 0/0`, indistinguishable from "no
-      // reception at this offset" — a false edge.
-      //
-      // That PARTICULAR trap is gone: the hold and the missed-mark demotion
-      // that triggered it were retired 2026-09-20. The reason for publishing is
-      // unchanged, because reasons 1, 2, 4 and 5 are still live and any
-      // non-zero one still voids a point — the precondition should be readable
-      // before pressing, not reconstructed from timestamps afterwards.
-      uint32_t node_demotion_reason() const { return this->link_.belief().node_demotion; }
-      bool     node_timed_rx_active() const { return this->link_.belief().node_timed_rx; }
-      // The four inputs phaseTrustworthy() actually tests, so a NoPhase can be
-      // attributed instead of guessed. Demotion::NoPhase has TWO producers
-      // (TimedModePolicy.h:173 and :175) and they report as the same value:
-      // !phase_valid (samples, frames, outside_guard, spread) versus the LAST
-      // sample being outside the guard. Without these the two are
-      // indistinguishable, which is what made a stuck node unreadable.
-      int32_t  node_phase_err_us() const     { return this->link_.belief().phase_err_us; }
-      int32_t  node_phase_spread_us() const  { return this->link_.belief().phase_spread_us; }
-      uint32_t node_phase_samples() const    { return this->link_.belief().phase_samples; }
-      uint32_t node_phase_outside_guard() const { return this->link_.belief().phase_outside_guard; }
-
       const MacStats &mac_stats() const { return this->mac_ping_.stats(); }
       void reset_mac_stats() { this->mac_ping_.reset_stats(); }
 
@@ -763,11 +735,6 @@ namespace esphome
         uint32_t crc_valid = 0;  // of those, CRC-valid
       };
       const ClassAStats &class_a_stats() const { return this->class_a_stats_; }
-      void reset_class_a_stats()
-      {
-        this->class_a_stats_          = ClassAStats{};
-        this->class_a_last_prev_msgid_ = 0;
-      }
 
      protected:
       // block == nullptr: a fresh FCNT (loop only); else the run's reserved
