@@ -1058,56 +1058,6 @@ namespace esphome
     // ------------------------------------------------------------------------
     // P4: schedule push
     // ------------------------------------------------------------------------
-    // ---- Home Assistant schedule editing ----------------------------------
-    //
-    // Slot-addressed rather than append-only: HA edits one field of one slot,
-    // so the entity needs a stable index. add_schedule_entry() below keeps its
-    // append semantics for the YAML seed.
-
-    void LORAListener::set_slot_minute(uint8_t slot, uint16_t minute_of_day)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].minute_of_day = minute_of_day;
-      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
-    void LORAListener::set_slot_days(uint8_t slot, uint8_t day_mask)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].day_mask = day_mask;
-      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
-    void LORAListener::set_slot_action(uint8_t slot, uint8_t action)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].action = action;
-      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
-    void LORAListener::set_slot_position(uint8_t slot, uint8_t position_pct)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].position_pct = position_pct;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
-    void LORAListener::set_slot_enabled(uint8_t slot, bool on)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].enabled = on;
-      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
     // Persist the whole slot table.
     //
     // Without this an HA-entered schedule would be silently reverted to the

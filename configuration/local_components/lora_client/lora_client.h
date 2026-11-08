@@ -268,12 +268,6 @@ namespace esphome
       // A sleeping node does not learn of an edit until it next wakes, up to
       // checkin_interval_. The `Schedule Pending` binary sensor already shows
       // exactly that window.
-      void set_slot_minute(uint8_t slot, uint16_t minute_of_day);
-      void set_slot_days(uint8_t slot, uint8_t day_mask);
-      void set_slot_action(uint8_t slot, uint8_t action);
-      void set_slot_position(uint8_t slot, uint8_t position_pct);
-      void set_slot_enabled(uint8_t slot, bool on);
-      const SchedEntryCfg &slot(uint8_t slot) const { return this->sched_entries_[slot]; }
       // ---- compact text form ---------------------------------------------
       //
       // Applies a whole schedule from one string (see ScheduleText.h). Returns
