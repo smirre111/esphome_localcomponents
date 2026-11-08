@@ -3988,7 +3988,7 @@ const ProtobufCMessageDescriptor hist__descriptor =
   (ProtobufCMessageInit) hist__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[41] =
+static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[32] =
 {
   {
     "seqFirst",
@@ -4195,42 +4195,6 @@ static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[41] =
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "missedMarks",
-    23,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, missedmarks),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "demotions",
-    24,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, demotions),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "promotions",
-    25,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT32,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, promotions),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
     "phaseErrUs",
     30,
     PROTOBUF_C_LABEL_NONE,
@@ -4309,78 +4273,6 @@ static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[41] =
     PROTOBUF_C_TYPE_INT32,
     0,   /* quantifier_offset */
     offsetof(ModeTestReport, measuredperiodus),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "rssiMin",
-    43,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_INT32,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, rssimin),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "rssiMean",
-    44,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_INT32,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, rssimean),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "snrMin",
-    45,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_INT32,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, snrmin),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "snrMean",
-    46,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_INT32,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, snrmean),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "sleepUs",
-    50,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT64,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, sleepus),
-    NULL,
-    NULL,
-    0,             /* flags */
-    0,NULL,NULL    /* reserved1,reserved2, etc */
-  },
-  {
-    "wallUs",
-    51,
-    PROTOBUF_C_LABEL_NONE,
-    PROTOBUF_C_TYPE_UINT64,
-    0,   /* quantifier_offset */
-    offsetof(ModeTestReport, wallus),
     NULL,
     NULL,
     0,             /* flags */
@@ -4485,43 +4377,34 @@ static const ProtobufCFieldDescriptor mode_test_report__field_descriptors[41] =
 };
 static const unsigned mode_test_report__field_indices_by_name[] = {
   7,   /* field[7] = addressed */
-  38,   /* field[38] = armRefusal */
-  21,   /* field[21] = armResidualUs */
+  29,   /* field[29] = armRefusal */
+  18,   /* field[18] = armResidualUs */
   8,   /* field[8] = counterAccepted */
-  36,   /* field[36] = counterOn */
-  35,   /* field[35] = cpuFreqMhz */
+  27,   /* field[27] = counterOn */
+  26,   /* field[26] = cpuFreqMhz */
   10,   /* field[10] = crcErrors */
   6,   /* field[6] = crcValid */
-  37,   /* field[37] = cryptoOn */
-  18,   /* field[18] = demotions */
+  28,   /* field[28] = cryptoOn */
   5,   /* field[5] = detected */
   11,   /* field[11] = duplicates */
   2,   /* field[2] = elapsedS */
-  26,   /* field[26] = measuredPeriodUs */
+  23,   /* field[23] = measuredPeriodUs */
   12,   /* field[12] = micFailures */
   9,   /* field[9] = micValid */
-  17,   /* field[17] = missedMarks */
   3,   /* field[3] = mode */
-  23,   /* field[23] = oneShotErrorUs */
-  20,   /* field[20] = phaseErrUs */
+  20,   /* field[20] = oneShotErrorUs */
+  17,   /* field[17] = phaseErrUs */
   4,   /* field[4] = powerProfileProduction */
-  24,   /* field[24] = ppmEstimate */
-  25,   /* field[25] = ppmSamples */
-  19,   /* field[19] = promotions */
-  39,   /* field[39] = residualPpm */
-  40,   /* field[40] = residualSamples */
-  28,   /* field[28] = rssiMean */
-  27,   /* field[27] = rssiMin */
-  33,   /* field[33] = rtcSlowSrc */
+  21,   /* field[21] = ppmEstimate */
+  22,   /* field[22] = ppmSamples */
+  30,   /* field[30] = residualPpm */
+  31,   /* field[31] = residualSamples */
+  24,   /* field[24] = rtcSlowSrc */
   0,   /* field[0] = seqFirst */
   13,   /* field[13] = seqGaps */
   1,   /* field[1] = seqLast */
-  31,   /* field[31] = sleepUs */
-  30,   /* field[30] = snrMean */
-  29,   /* field[29] = snrMin */
-  34,   /* field[34] = tickRateHz */
-  22,   /* field[22] = turnaroundUs */
-  32,   /* field[32] = wallUs */
+  25,   /* field[25] = tickRateHz */
+  19,   /* field[19] = turnaroundUs */
   14,   /* field[14] = windowsArmed */
   16,   /* field[16] = windowsEmpty */
   15,   /* field[15] = windowsHit */
@@ -4531,10 +4414,10 @@ static const ProtobufCIntRange mode_test_report__number_ranges[6 + 1] =
   { 1, 0 },
   { 10, 5 },
   { 20, 14 },
-  { 30, 20 },
-  { 40, 24 },
-  { 50, 31 },
-  { 0, 41 }
+  { 30, 17 },
+  { 40, 21 },
+  { 52, 24 },
+  { 0, 32 }
 };
 const ProtobufCMessageDescriptor mode_test_report__descriptor =
 {
@@ -4544,7 +4427,7 @@ const ProtobufCMessageDescriptor mode_test_report__descriptor =
   "ModeTestReport",
   "",
   sizeof(ModeTestReport),
-  41,
+  32,
   mode_test_report__field_descriptors,
   mode_test_report__field_indices_by_name,
   6,  mode_test_report__number_ranges,
@@ -4615,18 +4498,16 @@ const ProtobufCMessageDescriptor drift_test__descriptor =
   (ProtobufCMessageInit) drift_test__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCEnumValue ack_status__enum_values_by_number[3] =
+static const ProtobufCEnumValue ack_status__enum_values_by_number[2] =
 {
   { "ACK_OK", "ACK_STATUS__ACK_OK", 0 },
   { "ACK_ERROR", "ACK_STATUS__ACK_ERROR", 1 },
-  { "ACK_BUSY", "ACK_STATUS__ACK_BUSY", 2 },
 };
 static const ProtobufCIntRange ack_status__value_ranges[] = {
-{0, 0},{0, 3}
+{0, 0},{0, 2}
 };
-static const ProtobufCEnumValueIndex ack_status__enum_values_by_name[3] =
+static const ProtobufCEnumValueIndex ack_status__enum_values_by_name[2] =
 {
-  { "ACK_BUSY", 2 },
   { "ACK_ERROR", 1 },
   { "ACK_OK", 0 },
 };
@@ -4637,9 +4518,9 @@ const ProtobufCEnumDescriptor ack_status__descriptor =
   "AckStatus",
   "AckStatus",
   "",
-  3,
+  2,
   ack_status__enum_values_by_number,
-  3,
+  2,
   ack_status__enum_values_by_name,
   1,
   ack_status__value_ranges,

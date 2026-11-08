@@ -85,11 +85,7 @@ typedef enum _AckStatus {
   /*
    * not executed: no known case, or refused
    */
-  ACK_STATUS__ACK_ERROR = 1,
-  /*
-   * reserved for "not applied now"; not sent today
-   */
-  ACK_STATUS__ACK_BUSY = 2
+  ACK_STATUS__ACK_ERROR = 1
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(ACK_STATUS)
 } AckStatus;
 typedef enum _CovOperation {
@@ -1121,9 +1117,6 @@ struct  ModeTestReport
   uint32_t windowsarmed;
   uint32_t windowshit;
   uint32_t windowsempty;
-  uint32_t missedmarks;
-  uint32_t demotions;
-  uint32_t promotions;
   /*
    * Microseconds.
    */
@@ -1146,12 +1139,6 @@ struct  ModeTestReport
   int32_t ppmestimate;
   uint32_t ppmsamples;
   int32_t measuredperiodus;
-  int32_t rssimin;
-  int32_t rssimean;
-  int32_t snrmin;
-  int32_t snrmean;
-  uint64_t sleepus;
-  uint64_t wallus;
   /*
    * as PhaseReport.rtcSlowSrc
    */
@@ -1177,7 +1164,7 @@ struct  ModeTestReport
 };
 #define MODE_TEST_REPORT__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&mode_test_report__descriptor) \
-    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*
