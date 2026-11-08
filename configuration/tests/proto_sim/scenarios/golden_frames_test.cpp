@@ -320,17 +320,6 @@ TEST(GoldenHubFrames, MacPingStreams) {
     EXPECT_TRUE(golden::matches("hub_mac_ping_streams", h.dump()));
 }
 
-// Drift test stream: START burst, one grid tick, STOP.
-TEST(GoldenHubFrames, DriftTestStream) {
-    GoldenHub h;
-    h.session();
-    h.rol.start_drift_test(30, 1000);
-    h.tick(3100);
-    proto_sim_timer_fire_all();
-    h.rol.stop_drift_test();
-    EXPECT_TRUE(golden::matches("hub_drift_test_stream", h.dump()));
-}
-
 // Per-copy retag: a full 17-copy encrypted burst, each copy re-stamped and
 // re-tagged by the frame's own copy sealer.
 TEST(GoldenHubFrames, EncryptedBurstRetagEveryCopy) {

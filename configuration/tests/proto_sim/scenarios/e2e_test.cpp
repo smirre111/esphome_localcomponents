@@ -148,7 +148,6 @@ struct E2E : public ::testing::Test {
                 : esp_timer_get_time();
             const int64_t rxdone =
                 t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-            disp.noteDriftSample(rxdone);
             disp.onReceiveNew(const_cast<uint8_t *>(bytes.data()),
                               (int) bytes.size(), rxdone);
             ++n;

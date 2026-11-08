@@ -50,12 +50,6 @@ TEST(ModeTestPolicy, DurationIsCappedByTheNodeNotTheHub) {
         << "a hub that asks for forever gets fifteen minutes";
 }
 
-TEST(ModeTestPolicy, TheCeilingIsTighterThanDriftTests) {
-    // DriftTest caps at 1800 s. ModeTest can hold continuous RX AND force a
-    // mode, so an abandoned run costs more.
-    EXPECT_LT(kMaxDurationS, 1800u);
-}
-
 // ---------------------------------------------------------------------------
 // Joining a run whose START was not heard
 // ---------------------------------------------------------------------------

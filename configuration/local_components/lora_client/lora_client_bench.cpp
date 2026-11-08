@@ -22,8 +22,8 @@ namespace esphome
     // -----------------------------------------------------------------------
     // MAC-0 ping / echo — the hub half (mac-layer.md sections 5 and 6).
     //
-    // Deliberately shaped like the drift test, because that shape was arrived
-    // at by paying for the alternatives: the frame goes through the NORMAL
+    // Deliberately shaped like ModeTest (and the drift test before it),
+    // because that shape was arrived at by paying for the alternatives: the frame goes through the NORMAL
     // transmit queue rather than sendPacketOnce() from the timer callback (that
     // bypasses TxDone handling and the return-to-RX in the tracker main loop,
     // and left the SX1278 stuck in TX with the hub silent until restarted), and
@@ -455,7 +455,6 @@ namespace esphome
       std::lock_guard<std::mutex> lock(this->session_.tx_mutex());
       this->mac_ping_.fcnts()->invalidate();
       this->mode_test_.fcnts()->invalidate();
-      this->drift_.fcnts()->invalidate();
     }
 
     // A test stream's frame: a fresh FCNT on the loop (block == nullptr: the
@@ -564,73 +563,14 @@ namespace esphome
     }
     void LORAListener::stream_cancel_timeout(const char *name) { this->cancel_timeout(name); }
 
-    // -----------------------------------------------------------------------
-    // Drift test (bench only)
-    //
-    // The hub half of the test exists because a drift fit needs a RULER: a
-    // burst emitted on a known, regular grid. In normal interactive operation
-    // the hub only transmits when it has something to say, so the node would
-    // get a fit at unpredictable intervals or not at all.
-    //
-    // Cost note: each grid frame is a full 17-copy burst (~330 ms of airtime).
-    // At the default 15 s grid that is ~2 % occupancy, which is why the grid is
-    // seconds rather than milliseconds.
-    // -----------------------------------------------------------------------
-    // -----------------------------------------------------------------------
-    // Drift test — a hardware-timed ruler
-    //
-    // WHY THIS IS NOT A BURST ANY MORE
-    //
-    // The first version reused the ordinary 17-copy burst as the ruler. That
-    // burst is paced by vTaskDelayUntil, and this hub runs
-    // CONFIG_FREERTOS_HZ=1000 — so every copy is released on a 1 ms tick
-    // boundary. Over the 1.4 s span of a burst, +-1 ms of placement error is
-    // ~700 ppm of slope error, and the node duly reported +-1500 ppm of
-    // scatter for a crystal that cannot exceed +-20 ppm. The RULER was
-    // quantised; no amount of receiver precision could fix it.
-    //
-    // So: one frame per tick, paced by esp_timer (microsecond resolution, APB
-    // derived) instead of the FreeRTOS tick, over a long baseline. The frame
-    // for the NEXT tick is built immediately after each send, so the timer
-    // callback does nothing but transmit — packing work cannot leak into the
-    // interval being measured.
-    //
-    // Frames are PLAINTEXT: encryption time varies with payload and would sit
-    // between the timer firing and the radio starting. Same payload every
-    // time, so whatever latency remains is constant and affects the offset,
-    // never the slope.
-    // -----------------------------------------------------------------------
-    void DriftStream::timer_cb_(void *arg)
-    {
-      auto *self = static_cast<DriftStream *>(arg);
-      const CallbackBusy busy(self->cb_busy_);
-      if (!self->active_ || self->frame_len_ == 0)
-        return;
-
-      // Hand the PRE-BUILT frame to the normal transmit queue.
-      //
-      // NOT sendPacketOnce() straight from here. That bypasses the TxDone
-      // handling and the return-to-RX that live in the tracker main loop, and
-      // it left the SX1278 stuck in TX: every later beginPacket failed and the
-      // hub went silent until it was restarted. Observed 2026-08-31 — the node
-      // received nothing at all from the moment the test was triggered.
-      //
-      // A PER-FRAME copies=1 makes this one frame instead of seventeen, so the
-      // proven path is reused rather than duplicated — and, unlike the old
-      // global setBurstCopies(1), it cannot leak onto an ordinary command that
-      // a user happens to send during the test.
-      self->host_.stream_send(self->frame_, self->frame_len_,
-                       TxPolicy{/*copies=*/1, /*stride_ms=*/0}, self->seal_);
-
-      // Build the next one now, in the 99% of the period that is idle.
-      self->build_frame_(true, &self->fcnts_);
-    }
-
     // ---- ModeTest ----------------------------------------------------
     //
-    // Structurally identical to the drift test above, and that is the point:
-    // the two behaviours encoded in drift_timer_cb_ were paid for on hardware
-    // and are not worth rediscovering.
+    // Shaped like the drift test it was derived from (removed 2026-11-08), and
+    // that is the point: one PRE-BUILT frame per esp_timer tick (microsecond
+    // pacing, not the 1 ms FreeRTOS tick a burst is paced by), handed to the
+    // NORMAL transmit queue (never sendPacketOnce from the timer callback: that
+    // skipped TxDone handling and left the SX1278 stuck in TX), the next frame
+    // built right after each send. Both were paid for on hardware.
     //
     // Where it differs: every frame carries the FULL request, not just a tick.
     // The node arms on the first ModeTest it hears, and it is in windowed RX
@@ -939,154 +879,6 @@ namespace esphome
       this->build_frame_(false);
       if (this->frame_len_ > 0)
         this->host_.stream_send(this->frame_, this->frame_len_, TxPolicy{}, this->seal_);
-    }
-
-    void DriftStream::build_frame_(bool enable, mac1::FcntReservation *block)
-    {
-      hubframes::Down op_message {};
-      // msgid is the ruler mark (mac_frame_ allocates it). The node indexes
-      // samples by it, so a frame lost to the air leaves a gap instead of
-      // shifting every later sample.
-
-      DriftTest dt = DRIFT_TEST__INIT;
-      dt.enable       = enable;
-      dt.durations    = this->duration_s_;
-      dt.gridperiodms = this->grid_ms_;
-
-      op_message.cmd_case  = hubframes::DL_DRIFTTEST;
-      op_message.drifttest = &dt;
-
-      DeliveryFrame f;
-      // ENCRYPTED, like every other command.
-      //
-      // Plaintext was tried first, to keep variable-time crypto out of the
-      // timing path. It does not belong there anyway: this frame is built
-      // during the ~999 ms of idle BETWEEN ticks, so packing and encryption
-      // are already outside the interval being measured. On the node, decrypt
-      // happens after the ISR has captured the timestamp, so it cannot bias
-      // the measurement either.
-      //
-      // And plaintext simply does not work: the node rejects unencrypted
-      // commands once a session exists ("session requires encryption"), so
-      // every drift frame was silently dropped and the test never started.
-      // Exempting DriftTest would let an unauthenticated frame pin a node in
-      // ~11 mA continuous RX — a battery-drain vector on a 1.2 mA device.
-      if (pack_stream_frame(this->host_, &op_message, block, &f) &&
-          f.bytes.size() <= sizeof(this->frame_))
-      {
-        memcpy(this->frame_, f.bytes.data(), f.bytes.size());
-        this->frame_len_ = f.bytes.size();
-        this->seal_      = f.seal;
-      }
-      else
-      {
-        this->frame_len_ = 0;   // no FCNT left for this run: the ticks stop
-      }
-    }
-
-    void DriftStream::start(uint32_t duration_s, uint32_t grid_ms)
-    {
-      if (!this->host_.stream_has_radio())
-        return;
-
-      // One frame per tick is ~30 ms of airtime, so the grid can be far
-      // tighter than the old 17-copy burst allowed. More frames over the same
-      // wall-clock time is more samples on the same baseline.
-      if (grid_ms < 200)
-        grid_ms = 200;
-
-      this->active_     = true;
-      this->duration_s_ = duration_s;
-      this->grid_ms_    = grid_ms;
-
-      ESP_LOGI(TAG, "[%s] drift test START: %u s, hw-timed grid %u ms, plaintext single frames",
-               this->host_.stream_name(), (unsigned) duration_s, (unsigned) grid_ms);
-
-      // The START command goes out as a NORMAL 17-copy burst.
-      //
-      // The node is still in windowed RX at this point -- a ~29 ms window every
-      // 500 ms, a 5.9% duty cycle -- which is the entire reason the burst
-      // exists. A single-copy START has roughly a 6% chance of being heard, so
-      // the node never enters continuous RX, never hears anything after it, and
-      // the test silently does nothing. Observed exactly that: the node
-      // received nothing at all for eight minutes.
-      //
-      // Only the TIMING frames are single copies, and by then the node is in
-      // continuous RX and hears every one.
-      this->build_frame_(true);
-      if (this->frame_len_ > 0)
-        this->host_.stream_send(this->frame_, this->frame_len_, TxPolicy{}, this->seal_);
-      // Every tick's FCNT, reserved on the loop (HB1); see start_mode_test.
-      this->host_.stream_reserve_fcnts((duration_s * 1000) / grid_ms + 4, &this->fcnts_);
-
-      if (this->timer_ == nullptr)
-      {
-        const esp_timer_create_args_t args = {
-            .callback = &DriftStream::timer_cb_,
-            .arg      = this,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name     = "driftgrid",
-            .skip_unhandled_events = true,
-        };
-        if (esp_timer_create(&args, &this->timer_) != ESP_OK)
-        {
-          ESP_LOGE(TAG, "[%s] drift test: timer create failed — no ticks", this->host_.stream_name());
-          this->timer_ = nullptr;
-          this->active_ = false;
-          return;
-        }
-      }
-      esp_timer_stop(this->timer_);
-
-      // Give the bursted START time to land and the node time to switch into
-      // continuous RX before the single-copy grid begins. One burst round is
-      // 1.5 s; 3 s is comfortable margin.
-      this->host_.stream_set_timeout("drift_grid_arm", 3000, [this, grid_ms]() {
-        if (!this->active_)
-          return;
-        this->build_frame_(true, &this->fcnts_);
-        // Microsecond-resolution pacing — the entire point of this rewrite.
-        esp_timer_start_periodic(this->timer_, (uint64_t) grid_ms * 1000ULL);
-      });
-
-      this->host_.stream_set_timeout("drift_end", duration_s * 1000,
-                        [this]() { this->stop(); });
-    }
-
-    void DriftStream::stop()
-    {
-      if (!this->active_)
-        return;
-      this->active_ = false;
-      if (this->timer_ != nullptr)
-        esp_timer_stop(this->timer_);
-      wait_until_idle(this->cb_busy_);   // before the OFF frame reuses drift_frame_
-      this->host_.stream_cancel_timeout("drift_end");
-      this->host_.stream_cancel_timeout("drift_grid_arm");
-
-      // The OFF command is bursted like every other command: the node may
-      // already have left continuous RX on its own deadline, in which case a
-      // single copy would very likely be missed. Nothing needs "restoring" any
-      // more — the single-copy choice never left the frame it applied to.
-      this->build_frame_(false);
-      if (this->frame_len_ > 0)
-        this->host_.stream_send(this->frame_, this->frame_len_, TxPolicy{}, this->seal_);
-      this->frame_len_ = 0;
-
-      ESP_LOGI(TAG, "[%s] drift test STOP", this->host_.stream_name());
-    }
-
-    // A stream must not call its host here: the host is already being destroyed.
-    DriftStream::~DriftStream()
-    {
-      this->active_ = false;
-      if (this->timer_ != nullptr)
-      {
-        esp_timer_stop(this->timer_);
-        esp_timer_delete(this->timer_);
-        this->timer_ = nullptr;
-      }
-      wait_until_idle(this->cb_busy_);
     }
 
   }  // namespace lora_tracker

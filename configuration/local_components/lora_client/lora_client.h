@@ -291,23 +291,6 @@ namespace esphome
       bool schedule_pending();
       void send_schedule_config();
 
-      // --- Drift test (bench only) --------------------------------------
-      // Puts BOTH ends into test mode: the node holds continuous RX, and the
-      // hub emits a burst every grid_ms so there is a regular ruler to measure
-      // against. Without the hub half the node would only get a fit whenever
-      // the hub happened to have traffic, which in interactive mode is rare
-      // and irregular.
-      //
-      // The grid frame IS the DriftTest message, re-sent. That makes the test
-      // self-limiting: each one re-arms the node deadline, so if the hub stops
-      // or this component reboots, the node exits on its own.
-      void start_drift_test(uint32_t duration_s = 300, uint32_t grid_ms = 15000)
-      {
-        this->drift_.start(duration_s, grid_ms);
-      }
-      void stop_drift_test() { this->drift_.stop(); }
-      bool drift_test_active() const { return this->drift_.active(); }
-
       // ModeTest — the on-hardware validation mode (test-plan.md section 10).
       //
       // Same shape as the drift test, and deliberately so: the two lessons that
@@ -623,7 +606,6 @@ namespace esphome
       uint32_t ms_until_node_awake_for_test() const { return ms_until_node_awake_(); }
       // D4: fire one ModeTest mark exactly as the esp_timer would.
       void mode_test_tick_for_test() { this->mode_test_.tick_for_test(); }
-      void drift_tick_for_test() { this->drift_.tick_for_test(); }
       std::vector<uint8_t> mode_test_frame_for_test() const {
         return this->mode_test_.frame_for_test();
       }
@@ -897,7 +879,6 @@ namespace esphome
       uint32_t published_resync_max_s_{0};
 
       // The drift test (BenchStreams.h): its state, timer and FCNT block.
-      DriftStream drift_{*this};
 
       // ModeTest (BenchStreams.h). Every frame carries the full request (the
       // node arms on the first one it hears, so a node that missed the first is

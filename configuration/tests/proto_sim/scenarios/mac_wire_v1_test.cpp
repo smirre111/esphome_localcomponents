@@ -173,7 +173,6 @@ TEST(HubWireRoute, EveryAckedDeliveryAndOnlyThoseAskForAMacAck) {
         {hubframes::DL_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
         {hubframes::DL_MODETEST,     macwire::kPortMac0Mgmt, false},
         {hubframes::DL_MACCONTROL,   macwire::kPortMac0Mgmt, false},
-        {hubframes::DL_DRIFTTEST,    macwire::kPortMac0Mgmt, false},
         {hubframes::DL_GRIDBEACON,   macwire::kPortMac0Mgmt, false},
         {hubframes::DL_GRIDDEMOTE,   macwire::kPortMac0Mgmt, false},
     };

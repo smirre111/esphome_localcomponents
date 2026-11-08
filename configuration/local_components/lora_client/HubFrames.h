@@ -55,7 +55,6 @@ enum DownCase : int
     DL_LOGIN        = 14,
     DL_TIMESYNC     = 16,
     DL_SCHEDULE     = 17,
-    DL_DRIFTTEST    = 18,
     DL_MACCONTROL   = 20,
     DL_GRIDSYNC     = 21,
     DL_MODETEST     = 22,
@@ -76,7 +75,6 @@ struct Down
         LoginMsg           *login;
         TimeSync           *timesync;
         ScheduleConfig     *schedule;
-        DriftTest          *drifttest;
         MacControl         *maccontrol;
         GridSync           *gridsync;
         ModeTest           *modetest;

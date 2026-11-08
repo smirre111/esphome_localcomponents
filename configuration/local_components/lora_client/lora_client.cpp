@@ -1907,8 +1907,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // Somebody else's measurement is on the air for this node.
     bool LORAListener::mbs_other_test_() const
     {
-      return (this->mode_test_.active() && !this->mbs_owns_test_) || this->mac_ping_.active() ||
-             this->drift_.active();
+      return (this->mode_test_.active() && !this->mbs_owns_test_) || this->mac_ping_.active();
     }
 
     modebsup::Inputs LORAListener::mbs_inputs_() const

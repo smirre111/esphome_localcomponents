@@ -18,7 +18,6 @@ struct RouteRow
 };
 static constexpr RouteRow kRoutes[] = {
     {hubframes::DL_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
-    {hubframes::DL_DRIFTTEST,    macwire::kPortMac0Mgmt, false},
     {hubframes::DL_MACCONTROL,   macwire::kPortMac0Mgmt, false},
     {hubframes::DL_MODETEST,     macwire::kPortMac0Mgmt, false},
     {hubframes::DL_GRIDBEACON,   macwire::kPortMac0Mgmt, false},
@@ -44,8 +43,6 @@ static bool s_mac_pdu(const hubframes::Down *op, ::HubMacPdu *pdu)
 {
     switch (op->cmd_case)
     {
-    case hubframes::DL_DRIFTTEST:
-        pdu->pdu_case = HUB_MAC_PDU__PDU_DRIFTTEST;  pdu->drifttest  = op->drifttest;  break;
     case hubframes::DL_MACCONTROL:
         pdu->pdu_case = HUB_MAC_PDU__PDU_MACCONTROL; pdu->maccontrol = op->maccontrol; break;
     case hubframes::DL_GRIDSYNC:
@@ -59,7 +56,7 @@ static bool s_mac_pdu(const hubframes::Down *op, ::HubMacPdu *pdu)
     default:
         return false;
     }
-    return pdu->drifttest != nullptr;   // every case's pointer shares the union
+    return pdu->maccontrol != nullptr;   // every case's pointer shares the union
 }
 
 // HubAppPdu. The Control commands get their identity (section 7) here, in

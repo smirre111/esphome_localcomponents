@@ -2867,45 +2867,6 @@ TEST(TxPolicy, SingleCopyIsPerFrameAndDoesNotPersist) {
         << "a single-copy frame must not change how the NEXT frame is sent";
 }
 
-TEST(TxPolicy, OrdinaryCommandKeepsItsBurstDuringADriftTest) {
-    // The regression. Start a real drift test on the real LORAListener, then
-    // send an ordinary frame while it is active.
-    using namespace real_helpers;
-    RealHubHarness h{2, kMacRol2};
-    ensure_psa_ready();
-
-    h.rol.start_drift_test(/*duration_s=*/300, /*grid_ms=*/1100);
-    ASSERT_TRUE(h.rol.drift_test_active());
-
-    const size_t before = h.tracker.sent_copies.size();
-    uint8_t user_command[16] = {0};
-    h.tracker.send(user_command, sizeof(user_command));
-
-    ASSERT_GT(h.tracker.sent_copies.size(), before);
-    EXPECT_EQ(h.tracker.sent_copies.back(), 0)
-        << "a user command sent during a drift test must still be bursted; "
-           "one copy is ~5.8 % delivery to a node in three-window mode";
-
-    h.rol.stop_drift_test();
-    EXPECT_FALSE(h.rol.drift_test_active());
-}
-
-TEST(TxPolicy, StoppingADriftTestBurstsTheOffCommand) {
-    using namespace real_helpers;
-    RealHubHarness h{2, kMacRol2};
-    ensure_psa_ready();
-
-    h.rol.start_drift_test(/*duration_s=*/300, /*grid_ms=*/1100);
-    h.tracker.sent_copies.clear();
-    h.rol.stop_drift_test();
-
-    // The OFF frame goes out as a normal burst: the node may already have left
-    // continuous RX on its own deadline, and a single copy would likely be lost.
-    ASSERT_FALSE(h.tracker.sent_copies.empty());
-    for (int c : h.tracker.sent_copies)
-        EXPECT_EQ(c, 0) << "the OFF command must be bursted";
-}
-
 // ---------------------------------------------------------------------------
 // M1, hub half — MAC-0 ping and echo (mac-layer.md sections 5 and 6).
 //
@@ -3272,25 +3233,6 @@ TEST(TestStreamFcnts, ATimerBuiltModeTestMarkNeverTouchesTheSequencer) {
         if (i) EXPECT_GT(fcnts[i], fcnts[i - 1]) << "marks reuse or reorder FCNTs";
     }
     h.rol.stop_mode_test();
-}
-
-TEST(TestStreamFcnts, ATimerBuiltDriftTickNeverTouchesTheSequencer) {
-    using namespace real_helpers;
-    RealHubHarness h{18, kMacRol2};
-    ensure_psa_ready();
-    drive_session(h.clock, h.radio, h.rol);
-    ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
-
-    h.rol.start_drift_test(/*duration_s=*/60, /*grid_ms=*/1000);
-    h.clock.tick(3100);
-    const uint32_t tx_after_reserve = h.rol.sequencer().txId();
-    const size_t from = h.tracker.sent_raw.size();
-    for (int i = 0; i < 6; ++i)
-        h.rol.drift_tick_for_test();
-    ASSERT_GE(sealed_fcnts_from(h.tracker, from).size(), 6u) << "precondition: the ticks went out";
-    EXPECT_EQ(h.rol.sequencer().txId(), tx_after_reserve)
-        << "a drift tick built on the esp_timer task allocated from the Sequencer";
-    h.rol.stop_drift_test();
 }
 
 // P1's rule for these blocks too: a re-LOGIN mid-run drops the block, so no
@@ -7304,7 +7246,7 @@ TEST(ModeBListener, AnAutoModeFlaggedNodeIsNeverTouchedEvenIfItAnnouncesNothing)
     EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
 }
 
-TEST(ModeBListener, AMacPingOrDriftTestOnTheNodeIsNeverStartedOver) {
+TEST(ModeBListener, AMacPingOnTheNodeIsNeverStartedOver) {
     ensure_psa_ready();
     ModeBRig r;
     r.session();
@@ -7315,10 +7257,6 @@ TEST(ModeBListener, AMacPingOrDriftTestOnTheNodeIsNeverStartedOver) {
     r.secs(300);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "a MAC ping is somebody else's measurement";
     r.rol.stop_mac_ping();
-    r.rol.start_drift_test(900, 1500);
-    ASSERT_TRUE(r.rol.drift_test_active());
-    r.secs(300);
-    EXPECT_EQ(r.rol.mbs_warmups_started_, 0u) << "so is a drift test";
 }
 
 TEST(ModeBListener, ANodeWithoutAConfirmedSessionIsNotWarmedUp) {

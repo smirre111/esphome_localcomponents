@@ -335,43 +335,6 @@ button:
     id: rol_2_debug_trace_capture_arm
     op: trace_capture_arm
 
-  # --- Clock-drift characterisation (bench only) ---------------------------
-  # Puts both ends into test mode: the node holds continuous RX, the hub emits
-  # a burst every 15 s as a regular ruler. The node then regresses the arrival
-  # times of the 17 copies against their known 88000 us spacing; the slope is
-  # the relative drift.
-  #
-  # 88000, NOT 1500/17 = 88235. This comment said 88235 and that is the exact
-  # error that cost three firmware revisions: the hub's stride is
-  # `roundDurationMs / txSlotsPerRound` in C++ integer arithmetic, so it is 88
-  # ms exactly, and the node compiles kCopySpacingUs = 88000 to match. A ruler
-  # believed to be 88235 against copies actually 88000 apart reads as a
-  # -2663 ppm clock error that does not exist. Result appears in the node's serial log as
-  # "DriftTest result: +N ppm over M bursts".
-  #
-  # Continuous RX costs ~11 mA against the ~1.2 mA interactive average, so this
-  # is NOT something to leave running. Both ends stop themselves after 5 min,
-  # and the node's timeout is independent of the hub — if the hub goes away
-  # mid-test the node still exits.
-  # - platform: template
-  #   name: "Drift Test Start (node 2)"
-  #   id: rol_2_drift_start
-  #   entity_category: diagnostic
-  #   on_press:
-  #     # 1100 ms, deliberately NOT a multiple of the node's 500 ms RX interval.
-  #     # Commensurate periods phase-lock: a 1000 ms grid against 500 ms windows
-  #     # keeps a constant phase relationship, so if a frame starts landing in the
-  #     # node's RX-off gap it does so forever. Observed exactly that — ~300 grid
-  #     # frames heard, zero. Belt and braces: the node is in continuous RX by the
-  #     # time the grid starts, so this should not matter.
-  #     - lambda: 'id(rol_2)->start_drift_test(300, 1100);'
-  # - platform: template
-  #   name: "Drift Test Stop (node 2)"
-  #   id: rol_2_drift_stop
-  #   entity_category: diagnostic
-  #   on_press:
-  #     - lambda: 'id(rol_2)->stop_drift_test();'
-
   # --- ModeTest: on-hardware validation of a mode (test-plan.md section 10) ---
   #
   # Distinct from the drift test above, which measures ONE thing (relative clock

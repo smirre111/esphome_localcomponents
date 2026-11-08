@@ -33,7 +33,6 @@ SAME_CASE(DL_COVERCONFIG);
 SAME_CASE(DL_LOGIN);
 SAME_CASE(DL_TIMESYNC);
 SAME_CASE(DL_SCHEDULE);
-SAME_CASE(DL_DRIFTTEST);
 SAME_CASE(DL_MACCONTROL);
 SAME_CASE(DL_GRIDSYNC);
 SAME_CASE(DL_MODETEST);
@@ -96,6 +95,11 @@ TEST(MirrorTables, EveryDownlinkCaseHasThePortAndAckRuleTheNodeHas) {
             EXPECT_FALSE(portmap::ackedWhenExecuted(DL_LOGIN));
             continue;
         }
+        // DriftTest (case 18, the node's DL_DRIFTTEST): removed on the hub on
+        // 2026-11-08; the node's entry goes with the node's own removal (order:
+        // hub first). Drop this exception once node main has no case 18.
+        if (c == 18)
+            continue;
         EXPECT_EQ(r.ok, node_has) << "case " << c << " has a port on one side only";
         if (!r.ok || !node_has)
             continue;
@@ -104,7 +108,7 @@ TEST(MirrorTables, EveryDownlinkCaseHasThePortAndAckRuleTheNodeHas) {
         EXPECT_EQ(r.ack_req, portmap::ackedWhenExecuted(static_cast<DownlinkCase>(c)))
             << "case " << c << ": the hub's ACK_REQ and the node's 'acked' table disagree";
     }
-    EXPECT_EQ(checked, 12) << "every routed downlink case was compared";
+    EXPECT_EQ(checked, 11) << "every routed downlink case was compared";
 }
 
 // Every uplink case the node sends on a port is classified to that port by the

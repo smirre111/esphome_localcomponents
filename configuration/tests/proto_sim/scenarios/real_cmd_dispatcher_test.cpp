@@ -77,7 +77,7 @@ uint8_t dl_port(DownlinkCase c) {
     switch (c) {
     case DL_LOGIN:
         return macwire::kPortSession;
-    case DL_DRIFTTEST: case DL_MACCONTROL: case DL_GRIDSYNC: case DL_MODETEST:
+    case DL_MACCONTROL: case DL_GRIDSYNC: case DL_MODETEST:
     case DL_GRIDBEACON: case DL_GRIDDEMOTE:
         return macwire::kPortMac0Mgmt;
     default:
@@ -107,7 +107,6 @@ std::vector<uint8_t> dl_body(const DownlinkView &op) {
         GridDemote empty = GRID_DEMOTE__INIT;
         p.pdu_case = (HubMacPdu__PduCase) op.cmd_case;
         switch (op.cmd_case) {
-        case DL_DRIFTTEST:  p.drifttest  = op.drifttest;  break;
         case DL_MACCONTROL: p.maccontrol = op.maccontrol; break;
         case DL_GRIDSYNC:   p.gridsync   = op.gridsync;   break;
         case DL_MODETEST:   p.modetest   = op.modetest;   break;
@@ -2756,50 +2755,6 @@ TEST_F(RealNodeFixture, AutoSleepRechecksTheConditionWhenItFires) {
 }
 
 // ---------------------------------------------------------------------------
-// Drift test: the node must always come back to the PRODUCTION power profile
-// ---------------------------------------------------------------------------
-
-TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
-    // Node N15 (ae291f4): a DriftTest starts only on a bench node and from an
-    // authenticated frame, so the node is a bench node with a session here.
-    disp.setBenchNode(true);
-    useSession();
-    // The measuring profile disables light sleep and pins the CPU at 240 MHz:
-    // ~11 mA against the ~1.2 mA interactive average. If a test ever ends
-    // without restoring production, the node quietly burns ~9x its budget and
-    // nothing says so until the battery is flat.
-    SystemCtrl::applyPowerProfile(false);
-    ASSERT_FALSE(SystemCtrl::measuringProfile());
-
-    DlMsg op;
-    DlHdr hdr;
-    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
-    hdr.senderaddress = kHubAddr; hdr.msgid = 5;
-    op.header = &hdr;
-
-    DriftTest dt = DRIFT_TEST__INIT;
-    dt.enable = true; dt.durations = 60; dt.gridperiodms = 1093;
-    op.cmd_case = DL_DRIFTTEST;
-    op.drifttest = &dt;
-
-    auto on = pack_op(op);   // sealed: useSession() is on
-    disp.onReceiveNew(on.data(), static_cast<int>(on.size()));
-    EXPECT_TRUE(SystemCtrl::measuringProfile())
-        << "entering the test must disable light sleep";
-    EXPECT_TRUE(disp.driftTestActive());
-
-    dt.enable = false;
-    hdr.msgid = 6;
-    auto off = pack_op(op);
-    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
-    EXPECT_FALSE(SystemCtrl::measuringProfile())
-        << "leaving the test MUST restore production power management";
-    EXPECT_FALSE(disp.driftTestActive());
-    EXPECT_FALSE(lif.continuousRx())
-        << "and must leave continuous RX — 11 mA otherwise";
-}
-
-// ---------------------------------------------------------------------------
 // Mode sysops must actually change the mode
 // ---------------------------------------------------------------------------
 
@@ -3160,9 +3115,9 @@ TEST_F(RealNodeFixture, ForeignPlaintextFramesAreCountedNotIgnored) {
 // B2 — phase samples are committed only for frames addressed to this node.
 //
 // This is the bug the design warns about, exercised through production code:
-// noteDriftSample() runs before parsing (correct for drift), so without the
-// commit-late split a node stamps its neighbours' frames and phaseErrUs goes
-// bimodal at 0 and one slot pitch.
+// The RxDone stamp is taken before parsing, so without the commit-late split
+// a node stamps its neighbours' frames and phaseErrUs goes bimodal at 0 and
+// one slot pitch.
 // ---------------------------------------------------------------------------
 
 TEST_F(RealNodeFixture, NoPhaseSampleWithoutAGrid) {
@@ -3828,12 +3783,8 @@ TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
     // requires zero samples outside the guard, so it went permanently false on
     // the SECOND addressed frame and Mode B could never be entered. The failure
     // was silent and looked like a clock fault.
-    // noteDriftSample() is what the DIO0 task calls on every RxDone, and it is
-    // what sets the timestamp the phase sample is built from. Mirrored here
-    // because onReceiveNew alone does not set it.
     auto gs = build_grid_sync(true, /*slot=*/0, /*msgid=*/710);
     const int64_t anchor_rx = 10'000'000;
-    disp.noteDriftSample(anchor_rx);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), anchor_rx);
     ASSERT_TRUE(disp.gridState().active);
 
@@ -3850,7 +3801,6 @@ TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
     auto op1 = pack_sysop_op(/*msgid=*/711, CLIENT_OPERATION__CMD_STATUS);
     const int64_t mark1 = disp.expectedT0Us() + timedgrid::kRoundUs;
     const int64_t rx1 = mark1 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op1.size());
-    disp.noteDriftSample(rx1);
     disp.onReceiveNew(op1.data(), static_cast<int>(op1.size()), rx1);
     const int64_t expectation1 = disp.expectedT0Us();
     ASSERT_NE(expectation1, 0);
@@ -3858,7 +3808,6 @@ TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
     auto op2 = pack_sysop_op(/*msgid=*/712, CLIENT_OPERATION__CMD_STATUS);
     const int64_t mark2 = mark1 + timedgrid::kRoundUs;
     const int64_t rx2 = mark2 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op2.size());
-    disp.noteDriftSample(rx2);
     disp.onReceiveNew(op2.data(), static_cast<int>(op2.size()), rx2);
 
     EXPECT_NE(disp.expectedT0Us(), expectation1)
@@ -3913,7 +3862,6 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
     // never advanced. The commit now gates on the grid, so the test has to
     // establish one.
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/0, /*msgid=*/519);
-    disp.noteDriftSample(1'000'000);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), /*rx_us=*/1'000'000);
     ASSERT_TRUE(disp.gridState().active);
     disp.resetPhaseStats();
@@ -3923,7 +3871,6 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
     // would have made this test pass for the wrong reason.
     auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/520);
     const int64_t rx = rxOnMark(disp, bytes.size(), 1'040'000, /*err_us=*/300);
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
     EXPECT_EQ(disp.phaseStats().n, 1u);
 }
@@ -5117,7 +5064,6 @@ constexpr int64_t kAimBound = 290000;
 int64_t settle_on_grid(CmdDispatcherTestPeer &disp, uint32_t slot, uint32_t first_msgid) {
     auto gs = build_grid_sync(/*enable=*/true, slot, first_msgid);
     const int64_t anchor_rx = 20'000'000;
-    disp.noteDriftSample(anchor_rx);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), anchor_rx);
     if (!disp.gridState().active) return 0;
 
@@ -5126,7 +5072,6 @@ int64_t settle_on_grid(CmdDispatcherTestPeer &disp, uint32_t slot, uint32_t firs
         auto op = pack_sysop_op(first_msgid + 1 + i, CLIENT_OPERATION__CMD_STATUS);
         mark = disp.expectedT0Us() + timedgrid::kRoundUs;
         const int64_t rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
-        disp.noteDriftSample(rx);
         disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
     }
     return mark;
@@ -5184,7 +5129,6 @@ TEST_F(RealNodeFixture, AnAnchorTheNodeDoesNotTrustIsNotAimedFrom) {
     // on another node's slot — 32 nodes with bad anchors would converge on one
     // window instead of spreading out.
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/980);
-    disp.noteDriftSample(20'000'000);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 20'000'000);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_TRUE(disp.timedRxEnabledForTest());
@@ -5791,7 +5735,6 @@ TEST_F(RealNodeFixture, ABurstCopyIsStampedAsCopyZero) {
     const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
     const int64_t rx = mark + (int64_t) kCopy * drift::kCopySpacingUs
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
 
     ASSERT_EQ(disp.phaseStats().n, 1u);
@@ -5831,7 +5774,6 @@ void deliverStamped(CmdDispatcherTestPeer &disp, const std::vector<uint8_t> &f,
                     uint32_t fire_round, uint32_t fire_offset_us, int64_t err_us) {
     const int64_t t0 = gridstate::t0ForHubInstantUs(disp.gridState(), fire_round, fire_offset_us);
     const int64_t rx = t0 + err_us + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(const_cast<uint8_t *>(f.data()), static_cast<int>(f.size()), rx);
 }
 
@@ -5900,7 +5842,6 @@ TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
 
     const int64_t actual_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kLate;
     const int64_t rx = actual_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
     ASSERT_TRUE(disp.gridState().active);
 
@@ -5939,7 +5880,6 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
 
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(gs_rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
@@ -5950,7 +5890,6 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
         auto f = pack_stamped_sysop(msgid, round, 300'000);
         const int64_t t0 = kTrueAnchor + (int64_t) round * timedgrid::kRoundUs + 300'000;
         const int64_t rx = t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-        disp.noteDriftSample(rx);
         disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
     };
 
@@ -6002,7 +5941,6 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
 
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(gs_rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
@@ -6015,7 +5953,6 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
     auto at_truth = [&](uint32_t msgid, uint32_t round) {
         auto f = pack_stamped_sysop(msgid, round, 300'000);
         const int64_t rx = rx_for(round, f.size());
-        disp.noteDriftSample(rx);
         disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
         return f;
     };
@@ -6029,7 +5966,6 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
     // delivering a genuinely new one.
     nodeclock::setSettledForTest(true);
     const int64_t replay_rx = rx_for(10, first.size());
-    disp.noteDriftSample(replay_rx);
     disp.onReceiveNew(const_cast<uint8_t *>(first.data()), static_cast<int>(first.size()),
                       replay_rx);
     EXPECT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
@@ -6114,7 +6050,6 @@ TEST_F(RealNodeFixture, AnUnplacedFrameIsNotAPhaseSample) {
                                   /*burst_index=*/0, /*on_mark=*/false);
     const int64_t rx_u = mark + 463000
                        + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) unplaced.size());
-    disp.noteDriftSample(rx_u);
     disp.onReceiveNew(unplaced.data(), static_cast<int>(unplaced.size()), rx_u);
 
     EXPECT_EQ(disp.phaseStats().n, 0u)
@@ -6126,7 +6061,6 @@ TEST_F(RealNodeFixture, AnUnplacedFrameIsNotAPhaseSample) {
     auto placed = pack_sysop_op(/*msgid=*/722, CLIENT_OPERATION__CMD_STATUS);
     const int64_t rx_p = mark + (int64_t) timedgrid::kRoundUs
                        + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) placed.size());
-    disp.noteDriftSample(rx_p);
     disp.onReceiveNew(placed.data(), static_cast<int>(placed.size()), rx_p);
 
     ASSERT_EQ(disp.phaseStats().n, 1u);
@@ -6155,7 +6089,6 @@ TEST_F(RealNodeFixture, APlaintextFrameCannotFeedThePhaseFit) {
     const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
     const int64_t rx = mark + 7000
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
 
     EXPECT_EQ(disp.phaseStats().n, n_before)
@@ -7134,7 +7067,6 @@ void deliverStampedGridSync(CmdDispatcherTestPeer &disp, uint32_t msgid, int64_t
     std::vector<uint8_t> bytes = pack_op(op);
     const int64_t rx = kRefAnchor + (int64_t) kRefSlot * timedgrid::kSlotPitchUs + err_us
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
 }
 
@@ -7190,7 +7122,6 @@ TEST_F(RealNodeFixture, TheBootMinuteReSolveStartsTheRateSpan) {
     auto f = pack_stamped_sysop(781, /*round=*/12, /*offset=*/300'000);
     const int64_t rx = gridstate::t0ForHubInstantUs(truth, 12, 300'000)
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
 
     auto b = build_grid_beacon(233, truth.params.beacon_slot, 1);
@@ -7558,7 +7489,6 @@ std::vector<uint8_t> admit_enc_sysop_copy(CmdDispatcherTestPeer &disp, uint32_t 
 // Deliver `f` with its T0 on `mark`, as the radio would.
 void admit_deliver_on_mark(CmdDispatcherTestPeer &d, const std::vector<uint8_t> &f, int64_t mark) {
     const int64_t rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-    d.noteDriftSample(rx);
     d.onReceiveNew(const_cast<uint8_t *>(f.data()), static_cast<int>(f.size()), rx);
 }
 
@@ -8024,7 +7954,6 @@ TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnch
     std::vector<uint8_t> bytes = pack_op(op);
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(gs_rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError);
@@ -8063,7 +7992,6 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
     std::vector<uint8_t> bytes = pack_op(op);
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(gs_rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError);
@@ -8073,7 +8001,6 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
     auto f = pack_stamped_sysop(/*msgid=*/841, /*round=*/10, 300'000);
     const int64_t rx = kTrueAnchor + 10 * (int64_t) timedgrid::kRoundUs + 300'000
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor) << "precondition: the anchor was re-solved";
     EXPECT_EQ(lif.rearmRequests(), rearms + 1u)
@@ -8104,7 +8031,6 @@ TEST_F(RealNodeFixture, AdmitFrame_AReplayedCopyCannotTriggerAnAnchorRecentre) {
         disp.gridState(), t0 + (int64_t) (timedmode::kPromotionPhaseSamples - 2) * (int64_t) timedgrid::kRoundUs);
     auto copy = pack_sysop_op(last_msgid, CLIENT_OPERATION__CMD_STATUS, /*burst_index=*/1);
     const int64_t rx = mark + kOffUs + 88'000 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) copy.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(copy.data(), static_cast<int>(copy.size()), rx);
     ASSERT_GE(disp.phaseStats().n, timedmode::kPromotionPhaseSamples) << "precondition: the copy was sampled";
     EXPECT_EQ(disp.gridState().anchor_us, anchor_before)

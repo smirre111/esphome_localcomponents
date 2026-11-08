@@ -238,38 +238,5 @@ namespace esphome
       ModeTestSummary summary_{};
     };
 
-    // The drift test: a hardware-timed ruler, one frame per esp_timer tick.
-    class DriftStream
-    {
-    public:
-      explicit DriftStream(StreamHost &host) : host_(host) {}
-      ~DriftStream();
-      DriftStream(const DriftStream &) = delete;
-      DriftStream &operator=(const DriftStream &) = delete;
-
-      void start(uint32_t duration_s, uint32_t grid_ms);
-      void stop();
-      bool active() const { return this->active_; }
-      mac1::FcntReservation *fcnts() { return &this->fcnts_; }
-      void tick_for_test() { timer_cb_(this); }
-
-    private:
-      // Builds the NEXT frame into frame_, so the timer callback only sends.
-      void build_frame_(bool enable, mac1::FcntReservation *block = nullptr);
-      static void timer_cb_(void *arg);
-
-      StreamHost &host_;
-      std::atomic<bool> active_{false};    // loop writes, timer reads
-      std::atomic<bool> cb_busy_{false};   // timer_cb_ running; a stop waits for it
-      uint32_t duration_s_{0};
-      uint32_t grid_ms_{0};
-      esp_timer_handle_t timer_{nullptr};
-      // The run's tick FCNTs, reserved on the loop; guarded by the host's lock.
-      mac1::FcntReservation fcnts_{};
-      uint8_t  frame_[128]{};
-      size_t   frame_len_{0};
-      mac2::FrameSeal seal_{};
-    };
-
   }  // namespace lora_tracker
 }  // namespace esphome
