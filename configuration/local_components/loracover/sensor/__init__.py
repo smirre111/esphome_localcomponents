@@ -88,9 +88,11 @@ CONFIG_SCHEMA = (
                 icon="mdi:clock-alert-outline",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
-            # Battery-runtime compensation telemetry (visibility only -- see
-            # docs/battery-runtime-compensation-proposal.md decision 1; the
-            # node runs the fit, the hub only shows it). Published only when
+            # Battery-runtime telemetry (visibility only): the node reports the
+            # measured and nominal run time of a calibration move. No
+            # voltage->runtime fit runs anywhere: the node's
+            # BatteryRuntimeCalib.h was never wired in (review 2026-11-08 D3).
+            # Published only when
             # a full move just ended via the current-sense endstop -- the one
             # combination trusted as ground truth (proposal §2) -- so these
             # hold their last value between calibration events, not 0.
