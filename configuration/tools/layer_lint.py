@@ -59,7 +59,7 @@ METRICS = {
     # MAC-0 calling up into MAC-2 per copy (V1).
     "tracker.seal_upcalls": (TRACKER, r"(?<!::)\bsealBurstCopyTag\s*\(",
                              "per-copy up-call into the listener's MAC-2"),
-    # MAC-0 reading listener/client internals (V1 address lookup, V3 shadow).
+    # MAC-0 reading listener/client internals (V1 address lookup).
     "tracker.client_iteration": (TRACKER, r"\b(?:listeners_|clients_)\b",
                                  "tracker iterates registered listeners/clients"),
     # Direct data requests that bypass one framing path (V15).

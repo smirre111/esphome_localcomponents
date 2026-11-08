@@ -1593,74 +1593,12 @@ TEST(RealTrackerDrain, APlacedFrameIsPricedFromItsMarkNotFromNow) {
 }
 
 // ---------------------------------------------------------------------------
-// SHADOW pending-data mask (2026-10-06): computed and logged by serviceBeacon,
-// never transmitted. The whole point is zero behaviour change on the air.
-// ---------------------------------------------------------------------------
-
-TEST(RealTrackerBeaconShadow, TheShadowIsEvaluatedOncePerBeaconAndTheAirIsUnchanged) {
-    lorahal::rec().reset();
-    proto_sim_timer_reset();
-    proto_sim_timer_set_now_us(1'000'000);
-    TxProbe t;
-    t.init();
-    t.startGrid();
-    ASSERT_EQ(t.shadowBeacons(), 0u);
-
-    const int64_t beacon_t0 = t.nextBeaconT0Us(esp_timer_get_time());
-    ASSERT_GT(beacon_t0, 0);
-    t.serviceBeacon();
-    t.serviceBeacon();
-    t.serviceBeacon();
-    ASSERT_EQ(t.beaconsSent(), 1u);
-    EXPECT_EQ(t.shadowBeacons(), 1u) << "once per queued beacon, not once per loop pass";
-    EXPECT_EQ(t.shadowBeaconsWithClear(), 0u) << "no nodes registered: nothing to clear";
-    EXPECT_EQ(t.shadowLastMask(), pending::allListening());
-
-    const int64_t fire = loratiming::fireInstantUs(beacon_t0, 0);
-    proto_sim_timer_set_now_us(fire - LORATracker::kPrepareLeadUs);
-    ASSERT_TRUE(t.serviceTxQueue(fire - LORATracker::kPrepareLeadUs));
-    ASSERT_EQ(lorahal::rec().packets.size(), (size_t) 1);
-    const auto &bytes = lorahal::rec().packets.at(0);
-    View *msg = unpackView(bytes.data(), bytes.size());
-    ASSERT_NE(msg, nullptr);
-    ASSERT_EQ(msg->cmd_case, hubframes::DL_GRIDBEACON);
-    EXPECT_TRUE(msg->gridbeacon->pendingmaskvalid) << "validity flag semantics unchanged";
-    EXPECT_EQ(msg->gridbeacon->pendingmask, pending::allListening());
-    freeView(msg);
-}
-
-TEST(RealTrackerBeaconShadow, TheVerdictIsCountedAndRemembered) {
-    TxProbe t;
-    t.init();
-    pendingshadow::NodeInputs quiet;
-    quiet.slot = 4;
-    quiet.timed_mode_off = false;
-    quiet.latency_tolerant = true;
-    quiet.since_last_traffic_us = 1'000'000'000'000LL;
-    const std::string names[1] = {"rol_2"};
-
-    pendingshadow::Verdict v = t.recordShadowPending(&quiet, names, 1, 0);
-    EXPECT_TRUE(v.any_cleared);
-    EXPECT_EQ(t.shadowBeacons(), 1u);
-    EXPECT_EQ(t.shadowBeaconsWithClear(), 1u);
-    EXPECT_EQ(t.shadowLastMask(), pending::allListening() & ~(1u << 4));
-
-    pendingshadow::NodeInputs busy = quiet;
-    busy.op_awaiting_ack = true;
-    v = t.recordShadowPending(&busy, names, 1, 233);
-    EXPECT_FALSE(v.any_cleared);
-    EXPECT_EQ(t.shadowBeacons(), 2u);
-    EXPECT_EQ(t.shadowBeaconsWithClear(), 1u) << "a beacon with nothing cleared is not counted";
-    EXPECT_EQ(t.shadowLastMask(), pending::allListening());
-}
-
-// ---------------------------------------------------------------------------
 // serviceBeacon characterisation (CCN refactor): the early-return ladder and
 // the two refusals that must NOT be recorded as "queued".
 // ---------------------------------------------------------------------------
 namespace {
 struct BeaconProbe : TxProbe {
-    // S5: the fleet key and the shadow sources live in the MAC management unit.
+    // S5: the fleet key lives in the MAC management unit.
     uint8_t *net_key() { return this->mgmt().netKeyForTest(); }
     using LORATracker::beacon_round_queued_;
 };
@@ -1680,14 +1618,12 @@ TEST(RealTrackerBeacon, ABeaconThatCannotBeSignedIsNotSentAndIsNotRecordedAsQueu
 
     t.serviceBeacon();
     EXPECT_EQ(t.beaconsSent(), 0u) << "no beacon rather than an unsigned one";
-    EXPECT_EQ(t.shadowBeacons(), 0u) << "and no shadow line for a beacon never queued";
     EXPECT_EQ(t.beacon_round_queued_, 0xFFFFFFFFu) << "not recorded, so the next pass retries";
     EXPECT_EQ(t.txDrainUs(), 0) << "nothing entered the transmit queue";
 
     memcpy(t.net_key(), saved, sizeof(saved));      // the key is back
     t.serviceBeacon();
     EXPECT_EQ(t.beaconsSent(), 1u);
-    EXPECT_EQ(t.shadowBeacons(), 1u);
 }
 
 TEST(RealTrackerBeacon, ABeaconDroppedForWantOfABufferIsRetriedNotRecorded) {
@@ -1705,43 +1641,11 @@ TEST(RealTrackerBeacon, ABeaconDroppedForWantOfABufferIsRetriedNotRecorded) {
 
     t.serviceBeacon();
     EXPECT_EQ(t.beaconsSent(), 0u) << "dropped, not queued";
-    EXPECT_EQ(t.shadowBeacons(), 0u);
     EXPECT_EQ(t.beacon_round_queued_, 0xFFFFFFFFu) << "recording it would hide a hub that stopped beaconing";
 
     while (t.serviceTxQueue(1'000'000)) {}          // drain the pool
     t.serviceBeacon();
     EXPECT_EQ(t.beaconsSent(), 1u) << "and the next pass places it";
-}
-
-// Review HB9 (2026-10-25): the shadow pending mask's sources were filled only
-// by register_listener, whose sole caller was SleepTrigger (codegen commented
-// out), so every 'beacon shadow' line evaluated zero nodes. Every registered
-// client is a source now. (This target links no real listener: the object is
-// never used beyond its address, which is all register_client stores.)
-TEST(RealTrackerBeacon, EveryRegisteredClientFeedsTheShadowMask) {
-    BeaconProbe t;
-    ASSERT_EQ(t.mgmt().shadowSourceCount(), 0u);
-    using esphome::lora_tracker::LORAClient;
-    alignas(LORAClient) static unsigned char storage[2][sizeof(LORAClient)];
-    t.register_client(reinterpret_cast<LORAClient *>(storage[0]));
-    t.register_client(reinterpret_cast<LORAClient *>(storage[1]));
-    EXPECT_EQ(t.mgmt().shadowSourceCount(), 2u)
-        << "a registered node's state never reached the shadow pending mask";
-}
-
-TEST(RealTrackerBeacon, NullListenerEntriesAreSkippedWhenGatheringTheShadow) {
-    lorahal::rec().reset();
-    proto_sim_timer_reset();
-    proto_sim_timer_set_now_us(1'000'000);
-    BeaconProbe t;
-    t.init();
-    t.startGrid();
-    t.mgmt().addShadowSource(nullptr);
-    t.mgmt().addShadowSource(nullptr);
-    t.serviceBeacon();
-    EXPECT_EQ(t.beaconsSent(), 1u);
-    EXPECT_EQ(t.shadowBeacons(), 1u);
-    EXPECT_EQ(t.shadowLastMask(), pending::allListening());
 }
 
 TEST(RealTrackerBeacon, ARepeatedPassForTheSameRoundNeverQueuesTwiceEvenAfterTheMarkPasses) {

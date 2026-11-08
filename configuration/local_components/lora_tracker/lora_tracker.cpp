@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include "lora_tracker.h"
-#include "esphome/components/lora_client/lora_client.h"   // MAC-0 -> listener calls (fan-out, shadow gather)
+#include "esphome/components/lora_client/lora_client.h"   // MAC-0 -> listener calls (fan-out gather)
 #include "esphome/components/lora_client/UplinkDemux.h"
 #include "esphome/core/application.h"
 #include "esphome/core/defines.h"
@@ -608,10 +608,11 @@ namespace esphome
       if (!this->beacon_due_(now, t0, round, fire))
         return;
 
-      // The management plane builds the frame and gathers the shadow inputs
-      // (mac_mgmt.h); MAC-0 only places the opaque bytes on the mark.
+      // The management plane builds the frame (mac_mgmt.h); MAC-0 only places
+      // the opaque bytes on the mark.
+      (void) now;
       macmgmt::BeaconFrame frame;
-      const macmgmt::BeaconBuild built = this->mgmt_.buildBeacon(round, now, loratx::kBufferSize, &frame);
+      const macmgmt::BeaconBuild built = this->mgmt_.buildBeacon(round, loratx::kBufferSize, &frame);
       if (built == macmgmt::BeaconBuild::Unsigned)
         return;
       if (built == macmgmt::BeaconBuild::TooBig)
@@ -628,52 +629,6 @@ namespace esphome
       ESP_LOGI(TAG, "beacon queued: round %u, slot %u, T0 %lld us, fire %lld us",
                (unsigned) round, (unsigned) timedgrid::kBeaconSlotIndex,
                (long long) t0, (long long) fire);
-      // Shadow only: what was transmitted above is allListening(), whatever this says.
-      this->recordShadowPending(frame.shadow_in.data(), frame.shadow_names.data(),
-                                frame.shadow_in.size(), round);
-    }
-
-    // One line per beacon: the slot map, the would-be mask, who would have been
-    // cleared, and what held everyone else. Never alters what is transmitted.
-    pendingshadow::Verdict LORATracker::recordShadowPending(
-        const pendingshadow::NodeInputs *in, const std::string *names, size_t n,
-        uint32_t round)
-    {
-      const int64_t interval_us =
-          (int64_t) timedgrid::kBeaconEveryRounds * (int64_t) timedgrid::kRoundUs;
-      std::vector<uint32_t> reasons(n, 0u);
-      const pendingshadow::Verdict v =
-          pendingshadow::shadowMask(in, n, interval_us, reasons.data());
-
-      this->shadow_beacons_++;
-      if (v.any_cleared)
-        this->shadow_beacons_with_clear_++;
-      this->shadow_last_mask_ = v.mask;
-
-      std::string detail;
-      char rbuf[96];
-      for (size_t i = 0; i < n; ++i)
-      {
-        const bool cleared = i < pendingshadow::kMaxNodes && (v.cleared_nodes & (1u << i)) != 0;
-        pendingshadow::describeReasons(reasons[i], rbuf, sizeof(rbuf));
-        char one[160];
-        if (cleared)
-          snprintf(one, sizeof(one), " | %s slot %u CLEAR (no reason to listen)",
-                   names[i].c_str(), (unsigned) in[i].slot);
-        else if (reasons[i] == 0)
-          snprintf(one, sizeof(one), " | %s slot %u LISTEN (slot shared with a listener)",
-                   names[i].c_str(), (unsigned) in[i].slot);
-        else
-          snprintf(one, sizeof(one), " | %s slot %u LISTEN (%s)",
-                   names[i].c_str(), (unsigned) in[i].slot, rbuf);
-        detail += one;
-      }
-      ESP_LOGI(TAG, "beacon shadow r%u: sent=0x%08x would=0x%08x cleared_slots=0x%08x "
-                    "beacons_with_clear=%u/%u%s",
-               (unsigned) round, (unsigned) pending::allListening(), (unsigned) v.mask,
-               (unsigned) v.cleared_slots, (unsigned) this->shadow_beacons_with_clear_,
-               (unsigned) this->shadow_beacons_, detail.c_str());
-      return v;
     }
 
     int64_t LORATracker::nextT0ForSlotUs(uint8_t slot, int64_t now_us) const
@@ -1457,10 +1412,8 @@ namespace esphome
       this->firePacket(not_before_us);
     }
 
-    // Every node's listener: it sends through this tracker, receives every
-    // uplink (checkReception's fan-out), and its state feeds the shadow
-    // pending mask (review HB9: only SleepTrigger objects reached
-    // register_listener, so every 'beacon shadow' line evaluated zero nodes).
+    // Every node's listener: it sends through this tracker and receives every
+    // uplink (checkReception's fan-out).
     void LORATracker::register_client(LORAClient *client)
     {
       this->register_listener(client);
@@ -1469,8 +1422,7 @@ namespace esphome
 
     void LORATracker::register_listener(LORAListener *listener)
     {
-      listener->set_parent(this);              // lets the listener send via the radio
-      this->mgmt_.addShadowSource(listener);   // its state feeds the shadow mask
+      listener->set_parent(this);   // lets the listener send via the radio
     }
 
     // Initialize the handoff queue and the buffer pool

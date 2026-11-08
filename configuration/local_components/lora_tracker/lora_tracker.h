@@ -28,8 +28,7 @@
 #include "esphome/components/lora_client/FrameCrypto.h"
 // SHADOW pending-data mask: the would-be bitmap, computed and logged by
 // serviceBeacon but never transmitted. Dependency-free, hub-only.
-#include "esphome/components/lora_client/PendingShadow.h"
-// S5: the MAC management unit (fleet key, beacon build, shadow inputs).
+// S5: the MAC management unit (fleet key, beacon build).
 #include "mac_mgmt.h"
 
 // The transmit buffer pool and its buffer type (TxPool, review HB10).
@@ -216,7 +215,7 @@ namespace esphome
       // Owned by the MAC management unit since S5 (mac_mgmt.h); these delegate.
       const uint8_t *netKey() const   { return this->mgmt_.netKey(); }
       uint32_t       netKeyId() const { return this->mgmt_.netKeyId(); }
-      // The MAC management unit (S5): fleet key, beacon build, shadow inputs.
+      // The MAC management unit (S5): fleet key, beacon build.
       macmgmt::HubMacManagement       &mgmt()       { return this->mgmt_; }
       const macmgmt::HubMacManagement &mgmt() const { return this->mgmt_; }
 
@@ -257,20 +256,6 @@ namespace esphome
       // For tests: how many beacons have actually been queued.
       uint32_t  beaconsSent() const { return this->beacons_sent_; }
 
-      // SHADOW pending-data mask (PendingShadow.h). serviceBeacon still sends
-      // pending::allListening(); these report what it WOULD have sent.
-      //   shadowBeacons()          beacons the shadow was evaluated for
-      //   shadowBeaconsWithClear() of those, how many would have cleared >= 1 bit
-      //   shadowLastMask()         the last would-be mask
-      uint32_t  shadowBeacons() const          { return this->shadow_beacons_; }
-      uint32_t  shadowBeaconsWithClear() const { return this->shadow_beacons_with_clear_; }
-      uint32_t  shadowLastMask() const         { return this->shadow_last_mask_; }
-      // Evaluate, count and LOG one shadow verdict. Public so a test can feed it
-      // hand-built inputs; production calls it only from serviceBeacon, once per
-      // beacon, outside every mutex and nowhere near the burst retag path.
-      pendingshadow::Verdict recordShadowPending(const pendingshadow::NodeInputs *in,
-                                                 const std::string *names, size_t n,
-                                                 uint32_t round);
       int64_t   gridAnchorUs() const { return this->grid_.anchor_us(); }
       bool      gridStarted() const  { return this->grid_.started(); }
       // True once setup() has finished: the radio is configured and the send task
@@ -481,7 +466,7 @@ namespace esphome
       uint32_t worst_poll_gap_us() const { return this->worst_poll_gap_us_; }
 
     protected:
-      // Stages of serviceBeacon(). The build and the shadow gather are the MAC
+      // Stages of serviceBeacon(). The build is the MAC
       // management unit's (mgmt_.buildBeacon, S5).
       bool         beacon_due_(int64_t &now, int64_t &t0, uint32_t &round, int64_t &fire);
       bool         queue_beacon_(std::vector<uint8_t> &buf, int64_t fire, uint32_t round);
@@ -512,13 +497,10 @@ namespace esphome
       uint32_t beacon_round_queued_{0xFFFFFFFFu};
       uint32_t tx_superseded_drops_{0};
       uint32_t beacons_sent_{0};
-      uint32_t shadow_beacons_{0};
-      uint32_t shadow_beacons_with_clear_{0};
-      uint32_t shadow_last_mask_{0xFFFFFFFFu};
       bool    setup_done_{false};
       // Section 4.4's fleet key (minted in startGrid(), published inside each
       // node's already-encrypted GridSync, never sent in the clear), the beacon
-      // build and the shadow-mask sources: the MAC management unit's (S5).
+      // build: the MAC management unit's (S5).
       macmgmt::HubMacManagement mgmt_;
       // The transmit scheduler (tx_scheduler.h): the queue's order, supersession
       // and the channel calendar (burst on air, placed frames, the queue's

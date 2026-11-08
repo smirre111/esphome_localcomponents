@@ -408,9 +408,8 @@ private:
     }
 };
 
-// A ladder is live and still has a counted retry to spend: the push is "owed"
-// to the pending-shadow and holds the onboarding gate. (The final wait, after
-// the last retry, no longer does.)
+// A ladder is live and still has a counted retry to spend: the push is "owed".
+// (The final wait, after the last retry, no longer counts.)
 constexpr bool ladderHasRetryLeft(bool awaiting, uint8_t retries_spent, uint8_t max_retries)
 {
     return awaiting && retries_spent < max_retries;

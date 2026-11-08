@@ -425,58 +425,6 @@ namespace esphome
       this->refresh_sleep_status_();   // hearing the node ends "asleep" at once
     }
 
-    pendingshadow::NodeInputs LORAListener::pending_shadow_inputs(int64_t now_us)
-    {
-      pendingshadow::NodeInputs in;
-      in.slot = static_cast<uint8_t>(this->grid_slot_ % timedgrid::kSlotCount);
-      in.op_awaiting_ack          = this->ctl().awaiting_ack;
-      in.op_deferred_until_login  = this->ctl_cmd_.deferred_until_login;
-      // "Login still settling" counts with an explicit relogin: both mean the
-      // hub is mid-conversation with this node (TimeSync's sleepOk reads the same).
-      in.relogin_pending          = this->session_.relogin_pending() || !this->session_.confirmed();
-      // Anything the node has been sent and not confirmed, or is still owed:
-      // a schedule push in flight or an edit not yet pushed, a GridSync, and
-      // this boot's configuration push.
-      in.push_awaiting_ack = this->push_awaiting_ack_();
-      in.timesync_due = timesyncpolicy::shouldSend(
-          this->auto_mode_,
-          this->last_timesync_sent_us_ == 0 ? -1 : now_us - this->last_timesync_sent_us_);
-      // OTA is a tracked sysop, so awaiting_ack above already covers it.
-      //
-      // The hub's own transmit side is global, not per node: a frame placed for
-      // this node that has not fired yet, or anything draining on the air.
-      in.queued_frames = this->frames_queued_(now_us);
-      in.timed_mode_off = !this->timed_mode_enabled_;
-      // THERE IS NO EXPLICIT LATENCY-TOLERANT FLAG. An automatic-mode node is
-      // the only kind that is already unreachable between check-ins by design
-      // (implementation-plan.md section 5.5), so that is the proxy.
-      in.latency_tolerant = this->auto_mode_;
-      // Traffic in EITHER direction: the last frame heard from it, or the last
-      // downlink placed for it (that mark, once past, is the last time it was
-      // addressed).
-      in.since_last_traffic_us = pendingshadow::sinceLastTrafficUs(
-          this->last_heard_us_, this->link_.last_placed_t0_us(), now_us);
-      return in;
-    }
-
-    // Anything the node has been sent and not confirmed, or is still owed (the
-    // push_awaiting_ack input of pending_shadow_inputs).
-    bool LORAListener::push_awaiting_ack_()
-    {
-      return this->sched_push_outstanding_() ||
-             this->sched_dirty_ || this->schedule_pending() ||
-             this->mac().awaiting_ack || !this->config_synced_ ||
-             this->config_push_pending_;
-    }
-
-    // The hub's own transmit side is global, not per node: a frame placed for
-    // this node that has not fired yet, or anything draining on the air.
-    bool LORAListener::frames_queued_(int64_t now_us) const
-    {
-      return (this->link_.last_placed_t0_us() > now_us) ||
-             (this->parent_ != nullptr && this->parent_->txDrainUs() > 0);
-    }
-
     bool LORAListener::is_node_awake_() const
     {
       // (a'): HEARING THE NODE BEATS THE MODEL.
