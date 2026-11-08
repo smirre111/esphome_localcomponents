@@ -21,7 +21,6 @@ Recorder &rec() { static Recorder r; return r; }
 static loranode::Recorder &R() { return loranode::rec(); }
 
 int  lora_init(void)              { R().note("lora_init"); return 1; }
-void lora_end()                   { R().note("lora_end"); }
 
 int lora_beginPacket(int implicitHeader) {
     (void) implicitHeader;
@@ -63,8 +62,6 @@ int lora_parsePacket(uint8_t irqFlags, int size) {
 
 int   lora_packetRssi(void)       { return -42; }
 float lora_packetSnr(void)        { return 10.0f; }
-float lora_packetFrequencyError() { return 0.0f; }
-void  lora_compensateFrequencyOffset(const float &f) { (void) f; }
 
 size_t lora_write(uint8_t byte) {
     R().staging.push_back(byte);
@@ -83,7 +80,6 @@ int lora_read() {
     if (R().rx_cursor >= R().rx_payload.size()) return 0;
     return R().rx_payload[R().rx_cursor++];
 }
-int     lora_peek()               { return lora_available() ? R().rx_payload[R().rx_cursor] : 0; }
 void    lora_receive(void)        { R().op_mode = 0x85; R().note("lora_receive"); }
 void    lora_receive(int size)    { (void) size; R().op_mode = 0x85; R().note("lora_receive"); }
 uint8_t lora_getPayloadLength()   { return (uint8_t) R().rx_payload.size(); }
@@ -114,16 +110,9 @@ void lora_setSymbolTimeout(uint16_t symbols) {
     R().sym_timeout = symbols;
     R().note("lora_setSymbolTimeout");
 }
-uint16_t lora_getSymbolTimeout()  { return R().sym_timeout; }
 
 void lora_setSyncWord(int sw)     { R().sync_word = sw; R().note("lora_setSyncWord"); }
-void lora_setMaxPayloadLength(const uint8_t len) { (void) len; }
-void lora_enableLowDataRateOptimize(bool e) { (void) e; }
-void lora_enableTcxo(const bool e){ (void) e; }
 void lora_enableCrc(void)         { R().crc_on = true;  R().note("lora_enableCrc"); }
-void lora_disableCrc(void)        { R().crc_on = false; R().note("lora_disableCrc"); }
-void lora_enableInvertIQ()        {}
-void lora_disableInvertIQ()       {}
 void lora_setOCP(uint8_t mA)      { (void) mA; }
 void lora_setGain(uint8_t gain)   { (void) gain; }
 
@@ -150,19 +139,14 @@ int     lora_read_reg(int reg)    {
          : reg == 0x01 ? R().op_mode
                        : 0;
 }
-uint8_t lora_random()             { return 0; }
-void    lora_dump_registers(void) {}
 DeviceMode lora_getDeviceMode()   { return DeviceMode::Standby; }
 
 void lora_explicitHeaderMode(void)   { R().note("lora_explicitHeaderMode"); }
 void lora_implicitHeaderMode(int s)  { (void) s; }
 void lora_implicitHeaderMode()       {}
 void lora_reset(void)                { R().note("lora_reset"); }
-void lora_send_packet(uint8_t *buf, int size) { lora_write(buf, (size_t) size); lora_tx(); }
 int  lora_receive_packet(uint8_t *buf, int size) {
     const int n = (int) R().rx_payload.size() < size ? (int) R().rx_payload.size() : size;
     if (buf != nullptr && n > 0) memcpy(buf, R().rx_payload.data(), (size_t) n);
     return n;
 }
-int  lora_received(void)          { return R().rx_payload.empty() ? 0 : 1; }
-void lora_close(void)             { R().note("lora_close"); }
