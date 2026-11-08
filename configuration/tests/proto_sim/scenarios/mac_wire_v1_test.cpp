@@ -1375,6 +1375,31 @@ TEST(MacWireV1Listener, AnUplinkTheRebootedHubHoldsNoSessionForIsAnsweredOnTheNo
     EXPECT_EQ(since % 1'500'000, 0) << "on the node's own mark";
 }
 
+// Ported from the retired model scenario login_test (MaxLoginRetriesExhaustsAndStops,
+// 2026-11-08): a node that never answers gets the first LOGIN plus
+// kMaxLoginRetries - 1 retries, then the ladder gives up and stays quiet.
+TEST(MacWireV1Listener, AnUnansweredLoginLadderGivesUpAfterItsRetryBudget) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    const size_t from = loginsOnAir(hub.radio);
+    P(hub.rol).do_login_and_arm_retry_();
+    for (int s = 0; s < 30 * 3600 / 10; ++s) {   // 30 h in 10 s steps
+        proto_sim_timer_advance_us(10'000'000);
+        hub.clock.tick(10'000);
+    }
+    const size_t sent = loginsOnAir(hub.radio) - from;
+    EXPECT_EQ(sent, (size_t) esphome::lora_tracker::HubSession::kMaxLoginRetries)
+        << "the first LOGIN and kMaxLoginRetries - 1 retries";
+    for (int s = 0; s < 3 * 3600 / 10; ++s) {
+        proto_sim_timer_advance_us(10'000'000);
+        hub.clock.tick(10'000);
+    }
+    EXPECT_EQ(loginsOnAir(hub.radio) - from, sent) << "and nothing after giving up";
+}
+
 TEST(MacWireV1Listener, AKeylessUplinksLoginToAModeANodeIsTheBurst) {
     Hub hub;
     const uint32_t session = pendingLogin(hub);

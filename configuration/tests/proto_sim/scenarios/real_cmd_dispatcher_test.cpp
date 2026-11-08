@@ -568,6 +568,37 @@ TEST_F(RealNodeFixture, CmdCoverConfigAppliesGeometry) {
 // CoverConfig with one zero geometry field must NOT apply ANY of them
 // (atomic guard — production CmdDispatcher.cpp:1291 requires all three
 // non-zero). Documents the "partial = unset" production behaviour.
+// Ported from the retired model scenario cover_config_test (G2, 2026-11-08):
+// all-zero geometry is the proto3 'unset' encoding, so it must leave the
+// geometry the node already holds alone rather than wipe it.
+TEST_F(RealNodeFixture, CmdCoverConfigAllZeroGeometryKeepsTheStoredGeometry) {
+    auto send = [&](float h, float a, float t, uint32_t msgid) {
+        DlMsg op;
+        DlHdr hdr;
+        hdr.destaddress   = kNodeAddr;
+        hdr.destsubnet    = kSubnet;
+        hdr.senderaddress = kHubAddr;
+        hdr.msgid         = msgid;
+        op.header         = &hdr;
+        CoverConfig cc = COVER_CONFIG__INIT;
+        cc.opentime         = 60;
+        cc.closetime        = 65;
+        cc.blindheightmm    = h;
+        cc.axlediametermm   = a;
+        cc.blindthicknessmm = t;
+        op.cmd_case    = DL_COVERCONFIG;
+        op.coverconfig = &cc;
+        std::vector<uint8_t> bytes = pack_op(op);
+        disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    };
+    send(2000.0f, 60.0f, 8.0f, /*msgid=*/1);
+    ASSERT_TRUE(sys.geometry_set()) << "precondition: geometry installed";
+    send(0.0f, 0.0f, 0.0f, /*msgid=*/2);
+    EXPECT_FLOAT_EQ(sys.height_mm(),    2000.0f) << "an unset geometry is not a zero geometry";
+    EXPECT_FLOAT_EQ(sys.axle_mm(),        60.0f);
+    EXPECT_FLOAT_EQ(sys.thickness_mm(),    8.0f);
+}
+
 TEST_F(RealNodeFixture, CmdCoverConfigRejectsPartialGeometry) {
     DlMsg op;
     DlHdr hdr;

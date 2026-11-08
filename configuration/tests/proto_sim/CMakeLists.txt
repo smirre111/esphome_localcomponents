@@ -99,8 +99,6 @@ add_library(proto_sim STATIC
     sim/sim_radio.cpp
     sim/wire_codec.cpp
     sim/crypto.cpp
-    sim/hub_model.cpp
-    sim/node_model.cpp
     ${BLINDSPROTO_DIR}/blinds.pb-c.c
 )
 # FrameCrypto.h: the sim builds the frames the tests assert against, so it must
@@ -182,18 +180,6 @@ else()
 endif()
 
 
-add_scenario(register_test)
-add_scenario(login_test)
-add_scenario(addressing_test)
-add_scenario(sleep_wake_test)
-add_scenario(sysop_test)
-add_scenario(boundary_test)
-add_scenario(cover_config_test)
-add_scenario(reboot_test)
-add_scenario(race_test)
-add_scenario(crypto_test)
-add_scenario(garbage_test)
-add_scenario(recovery_test)
 add_scenario(auto_mode_proto_test)   # P0: automatic-mode schema + frame budget
 
 # ----------------------------------------------------------------------------
