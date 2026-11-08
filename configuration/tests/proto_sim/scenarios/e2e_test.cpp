@@ -796,7 +796,7 @@ TEST_F(E2E, ARefusedArmReachesTheHubAsARefusal) {
     rol.start_mode_test(/*duration_s=*/300, /*grid_ms=*/1500, /*mode=*/2,
                         /*copies=*/1, /*keep_power_profile=*/true,
                         /*enable_counter=*/false, /*enable_crypto=*/false,
-                        /*mac_echo=*/true, /*arm_offset_us=*/0);
+                        /*mac_echo=*/true);
     settle();
     rol.stop_mode_test();
 

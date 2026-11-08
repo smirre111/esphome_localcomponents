@@ -3217,7 +3217,7 @@ TEST(TestStreamFcnts, ATimerBuiltModeTestMarkNeverTouchesTheSequencer) {
     ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
 
     h.rol.start_mode_test(/*duration_s=*/60, /*grid_ms=*/1500, /*mode=*/1, 1, true, false,
-                          false, false, 0);
+                          false, false);
     h.clock.tick(3100);   // the grid arm builds the first mark (loop)
     const uint32_t tx_after_reserve = h.rol.sequencer().txId();
     const size_t from = h.tracker.sent_raw.size();
@@ -3243,7 +3243,7 @@ TEST(TestStreamFcnts, AReloginMidRunNeverSealsAMarkUnderTheNextSession) {
     ensure_psa_ready();
     drive_session(h.clock, h.radio, h.rol);
     ASSERT_TRUE(h.rol.session_confirmed()) << "precondition";
-    h.rol.start_mode_test(300, 1500, /*mode=*/1, 1, true, false, false, false, 0);
+    h.rol.start_mode_test(300, 1500, /*mode=*/1, 1, true, false, false, false);
     h.clock.tick(3100);
     h.rol.mode_test_tick_for_test();
 
@@ -4190,7 +4190,7 @@ TEST(GridAligned, AModeBTestMarkLandsOnTheNodesGridMark) {
     h.rol.start_mode_test(/*duration_s=*/300, /*grid_ms=*/1500, /*mode=*/2,
                           /*copies=*/1, /*keep_power_profile=*/true,
                           /*enable_counter=*/false, /*enable_crypto=*/false,
-                          /*mac_echo=*/true, /*arm_offset_us=*/0);
+                          /*mac_echo=*/true);
     h.rol.mode_test_tick_for_test();
 
     const int64_t fire    = h.tracker.last_earliest_us;
@@ -4242,7 +4242,7 @@ TEST(MarkLead, AForeignFrameDelaysOneMarkNotEveryMarkAfterIt) {
     h.rol.set_grid_aligned(true);
     int64_t now = h.tracker.gridAnchorUs() + 1;
     markTickAt(h, now);   // sets the clock for the START
-    h.rol.start_mode_test(900, 1500, /*mode=*/2, 1, true, true, true, true, 0);
+    h.rol.start_mode_test(900, 1500, /*mode=*/2, 1, true, true, true, true);
     h.tracker.sent_earliest_us.clear();
 
     const int64_t R = (int64_t) timedgrid::kRoundUs;
@@ -4265,28 +4265,6 @@ TEST(MarkLead, AForeignFrameDelaysOneMarkNotEveryMarkAfterIt) {
     h.rol.stop_mode_test();
 }
 
-TEST(MarkLead, ASweepTimerFasterThanTheRoundDoesNotPileMarksUp) {
-    // Mode 4 keeps its incommensurate 1093 ms timer and relies on placement to
-    // collapse ticks onto ~one mark per round (see mode_test_timer_cb_). With
-    // the "mark after the last" guard each tick queued one more round ahead.
-    using namespace real_helpers;
-    RealHubHarness h{2, kMacRol2};
-    h.tracker.startGrid();
-    h.rol.set_grid_aligned(true);
-    int64_t now = h.tracker.gridAnchorUs() + 1;
-    markTickAt(h, now);
-    h.rol.start_mode_test(300, 1093, /*mode=*/4, 1, true, false, false, true, 0);
-    h.tracker.sent_earliest_us.clear();
-
-    size_t worst = 0;
-    for (int i = 0; i < 40; ++i, now += 1093000) {
-        markTickAt(h, now);
-        worst = std::max(worst, marksStillAhead(h.tracker));
-    }
-    EXPECT_LE(worst, 2u) << "a 1093 ms timer must not run the marks ahead of the grid";
-    h.rol.stop_mode_test();
-}
-
 TEST(MarkLead, ASkippedTickSendsNothingAndTheNextMarkIsTheFrameItHeld) {
     // A tick that finds the marks already a round ahead sends nothing and does
     // not rebuild: the frame built after the last send (with its seq) goes out
@@ -4297,7 +4275,7 @@ TEST(MarkLead, ASkippedTickSendsNothingAndTheNextMarkIsTheFrameItHeld) {
     h.rol.set_grid_aligned(true);
     int64_t now = h.tracker.gridAnchorUs() + 1;
     markTickAt(h, now);
-    h.rol.start_mode_test(900, 1500, 2, 1, true, false, false, true, 0);
+    h.rol.start_mode_test(900, 1500, 2, 1, true, false, false, true);
     const int64_t R = (int64_t) timedgrid::kRoundUs;
     markTickAt(h, now);
     now += R;
@@ -4328,7 +4306,7 @@ TEST(GridAligned, AModeATestMarkStaysUnplaced) {
     h.tracker.sim_now_us = h.tracker.gridAnchorUs() + 1;
     proto_sim_timer_set_now_us(h.tracker.sim_now_us);
 
-    h.rol.start_mode_test(300, 1093, /*mode=*/1, 1, true, false, false, true, 0);
+    h.rol.start_mode_test(300, 1093, /*mode=*/1, 1, true, false, false, true);
     h.rol.mode_test_tick_for_test();
     EXPECT_EQ(h.tracker.last_earliest_us, 0)
         << "a Mode A mark must go out unplaced";

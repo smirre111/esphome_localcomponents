@@ -298,7 +298,7 @@ TEST(GoldenHubFrames, GridSyncWithdrawAndDemote) {
 TEST(GoldenHubFrames, ModeTestStream) {
     GoldenHub h;
     h.session();
-    h.rol.start_mode_test(60, 1500, 2, 1, true, true, true, true, 0);
+    h.rol.start_mode_test(60, 1500, 2, 1, true, true, true, true);
     h.tick(3100);                 // the grid arms and builds the first mark
     proto_sim_timer_fire_all();   // mark 1
     proto_sim_timer_fire_all();   // mark 2

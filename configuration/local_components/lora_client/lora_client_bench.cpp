@@ -595,7 +595,6 @@ namespace esphome
       mt.enablecounter    = this->enable_counter_;
       mt.enablecrypto     = this->enable_crypto_;
       mt.macecho          = this->mac_echo_;
-      mt.armoffsetus      = this->arm_offset_us_;
       // The ruler mark, separate from msgid. msgid is also the CTR counter-block input
       // and the replay-filter key, so the test must be able to retransmit
       // without touching either; seq is free to be a plain monotonic index, and
@@ -665,22 +664,7 @@ namespace esphome
       // Mode A stays unplaced on purpose: its swept period (1093 ms) is what
       // lets a free-running window catch it at all.
       //
-      // MODE 4 (SWEEP) BELONGS HERE TOO — added 2026-09-19. It is a timed-window
-      // run, distinguished only by a deliberate arm offset, so its marks must
-      // land on the node's mark like Mode B's. Gated on mode 2 alone, every
-      // sweep mark left unplaced and carried neither onMark nor fireStamped —
-      // and BOTH the mark-hit path and the phase-sample commit
-      // (CmdDispatcher.cpp:4858) require one of those. So a sweep resolved no
-      // marks and committed no samples: windows 14/1 on a 120 s point, then
-      // windows 0/0 -> Demotion::NoPhase -> no REPORT at all. Exactly the
-      // failure the note above records for Mode B on 2026-09-13, inherited by
-      // the mode that was never added to the condition.
-      //
-      // With placement on, the 1093 ms timer tick is deferred to the next clear
-      // slot T0, so ticks collapse onto ~one mark per round — which is what a
-      // sweep needs. The period itself can stay incommensurate; it is the
-      // PLACEMENT, not the period, that was missing.
-      if ((self->mode_ == 2 || self->mode_ == 4) && self->host_.stream_grid_started())
+      if (self->mode_ == 2 && self->host_.stream_grid_started())
       {
         const int64_t now = esp_timer_get_time();
         // Kept for the log line below: mt_last_mark_t0_us_ is overwritten before
@@ -693,8 +677,7 @@ namespace esphome
         // grid's next mark. MEASURED 2026-10-18 (S0-S7 checkpoint): another
         // node's frame pushed one mark two rounds out, and the "mark after the
         // last" guard below then kept EVERY later mark that far ahead, because
-        // the timer period is the round (mode 4's 1093 ms timer is worse: it
-        // runs ahead by a round every ~3.7 ticks). Each round of lead pins one
+        // the timer period is the round. Each round of lead pins one
         // tracker pool buffer until it fires; at 4 of 5 held, beacons and marks
         // were dropped and each dropped mark was a seq gap at the node. The
         // built frame is kept, so the next tick sends it: no seq gap.
@@ -744,7 +727,7 @@ namespace esphome
                                        uint32_t mode, uint32_t copies,
                                        bool keep_power_profile,
                                        bool enable_counter, bool enable_crypto,
-                                       bool mac_echo, int32_t arm_offset_us)
+                                       bool mac_echo)
     {
       if (!this->host_.stream_has_radio())
         return;
@@ -763,7 +746,6 @@ namespace esphome
       this->enable_counter_     = enable_counter;
       this->enable_crypto_      = enable_crypto;
       this->mac_echo_           = mac_echo;
-      this->arm_offset_us_      = arm_offset_us;
       this->seq_                = 0;
       this->last_mark_t0_us_    = 0;
 

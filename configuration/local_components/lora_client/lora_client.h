@@ -304,13 +304,13 @@ namespace esphome
       void start_mode_test(uint32_t duration_s, uint32_t grid_ms, uint32_t mode,
                            uint32_t copies, bool keep_power_profile,
                            bool enable_counter, bool enable_crypto,
-                           bool mac_echo, int32_t arm_offset_us = 0)
+                           bool mac_echo)
       {
         if (this->parent_ == nullptr)
           return;
         this->mbs_owns_test_ = this->mbs_starting_;
         this->mode_test_.start(duration_s, grid_ms, mode, copies, keep_power_profile,
-                               enable_counter, enable_crypto, mac_echo, arm_offset_us);
+                               enable_counter, enable_crypto, mac_echo);
       }
       void stop_mode_test() { this->mode_test_.stop(); }
       bool mode_test_active() const { return this->mode_test_.active(); }

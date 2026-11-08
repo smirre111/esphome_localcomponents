@@ -454,60 +454,6 @@ TEST_F(Irq, AContinuousWindowIsNeverRestartedAsAnRxSingle) {
 // Review findings 4 and 5 (2026-09-15).
 // ---------------------------------------------------------------------------
 
-// DISABLED 2026-09-20 — the requirement is right, the implementation was not.
-//
-// The guard this pins (`!sweeping` in windowEndClosesWindow) was REVERTED
-// because it made the node deaf for whole runs: sweepMisArming_() is
-// `mode_test_active_ && arm_offset_us != 0`, and handleModeTest sets both while
-// processing the START, so the node refused the extension its own START burst
-// needed and never joined the test. Measured on fw 1.0.98: `detected 0,
-// seq 0..0 exp 1` at +4 000 AND +19 000 us, against `detected 198,
-// windows 187/186` for a plain Mode B run on the same firmware.
-//
-// KEPT, DISABLED, RATHER THAN DELETED: a deliberately mis-armed window still
-// must not be rescued by an extension, or HW-2 measures its own repair. The
-// gate has to be PER-WINDOW — scoped to windows armed with the offset applied —
-// not a run-wide mode flag that also covers the frames carrying the test.
-// Re-enable when that lands, together with the promotion/anti-flap rework.
-TEST_F(Irq, DISABLED_ASweepsMisArmedWindowIsNeverRescuedByAnExtension) {
-    // HW-2 (2026-09-20). A sweep arms early or late ON PURPOSE and asks whether
-    // the frame is still caught. An extension re-arms a FULL kWindowUs, which
-    // carries the window back over the frame — so the measurement repairs the
-    // very thing it is measuring. Measured before this gate: the sweep reported
-    // `armed 189, hit 189` at EVERY offset, including +19 000 us (window opens
-    // 760 us AFTER T0) and -20 000 us (38 ms early).
-    //
-    // Note what is NOT changed: the modem-status evidence itself. An earlier
-    // attempt removed it and broke three tests immediately —
-    // AFrameArrivingAtTheWindowsEndKeepsItOpen pins the real case it serves, a
-    // frame synchronised on its preamble at the window boundary before
-    // ValidHeader lands. The cap from finding 4 already bounds it. Only a
-    // DELIBERATELY mis-armed window is refused the rescue.
-    proto_sim_timer_set_now_us(5'000'000);
-    // The fixture sets the GLOBAL cmdDispatcher, but LoraInterface reaches the
-    // dispatcher through its own MEMBER, assigned only by setCmdDispatcher()
-    // (main.cpp does it at startup). Without this the member is null, the
-    // guard's null check short-circuits, and the window extends anyway — which
-    // is exactly how this test first failed.
-    lif.setCmdDispatcher(&disp);
-    disp.setModeTestActiveForTest(true);
-    disp.mac0ForTest().setArmOffsetUs(12'000);   // a sweep, arming late
-
-    lif.armTimedRxWindow();
-    disp.noteMarkArmed(lif.windowGeneration());
-    const size_t sleeps = r().count("lora_sleep");
-    loranode::rec().modem_status = 0x01;   // signal detected: would normally extend
-
-    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
-
-    EXPECT_EQ(lif.windowEndExtensions(), 0u)
-        << "a deliberately mis-armed window must not be extended onto the frame";
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
-        << "the sweep guard still stops its own induced misses from demoting it";
-    EXPECT_GE(r().count("lora_sleep"), sleeps + 1)
-        << "the window closes instead of being held open";
-}
-
 TEST_F(Irq, AWindowIsExtendedAtMostAsFarAsTheLongestFrameNeeds) {
     // Finding 4. The modem's "signal detected" bit is weak evidence — interference
     // sets it too — and an extension on every window end had no bound but the 1 s

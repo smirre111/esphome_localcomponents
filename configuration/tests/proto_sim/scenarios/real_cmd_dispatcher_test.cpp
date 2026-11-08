@@ -4214,14 +4214,10 @@ std::vector<uint8_t> encrypted_sysop(CmdDispatcherTestPeer &disp, uint32_t msgid
 std::vector<uint8_t> encrypted_mode_test(CmdDispatcherTestPeer &disp, ModeTest__Mode mode, uint32_t msgid,
                                          uint32_t grid_period_ms = 1093,
                                          uint32_t seq = 0,
-                                         int32_t arm_offset_us = 0,
                                          bool counter = true,
                                          bool mac_echo = false,
                                          bool crypto = true) {
     ModeTest mt = MODE_TEST__INIT;
-    // HW-2: non-zero only for MODE_SWEEP, which deliberately mis-arms its
-    // windows. Defaulted so every existing caller builds the frame it did.
-    mt.armoffsetus      = arm_offset_us;
     mt.enable           = true;
     // 0 is the START. The hub resets its sequence immediately before building
     // it, so every later frame in the same test — each mark, and the STOP —
@@ -4379,7 +4375,7 @@ std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid
 void holdSessionAndArmTest(CmdDispatcherTestPeer &disp, bool counter_on, bool crypto_on = false) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, 0, counter_on,
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, counter_on,
                                  /*mac_echo=*/true, crypto_on);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
 }
@@ -4552,7 +4548,7 @@ TEST_F(RealNodeFixture, ThePingSequenceRestartsWithEachTest) {
 
     auto off = encrypted_mode_test_off(disp, /*msgid=*/3);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
-    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, 0, true, true,
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, true, true,
                                  /*crypto=*/false);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_TRUE(disp.modeTestActive());
@@ -4611,61 +4607,6 @@ TEST_F(RealNodeFixture, TheLogLevelsComeBackWhenTheNodeEndsItsOwnTest) {
     ASSERT_FALSE(disp.modeTestActive());
     for (const char *tag : {"CmdDispatcher", "LoraInterface", "frtosTasks"})
         EXPECT_EQ(tagLevel(tag), ESP_LOG_INFO) << tag;
-}
-
-// ---------------------------------------------------------------------------
-// HW-2: a sweep must not demote itself.
-//
-// MODE_SWEEP arms its windows deliberately off the mark to find the reception
-// edge, so the marks it loses ARE the measurement.
-//
-// WHAT THIS USED TO PREVENT, and no longer has to: three such misses tripped
-// kMaxMissedMarks, demotionReasonNow() returned MissedMarks, timedRxActive()
-// went false and the node armed nothing for the rest of the test. A point
-// outside the guard reported ~3 armed windows instead of ~109 — below
-// SweepAnalysis::Point::receives()'s min_armed of 8, so it read "no reception"
-// for the wrong reason — and the 600 s anti-flap hold made every LATER point
-// read the same way. The first failing offset planted a false edge and
-// poisoned the rest of the sweep.
-//
-// Both of those were retired on 2026-09-20 (see the Demotion banner in
-// TimedModePolicy.h), so the guard no longer protects the run from ending
-// itself. It is kept because it still keeps the DIAGNOSTIC honest: a sweep's
-// deliberate misses are not evidence about the link, and WMR is built on that
-// counter. The pair below — the sweep and its ordinary-run control — is what
-// stops the guard from quietly becoming "never count anything".
-// ---------------------------------------------------------------------------
-
-TEST_F(RealNodeFixture, ASweepsOwnMissedMarksNeitherCountNorDemote) {
-    disp.setBenchNode(true);   // MODE_SWEEP is refused outright off the bench
-
-    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
-    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
-    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
-    ASSERT_TRUE(disp.gridState().active) << "a sweep needs an anchor to mis-arm against";
-
-    auto sweep = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_SWEEP, /*msgid=*/3,
-                                     /*grid_period_ms=*/1093, /*seq=*/0,
-                                     /*arm_offset_us=*/12000);
-    disp.onReceiveNew(sweep.data(), static_cast<int>(sweep.size()));
-    ASSERT_TRUE(disp.modeTestActive());
-    ASSERT_EQ(disp.modeTestLastRefusal(), (uint32_t) modetest::ArmRefusal::None)
-        << "1093 ms, bench node, adopted grid: nothing here is refusable";
-
-    // Two missed marks. The control test below shows this same sequence leaves a
-    // count of 2 in an ordinary timed run — so 0 here is the guard acting, not
-    // an artefact of the counter being reset by a demotion that did happen.
-    disp.noteMarkArmed(/*generation=*/1);
-    disp.noteMarkMissed(/*generation=*/1);
-    disp.noteMarkArmed(/*generation=*/2);
-    disp.noteMarkMissed(/*generation=*/2);
-
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
-        << "the sweep's induced misses must not accumulate toward MissedMarks";
-    EXPECT_TRUE(disp.gridState().active) << "and must not cost the node its grid";
-    EXPECT_TRUE(disp.timedRxEnabledForTest())
-        << "the sweep must still be arming windows: that is what it measures";
 }
 
 TEST_F(RealNodeFixture, AnOrdinaryTimedRunStillCountsItsMissedMarks) {
@@ -7588,7 +7529,7 @@ TEST_F(RealNodeFixture, AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsA
         << "a plaintext ping with no authenticated test armed is refused at the gate";
     EXPECT_EQ(disp.macCounters().ping_rx, 0u);
 
-    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/3, 1093, 0, 0,
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/3, 1093, 0,
                                  /*counter=*/true, /*mac_echo=*/true, /*crypto=*/false);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_TRUE(disp.modeTestActive());

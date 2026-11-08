@@ -183,7 +183,7 @@ namespace esphome
 
       void start(uint32_t duration_s, uint32_t grid_ms, uint32_t mode, uint32_t copies,
                  bool keep_power_profile, bool enable_counter, bool enable_crypto,
-                 bool mac_echo, int32_t arm_offset_us);
+                 bool mac_echo);
       void stop();
       // send_stop = false is the supervisor's quiet abort.
       void stop_(bool send_stop);
@@ -224,7 +224,6 @@ namespace esphome
       bool     enable_counter_{false};
       bool     enable_crypto_{false};
       bool     mac_echo_{false};
-      int32_t  arm_offset_us_{0};
       uint32_t seq_{0};
       // The last grid mark a Mode B mark was aimed at (owned by the esp_timer
       // task; the loop's last_placed_* are the listener's).
