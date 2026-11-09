@@ -453,10 +453,10 @@ TEST(MacWireVectorsHub, NoSessionMeansPlaintextAndASpentFcntIsRefused) {
         << "no session id for the node: plaintext, the pre-session rule";
 
     VectorSession s;
-    hub.rol.clearMsgidReloginForTest();
+    hub.rol.clearFcntReloginForTest();
     EXPECT_FALSE(P(hub.rol).v1_frame_(&op, macwire::kFcntLimit, true, &f));
     EXPECT_TRUE(f.bytes.empty());
-    EXPECT_TRUE(hub.rol.msgidReloginPendingForTest()) << "FCNT bit 31: a fresh session";
+    EXPECT_TRUE(hub.rol.fcntReloginPendingForTest()) << "FCNT bit 31: a fresh session";
 }
 
 TEST(MacWireVectorsHub, UplinksVerifyDecryptAndDecode) {
@@ -570,16 +570,16 @@ TEST(MacWireV1Seal, ASpentFcntIsRefusedOnlyWhenSealing) {
     TimeSync ts;
     hubframes::Down op = timeSyncOp(&ts);
     esphome::lora_tracker::DeliveryFrame f;
-    hub.rol.clearMsgidReloginForTest();
+    hub.rol.clearFcntReloginForTest();
     EXPECT_FALSE(P(hub.rol).v1_frame_(&op, 0x80000005u, true, &f)) << "2^31 + 5 would reuse FCNT 5's keystream";
     EXPECT_TRUE(f.bytes.empty());
-    EXPECT_TRUE(hub.rol.msgidReloginPendingForTest());
+    EXPECT_TRUE(hub.rol.fcntReloginPendingForTest());
 
     // The same FCNT in the clear is not a CTR problem (no keystream).
-    hub.rol.clearMsgidReloginForTest();
+    hub.rol.clearFcntReloginForTest();
     ASSERT_TRUE(P(hub.rol).v1_frame_(&op, 0x80000005u, /*encrypt=*/false, &f));
     EXPECT_EQ(macwire::authOf(f.bytes[1]), macwire::Auth::None);
-    EXPECT_FALSE(hub.rol.msgidReloginPendingForTest());
+    EXPECT_FALSE(hub.rol.fcntReloginPendingForTest());
 }
 
 TEST(MacWireV1Seal, NoKeysOrASessionIdOfZeroSealsNothingAndAsksForNothing) {
@@ -591,10 +591,10 @@ TEST(MacWireV1Seal, NoKeysOrASessionIdOfZeroSealsNothingAndAsksForNothing) {
     {
         VectorSession s;
         st.clearKeys(mv::kNodeAddr);   // the session id stays; K_enc/K_mac are gone
-        hub.rol.clearMsgidReloginForTest();
+        hub.rol.clearFcntReloginForTest();
         EXPECT_FALSE(P(hub.rol).v1_frame_(&op, 5, true, &f));
         EXPECT_TRUE(f.bytes.empty()) << "never sent half-sealed, never downgraded";
-        EXPECT_FALSE(hub.rol.msgidReloginPendingForTest()) << "not an FCNT-space refusal";
+        EXPECT_FALSE(hub.rol.fcntReloginPendingForTest()) << "not an FCNT-space refusal";
     }
     {
         VectorSession s;
@@ -639,7 +639,7 @@ TEST(MacWireV1Seal, EveryRetagRefusalLeavesTheTagBytesAlone) {
         SealedFrame c(hub.rol);
         c.copy.fcnt = macwire::kFcntLimit;
         const uint32_t before = st.staleDrops(mv::kNodeAddr);
-        EXPECT_EQ(c.retag(), R::MsgidSpent);
+        EXPECT_EQ(c.retag(), R::FcntSpent);
         EXPECT_TRUE(c.untouched());
         EXPECT_EQ(st.staleDrops(mv::kNodeAddr), before) << "refused for the FCNT, not as stale";
     }
@@ -951,13 +951,13 @@ TEST(MacWireV1Listener, AnAckNamingAnotherFcntCompletesNothing) {
 TEST(MacWireV1Listener, AnAuthenticUplinkPastTheFcntSpaceAsksForAFreshSession) {
     Hub hub;
     const uint32_t session = openSession(hub);
-    hub.rol.clearMsgidReloginForTest();
+    hub.rol.clearFcntReloginForTest();
     // The node's counter is at the edge (the replay window admits the step).
     hub.rol.setCountersForTest(3, macwire::kFcntLimit - 1);
     macwire::WireHdr h = uplinkHdr(macwire::kFcntLimit + 5, macwire::kPortApp, macwire::Auth::Session);
     Bytes up = proto_sim::v1_session_frame(session, kNodeNonce, kHub, kNode, false, h, availBody());
     hub.rol.set_response(up.data(), up.size());
-    EXPECT_TRUE(hub.rol.msgidReloginPendingForTest());
+    EXPECT_TRUE(hub.rol.fcntReloginPendingForTest());
 }
 
 TEST(MacWireV1Listener, RegisterIsAcceptedOnlyUnderKAuth) {

@@ -182,9 +182,9 @@ public:
     static void destroy(KeyPair &keys);
 
     // -- downlink --------------------------------------------------------------
-    enum class Seal : uint8_t { Ok, MsgidSpent, NoSession, NoKey, Failed };
+    enum class Seal : uint8_t { Ok, FcntSpent, NoSession, NoKey, Failed };
 
-    enum class Retag : uint8_t { Ok, MsgidSpent, NoSession, Stale, Failed };
+    enum class Retag : uint8_t { Ok, FcntSpent, NoSession, Stale, Failed };
 
 
     // -- uplink ----------------------------------------------------------------

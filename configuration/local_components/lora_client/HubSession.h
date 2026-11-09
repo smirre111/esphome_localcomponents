@@ -360,10 +360,10 @@ namespace esphome
       // ---- msgid / CTR-space guard (framecrypto::kMsgidCtrLimit) ----
       // Starts a fresh session ONCE per exhaustion (cleared by send_login(),
       // where both counters restart).
-      void     request_msgid_relogin(const char *where);
-      bool     msgid_relogin_pending() const { return this->msgid_relogin_pending_; }
-      uint32_t msgid_relogin_requests() const { return this->msgid_relogin_requests_; }
-      void     clear_msgid_relogin() { this->msgid_relogin_pending_ = false; }
+      void     request_fcnt_relogin(const char *where);
+      bool     fcnt_relogin_pending() const { return this->fcnt_relogin_pending_; }
+      uint32_t fcnt_relogin_requests() const { return this->fcnt_relogin_requests_; }
+      void     clear_fcnt_relogin() { this->fcnt_relogin_pending_ = false; }
 
     private:
       // The Sequencer's PersistHook: the listener's save_state + notePersisted.
@@ -402,8 +402,8 @@ namespace esphome
       size_t           rx_len_{0};
       // The decrypted body of the uplink being processed (loop only, HB8).
       uint8_t uplink_pt_[256]{};
-      bool     msgid_relogin_pending_{false};
-      uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
+      bool     fcnt_relogin_pending_{false};
+      uint32_t fcnt_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       static onboarding::Gate onboarding_gate_;
       LoginState login_{};
       // When a keyless uplink last re-sent the LOGIN (0 = never).

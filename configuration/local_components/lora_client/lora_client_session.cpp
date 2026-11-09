@@ -564,7 +564,7 @@ namespace esphome
       // ...so no FCNT reserved from the old count may be spent any more (P1),
       // and ack ids on record would alias the new msgid space.
       this->host_.session_counters_restarted();
-      this->clear_msgid_relogin();   // the msgid space restarts here
+      this->clear_fcnt_relogin();   // the msgid space restarts here
       // New login challenge: the encrypted session is not confirmed until the
       // node proves it by sending a frame we can decrypt.  Until then the hub
       // sends commands in plaintext (see frame()).
@@ -1269,7 +1269,7 @@ namespace esphome
         ESP_LOGW(TAG, "[%s] Authentic uplink with msgid %u beyond the CTR space — refusing it",
                  this->host_.session_name(), (unsigned) up.msgid);
         this->drop_candidate_(up);
-        this->request_msgid_relogin("uplink");
+        this->request_fcnt_relogin("uplink");
         return false;
       }
       return true;
@@ -1516,18 +1516,18 @@ namespace esphome
         }
       }
       if (exhausted)
-        this->request_msgid_relogin("allocate");
+        this->request_fcnt_relogin("allocate");
       return val;
     }
 
-    void HubSession::request_msgid_relogin(const char *where)
+    void HubSession::request_fcnt_relogin(const char *where)
     {
       // Once per exhaustion: the flag is cleared in send_login(), which is where
       // both msgid counters restart. Until then every refusal is silent.
-      if (this->msgid_relogin_pending_)
+      if (this->fcnt_relogin_pending_)
         return;
-      this->msgid_relogin_pending_ = true;
-      ++this->msgid_relogin_requests_;
+      this->fcnt_relogin_pending_ = true;
+      ++this->fcnt_relogin_requests_;
       ESP_LOGE(TAG, "[%s] msgid space exhausted (%s): the CTR keystream would repeat — "
                     "starting a fresh session", this->host_.session_name(), where);
       // Deferred, not inline: callers sit inside frame building and the
@@ -1599,8 +1599,8 @@ namespace esphome
     {
       const mac2::LinkSecurity::Seal sealed =
           s_sec().sealFrameV1(f->bytes.data(), hdr_len, body_len, &f->seal);
-      if (sealed == mac2::LinkSecurity::Seal::MsgidSpent)
-        this->request_msgid_relogin("seal");
+      if (sealed == mac2::LinkSecurity::Seal::FcntSpent)
+        this->request_fcnt_relogin("seal");
       if (sealed != mac2::LinkSecurity::Seal::Ok)
       {
         ESP_LOGE(TAG, "[%s] v1 seal refused for FCNT %u (%d) — dropping the downlink",

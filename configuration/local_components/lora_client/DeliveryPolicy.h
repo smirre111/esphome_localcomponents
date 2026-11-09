@@ -121,14 +121,14 @@ constexpr GiveUpAction giveUpAction(bool outcome_ambiguous)
 
 // A request is sent under one msgid, or under a RANGE of them when each
 // retransmission mints a fresh one: an ack for any msgid in [first, last].
-constexpr bool msgIdInRange(uint32_t id, uint32_t first, uint32_t last)
+constexpr bool fcntInRange(uint32_t id, uint32_t first, uint32_t last)
 {
     return id >= first && id <= last;
 }
 
 // ...or under an explicit SET (GridSync keeps every published id). Linear: sets
 // are a handful of entries.
-constexpr bool msgIdInSet(const uint32_t *ids, unsigned count, uint32_t id)
+constexpr bool fcntInSet(const uint32_t *ids, unsigned count, uint32_t id)
 {
     for (unsigned i = 0; i < count; ++i)
         if (ids[i] == id)
@@ -140,11 +140,11 @@ constexpr bool msgIdInSet(const uint32_t *ids, unsigned count, uint32_t id)
 // msgid of this command.
 constexpr bool acceptsRangeAck(bool awaiting, uint32_t id, uint32_t first, uint32_t last)
 {
-    return awaiting && msgIdInRange(id, first, last);
+    return awaiting && fcntInRange(id, first, last);
 }
 
 // Position of `id` in the set, -1 when it is not a member.
-constexpr int msgIdIndex(const uint32_t *ids, unsigned count, uint32_t id)
+constexpr int fcntIndex(const uint32_t *ids, unsigned count, uint32_t id)
 {
     for (unsigned i = 0; i < count; ++i)
         if (ids[i] == id)
@@ -183,7 +183,7 @@ struct AckIds
         this->tag[this->n] = new_tag;
         ++this->n;
     }
-    int find(uint32_t wanted) const { return msgIdIndex(this->id, this->n, wanted); }
+    int find(uint32_t wanted) const { return fcntIndex(this->id, this->n, wanted); }
     void clear() { this->n = 0; }
     uint32_t last() const { return this->n != 0 ? this->id[this->n - 1] : 0; }
 };

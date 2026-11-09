@@ -5632,25 +5632,25 @@ TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     f.rol.setCountersForTest(0x7FFFFFFDu, f.rol.sequencer().rxId());
     EXPECT_EQ(f.rol.incrTxFcnt(), 0x7FFFFFFEu);
     EXPECT_EQ(f.rol.incrTxFcnt(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
-    EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
+    EXPECT_FALSE(f.rol.fcntReloginPendingForTest());
 
     const size_t before = f.radio.transcript().size();
     const uint32_t got = f.rol.incrTxFcnt();
     EXPECT_EQ(got, framecrypto::kMsgidCtrLimit) << "the out-of-space marker";
     EXPECT_FALSE(framecrypto::msgidFitsCtr(got));
     EXPECT_EQ(f.rol.sequencer().txId(), 0x7FFFFFFFu) << "the counter must not wrap or advance";
-    EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
+    EXPECT_TRUE(f.rol.fcntReloginPendingForTest());
 
     // A second refusal asks for nothing more, and the id is still refused.
     EXPECT_EQ(f.rol.incrTxFcnt(), framecrypto::kMsgidCtrLimit);
-    EXPECT_EQ(f.rol.msgidReloginRequestsForTest(), 1u) << "a repeat refusal must not ask again";
+    EXPECT_EQ(f.rol.fcntReloginRequestsForTest(), 1u) << "a repeat refusal must not ask again";
 
     // The relogin goes out on the next tick: one LOGIN, counters restarted,
     // flag cleared (the exhaustion is over).
     EXPECT_EQ(count_logins_since(f.radio, before), 0u) << "deferred, not inline";
     f.clock.tick(200);
     EXPECT_EQ(count_logins_since(f.radio, before), 1u);
-    EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
+    EXPECT_FALSE(f.rol.fcntReloginPendingForTest());
     EXPECT_LT(f.rol.sequencer().txId(), 0x100u) << "msgids start over";
 }
 
@@ -5736,13 +5736,13 @@ TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSessi
     auto ok = hand_sealed_uplink(f.base, 0x7FFFFFF1u, false);
     f.rol.set_response(ok.data(), ok.size());
     ASSERT_EQ(f.rol.sequencer().rxId(), 0x7FFFFFF1u) << "precondition: the control frame was accepted";
-    ASSERT_FALSE(f.rol.msgidReloginPendingForTest());
+    ASSERT_FALSE(f.rol.fcntReloginPendingForTest());
 
     // A FORGED frame (one tag bit flipped) with a huge msgid is dropped on the
     // tag, before the msgid guard can act on a value an attacker chose.
     auto forged = hand_sealed_uplink(f.base, 0x80000003u, true);
     f.rol.set_response(forged.data(), forged.size());
-    EXPECT_FALSE(f.rol.msgidReloginPendingForTest()) << "an unauthenticated frame must not trigger a relogin";
+    EXPECT_FALSE(f.rol.fcntReloginPendingForTest()) << "an unauthenticated frame must not trigger a relogin";
     EXPECT_EQ(f.rol.sequencer().rxId(), 0x7FFFFFF1u);
 
     // The authentic one: refused, replay counter untouched, fresh session asked for.
@@ -5750,16 +5750,16 @@ TEST(MsgidGuard, AnAuthenticUplinkBeyondTheCtrSpaceIsRefusedAndStartsAFreshSessi
     auto bad = hand_sealed_uplink(f.base, 0x80000003u, false);
     f.rol.set_response(bad.data(), bad.size());
     EXPECT_EQ(f.rol.sequencer().rxId(), 0x7FFFFFF1u) << "must not advance the replay counter";
-    EXPECT_TRUE(f.rol.msgidReloginPendingForTest());
+    EXPECT_TRUE(f.rol.fcntReloginPendingForTest());
 
     // A second one before the login goes out does not queue a second login.
     auto bad2 = hand_sealed_uplink(f.base, 0x80000004u, false);
     f.rol.set_response(bad2.data(), bad2.size());
 
-    EXPECT_EQ(f.rol.msgidReloginRequestsForTest(), 1u) << "once per exhaustion, not once per refused frame";
+    EXPECT_EQ(f.rol.fcntReloginRequestsForTest(), 1u) << "once per exhaustion, not once per refused frame";
     f.clock.tick(200);
     EXPECT_EQ(count_logins_since(f.radio, before), 1u) << "once per exhaustion";
-    EXPECT_FALSE(f.rol.msgidReloginPendingForTest());
+    EXPECT_FALSE(f.rol.fcntReloginPendingForTest());
 }
 
 // ===========================================================================

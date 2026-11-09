@@ -356,10 +356,10 @@ namespace esphome
       // (SHA-256(fleet key phrase)[0:16]). A wrong byte here is invisible to
       // anything that derives and compares on the SAME side, so a test pins it.
       static bool deriveRootKeyForTest(uint8_t out[16]);
-      // For tests: the msgid / CTR-space guard (see HubSession::request_msgid_relogin).
-      bool msgidReloginPendingForTest() const { return this->session_.msgid_relogin_pending(); }
-      uint32_t msgidReloginRequestsForTest() const { return this->session_.msgid_relogin_requests(); }
-      void clearMsgidReloginForTest() { this->session_.clear_msgid_relogin(); }
+      // For tests: the msgid / CTR-space guard (see HubSession::request_fcnt_relogin).
+      bool fcntReloginPendingForTest() const { return this->session_.fcnt_relogin_pending(); }
+      uint32_t fcntReloginRequestsForTest() const { return this->session_.fcnt_relogin_requests(); }
+      void clearFcntReloginForTest() { this->session_.clear_fcnt_relogin(); }
       // For tests: encrypt a block under this listener's CURRENT K_enc with
       // CTR — the only way to prove the hub and node landed on bit-IDENTICAL
       // session keys, since opaque PSA key ids can't be compared directly.
@@ -1387,7 +1387,7 @@ namespace esphome
       void     schedule_startup_login_() { this->session_.schedule_startup_login(); }
       void     do_login_and_arm_retry_() { this->session_.do_login_and_arm_retry(); }
 
-      // Msgid / CTR-space guard: HubSession::request_msgid_relogin.
+      // Msgid / CTR-space guard: HubSession::request_fcnt_relogin.
       // Arm a ONE-SHOT login retry that re-arms itself.  Uses set_timeout rather than set_interval: an
       // interval's first firing is randomly phased within [0, interval), which
       // fired the "hourly" login retry within ~0.6 s of the challenge, stepping

@@ -422,7 +422,7 @@ LinkSecurity::Seal LinkSecurity::sealFrameV1(uint8_t *frame, size_t hdr_len, siz
     if (body_len > kMaxCt || !s_v1_frame_ok(frame, hdr_len + body_len + kTagBytes, &h))
         return Seal::Failed;
     if (h.fcnt >= macwire::kFcntLimit)
-        return Seal::MsgidSpent;
+        return Seal::FcntSpent;
 
     std::unique_ptr<V1SealWork> work(new (std::nothrow) V1SealWork);
     if (!work)
@@ -513,7 +513,7 @@ LinkSecurity::Retag LinkSecurity::retagFrameV1(const FrameSeal &seal, const mac:
                                                uint8_t tag[kTagBytes])
 {
     if (copy.fcnt >= macwire::kFcntLimit)
-        return Retag::MsgidSpent;
+        return Retag::FcntSpent;
     if (!seal.sealed)
         return Retag::NoSession;
     if (n > kMaxCt || (n > 0 && bytes == nullptr))
