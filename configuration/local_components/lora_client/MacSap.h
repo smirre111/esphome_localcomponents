@@ -111,7 +111,6 @@ enum class SecRxStatus : uint8_t
     BadMic,       // CMAC (or LOGIN/REGISTER MIC) failed
     NoSession,    // sealed, but no keys for this peer
     FcntSpent,   // the FCNT space is exhausted (2^31); a fresh session is needed
-    MsgidSpent = FcntSpent,   // DEPRECATED v0 name (review D24, handoff H-D24)
 };
 
 }  // namespace mac

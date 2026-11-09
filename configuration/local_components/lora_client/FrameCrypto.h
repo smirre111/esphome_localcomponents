@@ -175,11 +175,4 @@ inline bool nextFcntFitsCtr(uint32_t last_fcnt)
     return last_fcnt < kFcntCtrLimit - 1u;
 }
 
-// DEPRECATED v0 names (review D24): the hub's vendored copy of this file is
-// still used under them. Delete once the hub uses the FCNT names (node
-// handoff, DECISIONS, step H-D24).
-static constexpr uint32_t kMsgidCtrLimit = kFcntCtrLimit;
-inline bool msgidFitsCtr(uint32_t fcnt) { return fcntFitsCtr(fcnt); }
-inline bool nextMsgidFitsCtr(uint32_t last_fcnt) { return nextFcntFitsCtr(last_fcnt); }
-
 }  // namespace framecrypto

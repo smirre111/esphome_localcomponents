@@ -73,10 +73,10 @@ struct Inputs
     // this with `authenticated` above, so the caller may pass the raw
     // result through unconditionally.
     bool     would_be_new{false};
-    uint32_t msgid{0};
+    uint32_t fcnt{0};
     // session_.lastAcceptedFcnt()/lastAcceptedUs() — the id and instant
     // acceptRxId() last returned true for.
-    uint32_t last_accepted_msgid{0};
+    uint32_t last_accepted_fcnt{0};
     int64_t  last_accepted_us{0};
     int64_t  now_us{0};
     uint32_t burst_count{0};
@@ -121,7 +121,7 @@ inline Class classify(const Inputs &in)
     if (in.would_be_new)
         return Class::New;
 
-    if (in.msgid == in.last_accepted_msgid &&
+    if (in.fcnt == in.last_accepted_fcnt &&
         (in.now_us - in.last_accepted_us) < spanUs(in.burst_count, in.frame_len))
         return Class::CurrentBurstCopy;
 
