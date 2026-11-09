@@ -19,7 +19,6 @@ NodeContext armable() {
     NodeContext c;
     c.frame_authenticated = true;
     c.has_session    = true;
-    c.is_bench_node  = false;
     // A node that has everything it needs to arm, which for MODE_B
     // includes an adopted grid — there is no window to arm without
     // one. The tests that are ABOUT that requirement clear it explicitly.
@@ -382,7 +381,6 @@ TEST(ModeTestPolicy, TheDefaultsAreTheProductionConfiguration) {
     // both sublayers on.
     SavedState s;
     EXPECT_TRUE(s.power_profile_production);
-    EXPECT_FALSE(s.continuous_rx);
     EXPECT_TRUE(s.counter_enabled);
     EXPECT_TRUE(s.crypto_enabled);
     EXPECT_TRUE(s.deep_sleep_allowed);

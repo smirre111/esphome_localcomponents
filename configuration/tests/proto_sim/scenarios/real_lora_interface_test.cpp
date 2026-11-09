@@ -20,7 +20,7 @@
 // directly.
 //
 // The receive task's body is reachable TOO, as of the extraction this file
-// drove: serviceRxWindow / armTimedRxWindow / armContinuousRx /
+// drove: serviceRxWindow / armTimedRxWindow /
 // noteRxWindowSkipped / transmitOneQueuedFrame / beginCad were lifted out of
 // loraRxTask's `for(;;)` without moving or reordering anything, exactly as
 // CmdDispatcher::serviceTxCommand was lifted out of its own task loop. What
@@ -71,8 +71,6 @@ struct Probe : LoraInterface {
     // to say which mechanism armed this window.
     using LoraInterface::ArmSource;
     using LoraInterface::arm_source_;
-    using LoraInterface::cont_rx_armed_;
-    using LoraInterface::continuous_rx_;
     // Whether a one-shot is in use, and whether it has fired: together they say
     // if a task wake belongs to the armed window or to a stale periodic tick.
     using LoraInterface::grid_timer_running_;
@@ -291,48 +289,6 @@ TEST_F(Iface, TheRxSingleComparisonBuildOpensTheOldWindow) {
     EXPECT_LT(r().indexOf("lora_clearInterrupts"), r().indexOf("lora_rxSingle"));
 }
 
-TEST_F(Iface, ContinuousRxIsArmedOnceAndNotReArmedEveryPass) {
-    // The drift test's whole point is to stop missing burst copies. The
-    // semaphore that drives this fires every ~500 ms, and an idle + re-arm on
-    // each pass would drop the radio out of receive each time — reopening the
-    // gap the mode exists to close, while the logs showed it enabled.
-    lif.continuous_rx_ = true;
-
-    lif.armContinuousRx();
-    const size_t receives_after_first = r().count("lora_receive");
-    ASSERT_EQ(receives_after_first, 1u);
-    EXPECT_TRUE(lif.cont_rx_armed_);
-
-    lif.armContinuousRx();
-    lif.armContinuousRx();
-    EXPECT_EQ(r().count("lora_receive"), 1u)
-        << "re-arming would take the radio out of RX for the duration of the "
-           "idle, which is exactly the loss continuous RX is meant to prevent";
-    EXPECT_EQ(r().count("lora_idle"), 0u);
-}
-
-TEST_F(Iface, NoteRadioSleptForcesAReArmSoTheNodeCannotGoDeaf) {
-    // v1.0.33: any other path that slept the radio left cont_rx_armed_ still
-    // claiming it was armed, and the node was deaf until reboot. The flag has
-    // to be resettable from outside the arming path for that reason.
-    lif.continuous_rx_ = true;
-    lif.armContinuousRx();
-    ASSERT_EQ(r().count("lora_receive"), 1u);
-
-    lif.noteRadioSlept();
-    lif.armContinuousRx();
-    EXPECT_EQ(r().count("lora_receive"), 2u)
-        << "after something else slept the radio, the next pass must re-arm";
-}
-
-TEST_F(Iface, ATimedWindowLeavesContinuousRxNeedingAReArm) {
-    // Leaving the drift test has to re-arm properly on the same pass, so the
-    // windowed path clears the flag rather than assuming it was already false.
-    lif.cont_rx_armed_ = true;
-    lif.armTimedRxWindow();
-    EXPECT_FALSE(lif.cont_rx_armed_);
-}
-
 TEST_F(Iface, ASkippedWindowIsCountedAndTouchesNoRadioRegister) {
     // The radio was busy for the whole 700 ms, so this window never opened.
     // Two things must be true, and the second is the subtle one: the skip is
@@ -509,7 +465,7 @@ TEST_F(Iface, TheCadSetupHappensInAnOrderThatMakesTheAnswerThisCads) {
         << "no answer was posted, and none was left over";
 }
 
-TEST_F(Iface, ServicingAWindowDispatchesOnTheDriftTestFlag) {
+TEST_F(Iface, ServicingAWindowOpensTheFreeRunningWindow) {
     // serviceRxWindow is the loop's one call for the receive half: take the
     // radio mutex, then open the kind of window the mode asks for. The busy
     // branch is unreachable through it on a harness whose xSemaphoreTake always
@@ -518,12 +474,6 @@ TEST_F(Iface, ServicingAWindowDispatchesOnTheDriftTestFlag) {
     EXPECT_EQ(r().count("lora_rxContinuous"), 1u);
     EXPECT_EQ(r().count("lora_receive"), 0u);
     EXPECT_EQ(lif.rxBusySkips(), 0u);
-
-    loranode::rec().reset();
-    lif.continuous_rx_ = true;
-    lif.serviceRxWindow();
-    EXPECT_EQ(r().count("lora_receive"), 1u);
-    EXPECT_EQ(r().count("lora_rxContinuous"), 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -692,67 +642,6 @@ TEST_F(Iface, AReArmRequestIsAStaleWakeThatOpensNoWindow) {
     lif.serviceRxWindow();
     EXPECT_EQ(r().count("lora_rxContinuous"), 0u);
     EXPECT_EQ(lif.staleTicksSkipped(), 1u);
-}
-
-TEST_F(Iface, AFailedTransmitDoesNotLeaveTheNodeDeafInADriftTest) {
-    // v1.0.33 again, through a door noteRadioSlept() did not cover.
-    //
-    // cont_rx_armed_ means "the radio is already sitting in continuous RX, so
-    // do not idle and re-arm it every ~500 ms". Every path that SLEEPS the
-    // radio clears it (frtosTasks, five call sites). But the transmit path does
-    // not sleep the radio, it IDLES it — in beginCad(), and again in the
-    // stuck-mutex recovery — and idling stops reception just as dead.
-    //
-    // On the success path that self-heals: TX_DONE sleeps the radio and clears
-    // the flag. The FAILING paths have no TX_DONE. So a transmit whose CAD
-    // never comes back clear leaves the radio in standby with the flag still
-    // claiming it is armed, and armContinuousRx() then does nothing on every
-    // subsequent pass — the node is deaf for the rest of the drift test, which
-    // is the one measurement session whose numbers have to be trustworthy.
-    lif.continuous_rx_ = true;
-    lif.armContinuousRx();
-    ASSERT_TRUE(lif.cont_rx_armed_);
-    ASSERT_EQ(r().count("lora_receive"), 1u);
-
-    const uint8_t frame[] = {0x5A};
-    queueOneFrame(lif, frame, (int) sizeof(frame));
-    answerCadWith(lif, 1 /* busy every time, so every retry is exhausted */);
-    lif.transmitOneQueuedFrame();
-
-    ASSERT_TRUE(r().packets.empty()) << "nothing went out, as set up";
-    ASSERT_GT(r().count("lora_idle"), 0u) << "but the radio WAS idled";
-    EXPECT_FALSE(lif.cont_rx_armed_)
-        << "the radio was idled out of continuous RX, so the flag must not "
-           "still claim it is armed — the next pass has to re-arm or the node "
-           "stays deaf for the rest of the drift test";
-
-    // And the next pass must actually re-arm it.
-    lif.armContinuousRx();
-    EXPECT_EQ(r().count("lora_receive"), 2u);
-}
-
-TEST_F(Iface, ABusyRadioIsNotASkippedWindowWhileTheDriftTestHoldsIt) {
-    // The skip counter answers "a window the node meant to open never opened",
-    // which is the one Mode B failure the KPIs cannot see: an unarmed window is
-    // invisible to WMR by construction, because noteMarkArmed is what opens a
-    // mark.
-    //
-    // During a drift test the radio is deliberately held in continuous RX, and
-    // the mutex is released only by an interrupt — so most passes find it busy.
-    // Counting those makes the number say "this node is failing to open
-    // windows" throughout a bench run that is working exactly as designed, and
-    // the count is reported to the hub. A diagnostic that cries wolf for the
-    // duration of a measurement is worse than no diagnostic.
-    lif.continuous_rx_ = true;
-
-    lif.noteRxWindowSkipped();
-    lif.noteRxWindowSkipped();
-    EXPECT_EQ(lif.rxBusySkips(), 0u)
-        << "the radio being busy IS the drift test — not a failure to arm";
-
-    lif.continuous_rx_ = false;
-    lif.noteRxWindowSkipped();
-    EXPECT_EQ(lif.rxBusySkips(), 1u) << "and in normal mode it still counts";
 }
 
 TEST_F(Iface, TheSkipWarningIsThrottledButTheCountIsNot) {

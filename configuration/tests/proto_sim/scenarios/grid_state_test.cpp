@@ -163,8 +163,8 @@ TEST(GridState, ClearReturnsToModeA) {
     EXPECT_EQ(st.anchor_us, 0);
 }
 
-TEST(GridState, AZeroOffsetIsAlwaysFine) {
-    EXPECT_EQ(validate(good(), 3, /*is_bench_node=*/false), Refusal::None);
+TEST(GridState, AGoodGridValidates) {
+    EXPECT_EQ(validate(good(), 3), Refusal::None);
 }
 
 // ---------------------------------------------------------------------------

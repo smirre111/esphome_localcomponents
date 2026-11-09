@@ -108,8 +108,6 @@ struct Irq : public ::testing::Test {
     Probe         lif{motorMux, buttonMux};
     DispProbe     disp{&mot, &sys, &lif, motorMux, buttonMux};
 
-    Dio0LoopState st{};
-
     void SetUp() override {
         loranode::rec().reset();
         resetIrqSession();
@@ -127,7 +125,7 @@ struct Irq : public ::testing::Test {
         loranode::rec().next_interrupts = flags;
         lora_irq_evt_t evt{};
         evt.rx_us = rx_us;
-        serviceDio0Event(evt, st);
+        serviceDio0Event(evt);
     }
     void dio1(uint8_t flags) {
         loranode::rec().next_interrupts = flags;
@@ -336,24 +334,6 @@ TEST_F(Irq, AWindowEndAfterTheRadioLeftReceiveClosesNothing) {
 
     EXPECT_EQ(disp.consecutiveMissedMarks(), 0u);
     EXPECT_EQ(r().count("lora_sleep"), sleeps);
-    EXPECT_EQ(lif.staleWindowEnds(), 1u);
-}
-
-TEST_F(Irq, AnEndQueuedBeforeTheDriftTestsReceiveDoesNotEndIt) {
-    // The drift test's continuous receive opens no window and so moves no window
-    // generation on. Only the receive that ENDED can make the queued end stale.
-    proto_sim_timer_set_now_us(5'000'000);
-    lif.armTimedRxWindow();
-    const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
-    lif.noteRadioSlept();          // RxDone
-    lif.setContinuousRx(true);
-    lif.armContinuousRx();
-    const size_t sleeps = r().count("lora_sleep");
-
-    serviceDio1Event(end);
-
-    EXPECT_EQ(r().count("lora_sleep"), sleeps)
-        << "a stale window end must not stop the drift test's receive";
     EXPECT_EQ(lif.staleWindowEnds(), 1u);
 }
 
@@ -1000,7 +980,6 @@ TEST_F(Irq, TxDoneSleepsTheRadioAndReturnsTheMutex) {
     // transmit path has a recovery branch for.
     dio0(LORA_IRQ_FLAG_TX_DONE, 5'000'000);
     EXPECT_GE(r().count("lora_sleep"), 1u);
-    EXPECT_FALSE(lif.continuousRx());
 }
 
 TEST_F(Irq, CadDetectedAndCadClearBothPostExactlyOneAnswer) {
@@ -1020,21 +999,6 @@ TEST_F(Irq, CadDetectedAndCadClearBothPostExactlyOneAnswer) {
     EXPECT_EQ(uxQueueMessagesWaiting(lif.lora_cad_queue_), 1u) << "free";
     ASSERT_EQ(xQueueReceive(lif.lora_cad_queue_, &answer, 0), pdTRUE);
     EXPECT_EQ(answer, 0) << "CAD done with nothing detected means free";
-}
-
-TEST_F(Irq, TheSpinSignatureIsCounted) {
-    // Woken with no flag behind it. The counters exist to tell an INTERRUPT
-    // STORM apart from other causes of idle starvation: wakes >> rxdone with a
-    // large zeroflags count is this task spinning on a line that keeps
-    // re-asserting, which is what a TASK_WDT reset with a prvIdleTask
-    // backtrace looks like. In normal mode lora_sleep() drops the line, so it
-    // cannot persist; continuous RX removed that.
-    dio0(0);
-    dio0(0);
-    dio0(LORA_IRQ_FLAG_TX_DONE, 1'000'000);
-
-    EXPECT_EQ(st.wakes, 3u) << "every wake counts";
-    EXPECT_EQ(st.zero_flags, 2u) << "two of them had nothing to do";
 }
 
 TEST_F(Irq, TheHandlersToleratePartlyWiredFirmware) {
