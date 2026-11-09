@@ -6,7 +6,7 @@
 // candidate, install, clear), the v1 downlink framing and seal, the uplink's
 // shape check and the security stages of the encrypted-uplink pipeline
 // (session id present, key selection, CMAC verify, CTR decrypt into its own
-// buffer), and the msgid / CTR-space guard. It reaches the listener ONLY
+// buffer), and the fcnt / CTR-space guard. It reaches the listener ONLY
 // through SessionHost. What the listener DOES with an authentic frame (commit
 // the counter, confirm the session, hand the body on) stays the listener's.
 //
@@ -129,7 +129,7 @@ namespace esphome
       mac2::KeyPair candidate{};   // an unverified candidate; destroyed unless installed
       mac::MacHdr   hdr{};         // the outer header, decoded for MAC-2
       bool          needs_candidate{false};
-      uint32_t     msgid{0};
+      uint32_t     fcnt{0};
     };
 
     class HubSession
@@ -357,7 +357,7 @@ namespace esphome
       void leave_onboarding_gate() { onboarding_gate_.release(this); }
       static void reset_onboarding_gate_for_test() { onboarding_gate_.reset(); }
 
-      // ---- msgid / CTR-space guard (framecrypto::kMsgidCtrLimit) ----
+      // ---- fcnt / CTR-space guard (framecrypto::kMsgidCtrLimit) ----
       // Starts a fresh session ONCE per exhaustion (cleared by send_login(),
       // where both counters restart).
       void     request_fcnt_relogin(const char *where);

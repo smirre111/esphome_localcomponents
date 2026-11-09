@@ -100,7 +100,7 @@ RealDown *real_down_body(const macwire::WireHdr &w, const uint8_t *body, size_t 
     d->hdr.destaddress   = w.dst;
     d->hdr.destsubnet    = w.subnet;
     d->hdr.senderaddress = w.src;
-    d->hdr.msgid         = w.fcnt;
+    d->hdr.fcnt         = w.fcnt;
     d->hdr.burstindex    = w.burst_idx;
     d->hdr.burstcount    = w.burst_cnt;
     d->hdr.onmark        = w.onMark();
@@ -450,8 +450,8 @@ struct AckProbe : LORAClient {
         s.req = this->ctl_request_();
         s.acks.clear();
         for (uint32_t id : ids) s.acks.add(id, id);
-        s.first_msgid  = ids.size() ? *ids.begin() : 0;
-        s.last_msgid   = ids.size() ? *(ids.end() - 1) : 0;
+        s.first_fcnt  = ids.size() ? *ids.begin() : 0;
+        s.last_fcnt   = ids.size() ? *(ids.end() - 1) : 0;
         s.awaiting_ack = true;
     }
     // Put a ScheduleConfig push "in flight" the way the glue would have left it:
@@ -518,7 +518,7 @@ void ackConfigPushes(LORAClient &rol) {
     for (int i = 0; i < 8; ++i) {
         auto &s = rol.dlv_slot_for_test(esphome::lora_tracker::CH_SETUP);
         if (!s.awaiting_ack) break;
-        deliverAck(rol, s.last_msgid);
+        deliverAck(rol, s.last_fcnt);
     }
 }
 }  // namespace
@@ -978,7 +978,7 @@ TEST(RealLoraClient, AForgedPlaintextAckCannotRetireATrackedCommand) {
 
     // Just above the hub's replay counter: inside the 1024-wide window, which is
     // what an attacker reading the plaintext header would choose.
-    auto forged = plaintext_ack_frame(/*msgid=*/5, op.ctl().last_msgid, false);
+    auto forged = plaintext_ack_frame(/*msgid=*/5, op.ctl().last_fcnt, false);
     h.rol.set_response(forged.data(), forged.size());
 
     EXPECT_TRUE(op.ctl().awaiting_ack)
@@ -1015,7 +1015,7 @@ TEST(RealLoraClient, PlaintextBeforeASessionIsAcceptedButNeverTrusted) {
     ASSERT_TRUE(op.ctl().awaiting_ack) << "precondition: a command is in flight";
     h.tracker.last_rx_t0_us_v = 100'000;
 
-    auto frame = plaintext_ack_frame(/*msgid=*/5, op.ctl().last_msgid, /*timed=*/true);
+    auto frame = plaintext_ack_frame(/*msgid=*/5, op.ctl().last_fcnt, /*timed=*/true);
     h.rol.set_response(frame.data(), frame.size());
 
     EXPECT_EQ(h.rol.plaintextRefused(), 0u) << "refusing here would close the bootstrap";
@@ -1268,7 +1268,7 @@ TEST(RealLoraClient, SleepFallbackFiresWhenRegisterLost) {
     rol.registered_ = true;
 
     rol.enterSleep();
-    deliverAck(rol, static_cast<TrackedOpProbe &>(rol).ctl().last_msgid);   // the effects (and the fallback) are the ACK's
+    deliverAck(rol, static_cast<TrackedOpProbe &>(rol).ctl().last_fcnt);   // the effects (and the fallback) are the ACK's
     const int before = static_cast<int>(radio.transcript().size());
 
     constexpr uint32_t kExpected = 60u * 1000u + 5000u + 18u * 3000u;
@@ -1319,7 +1319,7 @@ TEST(RealLoraClient, EarlyRegisterCancelsSleepFallback) {
     attach_encrypted_login_ack(radio, rol, /*node_addr=*/18, /*subnet=*/2);
 
     rol.enterSleep();
-    deliverAck(rol, static_cast<TrackedOpProbe &>(rol).ctl().last_msgid);   // the fallback timer is armed by the ACK
+    deliverAck(rol, static_cast<TrackedOpProbe &>(rol).ctl().last_fcnt);   // the fallback timer is armed by the ACK
     const int before = static_cast<int>(radio.transcript().size());
 
     // Node wakes early at 50 s and sends REGISTER.
@@ -2493,7 +2493,7 @@ TEST(RealLoraClient, ASingleShotCommandHoldsOtherNodesBurstsUntilItsAck) {
     EXPECT_EQ(w.end_us - w.start_us,
               (int64_t) 3000 * 1000) << "the single-shot ack wait ceiling";
 
-    deliverAck(h.rol, AK(h.rol).ctl().last_msgid);
+    deliverAck(h.rol, AK(h.rol).ctl().last_fcnt);
     ASSERT_FALSE(h.rol.awaitingAck()) << "precondition: acked";
     EXPECT_EQ(h.tracker.listen_windows.count(18), 0u) << "the ack releases the window";
 }
@@ -4704,7 +4704,7 @@ TEST(OnboardingGateHub, AnUnacknowledgedSchedulePushDoesNotHoldTheGate) {
     h.clock.tick(esphome::lora_tracker::LORAListener::kRegisterToLoginDelayMs + 200);
     h.clock.tick(onboarding::kSettleAfterConfirmMs + 2500);
     ASSERT_TRUE(h.rol_1.session_confirmed());
-    ASSERT_NE(h.rol_1.schedulePushMsgid(), 0u) << "precondition: a ScheduleConfig is outstanding";
+    ASSERT_NE(h.rol_1.schedulePushFcnt(), 0u) << "precondition: a ScheduleConfig is outstanding";
     EXPECT_FALSE(h.rol_1.onboarding_held_for_test()) << "node 17 is up: login confirmed, no grid to wait for";
     h.clock.tick(3000);
     EXPECT_GE(h.loginsTo(18), 1) << "node 18 goes next";
@@ -5668,7 +5668,7 @@ struct RetagCase {
     RetagCase() {
         hdr.destaddress = 18; hdr.destsubnet = 2;
         hdr.senderaddress = esphome::lora_tracker::kHubAddress;
-        hdr.msgid = 999; hdr.burstindex = 3; hdr.burstcount = 17;
+        hdr.fcnt = 999; hdr.burstindex = 3; hdr.burstcount = 17;
         hdr.onmark = true; hdr.firestamped = true;
         hdr.fireround = 0x1234; hdr.fireoffsetus = 4567;
     }
@@ -5684,7 +5684,7 @@ struct RetagCase {
         }
         w.flags = macwire::withAuth(flags, macwire::Auth::Session);
         w.dst = (uint8_t) hdr.destaddress; w.src = (uint8_t) hdr.senderaddress;
-        w.subnet = (uint8_t) hdr.destsubnet; w.fcnt = hdr.msgid; w.port = macwire::kPortApp;
+        w.subnet = (uint8_t) hdr.destsubnet; w.fcnt = hdr.fcnt; w.port = macwire::kPortApp;
         w.burst_idx = (uint8_t) hdr.burstindex; w.burst_cnt = (uint8_t) hdr.burstcount;
         std::vector<uint8_t> f(macwire::headerLen(w) + ct_len + macwire::kTagBytes);
         macwire::encodeHeader(w, f.data(), f.size());
@@ -5695,7 +5695,7 @@ struct RetagCase {
     mac::MacHdr mac() const {
         mac::MacHdr m;
         m.dst = (uint8_t) hdr.destaddress;
-        m.fcnt = hdr.msgid;
+        m.fcnt = hdr.fcnt;
         m.burst_idx = (uint8_t) hdr.burstindex;
         m.burst_cnt = (uint8_t) hdr.burstcount;
         return m;
@@ -5896,7 +5896,7 @@ TEST(OptimisticShot, AMissedFirstShotBurstsAfterTheShortWaitNotAfterThreeSeconds
     EXPECT_TRUE(h.rol.awaitingAck()) << "still waiting for the node";
 
     // The ack for the ORIGINAL msgid (the retry is the same command) lands.
-    deliverAck(h.rol, P(h).ctl().first_msgid);
+    deliverAck(h.rol, P(h).ctl().first_fcnt);
     EXPECT_FALSE(h.rol.awaitingAck());
     EXPECT_FALSE(h.rol.commandFailed());
 }
@@ -5940,7 +5940,7 @@ TEST(OptimisticShot, ACancelledWaitDoesNothing) {
 
     const size_t sends = h.tracker.sent_copies.size();
     h.clock.tick(100);
-    deliverAck(h.rol, P(h).ctl().first_msgid);   // the guess was RIGHT
+    deliverAck(h.rol, P(h).ctl().first_fcnt);   // the guess was RIGHT
     h.clock.tick(5000);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "an acked single shot is not followed by a burst";
     EXPECT_FALSE(h.rol.hubBelief().single_shot_unacked) << "and Rule 4 stays quiet";
@@ -5984,7 +5984,7 @@ TEST(OptimisticShot, TheShortWaitIsPerCommandNotPerSession) {
     ASSERT_EQ(h.tracker.last_copies, 1);
     h.clock.tick(expectedWaitMs(h) + 50);
     ASSERT_TRUE(h.rol.op_short_wait_spent_for_test());
-    deliverAck(h.rol, P(h).ctl().first_msgid);   // the burst got through
+    deliverAck(h.rol, P(h).ctl().first_fcnt);   // the burst got through
     ASSERT_FALSE(h.rol.awaitingAck());
 
     // The node answers a beacon again (fresh report), then it is stale again.
@@ -6097,7 +6097,7 @@ TEST(AdaptiveAckWait, AnAckAtTheMeasuredFieldLatencyDoesNotBurst) {
         h.clock.tick(1);
         ASSERT_EQ(h.tracker.sent_copies.size(), sends) << "no premature burst";
         EXPECT_FALSE(h.rol.op_short_wait_spent_for_test());
-        deliverAck(h.rol, P(h).ctl().first_msgid);
+        deliverAck(h.rol, P(h).ctl().first_fcnt);
         h.clock.tick(6000);
         EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "an answered command is never followed by a burst";
         EXPECT_FALSE(h.rol.hubBelief().single_shot_unacked);
@@ -6189,7 +6189,7 @@ TEST(AdaptiveAckWait, OnlyACleanSinglePlacedCopyFeedsTheHistory) {
         ASSERT_NE(h.tracker.last_copies, 1);
         h.clock.tick(500);
         proto_sim_timer_advance_us(2'500'000);   // esp_timer is separate from the scheduler clock
-        deliverAck(h.rol, P(h).ctl().first_msgid);
+        deliverAck(h.rol, P(h).ctl().first_fcnt);
         EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), 0u);
     }
     {   // an optimistic shot that missed and was answered after the fallback burst
@@ -6201,7 +6201,7 @@ TEST(AdaptiveAckWait, OnlyACleanSinglePlacedCopyFeedsTheHistory) {
         ASSERT_TRUE(h.rol.op_short_wait_spent_for_test());
         const unsigned before = h.rol.ack_latency_for_test().count(nowMs());
         proto_sim_timer_advance_us(3'100'000);   // a positive, plausible mark->ack delay
-        deliverAck(h.rol, P(h).ctl().first_msgid);
+        deliverAck(h.rol, P(h).ctl().first_fcnt);
         EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), before)
             << "an ack after a burst says nothing about the single-shot path";
     }
@@ -6216,7 +6216,7 @@ TEST(AdaptiveAckWait, OnlyACleanSinglePlacedCopyFeedsTheHistory) {
         ASSERT_EQ(h.tracker.last_copies, 1);
         ASSERT_FALSE(h.rol.op_sent_optimistic_for_test());
         proto_sim_timer_set_now_us(P(h).link_timing().last_placed_t0_us() + 1'650'000);
-        deliverAck(h.rol, P(h).ctl().first_msgid);
+        deliverAck(h.rol, P(h).ctl().first_fcnt);
         EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), 1u);
         EXPECT_EQ(h.rol.ack_latency_for_test().maxDelayMs(nowMs()), 1650u);
     }
@@ -6347,13 +6347,13 @@ TEST(AckPath, AScheduleAckClearsThePushAndTellsHomeAssistant) {
     h.rol.node_sched_version_ = h.rol.schedule_version() ^ 1u;
 
     deliverAck(h.rol, 8);   // not ours
-    EXPECT_EQ(h.rol.schedulePushMsgid(), 9u);
+    EXPECT_EQ(h.rol.schedulePushFcnt(), 9u);
     EXPECT_EQ(AK(h.rol).cfg().retry_count, 2);
     EXPECT_TRUE(bs.state);
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
 
     deliverAck(h.rol, 9);
-    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
+    EXPECT_EQ(h.rol.schedulePushFcnt(), 0u);
     EXPECT_EQ(AK(h.rol).cfg().retry_count, 0);
     EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack);
     EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
@@ -6381,7 +6381,7 @@ TEST(AckPath, AGridSyncAckIsConsumedBeforeAScheduleAckWithTheSameId) {
     h.rol.node_sched_version_   = h.rol.schedule_version() ^ 1u;
     deliverAck(h.rol, 9);
     EXPECT_FALSE(h.rol.gridSyncAwaitingAck()) << "the GridSync takes it";
-    EXPECT_EQ(h.rol.schedulePushMsgid(), 9u) << "and the schedule push is left waiting";
+    EXPECT_EQ(h.rol.schedulePushFcnt(), 9u) << "and the schedule push is left waiting";
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version());
 
     // The second of several published GridSync ids matches too.
@@ -7083,7 +7083,7 @@ TEST(ModeBListener, ACoverOpIssuedDuringTheWarmupAbortsItAndIsStillSent) {
     EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
     EXPECT_EQ(r.rol.modeBSupervisor().phase(), modebsup::Phase::Idle);
 
-    deliverAck(r.rol, op.ctl().last_msgid);
+    deliverAck(r.rol, op.ctl().last_fcnt);
     EXPECT_FALSE(op.ctl().awaiting_ack);
     EXPECT_FALSE(P(r.rol).command_failed_) << "the warm-up never costs a command";
 
@@ -7285,7 +7285,7 @@ TEST(ModeBListener, TheWarmupAbortSendsNoStopFrameAheadOfTheCommandButOneAfterIt
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
     const size_t after_op = r.radio.hub_to_node_frames().size();
     EXPECT_EQ(after_op - before, 1u) << "only the command itself: the stop is not in front of it";
-    deliverAck(r.rol, op.ctl().last_msgid);
+    deliverAck(r.rol, op.ctl().last_fcnt);
     r.secs(5);
     EXPECT_EQ(r.radio.hub_to_node_frames().size() - after_op, 1u)
         << "the node is told to end its test, after the command had its turn";
@@ -7314,7 +7314,7 @@ TEST(ModeBListener, TheDelayedStopIsNotSentIntoAnOperatorsTest) {
     ASSERT_GE(r.untilWarmup(modebsup::kGridSettleS + modebsup::kJitterMaxS + 10), 0);
     r.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     auto &op = static_cast<TrackedOpProbe &>(r.rol);
-    deliverAck(r.rol, op.ctl().last_msgid);
+    deliverAck(r.rol, op.ctl().last_fcnt);
     r.rol.start_mode_test(900, 1500, 2, 1, true, true, false, true);   // the operator, at once
     const size_t before = r.radio.hub_to_node_frames().size();
     r.secs(5);
@@ -7554,7 +7554,7 @@ void sleepReady(real_helpers::RealHubHarness &h) {
 // The node's CommandAck for the sleep in flight.
 void ackSleep(real_helpers::RealHubHarness &h) {
     SP(h.rol).note_node_heard_();   // the ack is an uplink: uplink_accept_ notes it first
-    deliverAck(h.rol, SP(h.rol).ctl().last_msgid);
+    deliverAck(h.rol, SP(h.rol).ctl().last_fcnt);
 }
 
 // Run the whole retry budget out: the first wait, then kOpMaxRetries more.
@@ -7604,7 +7604,7 @@ TEST(NightlySleep, AnUnackedSleepIsRetransmittedWithTheSameMsgidAndStillRecordsN
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
     h.rol.enterSleep();
-    const uint32_t id    = SP(h.rol).ctl().last_msgid;
+    const uint32_t id    = SP(h.rol).ctl().last_fcnt;
     const size_t   sends = h.tracker.sent_copies.size();
 
     h.clock.tick(2000);
@@ -7612,7 +7612,7 @@ TEST(NightlySleep, AnUnackedSleepIsRetransmittedWithTheSameMsgidAndStillRecordsN
     h.clock.tick(1050);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends + 1) << "the 3 s retry";
     EXPECT_EQ(h.rol.opRetryCount(), 1u);
-    EXPECT_EQ(SP(h.rol).ctl().last_msgid, id) << "the retry IS the original command";
+    EXPECT_EQ(SP(h.rol).ctl().last_fcnt, id) << "the retry IS the original command";
     EXPECT_EQ(h.rol.last_sleep_epoch_, 0u);
     EXPECT_TRUE(h.rol.login_acked());
 
@@ -7779,13 +7779,13 @@ TEST(NightlySleep, ASecondRequestWhileOneIsPendingChangesNothing) {
     h.rol.enterSleep();
     const size_t   sends = h.tracker.sent_copies.size();
     const uint32_t gen   = SP(h.rol).ctl_cmd().generation;
-    const uint32_t id    = SP(h.rol).ctl().last_msgid;
+    const uint32_t id    = SP(h.rol).ctl().last_fcnt;
 
     h.rol.enterSleep();
 
     EXPECT_EQ(h.tracker.sent_copies.size(), sends) << "no second command";
     EXPECT_EQ(SP(h.rol).ctl_cmd().generation, gen) << "the first is not superseded";
-    EXPECT_EQ(SP(h.rol).ctl().last_msgid, id);
+    EXPECT_EQ(SP(h.rol).ctl().last_fcnt, id);
 
     ackSleep(h);
     ASSERT_FALSE(h.rol.awaitingAck());
@@ -7835,7 +7835,7 @@ TEST(NightlySleep, ASleepDeferredBehindARelogin_IsSentWhenTheSessionReturnsInTim
     r.secs(6);                                    // the expiry timer fires meanwhile
     EXPECT_TRUE(r.rol.awaitingAck()) << "the expiry does not kill a sleep that is being retried";
     EXPECT_FALSE(SP(r.rol).ctl_cmd().sleep_unconfirmed);
-    deliverAck(r.rol, SP(r.rol).ctl().last_msgid);
+    deliverAck(r.rol, SP(r.rol).ctl().last_fcnt);
     EXPECT_NE(r.rol.last_sleep_epoch_, 0u);
 }
 
@@ -7857,7 +7857,7 @@ TEST(NightlySleep, ASleepIssuedDuringAWarmupStopsItAndTheAckKeepsItOff) {
     EXPECT_EQ(r.rol.modeBSupervisor().failures(), 0u) << "yielding is not a failed warm-up";
 
     r.secs(3);
-    deliverAck(r.rol, SP(r.rol).ctl().last_msgid);
+    deliverAck(r.rol, SP(r.rol).ctl().last_fcnt);
     ASSERT_FALSE(P(r.rol).is_node_awake_()) << "acked: the hub now models the node as asleep";
     r.secs(900);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 1u) << "no warm-up into a sleeping node";
@@ -7874,7 +7874,7 @@ TEST(NightlySleep, AfterTheSleepTheNodesRebootBringsModeBBack) {
     r.rol.notePhaseReportForTest(2, 100, 200, 12, 0, /*node_timed_rx=*/true);   // promoted
     r.rol.enterSleep();
     r.secs(3);
-    deliverAck(r.rol, SP(r.rol).ctl().last_msgid);
+    deliverAck(r.rol, SP(r.rol).ctl().last_fcnt);
     r.secs(60);
     ASSERT_EQ(r.rol.mbs_warmups_started_, 0u);
 
@@ -7989,7 +7989,7 @@ TEST(NightlySleep, ANewSleepAckedAfterAnUnconfirmedOneClearsTheUnconfirmedFlag) 
 
     h.rol.enterSleep();                           // the operator tries again
     ASSERT_TRUE(h.rol.awaitingAck()) << "an unconfirmed sleep does not block a new request";
-    deliverAck(h.rol, SP(h.rol).ctl().last_msgid);  // (no note_node_heard_: the flag is the ack's to clear)
+    deliverAck(h.rol, SP(h.rol).ctl().last_fcnt);  // (no note_node_heard_: the flag is the ack's to clear)
 
     EXPECT_FALSE(SP(h.rol).ctl_cmd().sleep_unconfirmed);
     EXPECT_NE(h.rol.last_sleep_epoch_, 0u);
@@ -8085,7 +8085,7 @@ TEST(SchedPush, TheLadderIsOnePushPlusKSchedMaxRetriesResendsThenItGivesUpAndKee
     for (size_t i = 1; i < ids.size(); ++i)
         EXPECT_GT(ids[i], ids[i - 1]) << "every resend is a new frame with a new msgid";
     EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack) << "the ladder is spent";
-    EXPECT_EQ(h.rol.schedulePushMsgid(), ids.back()) << "the latest msgid is kept after giving up";
+    EXPECT_EQ(h.rol.schedulePushFcnt(), ids.back()) << "the latest msgid is kept after giving up";
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version()) << "the node never confirmed";
     // A failed schedule push never tears the session down.
     EXPECT_FALSE(h.rol.commandFailed());
@@ -8142,8 +8142,8 @@ TEST(SchedPush, AnAckOfTheLatestAttemptClearsTheLadderAndAllowsAFullOneNextTime)
     h.rol.send_schedule_config();
     h.clock.tick(kSchedStepMs);                       // one resend
     ASSERT_EQ(AK(h.rol).cfg().retry_count, 1);
-    deliverAck(h.rol, h.rol.schedulePushMsgid());
-    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
+    deliverAck(h.rol, h.rol.schedulePushFcnt());
+    EXPECT_EQ(h.rol.schedulePushFcnt(), 0u);
     EXPECT_EQ(AK(h.rol).cfg().retry_count, 0);
     EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack);
     EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
@@ -8175,11 +8175,11 @@ TEST(SchedPush, ALateAckForAnEarlierAttemptIsRecognisedAndEndsTheRetries) {
     const auto ids = msgidsOf(h, OpCmd::Schedule);
     ASSERT_EQ(ids.size(), 2u);
     ASSERT_NE(ids[0], ids[1]);
-    ASSERT_EQ(h.rol.schedulePushMsgid(), ids[1]);
+    ASSERT_EQ(h.rol.schedulePushFcnt(), ids[1]);
 
     deliverAck(h.rol, ids[0]);                        // the node's ack of the FIRST copy, late
 
-    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u) << "delivered: nothing is awaited any more";
+    EXPECT_EQ(h.rol.schedulePushFcnt(), 0u) << "delivered: nothing is awaited any more";
     EXPECT_FALSE(AK(h.rol).cfg().awaiting_ack);
     EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
     EXPECT_FALSE(bs.state) << "Schedule Pending clears";
@@ -8204,7 +8204,7 @@ TEST(SchedPush, AnAckOfAnyAttemptOfASpentLadderStillDeliversTheSchedule) {
     deliverAck(h.rol, ids[1]);
 
     EXPECT_EQ(h.rol.node_sched_version_, h.rol.schedule_version());
-    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
+    EXPECT_EQ(h.rol.schedulePushFcnt(), 0u);
 }
 
 // An ack names an attempt, and applies what THAT attempt carried. The schedule
@@ -8235,7 +8235,7 @@ TEST(SchedPush, ANewerScheduleSupersedesTheRequestButTheOldAckIdsStillCount) {
     EXPECT_TRUE(h.rol.schedule_pending()) << "but not the current schedule";
     EXPECT_TRUE(bs.state) << "so Schedule Pending stays on";
     EXPECT_TRUE(AK(h.rol).cfg().awaiting_ack) << "and the newer attempt is still awaited";
-    EXPECT_EQ(h.rol.schedulePushMsgid(), ids[1]);
+    EXPECT_EQ(h.rol.schedulePushFcnt(), ids[1]);
 
     deliverAck(h.rol, ids[1]);
     EXPECT_EQ(h.rol.node_sched_version_, v2);
@@ -8302,10 +8302,10 @@ TEST(SchedPush, ANewLoginForgetsTheIdsOnRecord) {
     RealHubHarness h{18, kMacRol2};
     schedReady(h);
     h.rol.send_schedule_config();
-    const uint32_t id = h.rol.schedulePushMsgid();
+    const uint32_t id = h.rol.schedulePushFcnt();
     ASSERT_NE(id, 0u);
     h.rol.send_login();
-    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u) << "the old numbering is gone";
+    EXPECT_EQ(h.rol.schedulePushFcnt(), 0u) << "the old numbering is gone";
     deliverAck(h.rol, id);
     EXPECT_NE(h.rol.node_sched_version_, h.rol.schedule_version()) << "an alias is not an ack";
     EXPECT_TRUE(AK(h.rol).cfg().awaiting_ack) << "but the request itself goes on";
@@ -8328,8 +8328,8 @@ TEST(SchedPush, TwoNodesPushingAtOnceDoNotShareState) {
     h.rol_2.send_schedule_config();
     ASSERT_EQ(countTo(17), 1u);
     ASSERT_EQ(countTo(18), 1u);
-    const uint32_t id1 = h.rol_1.schedulePushMsgid();
-    const uint32_t id2 = h.rol_2.schedulePushMsgid();
+    const uint32_t id1 = h.rol_1.schedulePushFcnt();
+    const uint32_t id2 = h.rol_2.schedulePushFcnt();
     ASSERT_NE(id1, 0u);
     ASSERT_NE(id2, 0u);
 
@@ -8450,10 +8450,10 @@ TEST(SchedPush, AnAutoModeNodeIsPushedToAsAlwaysAndNeverWarmedUp) {
     r.rol.node_sched_version_ = r.rol.schedule_version() ^ 1u;
     r.rol.send_schedule_config();
     ASSERT_TRUE(AK(r.rol).cfg().awaiting_ack);
-    const uint32_t first_id = r.rol.schedulePushMsgid();
+    const uint32_t first_id = r.rol.schedulePushFcnt();
     r.secs(8);
-    EXPECT_NE(r.rol.schedulePushMsgid(), first_id) << "the ladder is the same: a resend under a new id";
-    deliverAck(r.rol, r.rol.schedulePushMsgid());
+    EXPECT_NE(r.rol.schedulePushFcnt(), first_id) << "the ladder is the same: a resend under a new id";
+    deliverAck(r.rol, r.rol.schedulePushFcnt());
     EXPECT_EQ(r.rol.node_sched_version_, r.rol.schedule_version());
     r.secs(modebsup::kGridSettleS + modebsup::kJitterMaxS + 60);
     EXPECT_EQ(r.rol.mbs_warmups_started_, 0u);
@@ -8655,7 +8655,7 @@ std::vector<PublishedGrid> publishedGrids(real_helpers::RealHubHarness &h) {
         if (m == nullptr) continue;
         if (m->cmd_case == hubframes::DL_GRIDSYNC &&
             m->gridsync != nullptr && m->gridsync->enable)
-            out.push_back({m->header->msgid, m->gridsync->txround, m->gridsync->txslot});
+            out.push_back({m->header->fcnt, m->gridsync->txround, m->gridsync->txslot});
         delete m;
     }
     return out;
@@ -8985,7 +8985,7 @@ TEST(ConfigShape, AClientConfigIsOneBareUnackedSendWithNoRetry) {
     EXPECT_EQ(h.tracker.last_supersede_key, 0u) << "no supersession";
     EXPECT_EQ(msgidsOf(h, OpCmd::ClientConfig).size(), 1u);
     EXPECT_FALSE(h.rol.awaitingAck());
-    EXPECT_EQ(h.rol.schedulePushMsgid(), 0u);
+    EXPECT_EQ(h.rol.schedulePushFcnt(), 0u);
     EXPECT_FALSE(h.rol.gridSyncAwaitingAck());
     h.clock.tick(120'000);
     EXPECT_EQ(h.tracker.sent_copies.size(), sends0 + 1) << "never retransmitted";
@@ -8998,14 +8998,14 @@ TEST(ConfigShape, AClientConfigDoesNotDisturbATrackedOpInFlight) {
     h.rol.registered_ = true;
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
-    const uint32_t first = DP(h).ctl().first_msgid;
-    const uint32_t last  = DP(h).ctl().last_msgid;
+    const uint32_t first = DP(h).ctl().first_fcnt;
+    const uint32_t last  = DP(h).ctl().last_fcnt;
 
     h.rol.send_remote_config();
 
     EXPECT_TRUE(h.rol.awaitingAck());
-    EXPECT_EQ(DP(h).ctl().first_msgid, first);
-    EXPECT_EQ(DP(h).ctl().last_msgid, last) << "the config frame took a msgid but is not part of the op's range";
+    EXPECT_EQ(DP(h).ctl().first_fcnt, first);
+    EXPECT_EQ(DP(h).ctl().last_fcnt, last) << "the config frame took a msgid but is not part of the op's range";
     EXPECT_EQ(h.tracker.last_supersede_gen, 0u) << "the config send carries no generation";
     deliverAck(h.rol, last);
     EXPECT_FALSE(h.rol.awaitingAck());
@@ -9077,7 +9077,7 @@ int copiesOf(proto_sim::SimRadio &radio, uint32_t msgid) {
 }
 
 // The node's CommandAck for the command in flight.
-void ackInFlight(real_helpers::RealHubHarness &h) { deliverAck(h.rol, DP(h).ctl().last_msgid); }
+void ackInFlight(real_helpers::RealHubHarness &h) { deliverAck(h.rol, DP(h).ctl().last_fcnt); }
 
 }  // namespace
 
@@ -9090,19 +9090,19 @@ TEST(ControlQueue, ACoverOpSentWhileASleepIsInFlightQueuesBehindItAndTheSleepIsR
     h.rol.enterSleep();
     ASSERT_TRUE(DP(h).sleep_op_in_flight_());
     ASSERT_EQ(countSleepFrames(h), 1);
-    const uint32_t sleep_id = DP(h).ctl().last_msgid;
+    const uint32_t sleep_id = DP(h).ctl().last_fcnt;
 
     sendOpen(h);
 
     EXPECT_TRUE(DP(h).sleep_op_in_flight_()) << "the sleep keeps its slot";
     EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::SYSOP);
-    EXPECT_EQ(DP(h).ctl().last_msgid, sleep_id);
+    EXPECT_EQ(DP(h).ctl().last_fcnt, sleep_id);
     EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "the cover op is waiting";
     EXPECT_EQ(airOrder(h), (Order{"S4"})) << "nothing else on the air yet";
 
     h.clock.tick(3050);
     EXPECT_EQ(countSleepFrames(h), 2) << "the sleep is retransmitted, as itself";
-    EXPECT_EQ(DP(h).ctl().last_msgid, sleep_id);
+    EXPECT_EQ(DP(h).ctl().last_fcnt, sleep_id);
     EXPECT_EQ(airOrder(h), (Order{"S4"}));
 
     ackSleep(h);                                       // the node DID hear it
@@ -9191,13 +9191,13 @@ TEST(ControlQueue, ASetAutoModeSysopDuringACoverOpQueuesBehindIt) {
     ASSERT_TRUE(h.rol.session_confirmed());
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
-    const uint32_t cover_id = DP(h).ctl().last_msgid;
+    const uint32_t cover_id = DP(h).ctl().last_fcnt;
     ASSERT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
 
     h.rol.set_auto_mode(true);
 
     EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER) << "the cover op is not displaced";
-    EXPECT_EQ(DP(h).ctl().last_msgid, cover_id);
+    EXPECT_EQ(DP(h).ctl().last_fcnt, cover_id);
     EXPECT_EQ(QP(h).ctl_queue_.size(), 1u);
     h.clock.tick(3050);
     EXPECT_EQ(h.rol.opRetryCount(), 1u) << "the cover op's own ladder runs on";
@@ -9334,14 +9334,14 @@ TEST(ControlQueue, ANewerCoverOpReplacesTheCoverOpInFlightAndLeavesTheLineAlone)
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     sendOpen(h);
-    const uint32_t first = DP(h).ctl().last_msgid;
+    const uint32_t first = DP(h).ctl().last_fcnt;
     h.rol.sendDebugSysop(kOpStatus);
     ASSERT_EQ(QP(h).ctl_queue_.size(), 1u);
 
     sendClose(h.rol);
     h.clock.tick(10);
 
-    const uint32_t second = DP(h).ctl().last_msgid;
+    const uint32_t second = DP(h).ctl().last_fcnt;
     EXPECT_NE(second, first);
     EXPECT_EQ(airOrder(h), (Order{"C0", "C1"})) << "the replacement goes out at once";
     EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "the sysop is still waiting, not displaced";
@@ -9352,7 +9352,7 @@ TEST(ControlQueue, ANewerCoverOpReplacesTheCoverOpInFlightAndLeavesTheLineAlone)
     deliverAck(h.rol, first);                          // the retired command's ack
     EXPECT_TRUE(h.rol.awaitingAck()) << "is not matched";
     EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER) << "the CLOSE is still the one awaited";
-    EXPECT_EQ(DP(h).ctl().last_msgid, second);
+    EXPECT_EQ(DP(h).ctl().last_fcnt, second);
     EXPECT_EQ(QP(h).ctl_queue_.size(), 1u) << "and the sysop has not been let through";
     ackInFlight(h);
     h.clock.tick(10);
@@ -9366,7 +9366,7 @@ TEST(ControlQueue, ALateAckOfACommandThatWasGivenUpOnChangesNothing) {
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     sendOpen(h);
-    const uint32_t id = DP(h).ctl().last_msgid;
+    const uint32_t id = DP(h).ctl().last_fcnt;
     for (int i = 0; i < 5; ++i) h.clock.tick(3050);    // 4 retries, then the give-up
     ASSERT_FALSE(h.rol.awaitingAck());
     ASSERT_TRUE(h.rol.commandFailed());
@@ -9394,11 +9394,11 @@ TEST(ControlQueue, TwoNodesControlChannelsAreIndependent) {
     EXPECT_TRUE(h.rol_2.awaitingAck());
     EXPECT_EQ(airOrder(h.radio, 18), (Order{"C1"})) << "node 2's command went out at once";
     EXPECT_EQ(airOrder(h.radio, 17), (Order{"S2"})) << "node 1 still has only its OTA on the air";
-    deliverAck(h.rol_2, QP(h.rol_2).ctl().last_msgid);
+    deliverAck(h.rol_2, QP(h.rol_2).ctl().last_fcnt);
     EXPECT_FALSE(h.rol_2.awaitingAck());
     EXPECT_TRUE(h.rol_1.awaitingAck()) << "node 2's ack did nothing to node 1";
     EXPECT_EQ(QP(h.rol_1).ctl_queue_.size(), 1u);
-    deliverAck(h.rol_1, QP(h.rol_1).ctl().last_msgid);
+    deliverAck(h.rol_1, QP(h.rol_1).ctl().last_fcnt);
     h.clock.tick(10);
     EXPECT_EQ(airOrder(h.radio, 17), (Order{"S2", "C0"}));
 }
@@ -9427,7 +9427,7 @@ TEST(ControlQueue, ARetriedSleepsSecondAckChangesNothing) {
     RealHubHarness h{18, kMacRol2};
     sleepReady(h);
     h.rol.enterSleep();
-    const uint32_t id = DP(h).ctl().last_msgid;
+    const uint32_t id = DP(h).ctl().last_fcnt;
     h.clock.tick(3050);                                // a retry
     ASSERT_EQ(countSleepFrames(h), 2);
 
@@ -9574,7 +9574,7 @@ TEST(ControlQueue, ALoneCoverOpNeverTouchesTheLine) {
     EXPECT_EQ(airOrder(h), (Order{"C0"}));
     for (int i = 0; i < 2; ++i) h.clock.tick(3050);
     EXPECT_EQ(h.rol.opRetryCount(), 2u);
-    EXPECT_EQ(copiesOf(h.radio, DP(h).ctl().last_msgid), 3) << "the same bytes, three times";
+    EXPECT_EQ(copiesOf(h.radio, DP(h).ctl().last_fcnt), 3) << "the same bytes, three times";
     ackInFlight(h);
     EXPECT_FALSE(h.rol.awaitingAck());
     EXPECT_FALSE(h.rol.commandFailed());
@@ -9613,12 +9613,12 @@ TEST(OneSlot, ASetAutoModeWithoutAConfirmedSessionSendsNothingAndLeavesTheCoverO
     h.rol.registered_ = true;
     sendOpen(h);
     ASSERT_FALSE(h.rol.session_confirmed());
-    const uint32_t last = DP(h).ctl().last_msgid;
+    const uint32_t last = DP(h).ctl().last_fcnt;
 
     h.rol.set_auto_mode(true);                         // saved, pushed with the schedule later
 
     EXPECT_EQ(DP(h).ctl_cmd().kind, DlvProbe::TrackedOpKind::COVER);
-    EXPECT_EQ(DP(h).ctl().last_msgid, last);
+    EXPECT_EQ(DP(h).ctl().last_fcnt, last);
 }
 
 // (g) OTA is AT-MOST-ONCE (step 5e). When a REGISTER / relogin clears the stored
@@ -9707,7 +9707,7 @@ TEST(OtaRepack, ACoverOpWhoseStoredFrameWasClearedByAReloginIsRePackedAndItsNewM
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     sendOpen(h);
-    const uint32_t old_id = DP(h).ctl().last_msgid;
+    const uint32_t old_id = DP(h).ctl().last_fcnt;
     DP(h).clearSessionKeys_();
     ASSERT_TRUE(DP(h).ctl().frame.bytes.empty());
     DP(h).login_state_for_test().relogin_pending = true;
@@ -9720,7 +9720,7 @@ TEST(OtaRepack, ACoverOpWhoseStoredFrameWasClearedByAReloginIsRePackedAndItsNewM
     const auto ids = msgidsOf(h, OpCmd::Operation);
     ASSERT_EQ(ids.size(), 2u) << "re-packed and sent";
     EXPECT_NE(ids[1], old_id);
-    EXPECT_EQ(DP(h).ctl().last_msgid, ids[1]);
+    EXPECT_EQ(DP(h).ctl().last_fcnt, ids[1]);
     EXPECT_TRUE(h.rol.awaitingAck());
     deliverAck(h.rol, ids[1]);
     EXPECT_FALSE(h.rol.awaitingAck());
@@ -9734,11 +9734,11 @@ TEST(OtaRepack, ACoverOpRetryWithAStoredFrameKeepsItsMsgid) {
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     sendOpen(h);
-    const uint32_t id = DP(h).ctl().last_msgid;
+    const uint32_t id = DP(h).ctl().last_fcnt;
     h.clock.tick(3050);
     EXPECT_EQ(h.rol.opRetryCount(), 1u);
-    EXPECT_EQ(DP(h).ctl().last_msgid, id);
-    EXPECT_EQ(DP(h).ctl().first_msgid, id);
+    EXPECT_EQ(DP(h).ctl().last_fcnt, id);
+    EXPECT_EQ(DP(h).ctl().first_fcnt, id);
 }
 
 // Step 2 of the delivery refactor moved two pieces of confirm_session_ and the
@@ -10755,7 +10755,7 @@ TEST(TrackedOpRetry, AnOtaWhoseFirstPackFailsIsNeverReplacedByAnOlderFrame) {
         << "precondition: the first command went out sealed";
     const auto first = h.tracker.sent_raw.back();
     auto &op = static_cast<TrackedOpProbe &>(h.rol);
-    ack_like_node(h.rol, base, op.ctl().last_msgid);
+    ack_like_node(h.rol, base, op.ctl().last_fcnt);
     ASSERT_FALSE(op.ctl().awaiting_ack) << "precondition: the cover op was acked";
 
     mac2::LinkSecurity::hub().store().clearKeys(18);
@@ -10781,7 +10781,7 @@ TEST(TrackedOpRetry, ALoginForgetsTheControlChannelsOldAckIds) {
     h.rol.setCountersForTest(500, h.rol.sequencer().rxId() + 1);   // old-session ids far from new ones
     h.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_POSITION, 0, 0.25f);
     auto &op = static_cast<TrackedOpProbe &>(h.rol);
-    const uint32_t old_id = op.ctl().last_msgid;
+    const uint32_t old_id = op.ctl().last_fcnt;
     ASSERT_GE(old_id, 500u) << "precondition";
     ASSERT_GE(op.ctl().acks.find(old_id), 0) << "precondition: the id is on record";
     h.rol.send_login();
@@ -10805,7 +10805,7 @@ TEST(TrackedOpRetry, ACommandTheNodeRefusesFailsAtOnceWithoutTearingTheSessionDo
     ASSERT_TRUE(op.ctl().awaiting_ack) << "precondition: the command is in flight";
     const auto cmd_frame = h.tracker.sent_raw.back();
 
-    ack_like_node(h.rol, base, op.ctl().last_msgid, proto_sim::AckStatus::ACK_ERROR);
+    ack_like_node(h.rol, base, op.ctl().last_fcnt, proto_sim::AckStatus::ACK_ERROR);
     EXPECT_FALSE(op.ctl().awaiting_ack) << "a refused command is not retried";
     EXPECT_TRUE(h.rol.commandFailed()) << "a refused command is not shown as delivered";
     const size_t handed = h.tracker.sent_raw.size();
@@ -11037,7 +11037,7 @@ TEST(FireDelivery, AScheduleConfigLadderRunsOnUndisturbedByTheThreeFrames) {
     schedReady(h);
     h.rol.send_schedule_config();
     ASSERT_TRUE(FP(h).cfg().awaiting_ack);
-    const uint32_t push_id = h.rol.schedulePushMsgid();
+    const uint32_t push_id = h.rol.schedulePushFcnt();
     ASSERT_NE(push_id, 0u);
 
     fireAllThree(h.rol, cover);
@@ -11047,7 +11047,7 @@ TEST(FireDelivery, AScheduleConfigLadderRunsOnUndisturbedByTheThreeFrames) {
     EXPECT_EQ(FP(h).cfg().acks.id[0], push_id);
     EXPECT_EQ(FP(h).cfg().retry_count, 0);
     EXPECT_STREQ(FP(h).cfg().req.what, "ScheduleConfig") << "the request in the slot is still the schedule";
-    EXPECT_EQ(h.rol.schedulePushMsgid(), push_id);
+    EXPECT_EQ(h.rol.schedulePushFcnt(), push_id);
 
     // An ack for a Fire frame's msgid is nobody's ack.
     const auto seen = airSeen(h.radio);
@@ -11100,15 +11100,15 @@ TEST(FireDelivery, ACoverOpLadderRunsOnUndisturbedByTheThreeFrames) {
     h.rol.registered_ = true;
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
-    const uint32_t first = FP(h).ctl().first_msgid;
-    const uint32_t last  = FP(h).ctl().last_msgid;
+    const uint32_t first = FP(h).ctl().first_fcnt;
+    const uint32_t last  = FP(h).ctl().last_fcnt;
     const uint8_t  gen   = (uint8_t) FP(h).ctl_cmd().generation;
 
     fireAllThree(h.rol, cover);
 
     EXPECT_TRUE(h.rol.awaitingAck());
-    EXPECT_EQ(FP(h).ctl().first_msgid, first);
-    EXPECT_EQ(FP(h).ctl().last_msgid, last) << "the Fire frames took msgids but are not part of the op's range";
+    EXPECT_EQ(FP(h).ctl().first_fcnt, first);
+    EXPECT_EQ(FP(h).ctl().last_fcnt, last) << "the Fire frames took msgids but are not part of the op's range";
     EXPECT_EQ((uint8_t) FP(h).ctl_cmd().generation, gen);
     EXPECT_EQ(FP(h).ctl().retry_count, 0);
 
@@ -11119,7 +11119,7 @@ TEST(FireDelivery, ACoverOpLadderRunsOnUndisturbedByTheThreeFrames) {
     h.clock.tick(3000 + 100);
     EXPECT_EQ(FP(h).ctl().retry_count, 1) << "the op's retry comes on its own schedule";
     EXPECT_EQ(countCmd(airSeen(h.radio), OpCmd::TimeSync), 1u) << "and re-sends nothing of the Fire frames";
-    deliverAck(h.rol, FP(h).ctl().last_msgid);
+    deliverAck(h.rol, FP(h).ctl().last_fcnt);
     EXPECT_FALSE(h.rol.awaitingAck());
 }
 
@@ -11135,8 +11135,8 @@ TEST(FireDelivery, AFireFrameDoesNotFillTheSlotOfAnIdleChannel) {
         EXPECT_FALSE(s->awaiting_ack);
         EXPECT_EQ(s->acks.n, 0);
         EXPECT_EQ(s->retry_count, 0);
-        EXPECT_EQ(s->first_msgid, 0u);
-        EXPECT_EQ(s->last_msgid, 0u);
+        EXPECT_EQ(s->first_fcnt, 0u);
+        EXPECT_EQ(s->last_fcnt, 0u);
         EXPECT_EQ(s->req.encode == nullptr, true) << "no request was left in the slot";
     }
     EXPECT_FALSE(FP(h).delivery_busy_());
@@ -11938,7 +11938,7 @@ TEST(PositionIsNotAnAck, ASpontaneousPositionLeavesAnUnackedCoverOpPendingAndRet
     h.rol.registered_ = true;
     sendOpen(h);
     ASSERT_TRUE(h.rol.awaitingAck());
-    const uint32_t id = DP(h).ctl().last_msgid;
+    const uint32_t id = DP(h).ctl().last_fcnt;
     ASSERT_NE(id, 0u);
     ASSERT_EQ(coverFramesWithId(h.radio, id), 1);
 
@@ -12063,7 +12063,7 @@ TEST(F4PerFrameSeal, AStoredFrameSealedBeforeAReKeyIsNeverTaggedAfterIt) {
     f.rol.mark_session_confirmed_for_test();
     f.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     f.clock.tick(10);
-    const uint32_t id = static_cast<AckProbe &>(f.rol).ctl().last_msgid;
+    const uint32_t id = static_cast<AckProbe &>(f.rol).ctl().last_fcnt;
     ASSERT_NE(id, 0u);
     auto copiesOf = [&](uint32_t msgid) {
         int n = 0;
@@ -12178,7 +12178,7 @@ TEST(F4PerFrameSeal, AStoredFramesRetryUnderTheSameKeysIsTaggedAndVerifies) {
     f.rol.mark_session_confirmed_for_test();
     f.rol.send_cover_operation(LORA_COVER_OPERATION__COVOP_OPERATION, COV_OPERATION__CMD_OPEN, 0.0f);
     f.clock.tick(10);
-    const uint32_t id = static_cast<AckProbe &>(f.rol).ctl().last_msgid;
+    const uint32_t id = static_cast<AckProbe &>(f.rol).ctl().last_fcnt;
     f.clock.tick(3050);                                  // the retry re-sends the stored frame
     int copies = 0, opened = 0;
     const auto frames = f.radio.hub_to_node_frames();
@@ -12543,7 +12543,7 @@ TEST(ArqS7, TheControlChannelLogsEveryAttemptAndTheAckWithTheFrameId) {
     h.rol.registered_ = true;
     testing::internal::CaptureStderr();
     sendOpen(h);
-    const uint32_t id = DP(h).ctl().last_msgid;
+    const uint32_t id = DP(h).ctl().last_fcnt;
     h.clock.tick(3050);                                  // retry 1: the stored bytes again
     deliverAck(h.rol, id);
     const std::string log = testing::internal::GetCapturedStderr();
@@ -12552,7 +12552,7 @@ TEST(ArqS7, TheControlChannelLogsEveryAttemptAndTheAckWithTheFrameId) {
     EXPECT_EQ(occurrences(log, "[rol] Tracked op retransmit 1/4 (msgid=" + sid + ")"), 1) << log;
     EXPECT_EQ(occurrences(log, "[rol] Tracked op acknowledged (ack_msg_id=" + sid + ")"), 1) << log;
     EXPECT_FALSE(h.rol.awaitingAck());
-    EXPECT_EQ(DP(h).ctl().first_msgid, id) << "a retry keeps the command's id";
+    EXPECT_EQ(DP(h).ctl().first_fcnt, id) << "a retry keeps the command's id";
 }
 
 TEST(ArqS7, AStoredFrameLostToASessionChangeIsRepackedUnderAFreshId) {
@@ -12560,15 +12560,15 @@ TEST(ArqS7, AStoredFrameLostToASessionChangeIsRepackedUnderAFreshId) {
     RealHubHarness h{18, kMacRol2};
     h.rol.registered_ = true;
     sendOpen(h);
-    const uint32_t id = DP(h).ctl().last_msgid;
+    const uint32_t id = DP(h).ctl().last_fcnt;
     DP(h).clearSessionKeys_();                           // drops the stored frame
     testing::internal::CaptureStderr();
     h.clock.tick(3050);
     const std::string log = testing::internal::GetCapturedStderr();
     EXPECT_EQ(occurrences(log, "no stored frame to retransmit \u2014 re-packing"), 1) << log;
-    const uint32_t fresh = DP(h).ctl().last_msgid;
+    const uint32_t fresh = DP(h).ctl().last_fcnt;
     EXPECT_EQ(fresh, id + 1) << "a NEW frame, a new id";
-    EXPECT_EQ(DP(h).ctl().first_msgid, fresh) << "the command's range moves with it";
+    EXPECT_EQ(DP(h).ctl().first_fcnt, fresh) << "the command's range moves with it";
     deliverAck(h.rol, fresh);
     EXPECT_FALSE(h.rol.awaitingAck());
 }
@@ -12589,7 +12589,7 @@ TEST(ArqS7, AnAckAfterTheBurstFallbackIsMeasuredFromTheFirstShotsMarkAndNotRecor
     ASSERT_TRUE(h.rol.op_short_wait_spent_for_test()) << "precondition: the burst fallback went out";
     const uint32_t before = h.rol.ack_latency_for_test().count(nowMs());
     testing::internal::CaptureStderr();
-    deliverAck(h.rol, P(h).ctl().first_msgid);
+    deliverAck(h.rol, P(h).ctl().first_fcnt);
     const std::string log = testing::internal::GetCapturedStderr();
     EXPECT_EQ(occurrences(log, "after a burst fallback or retry, not recorded"), 1) << log;
     EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), before);

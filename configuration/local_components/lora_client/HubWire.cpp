@@ -142,7 +142,7 @@ void toHdr(const macwire::WireHdr &h, hubframes::Hdr *out)
     out->destaddress   = h.dst;
     out->destsubnet    = h.subnet;
     out->senderaddress = h.src;
-    out->msgid         = h.fcnt;
+    out->fcnt         = h.fcnt;
     out->burstindex    = h.burst_idx;
     out->burstcount    = h.burst_cnt;
     out->onmark        = h.onMark();
@@ -192,7 +192,7 @@ bool Uplink::viewMac_(const macwire::WireHdr &h)
     case NODE_MAC_PDU__PDU_ACK:
         if (!h.ack() || this->mac_->ack == nullptr)
             return false;
-        this->ack_.ack_msg_id = h.acked_fcnt;
+        this->ack_.ack_fcnt = h.acked_fcnt;
         this->ack_.status     = this->mac_->ack->status;
         this->ack_.phase      = this->mac_->ack->phase;
         this->msg_.proto_case = hubframes::UL_ACK;

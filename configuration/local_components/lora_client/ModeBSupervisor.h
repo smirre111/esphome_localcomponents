@@ -157,7 +157,7 @@ constexpr bool regridDue(bool pending, bool awaiting_ack, uint32_t s_since_publi
 //
 // The node's SessionManager::load() restores rx_id_ = persisted + 16 with a
 // fully-set bitmap over the margin (kRxPersistMargin), on EVERY boot - a soft
-// reboot and a deep-sleep wake alike. A hub downlink whose msgid is not above
+// reboot and a deep-sleep wake alike. A hub downlink whose fcnt is not above
 // that mark is silently dropped. The hub therefore advances its own counter by
 // the margin once per boot.
 //
@@ -170,7 +170,7 @@ constexpr bool regridDue(bool pending, bool awaiting_ack, uint32_t s_since_publi
 static constexpr uint32_t kTxBootMargin = 16;   // node kRxPersistMargin
 
 // A deep-sleep wake has no BOOT beacon; its beacons all carry the PREVIOUS wake's
-// beacon msgid, which is what tells one wake from the next (`new_wake`).
+// beacon fcnt, which is what tells one wake from the next (`new_wake`).
 constexpr bool bootAdvancesTx(uint32_t wake_reason, uint32_t reset_reason,
                               bool reset_reason_changed, bool resumed, bool new_wake,
                               uint32_t s_since_advance)

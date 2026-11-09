@@ -125,7 +125,7 @@ namespace esphome
       // build_frame_). Encrypted pings: a block of the session's own FCNTs,
       // reserved in start() on the loop and dropped on every counter restart
       // or key change (FcntReservation.h); guarded by the host's lock.
-      uint32_t msgid_{0};
+      uint32_t plain_fcnt_{0};
       bool     crypto_{false};
       mac1::FcntReservation fcnts_{};
       esp_timer_handle_t timer_{nullptr};

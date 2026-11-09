@@ -140,13 +140,13 @@ namespace esphome
       // per command from Home Assistant — never per retransmission, which must
       // stay under the generation it belongs to.
       //
-      // Deliberately NOT msgid, even though msgid is also monotonic: a LoginMsg
-      // ZEROES the message counters, so a generation taken from msgid would go
+      // Deliberately NOT fcnt, even though fcnt is also monotonic: a LoginMsg
+      // ZEROES the message counters, so a generation taken from fcnt would go
       // backwards after a re-login and the first command afterwards would be
       // dropped as stale by frames queued before it. Starts at 1 because 0 is
       // the table's "takes no part in this" value.
       uint32_t generation{1};
-      // Stored operation, replayed on each retransmission with a fresh msgid.
+      // Stored operation, replayed on each retransmission with a fresh fcnt.
       uint32_t covop_case{0};
       int32_t  operation{0};
       float    position{0.0f};
@@ -356,7 +356,7 @@ namespace esphome
       // (SHA-256(fleet key phrase)[0:16]). A wrong byte here is invisible to
       // anything that derives and compares on the SAME side, so a test pins it.
       static bool deriveRootKeyForTest(uint8_t out[16]);
-      // For tests: the msgid / CTR-space guard (see HubSession::request_fcnt_relogin).
+      // For tests: the fcnt / CTR-space guard (see HubSession::request_fcnt_relogin).
       bool fcntReloginPendingForTest() const { return this->session_.fcnt_relogin_pending(); }
       uint32_t fcntReloginRequestsForTest() const { return this->session_.fcnt_relogin_requests(); }
       void clearFcntReloginForTest() { this->session_.clear_fcnt_relogin(); }
@@ -659,10 +659,10 @@ namespace esphome
       // invariant I3 (a) needs this cleared on every fresh send_login()
       // challenge, see clearSessionKeys_().
       bool     trackedOpFrameEmptyForTest() const { return this->ctl().frame.bytes.empty(); }
-      // The msgid of the latest ScheduleConfig attempt, 0 when none is on record
+      // The fcnt of the latest ScheduleConfig attempt, 0 when none is on record
       // (acked, or never sent). Kept after the ladder is spent, so a late ack is
       // still recognised.
-      uint32_t schedulePushMsgid() const { return this->cfg().acks.last(); }
+      uint32_t schedulePushFcnt() const { return this->cfg().acks.last(); }
       // A published GridSync the node has not confirmed yet, and how many times
       // it has been re-published for that.
       bool     gridSyncAwaitingAck() const { return this->mac().awaiting_ack; }
@@ -761,12 +761,12 @@ namespace esphome
       // One packed hub->node data frame, ready for MAC-0.
       using MacFrame = DeliveryFrame;
       // THE framing path for hub->node data frames: the header (this node, the
-      // hub, the msgid), the pack and, under a confirmed session, the seal.
-      // `op` carries the payload only. The first form allocates the msgid from
+      // hub, the fcnt), the pack and, under a confirmed session, the seal.
+      // `op` carries the payload only. The first form allocates the fcnt from
       // the session counter and encrypts iff the session is confirmed; the
-      // second is the MAC ping's (reserved / dedicated msgids, its own choice).
+      // second is the MAC ping's (reserved / dedicated fcnts, its own choice).
       bool mac_frame_(hubframes::Down *op, MacFrame *out, bool ack_req = false);
-      bool mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt, MacFrame *out,
+      bool mac_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt, MacFrame *out,
                       bool ack_req = false);
       // THE MAC-0 data request: every frame this listener puts on the air
       // passes here, with its copy sealer attached when it is sealed.
@@ -892,9 +892,9 @@ namespace esphome
       // The prevbeaconfcnt whose funnel has already been added. Each beacon
       // reports the PREVIOUS wake, so two beacons from one wake would count
       // that wake twice — exactly what fw 1.1.2 and 1.1.3 did before the
-      // one-uplink fix. Keying on the msgid makes the accumulation idempotent
+      // one-uplink fix. Keying on the fcnt makes the accumulation idempotent
       // rather than trusting that fix to hold.
-      uint32_t    class_a_last_prev_msgid_{0};
+      uint32_t    class_a_last_prev_fcnt_{0};
 
       // N-3 (hub side): the last resetReason this listener has already acted
       // on, so a run of beacons from the SAME boot (every Mode-C wake reports
@@ -977,9 +977,9 @@ namespace esphome
       // Retransmit until the node's MAC ACK confirms delivery.
       // The push is the Config channel's request (dlv_.slot(CH_CONFIG), deliver_).
       // A GridSync is re-published until the node's MAC ACK names one of its
-      // msgids. Measured 2026-09-15 on node 2: the single GridSync sent after a
+      // fcnts. Measured 2026-09-15 on node 2: the single GridSync sent after a
       // login was lost (the node spent the burst in CAD retries) and nothing
-      // re-sent it — 13 minutes in Mode A with Timed Mode ON. Exact msgids, not a
+      // re-sent it — 13 minutes in Mode A with Timed Mode ON. Exact fcnts, not a
       // range: a tracked op sent in between must not be mistaken for it.
       // It is the Mac channel's request (dlv_.slot(CH_MAC), deliver_): the ids are
       // its ack-id SET, the ladder is deliverypolicy::kGridSyncPolicy.
@@ -1059,12 +1059,12 @@ namespace esphome
       // through the delivery mechanism, so it is encrypted whenever the session is
       // confirmed and plaintext only before that — packing raw and calling
       // parent_->send() is what sent a CoverConfig in the clear onto a confirmed
-      // session, which the node refuses. Header and msgid are the mechanism's.
+      // session, which the node refuses. Header and fcnt are the mechanism's.
       // Returns false when it could not be packed or the transmit pool refused.
       bool send_cover_config(const ::CoverConfig &cc);
 
       // F-4: Send a cover operation with delivery tracking.  The operation is
-      // stored so it can be retransmitted (with a fresh, incrementing msgid)
+      // stored so it can be retransmitted (with a fresh, incrementing fcnt)
       // until the node returns a MAC ACK.  After kOpMaxRetries the command is
       // marked failed and surfaced to Home Assistant via the optional binary
       // sensor.  covop_case / operation use the generated LoraCoverOperation /
@@ -1189,8 +1189,8 @@ namespace esphome
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
 
-      // msgId of the frame link_.last_uplink_t0_us() belongs to.
-      uint32_t last_uplink_msgid_{0};
+      // fcnt of the frame link_.last_uplink_t0_us() belongs to.
+      uint32_t last_uplink_fcnt_{0};
       // Mode C, MAC-0: this node's wake-clock rate against the hub, from the
       // RTC tick counts its beacons report. See WakeClockFit.h.
       wakeclock::Fit wake_fit_{};
@@ -1268,7 +1268,7 @@ namespace esphome
       bool admit_frame_(hubframes::Up *rcv_message);
       void handle_encrypted_(hubframes::Up *rcv_message, uint8_t *data, size_t len);
       // The node's MAC-2 link (HubSession.h): keys, v1 framing and seal, the
-      // uplink's security stages, the msgid guard.
+      // uplink's security stages, the fcnt guard.
       HubSession session_{*this};
       // The last stage of handle_encrypted_ (the frame is authentic and decrypted).
       void     uplink_accept_(EncUplink &up, uint8_t *plaintext);
@@ -1413,7 +1413,7 @@ namespace esphome
 
       // ---- the delivery service, as the listener uses it ----
       void deliver_(DeliveryChannel ch, DeliveryRequest req) { this->dlv_.deliver(ch, std::move(req)); }
-      bool dlv_ack_(uint32_t ack_msg_id) { return this->dlv_.ack(ack_msg_id); }
+      bool dlv_ack_(uint32_t ack_fcnt) { return this->dlv_.ack(ack_fcnt); }
       void dlv_cancel_(DeliveryChannel ch) { this->dlv_.cancel(ch); }
       void dlv_forget_ids_() { this->dlv_.forget_ids(); }
       void arm_dlv_timer_(DeliveryChannel ch) { this->dlv_.arm_timer(ch); }
@@ -1451,7 +1451,7 @@ namespace esphome
       bool     encode_grid_sync_(bool retry, const DeliveryRequest::FrameFn &frame);
       void     place_grid_sync_(const MacFrame &f);
       int64_t  gridsync_planned_t0_{0};   // encode_grid_sync_ -> place_grid_sync_
-      bool     on_grid_sync_acked_(uint32_t msgid);
+      bool     on_grid_sync_acked_(uint32_t fcnt);
       void     on_grid_sync_failed_();
       void     withdraw_grid_sync_();
       int64_t  grid_sync_planned_t0_();
@@ -1500,11 +1500,11 @@ namespace esphome
       // is included BY lora_tracker.h, not the other way round), so an inline
       // body would need a complete type this header must not have.
       TxPolicy tracked_op_policy_() const;
-      void     handle_command_ack_(uint32_t ack_msg_id, AckStatus status = ACK_STATUS__ACK_OK);
+      void     handle_command_ack_(uint32_t ack_fcnt, AckStatus status = ACK_STATUS__ACK_OK);
       // An ack whose status says the node will not execute the request (P3).
-      bool     dlv_refused_(uint32_t ack_msg_id, AckStatus status)
+      bool     dlv_refused_(uint32_t ack_fcnt, AckStatus status)
       {
-        return this->dlv_.refused(ack_msg_id, status);
+        return this->dlv_.refused(ack_fcnt, status);
       }
       // Stages of handle_command_ack_: each returns true when it consumed the ack.
       void     record_ack_latency_();
@@ -1515,7 +1515,7 @@ namespace esphome
       DeliveryRequest ctl_request_();
       // Send the slot's command now (a fresh one, or the one a relogin deferred).
       void     ctl_send_();
-      bool     on_ctl_acked_(uint32_t ack_msg_id);
+      bool     on_ctl_acked_(uint32_t ack_fcnt);
       void     on_ctl_failed_();
       void     on_ctl_abandoned_();
       // A Control request from outside: starts now, replaces a cover op, or waits

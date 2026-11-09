@@ -80,7 +80,7 @@ namespace esphome
             pos = 1 - pos;
 
           // F-4: tracked send — the operation is retransmitted with a fresh
-          // msgid until acknowledged, then surfaced as failed if never acked.
+          // fcnt until acknowledged, then surfaced as failed if never acked.
           bool accepted;
           if (pos == COVER_OPEN)
           {
@@ -159,7 +159,7 @@ namespace esphome
       coverconfig.closeslack = this->close_slack_;
 
       // Through the listener's delivery mechanism, so it is ENCRYPTED once a session
-      // is confirmed (header and msgid are its job too). This packed raw and called
+      // is confirmed (header and fcnt are its job too). This packed raw and called
       // parent_->parent_->send(), which put the CoverConfig in the clear on a
       // confirmed session, where the node refuses it: its geometry and durations
       // never reached an already-provisioned node.

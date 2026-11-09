@@ -626,7 +626,7 @@ namespace esphome
         // refreshed at the one moment it is about to be read — without the
         // periodic per-node uplink §4.4 prices and rejects at 32 nodes.
         this->notePhaseReport_(msg->ack->phase);
-        this->handle_command_ack_(msg->ack->ack_msg_id, msg->ack->status);
+        this->handle_command_ack_(msg->ack->ack_fcnt, msg->ack->status);
       }
       // MAC-0: consumed here, never forwarded to a cover or a schedule.
       else if (msg->proto_case == hubframes::UL_MACCONTROL &&
@@ -983,7 +983,7 @@ namespace esphome
 
     // ---- S4: the single MAC data path ---------------------------------------
     //
-    // Every hub->node data frame is framed by mac_frame_ (header, msgid, pack,
+    // Every hub->node data frame is framed by mac_frame_ (header, fcnt, pack,
     // seal) and leaves through mac0_send_, which attaches the frame's own copy
     // sealer. LOGIN and the GridDemote broadcast build their own bootstrap
     // frames (MIC-authenticated / unsealed broadcast) but leave through
@@ -994,10 +994,10 @@ namespace esphome
       return this->mac_frame_(op, this->incrTxFcnt(), this->session_.confirmed(), out, ack_req);
     }
 
-    bool LORAListener::mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt,
+    bool LORAListener::mac_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt,
                                   MacFrame *out, bool ack_req)
     {
-      return this->session_.frame(op, msgid, encrypt, out, ack_req);
+      return this->session_.frame(op, fcnt, encrypt, out, ack_req);
     }
 
     // ---- S8: MAC wire v1 framing (docs/mac-wire-format.md) -------------------
@@ -1225,7 +1225,7 @@ namespace esphome
     {
       if (this->parent_ == nullptr)
         return;
-      // See relogin_pending_. Checked before the msgid is taken, so a deferred
+      // See relogin_pending_. Checked before the fcnt is taken, so a deferred
       // push does not burn one; confirm_session_ pushes the schedule again.
       if (this->session_.relogin_pending())
       {
@@ -1319,7 +1319,7 @@ namespace esphome
                  this->get_name().c_str(), a.retry ? "resent" : "sent", (unsigned) a.tag,
                  this->auto_mode_ ? "AUTO" : "INTERACTIVE",
                  (unsigned) this->sched_entry_count_, (unsigned) f.bytes.size(),
-                 (unsigned) f.msgid);
+                 (unsigned) f.fcnt);
       }
     }
 
@@ -1435,7 +1435,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
           this->link_.last_uplink_t0_us() == this->parent_->last_rx_t0_us())
       {
         const bool sampled = this->wake_fit_.addReported(b->prevbeaconfcnt, b->prevbeacont0ticks);
-        this->wake_fit_.noteHeard(this->last_uplink_msgid_, this->link_.last_uplink_t0_us());
+        this->wake_fit_.noteHeard(this->last_uplink_fcnt_, this->link_.last_uplink_t0_us());
         if (sampled)
           ESP_LOGW(TAG, "[%s] Wake clock: n %u span %u s ppm %d | crystal period %u Q19 -> %d ppm "
                         "| prev wake: windows %u hits %u detected %u crcValid %u",
@@ -1472,12 +1472,12 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       // IDEMPOTENT ON prevbeaconfcnt. Each beacon reports the previous wake,
       // so two beacons from one wake would add that wake twice — precisely
       // what fw 1.1.2 and 1.1.3 did before the one-uplink fix. Keying on the
-      // msgid means a duplicate, a retransmission or a regression of that fix
+      // fcnt means a duplicate, a retransmission or a regression of that fix
       // cannot inflate the ledger.
       if (b->prevbeaconfcnt != 0 &&
-          b->prevbeaconfcnt != this->class_a_last_prev_msgid_)
+          b->prevbeaconfcnt != this->class_a_last_prev_fcnt_)
       {
-        this->class_a_last_prev_msgid_ = b->prevbeaconfcnt;
+        this->class_a_last_prev_fcnt_ = b->prevbeaconfcnt;
         this->class_a_stats_.windows   += b->prevwakewindows;
         this->class_a_stats_.hits      += b->prevwakehits;
         this->class_a_stats_.detected  += b->prevwakedetected;
@@ -1490,7 +1490,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       // N-3 (hub side): a non-deep-sleep reset means the node's SessionManager
       // restored rx_id_ with a +16 margin and a fully-seen bitmap over it (see
       // BlindsESP's SessionManager::load()) — the node will refuse to accept
-      // any downlink msgid inside that margin. Advance this listener's own
+      // any downlink fcnt inside that margin. Advance this listener's own
       // downlink counter to match, once per actual reboot (not once per
       // beacon — DEEPSLEEP wakes report the same reason on every beacon).
       const bool changed = (b->resetreason != this->last_handled_reset_reason_);
@@ -1661,10 +1661,10 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       req.policy  = deliverypolicy::kTimeSyncPolicy;
       req.admit   = [this]() { return this->timesync_due_(); };
       req.fill    = [this, ts](hubframes::Down *op) { this->fill_timesync_(op, ts.get()); };
-      req.on_sent = [this, ts](uint32_t msgid) {
+      req.on_sent = [this, ts](uint32_t fcnt) {
         ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
                  this->get_name().c_str(), (unsigned long long) ts->epoch,
-                 (int) ts->utcoffset, (unsigned) msgid);
+                 (int) ts->utcoffset, (unsigned) fcnt);
       };
       this->deliver_(CH_NONE, std::move(req));
     }
@@ -1707,7 +1707,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     }
 
     // The CoverConfig, as a Fire request. The cover component builds the payload;
-    // the header, msgid, encryption and placement are the mechanism's.
+    // the header, fcnt, encryption and placement are the mechanism's.
     bool LORAListener::send_cover_config(const ::CoverConfig &cc)
     {
       if (this->config_goes_acked_())   // CoverConfig: acked on a session

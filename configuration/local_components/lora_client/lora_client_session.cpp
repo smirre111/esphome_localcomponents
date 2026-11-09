@@ -21,7 +21,7 @@ namespace esphome
     {
       if (rcv_message->header) {
         ESP_LOGV(TAG, "Received message with ID %u from address %u (my rx id %u, my address %u)",
-                 (unsigned) rcv_message->header->msgid, (unsigned) rcv_message->header->senderaddress,
+                 (unsigned) rcv_message->header->fcnt, (unsigned) rcv_message->header->senderaddress,
                  (unsigned) this->session_.seq().rxId(), (unsigned) this->short_address_);
       } else {
         ESP_LOGD(TAG, "Received message without header");
@@ -47,16 +47,16 @@ namespace esphome
       if (rcv_message->proto_case != hubframes::UL_REGISTER)
       {
         // Accept only a forward jump within a bounded window (mac1::kForwardWindow,
-        // 1024) — a huge msgid from a corrupt/spurious frame would otherwise
+        // 1024) — a huge fcnt from a corrupt/spurious frame would otherwise
         // ratchet rx up and wedge the link (dropping every legitimate lower id)
         // until the next login resets it. MAC-1's read-only check (S3).
-        if (rcv_message->header && this->session_.seq().check(rcv_message->header->msgid))
+        if (rcv_message->header && this->session_.seq().check(rcv_message->header->fcnt))
         {
           // CHECKED here, COMMITTED later — see commit_rx_fcnt_().
           //
           // This used to assign (and persist) the counter right here, before a
           // single byte had been authenticated. The window is a ratchet, so one
-          // forged uplink at msgid = rx + 1024 pushed the hub's expectation past
+          // forged uplink at fcnt = rx + 1024 pushed the hub's expectation past
           // everything the node would legitimately send next, and every real
           // frame was then dropped as "duplicate or old" until the next login.
           // The frame did not have to be acted on to wedge the link; it only had
@@ -64,7 +64,7 @@ namespace esphome
           //
           // NOTE: login is NOT acknowledged here.  A plaintext status frame (e.g.
           // a position report during boot homing) does not prove the node holds
-          // the session key.  Marking login acked on any msgid-bump and then
+          // the session key.  Marking login acked on any fcnt-bump and then
           // encrypting downlink left a node that missed the LoginMsg unable to
           // decrypt commands.  login_acked_/session_confirmed_ are set only after
           // we successfully DECRYPT a frame from the node (encrypted branch below).
@@ -72,7 +72,7 @@ namespace esphome
         else
         {
           ESP_LOGE(TAG, "%s, duplicate or old FCNT %u, ignoring (rx id %u)", this->get_name().c_str(),
-                   (unsigned) (rcv_message->header ? rcv_message->header->msgid : 0u),
+                   (unsigned) (rcv_message->header ? rcv_message->header->fcnt : 0u),
                    (unsigned) this->session_.seq().rxId());
           return false;
         }
@@ -145,13 +145,13 @@ namespace esphome
     {
       if (m && m->header)
       {
-        this->setRxFcnt(m->header->msgid);
+        this->setRxFcnt(m->header->fcnt);
         // Keep the plaintext high-water mark with the authenticated counter, so
         // a value left behind by a forged frame cannot outlive the session it
         // was injected into. See the plaintext path in set_response().
-        this->plaintext_hwm_      = m->header->msgid;
+        this->plaintext_hwm_      = m->header->fcnt;
         this->have_plaintext_hwm_ = true;
-        this->last_uplink_msgid_  = m->header->msgid;
+        this->last_uplink_fcnt_  = m->header->fcnt;
       }
       // The same frame, having earned the counter, has earned the measurement:
       // MAC-1 hands MAC-0 the ticket back (commitTiming).
@@ -163,7 +163,7 @@ namespace esphome
     // until it can encrypt downlink safely hangs off this one moment: the
     // TimeSync push, the schedule push, and the resume-path config re-login.
     //
-    // Deliberately NOT triggered by a plaintext frame bumping the msgid — that
+    // Deliberately NOT triggered by a plaintext frame bumping the fcnt — that
     // does not prove the node holds the session key, and treating it as proof
     // once left a node that missed the LoginMsg unable to decrypt commands.
     // The tracked op that send_cover_operation()/send_tracked_sysop_() deferred
@@ -407,10 +407,10 @@ namespace esphome
         }
 
         // Security review finding 2: the MIC above stops forgery but not
-        // replay — REGISTER carries no msgid/freshness check of its own
+        // replay — REGISTER carries no fcnt/freshness check of its own
         // (it is routed around admit_frame_ for the unprovisioned-bootstrap
         // case, which has no session to check one against), and a REGISTER's
-        // own msgid is NOT usable as a monotonic replay key either: it is
+        // own fcnt is NOT usable as a monotonic replay key either: it is
         // always a small post-reboot value, so a strict increasing check
         // would reject every legitimate reboot after the first. A captured
         // REGISTER could otherwise be replayed at will to force a full
@@ -485,7 +485,7 @@ namespace esphome
     // until it can encrypt downlink safely hangs off this one moment (the
     // listener's session_on_confirmed / session_on_login_acknowledged).
     //
-    // Deliberately NOT triggered by a plaintext frame bumping the msgid — that
+    // Deliberately NOT triggered by a plaintext frame bumping the fcnt — that
     // does not prove the node holds the session key, and treating it as proof
     // once left a node that missed the LoginMsg unable to decrypt commands.
     void HubSession::confirm()
@@ -507,7 +507,7 @@ namespace esphome
       // call paths reach send_login() while login_acked is already true
       // (config_sync_relogin, the node-LOGIN path, the missing-nonce path),
       // and each of those previously skipped this clear, so the next
-      // send_login() reused the still-pending nonce under a reset msgid —
+      // send_login() reused the still-pending nonce under a reset fcnt —
       // real base-nonce (keystream) reuse. This alone does not fully close the
       // issue (send_login's own unconditional tx/rx reset is the deeper
       // bug; Tier 3's session redesign is the real fix) but removes this
@@ -562,9 +562,9 @@ namespace esphome
 
       this->restart_counters();   // a new session: both directions restart
       // ...so no FCNT reserved from the old count may be spent any more (P1),
-      // and ack ids on record would alias the new msgid space.
+      // and ack ids on record would alias the new fcnt space.
       this->host_.session_counters_restarted();
-      this->clear_fcnt_relogin();   // the msgid space restarts here
+      this->clear_fcnt_relogin();   // the fcnt space restarts here
       // New login challenge: the encrypted session is not confirmed until the
       // node proves it by sending a frame we can decrypt.  Until then the hub
       // sends commands in plaintext (see frame()).
@@ -1233,7 +1233,7 @@ namespace esphome
     }
 
     // Authenticate the frame: keys present, CMAC verifies, and the authentic
-    // msgid is inside the CTR space. Every failure destroys the candidate.
+    // fcnt is inside the CTR space. Every failure destroys the candidate.
     bool HubSession::verify(EncUplink &up)
     {
       if (!up.keys.complete())
@@ -1258,16 +1258,16 @@ namespace esphome
         return false;
       }
 
-      // AUTHENTIC, but is its msgid inside the CTR space? The counter block
-      // holds 31 bits while the tag covers 32, so msgid X and X + 2^31 would
+      // AUTHENTIC, but is its fcnt inside the CTR space? The counter block
+      // holds 31 bits while the tag covers 32, so fcnt X and X + 2^31 would
       // decrypt under the same keystream. Checked only AFTER the tag verified:
       // a forged frame must not be able to make the hub tear a session down.
       // The peer has run its counter off the end; the repair is a fresh
       // session (LOGIN resets both counters), requested once per exhaustion.
-      if (!framecrypto::msgidFitsCtr(up.msgid))
+      if (!framecrypto::msgidFitsCtr(up.fcnt))
       {
         ESP_LOGW(TAG, "[%s] Authentic uplink with msgid %u beyond the CTR space — refusing it",
-                 this->host_.session_name(), (unsigned) up.msgid);
+                 this->host_.session_name(), (unsigned) up.fcnt);
         this->drop_candidate_(up);
         this->request_fcnt_relogin("uplink");
         return false;
@@ -1305,9 +1305,9 @@ namespace esphome
     {
       // The node's counters may show it rebooted (its beacons can be lost): read
       // before the commit moves the mark.
-      this->session_.note_authentic_uplink(up.msgid, up.needs_candidate);
+      this->session_.note_authentic_uplink(up.fcnt, up.needs_candidate);
 
-      // The tag verified: this frame is the node's, so its msgid is real and
+      // The tag verified: this frame is the node's, so its fcnt is real and
       // the replay counter may finally move.
       this->commit_rx_fcnt_(up.msg);
 
@@ -1345,8 +1345,8 @@ namespace esphome
       const hubframes::Sealed *enc = rcv_message->encrypted;
       ESP_LOGD(TAG, "Received encrypted payload ciphertext=%u bytes", (unsigned) enc->ciphertext.len);
 
-      // Use the header's msgid as the unified frame counter.  Replay protection
-      // was already enforced above (seq_.check(msgid)).
+      // Use the header's fcnt as the unified frame counter.  Replay protection
+      // was already enforced above (seq_.check(fcnt)).
       EncUplink up;
       up.msg    = rcv_message;
       up.sender = rcv_message->header ? rcv_message->header->senderaddress : 0;
@@ -1418,10 +1418,10 @@ namespace esphome
     //
     // ONCE THE SESSION IS CONFIRMED, IT IS REFUSED OUTRIGHT (review finding 1,
     // 2026-09-15). Suppressing duplicates was not enough, because dispatch is
-    // not inert and the msgid is plaintext in every header, so anyone in radio
+    // not inert and the fcnt is plaintext in every header, so anyone in radio
     // range can pick one above the high-water mark and be acted on ONCE, which
     // is all it takes:
-    //   * a forged MAC ACK naming a msgid in the tracked command's range
+    //   * a forged MAC ACK naming a fcnt in the tracked command's range
     //     cancels its retransmissions and clears "command failed" — the command
     //     is lost while Home Assistant shows it delivered;
     //   * the same ack confirms a GridSync or a ScheduleConfig push;
@@ -1437,7 +1437,7 @@ namespace esphome
     {
       if (!this->session_.confirmed())
       {
-        const uint32_t id = rcv_message->header != nullptr ? rcv_message->header->msgid : 0u;
+        const uint32_t id = rcv_message->header != nullptr ? rcv_message->header->fcnt : 0u;
         if (this->have_plaintext_hwm_ && id <= this->plaintext_hwm_)
         {
           ESP_LOGD(TAG, "[%s] plaintext uplink msgid %u not above %u — duplicate, dropped",
@@ -1452,7 +1452,7 @@ namespace esphome
       ESP_LOGW(TAG, "[%s] refusing a PLAINTEXT uplink (proto_case=%d, msgid=%u) — "
                     "this node holds a confirmed session (%u refused)",
                this->get_name().c_str(), (int) rcv_message->proto_case,
-               (unsigned) (rcv_message->header != nullptr ? rcv_message->header->msgid : 0u),
+               (unsigned) (rcv_message->header != nullptr ? rcv_message->header->fcnt : 0u),
                (unsigned) this->plaintext_refused_);
       return false;
     }
@@ -1501,8 +1501,8 @@ namespace esphome
         const mac1::Alloc a = this->seq_.allocate(this->persist_());
         if (a.status != mac1::AllocStatus::Ok)
         {
-          // The CTR counter block holds 31 bits of msgid: handing out 2^31 would
-          // reuse the keystream of msgid 0. Do not advance the counter (it must
+          // The CTR counter block holds 31 bits of fcnt: handing out 2^31 would
+          // reuse the keystream of fcnt 0. Do not advance the counter (it must
           // not wrap); hand back the first out-of-space id, which the seal point
           // refuses, and ask for a fresh session below.
           exhausted = true;
@@ -1523,7 +1523,7 @@ namespace esphome
     void HubSession::request_fcnt_relogin(const char *where)
     {
       // Once per exhaustion: the flag is cleared in send_login(), which is where
-      // both msgid counters restart. Until then every refusal is silent.
+      // both fcnt counters restart. Until then every refusal is silent.
       if (this->fcnt_relogin_pending_)
         return;
       this->fcnt_relogin_pending_ = true;
@@ -1554,7 +1554,7 @@ namespace esphome
     bool HubSession::frame(hubframes::Down *op, uint32_t fcnt, bool encrypt,
                                  DeliveryFrame *out, bool ack_req)
     {
-      out->msgid = fcnt;
+      out->fcnt = fcnt;
       out->bytes.clear();
       out->seal = mac2::FrameSeal{};
       const hubwire::Route r = op ? hubwire::routeDownlink(op->cmd_case) : hubwire::Route{};
@@ -1604,7 +1604,7 @@ namespace esphome
       if (sealed != mac2::LinkSecurity::Seal::Ok)
       {
         ESP_LOGE(TAG, "[%s] v1 seal refused for FCNT %u (%d) — dropping the downlink",
-                 this->host_.session_name(), (unsigned) f->msgid, (int) sealed);
+                 this->host_.session_name(), (unsigned) f->fcnt, (int) sealed);
         f->bytes.clear();
         f->seal = mac2::FrameSeal{};
         return false;
@@ -1614,7 +1614,7 @@ namespace esphome
 
     bool HubSession::login_frame(const LoginMsg &login, uint32_t fcnt, DeliveryFrame *out)
     {
-      out->msgid = fcnt;
+      out->fcnt = fcnt;
       out->seal  = mac2::FrameSeal{};
       const size_t body_len = login_msg__get_packed_size(&login);
       if (body_len > macwire::kMaxFrameBytes)
@@ -1634,7 +1634,7 @@ namespace esphome
 
     bool HubSession::demote_frame(DeliveryFrame *out)
     {
-      out->msgid = 0;
+      out->fcnt = 0;
       out->seal  = mac2::FrameSeal{};
       hubframes::Down op = {};
       GridDemote demote = GRID_DEMOTE__INIT;
@@ -1686,7 +1686,7 @@ namespace esphome
     bool HubSession::verify_uplink_(EncUplink &up)
     {
       machdr::fromWireHdr(this->rx_hdr_, &up.hdr);
-      up.msgid = up.hdr.fcnt;
+      up.fcnt = up.hdr.fcnt;
       return this->rx_frame_ != nullptr &&
              s_sec().verifyUplinkV1(up.session_id, up.keys, this->rx_frame_, this->rx_len_) ==
                  mac2::LinkSecurity::Verify::Ok;

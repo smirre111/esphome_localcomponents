@@ -32,19 +32,19 @@ namespace esphome
     // ---- S7: the MAC-0 delivery service's contract with the application ----
     //
     // The service (DeliveryService below, policy in DeliveryPolicy.h)
-    // owns everything ARQ: the msgid of every attempt, the header and the frame,
+    // owns everything ARQ: the fcnt of every attempt, the header and the frame,
     // the pack-once copy a Resend::SameBytes request re-sends byte for byte, the
     // ack matching, the retry ladder and the timers. The application only says
     // what an attempt carries (encode), where it goes on the air (place), and is
     // told the outcome (on_delivered / on_fail / on_abandon).
 
-    // One framed attempt, as the service hands it to `place`. `msgid` is the
+    // One framed attempt, as the service hands it to `place`. `fcnt` is the
     // frame's id; the application may print it, never keep or compare it.
     struct DeliveryFrame
     {
       std::vector<uint8_t> bytes;
       mac2::FrameSeal      seal{};    // sealed=false: plaintext
-      uint32_t             msgid{0};  // set even when packing failed (it was allocated)
+      uint32_t             fcnt{0};  // set even when packing failed (it was allocated)
     };
     struct DeliveryAttempt
     {
@@ -68,7 +68,7 @@ namespace esphome
       const char *sent_label{nullptr};
       deliverypolicy::Policy policy{};
       // Say what ONE attempt carries: fill a message on YOUR stack (payload only)
-      // and hand it to `frame`, which adds the header and a fresh msgid, packs and
+      // and hand it to `frame`, which adds the header and a fresh fcnt, packs and
       // seals it; return what `frame` returned (false: nothing was framed). `*tag`
       // names what the attempt stands for (a ScheduleConfig's version) and comes
       // back in on_delivered. Asked for every attempt, except that a
@@ -93,9 +93,9 @@ namespace esphome
       std::function<void()> on_abandon;
       // ---- Fire requests only (Policy::mode == Fire): sent once, no ack ----
       // Whether the frame is wanted at all, asked after the relogin deferral and
-      // before a msgid is taken. False: dropped (the callback logs why).
+      // before a fcnt is taken. False: dropped (the callback logs why).
       std::function<bool()> admit;
-      // Fill in the command (cmd_case and its payload); the header and the msgid
+      // Fill in the command (cmd_case and its payload); the header and the fcnt
       // are the mechanism's. The payload must outlive the call (own it in a capture).
       std::function<void(hubframes::Down *op)> fill;
       // The frame is on the air (or queued for it); `log_id` is its id, for log lines only.
@@ -172,13 +172,13 @@ namespace esphome
       // Start `req` on channel `ch`, superseding one already in flight there (its
       // ack ids stay recognised). A Fire request (CH_NONE) is sent once.
       void deliver(DeliveryChannel ch, DeliveryRequest req);
-      // The node acknowledged `ack_msg_id`: true when a request owns it.
-      bool ack(uint32_t ack_msg_id);
+      // The node acknowledged `ack_fcnt`: true when a request owns it.
+      bool ack(uint32_t ack_fcnt);
       // An ack whose status says the node will not execute the request (P3).
-      bool refused(uint32_t ack_msg_id, AckStatus status);
+      bool refused(uint32_t ack_fcnt, AckStatus status);
       // Forget the request on `ch`: its timer, its wait and its ack ids.
       void cancel(DeliveryChannel ch);
-      // A new session restarts the msgid space: ids on record would alias new ones.
+      // A new session restarts the fcnt space: ids on record would alias new ones.
       void forget_ids();
       // `base_ms` plus the transmit backlog (see ack_wait_ms).
       uint32_t ack_wait_ms(uint32_t base_ms) const;
@@ -220,7 +220,7 @@ namespace esphome
       bool     fire_(DeliveryRequest &req);
       bool     tx_(DeliveryChannel ch, bool retry);
       uint32_t attempt_(DeliverySlot &s, bool retry, uint32_t *tag);
-      void     log_attempt_(const DeliverySlot &s, bool retry, uint32_t msgid);
+      void     log_attempt_(const DeliverySlot &s, bool retry, uint32_t fcnt);
       uint32_t short_wait_ms_(DeliveryChannel ch);
       void     on_timeout_(DeliveryChannel ch, bool short_wait);
       void     resend_(DeliveryChannel ch);
@@ -238,10 +238,10 @@ namespace esphome
       struct DeliverySlot
       {
         bool     awaiting_ack{false};
-        uint32_t first_msgid{0};   // first msgid used for the current logical command
-        uint32_t last_msgid{0};    // msgid of the most recent (re)transmission
+        uint32_t first_fcnt{0};   // first fcnt used for the current logical command
+        uint32_t last_fcnt{0};    // fcnt of the most recent (re)transmission
         uint8_t  retry_count{0};
-        // Resend::SameBytes: the first attempt's frame (bytes, msgid, and the keys
+        // Resend::SameBytes: the first attempt's frame (bytes, fcnt, and the keys
         // it was sealed under -- a retry hands the SAME binding to the tracker, so
         // a frame sealed before a re-key is never re-tagged, F4), and its tag.
         // Owned by the delivery service (S7).
@@ -265,7 +265,7 @@ namespace esphome
         uint32_t first_tail_ms{0};
         // ---- the generic glue (step 3): Config and Mac channels ----
         // awaiting_ack / retry_count above are shared with it. The ids are every
-        // msgid the current AND earlier requests went out under, with the tag of
+        // fcnt the current AND earlier requests went out under, with the tag of
         // the attempt: an ack for any of them is recognised.
         DeliveryRequest        req;
         deliverypolicy::AckIds acks;

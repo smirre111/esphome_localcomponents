@@ -8,7 +8,7 @@
 // A Class A node wakes on its RTC timer, which counts the 32 kHz crystal. ESP-IDF
 // converts a requested sleep to ticks with the NOMINAL period, so the node's
 // idea of "sleep 600 s" runs at the crystal's error. Each wake beacon reports
-// the RTC tick count at the PREVIOUS beacon's T0, with that beacon's msgId; the
+// the RTC tick count at the PREVIOUS beacon's T0, with that beacon's fcnt; the
 // hub pairs it with its own receive stamp of the same beacon.
 //
 //   x = hub microseconds since the first paired beacon
@@ -19,7 +19,7 @@
 // check-in that is +-8 ppm per pair, and the least-squares slope over the run
 // is what gets reported.
 //
-// Pairing is by msgId, so a lost beacon costs one sample and never pairs a
+// Pairing is by fcnt, so a lost beacon costs one sample and never pairs a
 // tick count with the wrong frame. A tick count lower than the last one means
 // the node powered on (the counter reset): the fit starts over.
 // ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ struct Fit
 {
     // The beacon most recently heard, waiting for its tick count.
     bool     have_heard{false};
-    uint32_t heard_msgid{0};
+    uint32_t heard_fcnt{0};
     int64_t  heard_hub_t0_us{0};
 
     // Origin of the fit and least-squares sums, in microseconds from it.
@@ -57,9 +57,9 @@ struct Fit
 
     // This beacon reported the tick count of the PREVIOUS one. Returns true
     // when it became a sample. Call before noteHeard() for the same beacon.
-    bool addReported(uint32_t prev_msgid, uint64_t prev_t0_ticks)
+    bool addReported(uint32_t prev_fcnt, uint64_t prev_t0_ticks)
     {
-        if (!have_heard || prev_t0_ticks == 0 || prev_msgid != heard_msgid)
+        if (!have_heard || prev_t0_ticks == 0 || prev_fcnt != heard_fcnt)
             return false;
 
         if (have_origin && prev_t0_ticks <= last_ticks)
@@ -82,11 +82,11 @@ struct Fit
         return true;
     }
 
-    // This beacon was heard at hub T0 with this msgId.
-    void noteHeard(uint32_t msgid, int64_t hub_t0_us)
+    // This beacon was heard at hub T0 with this fcnt.
+    void noteHeard(uint32_t fcnt, int64_t hub_t0_us)
     {
         have_heard      = true;
-        heard_msgid     = msgid;
+        heard_fcnt     = fcnt;
         heard_hub_t0_us = hub_t0_us;
     }
 

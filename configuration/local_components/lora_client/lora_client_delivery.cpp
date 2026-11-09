@@ -12,16 +12,16 @@ namespace esphome
   {
 
     // The tracked command's payload (S7): built from the slot's command. The
-    // delivery service frames it under a fresh msgid, keeps the frame (pack once,
+    // delivery service frames it under a fresh fcnt, keeps the frame (pack once,
     // Resend::SameBytes) and re-sends THOSE bytes on every retry.
     //
-    // B4: PACK ONCE. Re-packing was two bugs at once. It minted a fresh msgid, so
+    // B4: PACK ONCE. Re-packing was two bugs at once. It minted a fresh fcnt, so
     // the node's replay filter admitted the retry and executed the command a
     // SECOND time — a blind that moves twice. And re-reading the position at
     // pack time meant a user moving the blind mid-retry produced different
-    // plaintext under a msgid-derived CTR counter block; with a reused msgid that
+    // plaintext under a fcnt-derived CTR counter block; with a reused fcnt that
     // is keystream reuse, and with a fresh one it is a duplicate command. Storing
-    // the frame removes both: same msgid, same ciphertext, and the node can
+    // the frame removes both: same fcnt, same ciphertext, and the node can
     // recognise a duplicate and re-ack it.
     bool LORAListener::encode_ctl_(const DeliveryRequest::FrameFn &frame)
     {
@@ -134,14 +134,14 @@ namespace esphome
       this->deliver_(CH_CONTROL, this->ctl_request_());
     }
 
-    bool LORAListener::on_ctl_acked_(uint32_t ack_msg_id)
+    bool LORAListener::on_ctl_acked_(uint32_t ack_fcnt)
     {
       if (this->parent_ != nullptr)
         this->parent_->releaseListen(this->short_address_);   // the ack is in
       this->dlv_.clear_awaiting(CH_CONTROL);
       this->set_command_failed_(false);
       ESP_LOGI(TAG, "[%s] Tracked op acknowledged (ack_msg_id=%u)", this->get_name().c_str(),
-               (unsigned) ack_msg_id);
+               (unsigned) ack_fcnt);
       if (this->ctl().mark_us != 0)
         this->record_ack_latency_();
       // The nightly sleep takes effect on the hub only now: the node has heard it.
@@ -349,7 +349,7 @@ namespace esphome
         return;   // an acked request needs a channel to wait on
       DeliverySlot &s = this->slots_[ch];
       // A request already in flight is REPLACED by this one, with a fresh ladder
-      // of its own (the budget is per request). Its msgids stay on record in
+      // of its own (the budget is per request). Its fcnts stay on record in
       // s.acks, so a late ack for the old request is still recognised. Its timer
       // needs no cancelling: the first attempt re-arms the same named one, and a
       // request that never arms one leaves it to find nothing awaited.
@@ -368,7 +368,7 @@ namespace esphome
 
     // THE one transmission of a Fire request (step 6): TimeSync, ClientConfig,
     // CoverConfig. Everything that used to be repeated at each of those three call
-    // sites lives here once -- the relogin deferral, the msgid, the header, the
+    // sites lives here once -- the relogin deferral, the fcnt, the header, the
     // encryption decision (v1_frame_: sealed whenever a session is confirmed,
     // plaintext only before one exists), the shape and the failure log. What the
     // frame SAYS, and when it is wanted at all, is the request's.
@@ -376,7 +376,7 @@ namespace esphome
     {
       if (!this->host_.dlv_has_radio() || !req.fill)
         return false;   // no radio, or nothing to say
-      // See relogin_pending_. Checked before the msgid is taken, so a deferred
+      // See relogin_pending_. Checked before the fcnt is taken, so a deferred
       // frame does not burn one; confirm_session_ sends it again.
       if (deliverypolicy::fireDeferred(req.policy, this->host_.dlv_relogin_pending()))
       {
@@ -398,7 +398,7 @@ namespace esphome
       }
       const bool sent = this->host_.dlv_place_fire(req.policy.shape, f, req.what);
       if (sent && req.on_sent)
-        req.on_sent(f.msgid);
+        req.on_sent(f.fcnt);
       return sent;
     }
 
@@ -479,13 +479,13 @@ namespace esphome
     }
 
     // ONE attempt of the slot's request (S7). A Resend::SameBytes retry re-sends
-    // the stored first frame byte for byte under its ORIGINAL msgid -- that is the
-    // point, a fresh msgid would be a new command to the node. Every other attempt
-    // asks the application for the payload, frames it under a fresh msgid and
+    // the stored first frame byte for byte under its ORIGINAL fcnt -- that is the
+    // point, a fresh fcnt would be a new command to the node. Every other attempt
+    // asks the application for the payload, frames it under a fresh fcnt and
     // places it. A SameBytes request whose stored frame is gone (a session change
     // cleared it) is re-packed: a NEW command, so its id range moves with it
     // (security review finding 1: the old range would reject the node's ack).
-    // Returns the msgid, 0 when nothing was framed.
+    // Returns the fcnt, 0 when nothing was framed.
     uint32_t DeliveryService::attempt_(DeliverySlot &s, bool retry, uint32_t *tag)
     {
       const bool same_bytes = s.req.policy.resend == deliverypolicy::Resend::SameBytes;
@@ -494,7 +494,7 @@ namespace esphome
         *tag = s.frame_tag;
         if (s.req.place)
           s.req.place(s.frame, DeliveryAttempt{true, true, s.frame_tag});
-        return s.frame.msgid;
+        return s.frame.fcnt;
       }
       if (retry && same_bytes)
         ESP_LOGW(TAG, "[%s] no stored frame to retransmit — re-packing", this->host_.dlv_name());
@@ -519,14 +519,14 @@ namespace esphome
           s.frame_tag = *tag;
         }
         if (retry)
-          s.first_msgid = f.msgid;   // a re-pack is a new command: its range moves
-        return f.msgid;              // a SameBytes id is taken even when packing failed
+          s.first_fcnt = f.fcnt;   // a re-pack is a new command: its range moves
+        return f.fcnt;              // a SameBytes id is taken even when packing failed
       }
-      return framed ? f.msgid : 0;
+      return framed ? f.fcnt : 0;
     }
 
     // The attempt lines of a Resend::SameBytes request (the Control channel).
-    void DeliveryService::log_attempt_(const DeliverySlot &s, bool retry, uint32_t msgid)
+    void DeliveryService::log_attempt_(const DeliverySlot &s, bool retry, uint32_t fcnt)
     {
       if (s.req.policy.resend != deliverypolicy::Resend::SameBytes)
         return;
@@ -534,37 +534,37 @@ namespace esphome
       {
         if (s.req.sent_label != nullptr)
           ESP_LOGI(TAG, "[%s] %s sent (msgid=%u) — awaiting ack", this->host_.dlv_name(),
-                   s.req.sent_label, (unsigned) msgid);
+                   s.req.sent_label, (unsigned) fcnt);
       }
       else if (s.short_wait_spent && s.retry_count == 0)
         ESP_LOGW(TAG, "[%s] %s burst fallback (msgid=%u)", this->host_.dlv_name(), s.req.what,
-                 (unsigned) msgid);
+                 (unsigned) fcnt);
       else
         ESP_LOGW(TAG, "[%s] %s retransmit %u/%u (msgid=%u)", this->host_.dlv_name(), s.req.what,
-                 (unsigned) s.retry_count, (unsigned) s.req.policy.max_retries, (unsigned) msgid);
+                 (unsigned) s.retry_count, (unsigned) s.req.policy.max_retries, (unsigned) fcnt);
     }
 
     bool DeliveryService::tx_(DeliveryChannel ch, bool retry)
     {
       DeliverySlot &s = this->slots_[ch];
       uint32_t tag = 0;
-      const uint32_t msgid = this->attempt_(s, retry, &tag);
-      this->log_attempt_(s, retry, msgid);
-      if (msgid != 0)
+      const uint32_t fcnt = this->attempt_(s, retry, &tag);
+      this->log_attempt_(s, retry, fcnt);
+      if (fcnt != 0)
       {
-        s.acks.add(msgid, tag);
-        s.last_msgid = msgid;
+        s.acks.add(fcnt, tag);
+        s.last_fcnt = fcnt;
         if (!retry)
-          s.first_msgid = msgid;
+          s.first_fcnt = fcnt;
       }
       // A retry that could not be built still keeps the ladder running to its
       // end; a first attempt that could not be built starts nothing.
-      if (s.req.policy.mode == deliverypolicy::Mode::Acked && (msgid != 0 || retry))
+      if (s.req.policy.mode == deliverypolicy::Mode::Acked && (fcnt != 0 || retry))
       {
         s.awaiting_ack = true;
         this->arm_timer(ch);
       }
-      return msgid != 0;
+      return fcnt != 0;
     }
 
     void DeliveryService::arm_timer(DeliveryChannel ch)
@@ -730,18 +730,18 @@ namespace esphome
       this->done_(ch);
     }
 
-    // The node acknowledged `ack_msg_id`. A request that owns it is told which
+    // The node acknowledged `ack_fcnt`. A request that owns it is told which
     // attempt was answered (its tag) and says whether that completes it.
-    bool DeliveryService::ack(uint32_t ack_msg_id)
+    bool DeliveryService::ack(uint32_t ack_fcnt)
     {
       // Highest channel first: a GridSync takes an id before a schedule push would.
       for (uint8_t c = kDeliveryChannels; c-- > 0;)
       {
         DeliverySlot &s = this->slots_[c];
-        const int i = s.acks.find(ack_msg_id);
+        const int i = s.acks.find(ack_fcnt);
         if (i < 0)
           continue;
-        if (!s.req.on_delivered || s.req.on_delivered(DeliveryConfirm{s.acks.tag[i], ack_msg_id}))
+        if (!s.req.on_delivered || s.req.on_delivered(DeliveryConfirm{s.acks.tag[i], ack_fcnt}))
         {
           this->cancel((DeliveryChannel) c);
           this->done_((DeliveryChannel) c);
@@ -760,7 +760,7 @@ namespace esphome
       s.acks.clear();
     }
 
-    // A new login restarts the msgid space, so ids on record would alias new ones
+    // A new login restarts the fcnt space, so ids on record would alias new ones
     // -- on every channel, the Control channel included (review HB15: a command
     // waiting behind the relogin kept old-session ids a new-session FCNT could
     // match). The requests themselves go on (the next attempt is sent under a
@@ -792,13 +792,13 @@ namespace esphome
                (unsigned) this->link_.ack_latency().maxDelayMs((uint32_t) (now_us / 1000)));
     }
 
-    void LORAListener::handle_command_ack_(uint32_t ack_msg_id, AckStatus status)
+    void LORAListener::handle_command_ack_(uint32_t ack_fcnt, AckStatus status)
     {
       this->acked_since_confirm_ = true;
       if (status == ACK_STATUS__ACK_OK)
-        this->dlv_ack_(ack_msg_id);
+        this->dlv_ack_(ack_fcnt);
       else
-        this->dlv_refused_(ack_msg_id, status);
+        this->dlv_refused_(ack_fcnt, status);
     }
 
     // The node HEARD an Acked frame and answered that it will not execute it:
@@ -806,15 +806,15 @@ namespace esphome
     // review P3), ACK_BUSY reserved. Retrying the same bytes cannot change that,
     // and the session is demonstrably alive, so the request fails at once:
     // no retries, no relogin (unlike a ladder that ran out without any answer).
-    bool DeliveryService::refused(uint32_t ack_msg_id, AckStatus status)
+    bool DeliveryService::refused(uint32_t ack_fcnt, AckStatus status)
     {
       for (uint8_t c = kDeliveryChannels; c-- > 0;)
       {
         DeliverySlot &s = this->slots_[c];
-        if (s.acks.find(ack_msg_id) < 0)
+        if (s.acks.find(ack_fcnt) < 0)
           continue;
         ESP_LOGE(TAG, "[%s] %s refused by the node (status %d, FCNT %u) — failed, not retried",
-                 this->host_.dlv_name(), s.req.what, (int) status, (unsigned) ack_msg_id);
+                 this->host_.dlv_name(), s.req.what, (int) status, (unsigned) ack_fcnt);
         this->cancel((DeliveryChannel) c);
         if (s.req.on_abandon)
           s.req.on_abandon();

@@ -37,7 +37,7 @@ namespace esphome
     void MacPingStream::build_frame_()
     {
       hubframes::Down op_message = {};
-      uint32_t msgid = 0;
+      uint32_t fcnt = 0;
 
       // MAC-2 OFF (the default): a DEDICATED counter, deliberately not
       // incrTxFcnt().
@@ -62,7 +62,7 @@ namespace esphome
       if (this->crypto_ && this->host_.stream_session_confirmed())
         reserved = this->host_.stream_take_fcnt(&this->fcnts_);
       const bool encrypt_this_one = reserved != 0;
-      msgid = encrypt_this_one ? reserved : ++this->msgid_;
+      fcnt = encrypt_this_one ? reserved : ++this->plain_fcnt_;
       if (this->crypto_ && !encrypt_this_one)
       {
         this->crypto_ = false;   // say it once
@@ -93,7 +93,7 @@ namespace esphome
       op_message.maccontrol = &mc;
 
       DeliveryFrame f;
-      if (!this->host_.stream_frame(&op_message, msgid, encrypt_this_one, &f))
+      if (!this->host_.stream_frame(&op_message, fcnt, encrypt_this_one, &f))
       {
         ESP_LOGE(TAG, "[%s] MAC ping: failed to pack", this->host_.stream_name());
         this->frame_len_ = 0;
@@ -277,7 +277,7 @@ namespace esphome
                  this->host_.stream_name());
       }
 
-      // The ping msgids are their own sequence and will not satisfy the node's
+      // The ping fcnts are their own sequence and will not satisfy the node's
       // replay window, so a run needs MAC-1 off on the node (M3). Said out loud
       // because the failure — every ping silently rejected — looks exactly like
       // a reception problem.
@@ -595,7 +595,7 @@ namespace esphome
       mt.enablecounter    = this->enable_counter_;
       mt.enablecrypto     = this->enable_crypto_;
       mt.macecho          = this->mac_echo_;
-      // The ruler mark, separate from msgid. msgid is also the CTR counter-block input
+      // The ruler mark, separate from fcnt. fcnt is also the CTR counter-block input
       // and the replay-filter key, so the test must be able to retransmit
       // without touching either; seq is free to be a plain monotonic index, and
       // a frame lost to the air leaves a GAP in it rather than shifting every

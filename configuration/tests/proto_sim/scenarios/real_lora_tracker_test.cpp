@@ -49,7 +49,7 @@ View *unpackView(const uint8_t *data, size_t len) {
     v->hdr.destaddress   = w.dst;
     v->hdr.destsubnet    = w.subnet;
     v->hdr.senderaddress = w.src;
-    v->hdr.msgid         = w.fcnt;
+    v->hdr.fcnt         = w.fcnt;
     v->hdr.burstindex    = w.burst_idx;
     v->hdr.burstcount    = w.burst_cnt;
     v->hdr.onmark        = w.onMark();
@@ -175,7 +175,7 @@ TEST(RealTracker, EachCopyIsStampedWithItsOwnBurstIndex) {
         ASSERT_NE(m->header, nullptr);
         EXPECT_EQ(m->header->burstcount, 5u) << "copy " << i;
         EXPECT_EQ(m->header->burstindex, (uint32_t) i);
-        EXPECT_EQ(m->header->msgid, 42u) << "re-stamping must not disturb the msgid";
+        EXPECT_EQ(m->header->fcnt, 42u) << "re-stamping must not disturb the msgid";
         freeView(m);
     }
 }
@@ -1726,7 +1726,7 @@ TEST(RealTrackerBeacon, ALaterBeaconCarriesItsOwnRoundAndTheFullBroadcastHeader)
     EXPECT_EQ(msg->header->destaddress, (uint32_t) LORATracker::broadcastAddressing);
     EXPECT_EQ(msg->header->destsubnet, (uint32_t) LORATracker::subnetAddressing);
     EXPECT_EQ(msg->header->senderaddress, (uint32_t) esphome::lora_tracker::kHubAddress);
-    EXPECT_EQ(msg->header->msgid, 0u);
+    EXPECT_EQ(msg->header->fcnt, 0u);
     EXPECT_EQ(msg->header->burstindex, 0u);
     EXPECT_EQ(msg->header->burstcount, 1u) << "one copy, not a burst";
     {

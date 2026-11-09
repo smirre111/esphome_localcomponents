@@ -299,7 +299,7 @@ TEST(HubWireUplink, EachPortDecodesAsItsOwnMessage) {
         ASSERT_EQ(u.view()->proto_case, hubframes::UL_POSITION);
         EXPECT_FLOAT_EQ(u.view()->position->position, 1.0f);
         EXPECT_EQ(u.view()->header->senderaddress, 0x12u);
-        EXPECT_EQ(u.view()->header->msgid, 10u) << "FCNT is the msgid";
+        EXPECT_EQ(u.view()->header->fcnt, 10u) << "FCNT is the msgid";
     }
     {   // PORT 0: MacAck needs FLAGS.ACK; ACKED_FCNT becomes ack_msg_id
         const mv::Vector &v = vec("mac_ack");
@@ -311,7 +311,7 @@ TEST(HubWireUplink, EachPortDecodesAsItsOwnMessage) {
         h.acked_fcnt = 7;
         ASSERT_TRUE(u.parse(h, v.body, v.body_len));
         ASSERT_EQ(u.view()->proto_case, hubframes::UL_ACK);
-        EXPECT_EQ(u.view()->ack->ack_msg_id, 7u);
+        EXPECT_EQ(u.view()->ack->ack_fcnt, 7u);
         ASSERT_NE(u.view()->ack->phase, nullptr) << "the phase report still rides on the ack";
     }
     {   // PORT 1: ClientRegister
@@ -688,7 +688,7 @@ TEST(WireBurstFrame, TouchesOnlyTheDocumentedOffsets) {
     mac0::WireBurstFrame fr(in.data(), in.size());
     ASSERT_TRUE(fr.ok());
     ASSERT_TRUE(fr.encrypted());
-    EXPECT_EQ(fr.msgid(), v.fcnt);
+    EXPECT_EQ(fr.fcnt(), v.fcnt);
     fr.setBurst(9, true);
     fr.setIndex(4);
     Bytes out(fr.packedSize());

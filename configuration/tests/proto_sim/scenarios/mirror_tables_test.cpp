@@ -54,11 +54,14 @@ SAME_CASE(UL_GRIDSYNCREQUEST);
 // ---- field layout: same names at the same offsets ---------------------------
 #define SAME_FIELD(H, N, f) static_assert(offsetof(H, f) == offsetof(N, f), \
                                           #f " moved between " #H " and " #N)
+// A field the hub renamed (review D24: the FCNT is 'fcnt' on the hub, still
+// 'msgid' in the node's mirror).
+#define SAME_FIELD_AS(H, hf, N, nf) static_assert(offsetof(H, hf) == offsetof(N, nf),                                                   #hf " / " #nf " moved between " #H " and " #N)
 static_assert(sizeof(hubframes::Hdr) == sizeof(MacFrameHdr), "Hdr / MacFrameHdr differ");
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, destaddress);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, destsubnet);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, senderaddress);
-SAME_FIELD(hubframes::Hdr, MacFrameHdr, msgid);
+SAME_FIELD_AS(hubframes::Hdr, fcnt, MacFrameHdr, msgid);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, burstindex);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, burstcount);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, onmark);
@@ -67,7 +70,7 @@ SAME_FIELD(hubframes::Hdr, MacFrameHdr, fireround);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, fireoffsetus);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, sessionnonce);
 static_assert(sizeof(hubframes::UpAck) == sizeof(UplinkAck), "UpAck / UplinkAck differ");
-SAME_FIELD(hubframes::UpAck, UplinkAck, ack_msg_id);
+SAME_FIELD_AS(hubframes::UpAck, ack_fcnt, UplinkAck, ack_msg_id);
 SAME_FIELD(hubframes::UpAck, UplinkAck, status);
 SAME_FIELD(hubframes::UpAck, UplinkAck, phase);
 static_assert(sizeof(hubframes::Down) == sizeof(DownlinkView), "Down / DownlinkView differ");

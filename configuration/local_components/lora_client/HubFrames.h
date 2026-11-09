@@ -35,7 +35,7 @@ struct Hdr
     uint8_t  destaddress{0};
     uint8_t  destsubnet{0};
     uint8_t  senderaddress{0};
-    uint32_t msgid{0};          // the FCNT
+    uint32_t fcnt{0};          // the FCNT
     uint8_t  burstindex{0};
     uint8_t  burstcount{0};
     bool     onmark{false};
@@ -100,7 +100,7 @@ enum UpCase : int
 
 struct UpAck
 {
-    uint32_t     ack_msg_id{0};   // the acknowledged FCNT (header ACKED_FCNT)
+    uint32_t     ack_fcnt{0};   // the acknowledged FCNT (header ACKED_FCNT)
     AckStatus    status{ACK_STATUS__ACK_OK};
     PhaseReport *phase{nullptr};
 };

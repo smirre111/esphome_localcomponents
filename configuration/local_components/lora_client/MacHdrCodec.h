@@ -44,7 +44,7 @@ inline bool fromHdr(const hubframes::Hdr *h, mac::MacHdr *out)
     out->dst           = static_cast<mac::Addr>(h->destaddress);
     out->src           = static_cast<mac::Addr>(h->senderaddress);
     out->subnet        = static_cast<uint8_t>(h->destsubnet);
-    out->fcnt          = h->msgid;
+    out->fcnt          = h->fcnt;
     out->burst_idx     = static_cast<uint8_t>(h->burstindex);
     out->burst_cnt     = static_cast<uint8_t>(h->burstcount);
     out->on_mark       = h->onmark;

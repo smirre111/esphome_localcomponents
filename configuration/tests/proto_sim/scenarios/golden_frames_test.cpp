@@ -192,7 +192,7 @@ struct GoldenHub {
 
     void ackCtl() {
         auto &p = static_cast<GProbe &>(rol);
-        p.handle_command_ack_(p.ctl().last_msgid);
+        p.handle_command_ack_(p.ctl().last_fcnt);
     }
 
     // The node acks every acked config push in turn (review rollout-3 D1): the
@@ -202,7 +202,7 @@ struct GoldenHub {
         for (int i = 0; i < 8; ++i) {
             auto &s = rol.dlv_slot_for_test(esphome::lora_tracker::CH_SETUP);
             if (!s.awaiting_ack) break;
-            p.handle_command_ack_(s.last_msgid);
+            p.handle_command_ack_(s.last_fcnt);
         }
     }
 

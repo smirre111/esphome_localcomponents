@@ -56,7 +56,7 @@ public:
     bool ok() const { return this->ok_; }
     // An authenticated frame: every copy needs its own tag (seal()).
     bool encrypted() const { return this->ok_ && this->hdr_.auth() != macwire::Auth::None; }
-    uint32_t msgid() const { return this->ok_ ? this->hdr_.fcnt : 0u; }
+    uint32_t fcnt() const { return this->ok_ ? this->hdr_.fcnt : 0u; }
 
     void setBurst(int count, bool on_mark)
     {
