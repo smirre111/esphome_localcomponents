@@ -108,3 +108,29 @@ without the node tree).
 `vendor_list_hub_vs_node` gate compares the two lists, so the hub deletes its copies, their shims
 and its `cmake/vendored_shared_headers.txt` entries in the same step as that node commit (prepared,
 not applied yet). `TxQueue.h` stays vendored: the hub firmware does include it.
+
+### 2026-11-09 update (hub `hub-decisions`, node main 15e855c): D5 step 2, verified request
+
+Checked by `#include` grep over every hub firmware source in `local_components/` (tests excluded):
+the hub firmware includes **none** of `MacSublayers.h`, `PhaseTracker.h`, `GridState.h`,
+`AckCache.h`, `ModeTestPolicy.h` (they include each other / TimedGrid.h / LoraTiming.h only).
+Every other vendored file IS included by hub firmware (FrameCrypto, Scheduler, ScheduleText,
+LoraTiming, TimedGrid, TimedModePolicy, ClassAWindows, MacFunnel, TxQueue, PendingData,
+Mac1Freshness, MacSap, Sequencer, MacWire), except `MacWireVectors.h`, which stays on purpose (the
+shared test vectors both suites pin).
+
+**Exact node change requested:** in `proto/regen_stubs.sh`, delete these five lines from the
+vendored list:
+
+    "main/include/MacSublayers.h:MacSublayers.h" \
+    "main/include/PhaseTracker.h:PhaseTracker.h" \
+    "main/include/GridState.h:GridState.h" \
+    "main/include/ModeTestPolicy.h:ModeTestPolicy.h" \
+    "main/include/AckCache.h:AckCache.h" \
+
+**Hub step that lands with it** (one hub commit, prepared, not applied while the gate would go red):
+delete `local_components/lora_client/{MacSublayers,PhaseTracker,GridState,ModeTestPolicy,AckCache}.h`,
+their re-export shims in `tests/proto_sim/shims/esphome/components/lora_client/`, and the five
+entries of `tests/proto_sim/cmake/vendored_shared_headers.txt`. The hub tests that use them
+(the six header tests since 7d22afe, plus e2e / seam / real_cmd_dispatcher, which already compile
+real node code) then resolve them from the node tree.
