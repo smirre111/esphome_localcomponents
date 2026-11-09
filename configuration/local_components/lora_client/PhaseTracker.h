@@ -13,7 +13,7 @@
 // whole reason the class exists rather than a pair of members on the
 // dispatcher.
 //
-// noteDriftSample() is called BEFORE parsing, by design: a drift measurement
+// The removed DriftTest took its sample BEFORE parsing, by design: a drift measurement
 // only cares when a frame ARRIVED, and every step after that point can
 // legitimately discard it (CRC, replay, a plaintext frame rejected because the
 // session requires encryption). Taking the timestamp early is correct for

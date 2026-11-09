@@ -42,7 +42,6 @@ typedef struct MacControl MacControl;
 typedef struct ModeTest ModeTest;
 typedef struct Hist Hist;
 typedef struct ModeTestReport ModeTestReport;
-typedef struct DriftTest DriftTest;
 
 
 /* --- enums --- */
@@ -70,11 +69,7 @@ typedef enum _ModeTest__Mode {
   MODE_TEST__MODE__MODE_UNSPEC = 0,
   MODE_TEST__MODE__MODE_A = 1,
   MODE_TEST__MODE__MODE_B = 2,
-  MODE_TEST__MODE__MODE_C = 3,
-  /*
-   * deliberate arm error, for T_detect (bench only)
-   */
-  MODE_TEST__MODE__MODE_SWEEP = 4
+  MODE_TEST__MODE__MODE_C = 3
     PROTOBUF_C__FORCE_ENUM_TO_BE_INT_SIZE(MODE_TEST__MODE)
 } ModeTest__Mode;
 typedef enum _AckStatus {
@@ -142,10 +137,6 @@ typedef enum _NodeMode {
 typedef enum _WakeReason {
   WAKE_REASON__WAKE_BOOT = 0,
   /*
-   * woke for a scheduled entry
-   */
-  WAKE_REASON__WAKE_TIMER_EVENT = 1,
-  /*
    * periodic check-in, no entry due
    */
   WAKE_REASON__WAKE_TIMER_CHECKIN = 2,
@@ -167,7 +158,6 @@ typedef enum _WakeReason {
 
 typedef enum {
   HUB_MAC_PDU__PDU__NOT_SET = 0,
-  HUB_MAC_PDU__PDU_DRIFTTEST = 18,
   HUB_MAC_PDU__PDU_MACCONTROL = 20,
   HUB_MAC_PDU__PDU_GRIDSYNC = 21,
   HUB_MAC_PDU__PDU_MODETEST = 22,
@@ -184,7 +174,6 @@ struct  HubMacPdu
   ProtobufCMessage base;
   HubMacPdu__PduCase pdu_case;
   union {
-    DriftTest *drifttest;
     GridBeacon *gridbeacon;
     GridDemote *griddemote;
     GridSync *gridsync;
@@ -838,8 +827,9 @@ struct  GridSync
    */
   uint32_t uloffsetus;
   /*
-   * BENCH ONLY (HW-2 sweep): arm the window deliberately early/late. A node
-   * not flagged as a bench unit refuses a non-zero value.
+   * Was the HW-2 sweep's deliberate arm offset. IGNORED by the node since
+   * 2026-11-08 (review D7); kept, not reserved, because the shared
+   * MacWireVectors grid_sync_copy3 vector carries it (-2000). Send 0.
    */
   int32_t armoffsetus;
   /*
@@ -1003,7 +993,7 @@ struct  ModeTest
   uint32_t durations;
   ModeTest__Mode mode;
   /*
-   * For MODE_A / MODE_SWEEP it must be INCOMMENSURATE with the node's RX
+   * For MODE_A it must be INCOMMENSURATE with the node's RX
    * interval, or frames landing in an RX-off gap do so forever.
    */
   uint32_t gridperiodms;
@@ -1012,22 +1002,10 @@ struct  ModeTest
    */
   uint32_t copies;
   /*
-   * pad to N bytes: sweep time on air
-   */
-  uint32_t payloadpadto;
-  /*
-   * partial reports; 0 = final only
-   */
-  uint32_t reporteverys;
-  /*
    * The hub's monotonic mark index (the ruler), separate from the FCNT so the
    * test can retransmit without disturbing the replay window.
    */
   uint32_t seq;
-  /*
-   * MODE_SWEEP only
-   */
-  int32_t armoffsetus;
   /*
    * Sublayers (mac-layer.md section 4), both DEFAULT OFF here so each one's
    * cost is a measured delta.
@@ -1051,7 +1029,7 @@ struct  ModeTest
 };
 #define MODE_TEST__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&mode_test__descriptor) \
-    , 0, 0, MODE_TEST__MODE__MODE_UNSPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , 0, 0, MODE_TEST__MODE__MODE_UNSPEC, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*
@@ -1165,29 +1143,6 @@ struct  ModeTestReport
 #define MODE_TEST_REPORT__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&mode_test_report__descriptor) \
     , 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-
-
-/*
- * Bench tool: characterise node-vs-hub clock drift (DriftEstimator.h). The node
- * holds the radio in continuous RX (~11 mA), so it caps durationS and ends the
- * test itself, and starts one only on a bench node from an authenticated frame.
- */
-struct  DriftTest
-{
-  ProtobufCMessage base;
-  protobuf_c_boolean enable;
-  /*
-   * node auto-exits after this; 0 = node default
-   */
-  uint32_t durations;
-  /*
-   * hub burst cadence while active; 0 = hub default
-   */
-  uint32_t gridperiodms;
-};
-#define DRIFT_TEST__INIT \
- { PROTOBUF_C_MESSAGE_INIT (&drift_test__descriptor) \
-    , 0, 0, 0 }
 
 
 /* HubMacPdu methods */
@@ -1703,25 +1658,6 @@ ModeTestReport *
 void   mode_test_report__free_unpacked
                      (ModeTestReport *message,
                       ProtobufCAllocator *allocator);
-/* DriftTest methods */
-void   drift_test__init
-                     (DriftTest         *message);
-size_t drift_test__get_packed_size
-                     (const DriftTest   *message);
-size_t drift_test__pack
-                     (const DriftTest   *message,
-                      uint8_t             *out);
-size_t drift_test__pack_to_buffer
-                     (const DriftTest   *message,
-                      ProtobufCBuffer     *buffer);
-DriftTest *
-       drift_test__unpack
-                     (ProtobufCAllocator  *allocator,
-                      size_t               len,
-                      const uint8_t       *data);
-void   drift_test__free_unpacked
-                     (DriftTest *message,
-                      ProtobufCAllocator *allocator);
 /* --- per-message closures --- */
 
 typedef void (*HubMacPdu_Closure)
@@ -1805,9 +1741,6 @@ typedef void (*Hist_Closure)
 typedef void (*ModeTestReport_Closure)
                  (const ModeTestReport *message,
                   void *closure_data);
-typedef void (*DriftTest_Closure)
-                 (const DriftTest *message,
-                  void *closure_data);
 
 /* --- services --- */
 
@@ -1849,7 +1782,6 @@ extern const ProtobufCMessageDescriptor mode_test__descriptor;
 extern const ProtobufCEnumDescriptor    mode_test__mode__descriptor;
 extern const ProtobufCMessageDescriptor hist__descriptor;
 extern const ProtobufCMessageDescriptor mode_test_report__descriptor;
-extern const ProtobufCMessageDescriptor drift_test__descriptor;
 
 PROTOBUF_C__END_DECLS
 

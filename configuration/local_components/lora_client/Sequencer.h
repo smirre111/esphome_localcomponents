@@ -58,7 +58,7 @@ static constexpr uint32_t kForwardWindow = 1024;
 // One word of bitmap; an attacker replaying something old gets 64 ids of reach.
 static constexpr uint32_t kReplayWindow = 64;
 // The CTR counter block holds 31 bits of the frame counter (FrameCrypto.h
-// kMsgidCtrLimit): an id >= 2^31 would reuse a keystream.
+// kFcntCtrLimit): an id >= 2^31 would reuse a keystream.
 static constexpr uint32_t kFcntLimit = 0x80000000u;
 
 struct Config

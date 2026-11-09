@@ -141,8 +141,8 @@ inline void buildCtrInitialBlock(uint32_t session_id, uint32_t node_addr,
 {
     u32be(session_id, out);
     u32be(node_addr, out + 4);
-    const uint32_t dir_msgid = (downlink ? 0x80000000u : 0u) | (msgid & 0x7FFFFFFFu);
-    u32be(dir_msgid, out + 8);
+    const uint32_t dir_fcnt = (downlink ? 0x80000000u : 0u) | (msgid & 0x7FFFFFFFu);
+    u32be(dir_fcnt, out + 8);
     u32be(block_idx, out + 12);
 }
 
@@ -158,21 +158,28 @@ inline void buildCtrInitialBlock(uint32_t session_id, uint32_t node_addr,
 // 2^31 frames is years of continuous traffic, which is exactly why this is
 // written down rather than left to the arithmetic never being reached: a
 // counter restored from NVS, or a corrupt one, gets there at once.
-static constexpr uint32_t kMsgidCtrLimit = 0x80000000u;
+static constexpr uint32_t kFcntCtrLimit = 0x80000000u;
 
 // May a frame carrying this msgid be sealed (uplink) or opened (downlink)?
 // 0x7FFFFFFF is the last usable value; 0x80000000 and above are refused.
-inline bool msgidFitsCtr(uint32_t msgid)
+inline bool fcntFitsCtr(uint32_t fcnt)
 {
-    return msgid < kMsgidCtrLimit;
+    return fcnt < kFcntCtrLimit;
 }
 
 // Allocation form: given the LAST msgid handed out, is the next one still
 // inside the CTR space? Written as a comparison against the limit minus one
 // so that last == 0xFFFFFFFF cannot wrap `last + 1` back to 0 and pass.
-inline bool nextMsgidFitsCtr(uint32_t last_msgid)
+inline bool nextFcntFitsCtr(uint32_t last_fcnt)
 {
-    return last_msgid < kMsgidCtrLimit - 1u;
+    return last_fcnt < kFcntCtrLimit - 1u;
 }
+
+// DEPRECATED v0 names (review D24): the hub's vendored copy of this file is
+// still used under them. Delete once the hub uses the FCNT names (node
+// handoff, DECISIONS, step H-D24).
+static constexpr uint32_t kMsgidCtrLimit = kFcntCtrLimit;
+inline bool msgidFitsCtr(uint32_t fcnt) { return fcntFitsCtr(fcnt); }
+inline bool nextMsgidFitsCtr(uint32_t last_fcnt) { return nextFcntFitsCtr(last_fcnt); }
 
 }  // namespace framecrypto

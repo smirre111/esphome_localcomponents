@@ -45,7 +45,8 @@ enum class Mode : uint8_t {
     A      = 1,
     B      = 2,
     C      = 3,
-    Sweep  = 4,
+    // 4 was Sweep (MODE_SWEEP, the HW-2 arm sweep, removed 2026-11-08, review
+    // D7). A request carrying it is refused as unimplemented (modeIsImplemented).
 };
 
 // --- Duration --------------------------------------------------------------
@@ -53,9 +54,8 @@ enum class Mode : uint8_t {
 // The NODE owns this, not the hub. Every task loop blocks on its queue with
 // portMAX_DELAY, so a poll would not end the test; a one-shot esp_timer does,
 // independently of whether the hub is still there. Same shape as
-// drift::testDurationS, and deliberately a shorter ceiling: ModeTest can hold
-// the radio in continuous RX AND force a mode, so an abandoned run costs more
-// than an abandoned drift test.
+// the removed DriftTest's duration policy, and deliberately a shorter
+// ceiling: ModeTest can force a mode, so an abandoned run costs more.
 static constexpr uint32_t kDefaultDurationS = 300;    // 5 min
 static constexpr uint32_t kMaxDurationS     = 900;    // 15 min
 
@@ -111,12 +111,9 @@ constexpr uint32_t remainingDurationS(uint32_t duration_s, uint32_t seq,
 // frames sent, zero heard. DriftTest uses 1100 ms for exactly this reason.
 //
 // MODE_B inverts it. There the period must be exactly the round and phase-locked
-// to the node's slot; that IS the mode. **MODE_SWEEP inverts it for the same
-// reason** (changed 2026-09-19 — see periodMattersFor below): a sweep arms one
-// timed window per round against the grid, offset deliberately, so it is not a
-// free-running receiver either and its period must also BE the round. The rule
-// therefore applies to MODE_A (and Unspec) only, and it is enforced at arm time
-// rather than left for an operator to rediscover.
+// to the node's slot; that IS the mode. The rule therefore applies to MODE_A
+// (and Unspec) only, and it is enforced at arm time rather than left for an
+// operator to rediscover.
 //
 // MEASURED 2026-09-12, and it refutes the paragraph above. The old test was
 // `(a % b) == 0` — divisibility — and 1100 ms passes it, which is why 1100 was
@@ -175,26 +172,9 @@ constexpr bool periodsAreCommensurate(uint32_t grid_period_ms, uint32_t rx_inter
     return periodsPhaseLock(grid_period_ms, rx_interval_ms, window_us);
 }
 
-// MODE_SWEEP IS EXEMPT TOO, for the same reason MODE_B is — MEASURED 2026-09-19.
-//
-// The commensurate check exists for a FREE-RUNNING receiver: a period whose gcd
-// with the 500 ms RX interval exceeds the window means marks land at a few fixed
-// phases and a sweeping window may never see them. A sweep is not free-running.
-// It arms one timed window per round against the grid, offset deliberately, so
-// its period must BE the round exactly as Mode B's is — "the grid period must BE
-// the round and phase-locked to the node's slot. That is the mode, not a
-// mistake."
-//
-// Leaving Sweep in here forced it onto an incommensurate 1093 ms while the hub
-// places each mark on the next free round T0, 1500 ms apart. The timer then runs
-// 407 ms further behind on every tick: 274 ticks x 1.5 s = 411 s of marks inside
-// a 299 s test, the tail scheduled ~112 s after it ends. Measured result —
-// 274/274 marks placed, only 53 of 196 delivered, gaps 143, FER_link 730 000 ppm,
-// windows 0/0, and the node never promoted. The backlog is structural.
-//
-// Both halves were needed: the hub must PLACE sweep marks (it gated placement on
-// mode 2 alone), and the period must be the round so placement has nothing to
-// queue behind.
+// The commensurate check exists for a FREE-RUNNING receiver (Mode A). A
+// timed-window mode arms one window per round against the grid, so its
+// period must BE the round.
 constexpr bool periodMattersFor(Mode m)
 {
     return m == Mode::A || m == Mode::Unspec;
@@ -202,23 +182,24 @@ constexpr bool periodMattersFor(Mode m)
 
 // --- Which modes the node must actually be able to enter -------------------
 //
-// A timed window is armed against a grid, so MODE_B and MODE_SWEEP are only
-// meaningful on a node that has adopted one. Refusing is the whole point:
+// A timed window is armed against a grid, so MODE_B is only meaningful on a
+// node that has adopted one. Refusing is the whole point:
 // arming timed RX with no anchor does not measure Mode B badly, it measures
 // nothing at all while the node stops hearing the hub for the duration.
 constexpr bool modeNeedsGrid(Mode m)
 {
-    return m == Mode::B || m == Mode::Sweep;
+    return m == Mode::B;
 }
 
 // MODE_C is not a flag this handler can flip. Class A is a sleep discipline —
 // the node wakes, transmits, opens RX1/RX2 and sleeps again — so a Class A
 // measurement is a different test shape, not this one with a different mode
 // byte. Refusing it is what stops the report from carrying `mode = 3` over a
-// run that was nothing of the kind.
+// run that was nothing of the kind. Any value the node does not know -- 4, the
+// removed MODE_SWEEP, among them -- is refused the same way rather than run.
 constexpr bool modeIsImplemented(Mode m)
 {
-    return m != Mode::C;
+    return m == Mode::Unspec || m == Mode::A || m == Mode::B;
 }
 
 // What the report's `mode` field must say: what the node APPLIED, derived from
@@ -231,9 +212,6 @@ constexpr bool modeIsImplemented(Mode m)
 // it from state means a mode that fails to apply cannot be reported as if it
 // had.
 //
-// Sweep survives as itself: it IS a timed-window run, distinguished by the
-// deliberate arm offset rather than by the RX discipline.
-//
 // What this still cannot say is whether timed RX was ACTIVE. Enabling it makes
 // Mode B reachable; timedRxActive() re-runs the full promotion test at every
 // mark, so a node whose phase never becomes trustworthy reports `mode = 2` over
@@ -242,7 +220,7 @@ constexpr bool modeIsImplemented(Mode m)
 // not happen.
 constexpr Mode modeApplied(Mode requested, bool timed_rx_on)
 {
-    if (requested == Mode::Sweep) return Mode::Sweep;
+    (void) requested;
     return timed_rx_on ? Mode::B : Mode::A;
 }
 
@@ -252,13 +230,14 @@ enum class ArmRefusal : uint8_t {
     None = 0,
     NotAuthenticated,   // the arming frame was plaintext — see NodeContext
     NoSession,          // no session at all — see the banner
-    SweepOffBench,      // MODE_SWEEP deliberately mis-arms windows
+    RemovedSweepOffBench_,  // 3: was SweepOffBench (MODE_SWEEP, removed 2026-11-08);
+                            // never returned, kept so later values keep their wire numbers
     CommensurateGrid,   // would measure nothing; see periodsAreCommensurate
     BatteryTooLow,      // a test that flattens the node teaches nothing
     BadCopies,          // outside 1..17, so not a burst this fleet ever sends
     NoGridPeriod,       // a mode that needs a ruler was given none
-    NoGrid,             // MODE_B/MODE_SWEEP on a node that has adopted none
-    ModeUnimplemented,  // MODE_C — see modeIsImplemented
+    NoGrid,             // MODE_B on a node that has adopted none
+    ModeUnimplemented,  // MODE_C or an unknown mode — see modeIsImplemented
 };
 
 // What the node knows about itself when the arm request lands.
@@ -284,8 +263,7 @@ struct NodeContext {
     // than arms — the same direction as every other default in these headers.
     bool     frame_authenticated{false};
     bool     has_session{false};
-    bool     is_bench_node{false};
-    // Has the node adopted a grid? Gates MODE_B and MODE_SWEEP; see
+    // Has the node adopted a grid? Gates MODE_B; see
     // modeNeedsGrid. Defaults false, so a context that forgets it refuses.
     bool     has_adopted_grid{false};
     uint32_t battery_mv{4000};
@@ -305,9 +283,9 @@ struct Request {
     uint32_t duration_s{0};
 };
 
-// Below this the node refuses to start. A ModeTest can hold the radio in
-// continuous RX for fifteen minutes; running one on a nearly flat cell buys a
-// number and loses the node.
+// Below this the node refuses to start. A ModeTest can hold a forced mode for
+// fifteen minutes; running one on a nearly flat cell buys a number and loses
+// the node.
 static constexpr uint32_t kMinBatteryMv = 3500;
 
 // The hub never sends more than txSlotsPerRound copies, so a request outside
@@ -325,8 +303,6 @@ constexpr ArmRefusal armRefusal(const Request &r, const NodeContext &ctx)
     // holding a key.
     if (!ctx.frame_authenticated)               return ArmRefusal::NotAuthenticated;
     if (!ctx.has_session)                       return ArmRefusal::NoSession;
-    if (r.mode == Mode::Sweep && !ctx.is_bench_node)
-                                                return ArmRefusal::SweepOffBench;
     // Then whether the node can enter the mode at all, before anything about
     // the request's parameters: a refusal naming the battery or the grid period
     // would send an operator off measuring the wrong thing.
@@ -357,7 +333,6 @@ struct SavedState {
     uint8_t  mode{0};             // the node's mode before the test
     uint8_t  slot{0};             // and its slot assignment
     bool     power_profile_production{true};
-    bool     continuous_rx{false};
     uint32_t sym_timeout{0};
     bool     counter_enabled{true};
     bool     crypto_enabled{true};

@@ -33,7 +33,7 @@ enum class Refusal : uint8_t {
     SlotOutOfRange,      // slotIndex >= slotCount
     TxSlotOutOfRange,    // the frame claims a position off its own grid
     BeaconSlotOutOfRange,
-    SweepOffsetNotAllowed,   // non-zero armOffsetUs on a node that is not a bench unit
+    // (SweepOffsetNotAllowed, the last value, went with the HW-2 sweep, 2026-11-08.)
 };
 
 struct Params
@@ -47,9 +47,8 @@ struct Params
     uint32_t sym_timeout{timedgrid::kSymbolTimeoutSymbols};
     uint32_t resync_max_s{704};
     uint32_t ul_offset_us{0};
-    // HW-2 sweep offset. Zero in every normal configuration; non-zero
-    // deliberately mis-arms the window and is refused off the bench.
-    int32_t  arm_offset_us{0};
+    // (arm_offset_us, the HW-2 sweep offset, was removed 2026-11-08. GridSync
+    // still carries armOffsetUs on the wire; the node ignores it.)
 };
 
 // Agreement check, run BEFORE anything is adopted.
@@ -58,12 +57,8 @@ struct Params
 // believe in a different pitch and quietly miss every window — a failure that
 // looks like a dead radio. The geometry is carried on the wire precisely so
 // this check is possible; refusing is much better than half-adopting.
-constexpr Refusal validate(const Params &p, uint32_t tx_slot, bool is_bench_node = true)
+constexpr Refusal validate(const Params &p, uint32_t tx_slot)
 {
-    // Checked FIRST: a sweep offset is the one parameter here that
-    // deliberately breaks reception, so refusing it must not depend on the
-    // rest of the grid being agreeable.
-    if (p.arm_offset_us != 0 && !is_bench_node)     return Refusal::SweepOffsetNotAllowed;
     if (p.slot_count != timedgrid::kSlotCount)      return Refusal::SlotCountMismatch;
     if (p.round_us   != timedgrid::kRoundUs)        return Refusal::RoundMismatch;
     if (p.pitch_us   != timedgrid::kSlotPitchUs)    return Refusal::PitchMismatch;
@@ -138,13 +133,11 @@ constexpr int64_t unstretchUs(const State &st, int64_t node_span_us)
     return node_span_us - (node_span_us * (int64_t) st.rate_ppb) / kRateDen;
 }
 
-// When the receiver opens for a given mark: T0 - (T_pre + G), plus the HW-2
-// sweep offset. The offset is added rather than folded into the arm lead so
-// that a sweep never silently becomes the node's idea of correct.
+// When the receiver opens for a given mark: T0 - (T_pre + G).
 constexpr int64_t armInstantUs(const State &st, int64_t t0_us)
 {
-    return t0_us - (int64_t) timedgrid::kArmLeadUs
-                 + (int64_t) st.params.arm_offset_us;
+    (void) st;
+    return t0_us - (int64_t) timedgrid::kArmLeadUs;
 }
 
 

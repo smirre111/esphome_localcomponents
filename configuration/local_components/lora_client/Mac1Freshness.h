@@ -74,7 +74,7 @@ struct Inputs
     // result through unconditionally.
     bool     would_be_new{false};
     uint32_t msgid{0};
-    // session_.lastAcceptedMsgid()/lastAcceptedUs() — the id and instant
+    // session_.lastAcceptedFcnt()/lastAcceptedUs() — the id and instant
     // acceptRxId() last returned true for.
     uint32_t last_accepted_msgid{0};
     int64_t  last_accepted_us{0};

@@ -44,7 +44,7 @@ namespace mac
 using Addr = uint8_t;
 
 // MAC-1 frame counter: the header's FCNT (31 bits usable: the CTR counter
-// block holds 31, see framecrypto::msgidFitsCtr). Older code calls it msgid.
+// block holds 31, see framecrypto::fcntFitsCtr). Older code calls it msgid.
 using FCnt = uint32_t;
 
 // Payload demultiplexer (LoRaWAN FPort-like): the header's PORT byte, which
@@ -110,7 +110,8 @@ enum class SecRxStatus : uint8_t
     Plaintext,    // arrived unsealed (bootstrap / exempt broadcast)
     BadMic,       // CMAC (or LOGIN/REGISTER MIC) failed
     NoSession,    // sealed, but no keys for this peer
-    MsgidSpent,   // the FCNT space is exhausted (2^31); a fresh session is needed
+    FcntSpent,   // the FCNT space is exhausted (2^31); a fresh session is needed
+    MsgidSpent = FcntSpent,   // DEPRECATED v0 name (review D24, handoff H-D24)
 };
 
 }  // namespace mac

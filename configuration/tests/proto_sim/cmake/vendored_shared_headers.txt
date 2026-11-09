@@ -16,7 +16,6 @@ main/include/MacFunnel.h
 main/include/MacSublayers.h
 main/include/PhaseTracker.h
 main/include/GridState.h
-main/include/SweepAnalysis.h
 main/include/TxQueue.h
 main/include/AckCache.h
 main/include/ModeTestPolicy.h
