@@ -13,12 +13,7 @@ main/include/TimedGrid.h
 main/include/TimedModePolicy.h
 main/include/ClassAWindows.h
 main/include/MacFunnel.h
-main/include/MacSublayers.h
-main/include/PhaseTracker.h
-main/include/GridState.h
 main/include/TxQueue.h
-main/include/AckCache.h
-main/include/ModeTestPolicy.h
 main/include/PendingData.h
 main/include/Mac1Freshness.h
 main/include/MacSap.h
