@@ -148,7 +148,7 @@ TEST(SessionManager, AnIdAlreadySeenIsRefusedHoweverItArrives) {
 }
 
 TEST(SessionManager, TooFarBehindTheMarkIsStillARefusal) {
-    // The reorder window is deliberately much smaller than kMsgIdWindow: a
+    // The reorder window is deliberately much smaller than kFcntWindow: a
     // forward jump may be 1024, but an attacker replaying something old gets
     // kReplayWindow of reach, not that.
     SessionManager s = freshManager();
@@ -158,7 +158,7 @@ TEST(SessionManager, TooFarBehindTheMarkIsStillARefusal) {
         << "exactly the window's width behind is out";
     EXPECT_TRUE(s.acceptRxId(1000 - SessionManager::kReplayWindow + 1, 0))
         << "one inside it is a reorder";
-    EXPECT_LT(SessionManager::kReplayWindow, SessionManager::kMsgIdWindow);
+    EXPECT_LT(SessionManager::kReplayWindow, SessionManager::kFcntWindow);
 }
 
 TEST(SessionManager, ALoginClearsWhatHasBeenSeenAsWellAsTheMark) {
@@ -180,11 +180,11 @@ TEST(SessionManager, RejectsAJumpBeyondTheWindow) {
 
     // Ratcheting onto a corrupt id would drop every legitimate lower id until
     // the next login.
-    EXPECT_FALSE(s.acceptRxId(10 + SessionManager::kMsgIdWindow + 1, 0));
+    EXPECT_FALSE(s.acceptRxId(10 + SessionManager::kFcntWindow + 1, 0));
     EXPECT_EQ(s.rxId(), 10u);
 
     // The window edge itself is still accepted.
-    EXPECT_TRUE(s.acceptRxId(10 + SessionManager::kMsgIdWindow, 0));
+    EXPECT_TRUE(s.acceptRxId(10 + SessionManager::kFcntWindow, 0));
 }
 
 TEST(SessionManager, LoginResetsBothDirections) {

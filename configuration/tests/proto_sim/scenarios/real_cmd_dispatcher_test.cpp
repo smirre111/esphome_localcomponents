@@ -434,7 +434,7 @@ TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
     op_hdr.msgid         = kOpMsgId;
     std::vector<uint8_t> op_bytes = seal_op(disp, inner_op, op_hdr, kHubNonce);
     disp.onReceiveNew(op_bytes.data(), static_cast<int>(op_bytes.size()));
-    ASSERT_EQ(disp.rxMsgIdForTest(), 5u) << "precondition: msgid 5 was accepted";
+    ASSERT_EQ(disp.rxFcntForTest(), 5u) << "precondition: msgid 5 was accepted";
     CmdDispatcher::tx_command_t rx_drain{};
     while (xQueueReceive(disp.rxCmdQueueNew, &rx_drain, 0) == pdTRUE) {}
     while (xQueueReceive(disp.txCmdQueueNew, &rx_drain, 0) == pdTRUE) {}
@@ -447,7 +447,7 @@ TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
 
     EXPECT_EQ(disp.sessionGenerationForTest(), 1u)
         << "a retry of the live session must not re-derive K_enc/K_mac";
-    EXPECT_EQ(disp.rxMsgIdForTest(), 5u)
+    EXPECT_EQ(disp.rxFcntForTest(), 5u)
         << "a retry of the live session must not reset rx_message_id_";
     EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 2u)
         << "the retry must still resend the beacon + AVAILABLE ack";
@@ -3982,12 +3982,12 @@ TEST_F(RealNodeFixture, AnUnauthenticatedFrameCannotRatchetTheReplayCounter) {
     // and the link was still wedged.
     disp.setSessionIdForTest(kHubAddr, 0xABCDEF01);
 
-    const uint32_t before = disp.rxMsgIdForTest();
+    const uint32_t before = disp.rxFcntForTest();
     auto sched = pack_schedule_op(/*msgid=*/before + 1000, /*version=*/0xBEEF,
                                   NODE_MODE__MODE_INTERACTIVE);
     disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()), 1'100'000);
 
-    EXPECT_EQ(disp.rxMsgIdForTest(), before)
+    EXPECT_EQ(disp.rxFcntForTest(), before)
         << "a plaintext frame must be refused before it can touch the counter";
     EXPECT_NE(sys.getSchedVersion(), 0xBEEFu);
 }
@@ -4007,7 +4007,7 @@ TEST_F(RealNodeFixture, AnUnknownSenderCannotWalkPastThePlaintextGate) {
     // which the old gate happened to work.
     disp.setSessionIdForTest(kHubAddr, 0xABCDEF01);
 
-    const uint32_t before = disp.rxMsgIdForTest();
+    const uint32_t before = disp.rxFcntForTest();
     auto sched = pack_schedule_op(/*msgid=*/before + 1000, /*version=*/0xBEEF,
                                   NODE_MODE__MODE_INTERACTIVE,
                                   /*sender=*/0x77);   // never seen by this node
@@ -4015,7 +4015,7 @@ TEST_F(RealNodeFixture, AnUnknownSenderCannotWalkPastThePlaintextGate) {
 
     EXPECT_NE(sys.getSchedVersion(), 0xBEEFu)
         << "naming an unknown sender must not be a way past the gate";
-    EXPECT_EQ(disp.rxMsgIdForTest(), before)
+    EXPECT_EQ(disp.rxFcntForTest(), before)
         << "and it must not ratchet the replay counter on its way through";
 }
 
@@ -4999,7 +4999,7 @@ TEST_F(RealNodeFixture, ABeaconDoesNotRatchetTheReplayCounter) {
     const uint32_t kNonce = 0xBEEF0001;
     auto login = pack_login_op(/*msgid=*/1, kNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    const uint32_t rx_id_before = disp.rxMsgIdForTest();
+    const uint32_t rx_id_before = disp.rxFcntForTest();
 
     auto gs = build_grid_sync(true, 4, 2);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
@@ -5010,7 +5010,7 @@ TEST_F(RealNodeFixture, ABeaconDoesNotRatchetTheReplayCounter) {
     const int64_t rx = rx_for_beacon(st, 90, 0, (uint32_t) b.size());
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
 
-    EXPECT_LE(disp.rxMsgIdForTest(), rx_id_before + 2)
+    EXPECT_LE(disp.rxFcntForTest(), rx_id_before + 2)
         << "the beacon's own counter must not become the node's";
     EXPECT_EQ(disp.gridState().anchor_us, st.anchor_us)
         << "and it still re-anchored (by zero) rather than being dropped";
@@ -6746,7 +6746,7 @@ TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
     ASSERT_TRUE(disp.classAActive());
 
     // SMALL MSGIDS DELIBERATELY. My first draft used 3100 and the handler was
-    // never reached: SessionManager::kMsgIdWindow bounds a forward jump to
+    // never reached: SessionManager::kFcntWindow bounds a forward jump to
     // 1024, because msgid increments by one per frame and a huge jump is a
     // corrupt frame that would wedge the link until the next login. The
     // assertion below is what caught it — without it the test would have
@@ -7264,24 +7264,24 @@ TEST_F(RealNodeFixture, AnAuthenticDownlinkBeyondTheCtrSpaceIsRefusedAndStartsAF
     while (disp.runOneTxCommand()) {}
     (void) lif.drain_tx_queue();
     ASSERT_EQ(disp.sessionGenerationForTest(), 1u);
-    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+    ASSERT_FALSE(disp.fcntReloginPendingForTest());
 
     // CONTROL: an ordinary authentic downlink is accepted and asks for nothing.
     auto ok = encrypted_sysop(disp, /*msgid=*/2, CLIENT_OPERATION__CMD_STATUS, 0, true);
     disp.onReceiveNew(ok.data(), static_cast<int>(ok.size()));
-    ASSERT_EQ(disp.rxMsgIdForTest(), 2u) << "precondition: the control frame was accepted";
+    ASSERT_EQ(disp.rxFcntForTest(), 2u) << "precondition: the control frame was accepted";
     ASSERT_FALSE(reg_queued(disp));
-    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+    ASSERT_FALSE(disp.fcntReloginPendingForTest());
 
     // msgid 2^31 + 3 aliases msgid 3 in the CTR block but has its own valid tag.
     auto bad = encrypted_sysop(disp, /*msgid=*/0x80000003u, CLIENT_OPERATION__CMD_STATUS, 0, true);
     disp.onReceiveNew(bad.data(), static_cast<int>(bad.size()));
 
-    EXPECT_EQ(disp.rxMsgIdForTest(), 2u) << "the frame must not advance the replay counter";
+    EXPECT_EQ(disp.rxFcntForTest(), 2u) << "the frame must not advance the replay counter";
     uint32_t n = 0;
     EXPECT_TRUE(reg_queued(disp, &n)) << "a fresh session (REGISTER) must be requested";
     EXPECT_EQ(n, 1u);
-    EXPECT_TRUE(disp.msgidReloginPendingForTest());
+    EXPECT_TRUE(disp.fcntReloginPendingForTest());
 
     // A second such frame does not queue a second REGISTER.
     auto bad2 = encrypted_sysop(disp, /*msgid=*/0x80000004u, CLIENT_OPERATION__CMD_STATUS, 0, true);
@@ -7304,7 +7304,7 @@ TEST_F(RealNodeFixture, AForgedDownlinkWithAHugeMsgidCannotTearTheSessionDown) {
     disp.onReceiveNew(out.data(), static_cast<int>(out.size()));
 
     EXPECT_FALSE(reg_queued(disp)) << "an unauthenticated frame must not trigger a relogin";
-    EXPECT_FALSE(disp.msgidReloginPendingForTest());
+    EXPECT_FALSE(disp.fcntReloginPendingForTest());
 }
 
 TEST_F(RealNodeFixture, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
@@ -7314,33 +7314,33 @@ TEST_F(RealNodeFixture, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     (void) lif.drain_tx_queue();
 
     // Two ids short of the boundary: 2^31-2 and 2^31-1 are still sealable.
-    disp.seedTxMsgIdForTest(0x7FFFFFFDu);
+    disp.seedTxFcntForTest(0x7FFFFFFDu);
     disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
     ASSERT_TRUE(disp.runOneTxCommand());
-    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFEu);
+    EXPECT_EQ(disp.txFcntForTest(), 0x7FFFFFFEu);
     EXPECT_EQ(lif.drain_tx_queue().size(), 1u);
 
     disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
     ASSERT_TRUE(disp.runOneTxCommand());
-    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
+    EXPECT_EQ(disp.txFcntForTest(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
     EXPECT_EQ(lif.drain_tx_queue().size(), 1u);
-    EXPECT_FALSE(disp.msgidReloginPendingForTest());
+    EXPECT_FALSE(disp.fcntReloginPendingForTest());
     EXPECT_FALSE(reg_queued(disp));
 
     // The next one would be 2^31: refused, nothing sent, a relogin requested.
     disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
     ASSERT_TRUE(disp.runOneTxCommand());
-    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFFu) << "the counter must not move past the boundary";
+    EXPECT_EQ(disp.txFcntForTest(), 0x7FFFFFFFu) << "the counter must not move past the boundary";
     EXPECT_TRUE(lif.drain_tx_queue().empty()) << "nothing may be sealed with msgid >= 2^31";
     uint32_t n = 0;
     EXPECT_TRUE(reg_queued(disp, &n));
     EXPECT_EQ(n, 1u);
-    EXPECT_TRUE(disp.msgidReloginPendingForTest());
+    EXPECT_TRUE(disp.fcntReloginPendingForTest());
 
     // The REGISTER itself goes out (plaintext, counters restart) and ends the episode.
     while (disp.runOneTxCommand()) {}
-    EXPECT_FALSE(disp.msgidReloginPendingForTest()) << "the counters restarted";
-    EXPECT_LT(disp.txMsgIdForTest(), 0x100u) << "msgids start over after the REGISTER";
+    EXPECT_FALSE(disp.fcntReloginPendingForTest()) << "the counters restarted";
+    EXPECT_LT(disp.txFcntForTest(), 0x100u) << "msgids start over after the REGISTER";
     EXPECT_FALSE(lif.drain_tx_queue().empty()) << "the REGISTER must reach the air";
 }
 
@@ -7368,13 +7368,13 @@ TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
     size_t len = 0;
     ASSERT_TRUE(disp.packUplinkFrame_(msg, hdr, &buf, &len)) << "control: an ordinary msgid seals";
     free(buf);
-    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+    ASSERT_FALSE(disp.fcntReloginPendingForTest());
 
     hdr.msgid = 0x80000005u;     // would reuse msgid 5's keystream
     buf = nullptr;
     EXPECT_FALSE(disp.packUplinkFrame_(msg, hdr, &buf, &len)) << "must not seal";
     EXPECT_EQ(buf, nullptr);
-    EXPECT_TRUE(disp.msgidReloginPendingForTest());
+    EXPECT_TRUE(disp.fcntReloginPendingForTest());
 }
 
 // ===========================================================================
