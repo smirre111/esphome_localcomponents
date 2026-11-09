@@ -98,11 +98,6 @@ TEST(MirrorTables, EveryDownlinkCaseHasThePortAndAckRuleTheNodeHas) {
             EXPECT_FALSE(portmap::ackedWhenExecuted(DL_LOGIN));
             continue;
         }
-        // DriftTest (case 18, the node's DL_DRIFTTEST): removed on the hub on
-        // 2026-11-08; the node's entry goes with the node's own removal (order:
-        // hub first). Drop this exception once node main has no case 18.
-        if (c == 18)
-            continue;
         EXPECT_EQ(r.ok, node_has) << "case " << c << " has a port on one side only";
         if (!r.ok || !node_has)
             continue;
