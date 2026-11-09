@@ -67,7 +67,7 @@ enum class NodeMode : uint32_t {
 // the two — so it can lag silently, unlike the generated stubs.
 enum class WakeReason : uint32_t {
     WAKE_BOOT          = 0,
-    WAKE_TIMER_EVENT   = 1,
+    // 1 was WAKE_TIMER_EVENT: never produced, reserved in blinds.proto (D19).
     WAKE_TIMER_CHECKIN = 2,
     WAKE_BUTTON        = 3,
     WAKE_UNKNOWN       = 4,

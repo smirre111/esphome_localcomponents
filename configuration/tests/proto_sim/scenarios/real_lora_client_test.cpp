@@ -10023,7 +10023,6 @@ TEST(RebootRegrid, OrdinaryBeaconsAndAStaleResetReasonDoNotRepublish) {
     ModeBRig r;
     promotedNode(r);
     deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_CHECKIN, kResetSw, true);
-    deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_TIMER_EVENT, kResetSw, true);
     deliverRebootBeacon(r.rol, WAKE_REASON__WAKE_BUTTON, kResetSw, true);
     EXPECT_EQ(publishesDuring(r, 5), 0) << "periodic beacons never trigger it";
     EXPECT_TRUE(r.rol.mbs_grid_acked_());
