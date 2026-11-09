@@ -93,3 +93,18 @@ still covers a free-running window, as before.
    that. Needs a node-side decision on N (power vs recovery time).
 3. Test (node host suite): after `sendRegister()` the node's next armed window is the free-running
    one (no mark arming) until a LOGIN is accepted; a LOGIN arriving in a Mode A window is adopted.
+
+## 2026-11-09 — D5: stop vendoring the node-only headers into the hub (hub branch hub-decisions)
+
+The hub firmware includes none of `MacSublayers.h`, `PhaseTracker.h`, `GridState.h`,
+`ModeTestPolicy.h`, `AckCache.h` (nor the removed `SweepAnalysis.h`); only hub header tests did.
+On `hub-decisions` those tests (mac_sublayers, phase_tracker, grid_state, ack_cache,
+mode_test_policy, mode_b_supervisor) now compile against the node tree
+(`add_node_header_test`, the existing BLINDS_ESP_ROOT discovery; CI still fails at configure
+without the node tree).
+
+**Requested node change:** drop these five entries from `proto/regen_stubs.sh`'s vendored list
+(lines `main/include/{MacSublayers,PhaseTracker,GridState,ModeTestPolicy,AckCache}.h`). The hub's
+`vendor_list_hub_vs_node` gate compares the two lists, so the hub deletes its copies, their shims
+and its `cmake/vendored_shared_headers.txt` entries in the same step as that node commit (prepared,
+not applied yet). `TxQueue.h` stays vendored: the hub firmware does include it.
