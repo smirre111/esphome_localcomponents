@@ -345,7 +345,7 @@ namespace esphome
       uint32_t sessionGenerationForTest() const { return this->session_.generation(); }
       // For tests: install a session directly (sets the base nonce AND
       // derives K_enc/K_mac from it), without a real LOGIN/uplink round
-      // trip. Mirrors CmdDispatcher's setBaseNonceForTest reasoning: some
+      // trip. Mirrors CmdDispatcher's setSessionIdForTest reasoning: some
       // tests need "a second, DIFFERENT session now exists" as a precise,
       // one-line precondition rather than a second full handshake.
       bool deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce)

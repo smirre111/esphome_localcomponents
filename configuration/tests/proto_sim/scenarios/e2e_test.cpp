@@ -230,7 +230,7 @@ TEST_F(E2E, ALoginBecomesAProvenSessionOnBothSides) {
     bringUpSession();
 
     uint32_t nonce = 0;
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHub, nonce))
+    ASSERT_TRUE(disp.getSessionIdForTest(kHub, nonce))
         << "the node must hold the hub's base nonce";
     EXPECT_NE(nonce, 0u);
 

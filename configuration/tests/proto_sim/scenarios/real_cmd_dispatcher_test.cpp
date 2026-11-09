@@ -771,7 +771,7 @@ TEST(RealCmdDispatcherFresh, AnUnprovisionedNodeWithAStaleSessionStillAcceptsIts
     CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
     constexpr uint64_t kMac = 0xCAFEBABEFEEDULL;
     pinFactoryMac(kMac);
-    disp.setBaseNonceForTest(1, 0xABCDEF01);   // the session NVS restored
+    disp.setSessionIdForTest(1, 0xABCDEF01);   // the session NVS restored
     ASSERT_EQ(sys.getConfigAddress(), 0u);
 
     auto cfg = plaintextClientConfigFor(kMac, 18, 5);
@@ -789,7 +789,7 @@ TEST(RealCmdDispatcherFresh, AProvisionedNodeWithASessionStillRefusesPlaintextCo
     CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
     constexpr uint64_t kMac = 0xCAFEBABEFEEDULL;
     pinFactoryMac(kMac);
-    disp.setBaseNonceForTest(1, 0xABCDEF01);
+    disp.setSessionIdForTest(1, 0xABCDEF01);
 
     auto cfg = plaintextClientConfigFor(kMac, 42, 5);
     disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
@@ -1769,7 +1769,7 @@ TEST_F(RealNodeFixture, AProvisionedNodeWithoutASessionKeepsRegistering) {
     proto_sim_timer_reset();
     sys.setAddress(kNodeAddr, kSubnet);
     uint32_t nonce = 0;
-    ASSERT_FALSE(disp.getBaseNonceForTest(kHubAddr, nonce))
+    ASSERT_FALSE(disp.getSessionIdForTest(kHubAddr, nonce))
         << "precondition: no session with the hub";
 
     disp.sendRegister();              // boot REGISTER - lost on air
@@ -3980,7 +3980,7 @@ TEST_F(RealNodeFixture, AnUnauthenticatedFrameCannotRatchetTheReplayCounter) {
     // past everything the hub had queued, and every legitimate command was
     // then rejected as a replay until the next LOGIN. The frame was refused
     // and the link was still wedged.
-    disp.setBaseNonceForTest(kHubAddr, 0xABCDEF01);
+    disp.setSessionIdForTest(kHubAddr, 0xABCDEF01);
 
     const uint32_t before = disp.rxMsgIdForTest();
     auto sched = pack_schedule_op(/*msgid=*/before + 1000, /*version=*/0xBEEF,
@@ -4005,7 +4005,7 @@ TEST_F(RealNodeFixture, AnUnknownSenderCannotWalkPastThePlaintextGate) {
     // The predicate was keyed on the one field the attacker chooses. The test
     // that was meant to cover this sent from kHubAddr — the single sender for
     // which the old gate happened to work.
-    disp.setBaseNonceForTest(kHubAddr, 0xABCDEF01);
+    disp.setSessionIdForTest(kHubAddr, 0xABCDEF01);
 
     const uint32_t before = disp.rxMsgIdForTest();
     auto sched = pack_schedule_op(/*msgid=*/before + 1000, /*version=*/0xBEEF,
@@ -4032,9 +4032,9 @@ TEST_F(RealNodeFixture, LoginItselfStaysAcceptedInPlaintext) {
     // test hands in: two logins 100 ms apart on the simulated clock land in the
     // same real millisecond, so the second is dropped by the limiter and the
     // test would be measuring F-30, not the security gate.
-    disp.setBaseNonceForTest(kHubAddr, 0x11223344);
+    disp.setSessionIdForTest(kHubAddr, 0x11223344);
     uint32_t bn = 0;
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, bn));
+    ASSERT_TRUE(disp.getSessionIdForTest(kHubAddr, bn));
     ASSERT_EQ(bn, 0x11223344u) << "precondition: a session exists";
 
     // Now the recovery case: the hub has lost its state and re-logs in, in the
@@ -4044,7 +4044,7 @@ TEST_F(RealNodeFixture, LoginItselfStaysAcceptedInPlaintext) {
     auto login = pack_login_op(/*msgid=*/811, /*nonce=*/0x55667788);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 2'100'000);
 
-    EXPECT_TRUE(disp.getBaseNonceForTest(kHubAddr, bn));
+    EXPECT_TRUE(disp.getSessionIdForTest(kHubAddr, bn));
     EXPECT_EQ(bn, 0x55667788u)
         << "plaintext login is the recovery path and must never be refused";
 }
@@ -7240,7 +7240,7 @@ TEST_F(RealNodeFixture, AnOldPeersBaseNonceExchangeIsAnUnknownFieldAndInstallsNo
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
 
     uint32_t nonce = 0;
-    EXPECT_FALSE(disp.getBaseNonceForTest(kHubAddr, nonce))
+    EXPECT_FALSE(disp.getSessionIdForTest(kHubAddr, nonce))
         << "the removed BaseNonceExchange must not install a session key";
     EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 0u) << "and must not make the node transmit";
     EXPECT_EQ(uxQueueMessagesWaiting(disp.rxCmdQueueNew), 0u);
@@ -7248,13 +7248,13 @@ TEST_F(RealNodeFixture, AnOldPeersBaseNonceExchangeIsAnUnknownFieldAndInstallsNo
     // Same frame at a node that HOLDS a session: refused as plaintext, session untouched.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, nonce));
+    ASSERT_TRUE(disp.getSessionIdForTest(kHubAddr, nonce));
     ASSERT_EQ(nonce, kMtNonce);
     while (disp.runOneTxCommand()) {}
     (void) lif.drain_tx_queue();
     auto frame2 = old_basenonce_frame(/*msgid=*/2, kNodeAddr);
     disp.onReceiveNew(frame2.data(), static_cast<int>(frame2.size()));
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, nonce));
+    ASSERT_TRUE(disp.getSessionIdForTest(kHubAddr, nonce));
     EXPECT_EQ(nonce, kMtNonce) << "a session must survive an old peer's plaintext key offer";
 }
 
@@ -7474,7 +7474,7 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionAcceptsPl
     LoraInterface lif;
     portMUX_TYPE  motorMux{}, buttonMux{};
     CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
-    disp.setBaseNonceForTest(1, 0xABCDEF01);
+    disp.setSessionIdForTest(1, 0xABCDEF01);
     ASSERT_EQ(sys.getConfigAddress(), 0u);
 
     DlMsg op;
@@ -7509,7 +7509,7 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionStillRefu
     disp.onReceiveNew(f1.data(), static_cast<int>(f1.size()));
     ASSERT_EQ(disp.uplinkAddress(), 33u) << "control: a node without a session admits provisioning";
 
-    disp.setBaseNonceForTest(1, 0xABCDEF01);
+    disp.setSessionIdForTest(1, 0xABCDEF01);
     auto f2 = admit_plain_sysop(/*dest=*/0, /*sender=*/77, kSubnet, /*msgid=*/2, false);
     disp.onReceiveNew(f2.data(), static_cast<int>(f2.size()));
     EXPECT_EQ(disp.uplinkAddress(), 33u)

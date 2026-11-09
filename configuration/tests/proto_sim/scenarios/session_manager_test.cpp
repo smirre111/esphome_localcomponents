@@ -37,7 +37,7 @@ SessionManager freshManager() {
 TEST(SessionManager, UnknownPeerHasNoSession) {
     SessionManager s = freshManager();
     uint32_t out = 0xDEAD;
-    EXPECT_FALSE(s.getBaseNonce(kHub, out));
+    EXPECT_FALSE(s.getSessionId(kHub, out));
 }
 
 TEST(SessionManager, ZeroNonceIsNotASession) {
@@ -46,51 +46,51 @@ TEST(SessionManager, ZeroNonceIsNotASession) {
     // entry is created the moment we track anything for that address, with a
     // zero nonce. Reporting that as usable let the node encrypt a resume beacon
     // the hub could not authenticate.
-    s.setBaseNonce(kHub, 0);
+    s.setSessionId(kHub, 0);
 
     uint32_t out = 0xDEAD;
-    EXPECT_FALSE(s.getBaseNonce(kHub, out))
+    EXPECT_FALSE(s.getSessionId(kHub, out))
         << "a zero nonce is the cleared/never-set sentinel, not a session";
     EXPECT_EQ(out, 0xDEADu) << "the out-parameter must be left untouched";
 }
 
 TEST(SessionManager, ARealNonceIsASession) {
     SessionManager s = freshManager();
-    s.setBaseNonce(kHub, kNonce);
+    s.setSessionId(kHub, kNonce);
 
     uint32_t out = 0;
-    ASSERT_TRUE(s.getBaseNonce(kHub, out));
+    ASSERT_TRUE(s.getSessionId(kHub, out));
     EXPECT_EQ(out, kNonce);
 }
 
 TEST(SessionManager, ClearingRemovesTheSession) {
     SessionManager s = freshManager();
-    s.setBaseNonce(kHub, kNonce);
-    s.clearBaseNonce(kHub);
+    s.setSessionId(kHub, kNonce);
+    s.clearSessionId(kHub);
 
     uint32_t out = 0;
-    EXPECT_FALSE(s.getBaseNonce(kHub, out));
+    EXPECT_FALSE(s.getSessionId(kHub, out));
 }
 
 TEST(SessionManager, PeersDoNotShareNonces) {
     // Two nodes share the air; one node's session must never satisfy a lookup
     // for another's.
     SessionManager s = freshManager();
-    s.setBaseNonce(kOther, kNonce);
+    s.setSessionId(kOther, kNonce);
 
     uint32_t out = 0;
-    EXPECT_FALSE(s.getBaseNonce(kHub, out));
-    EXPECT_TRUE(s.getBaseNonce(kOther, out));
+    EXPECT_FALSE(s.getSessionId(kHub, out));
+    EXPECT_TRUE(s.getSessionId(kOther, out));
 }
 
 TEST(SessionManager, OnlyThePersistPeerAsksToBeSaved) {
     SessionManager s = freshManager();
     s.setPersistPeer(kHub);
 
-    EXPECT_TRUE(s.setBaseNonce(kHub, kNonce))
+    EXPECT_TRUE(s.setSessionId(kHub, kNonce))
         << "the hub's nonce is the critical secret — it must be persisted "
            "immediately whenever it changes";
-    EXPECT_FALSE(s.setBaseNonce(kOther, kNonce))
+    EXPECT_FALSE(s.setSessionId(kOther, kNonce))
         << "another node's nonce must not trigger a write of OUR blob";
 }
 
@@ -223,7 +223,7 @@ TEST(SessionManager, ASessionSurvivesSaveAndLoad) {
     {
         SessionManager a;
         a.setPersistPeer(kHub);
-        a.setBaseNonce(kHub, kNonce);
+        a.setSessionId(kHub, kNonce);
         for (int i = 0; i < 7; i++) a.nextTxId();
         ASSERT_TRUE(a.acceptRxId(3, 0));
         a.save();
@@ -237,7 +237,7 @@ TEST(SessionManager, ASessionSurvivesSaveAndLoad) {
         << "the restored blob must point at the HUB — pointing at 0xFF is what "
            "made every resume beacon undecryptable";
     uint32_t out = 0;
-    ASSERT_TRUE(b.getBaseNonce(kHub, out));
+    ASSERT_TRUE(b.getSessionId(kHub, out));
     EXPECT_EQ(out, kNonce);
     EXPECT_EQ(b.rxId(), 3u + SessionManager::kRxPersistMargin)
         << "N-3: rx is restored with its own margin too, with the whole "
@@ -259,7 +259,7 @@ TEST(SessionManager, RestoredMarginIsFullySeenSoNothingInItCanBeReplayed) {
     {
         SessionManager a;
         a.setPersistPeer(kHub);
-        a.setBaseNonce(kHub, kNonce);
+        a.setSessionId(kHub, kNonce);
         ASSERT_TRUE(a.acceptRxId(3, 0));
         a.save();
     }
@@ -291,7 +291,7 @@ TEST(SessionManager, SessionNoncesSurviveSaveAndLoadUnderTheirOwnKey) {
     {
         SessionManager a;
         a.setPersistPeer(kHub);
-        a.setBaseNonce(kHub, kNonce);   // base_nonce IS hub_nonce/sessionId
+        a.setSessionId(kHub, kNonce);   // base_nonce IS hub_nonce/sessionId
         a.setNodeNonce(kNodeNonce);
         a.saveSession();
     }
@@ -302,7 +302,7 @@ TEST(SessionManager, SessionNoncesSurviveSaveAndLoadUnderTheirOwnKey) {
 
     EXPECT_EQ(b.nodeNonce(), kNodeNonce);
     uint32_t restored_hub_nonce = 0;
-    ASSERT_TRUE(b.getBaseNonce(kHub, restored_hub_nonce));
+    ASSERT_TRUE(b.getSessionId(kHub, restored_hub_nonce));
     EXPECT_EQ(restored_hub_nonce, kNonce);
 }
 
@@ -330,17 +330,17 @@ TEST(SessionManager, ACrashBetweenSaveSessionAndSaveLeavesTheNewKeysSafelyPaired
         // non-trivial counter progress.
         SessionManager a;
         a.setPersistPeer(kHub);
-        a.setBaseNonce(kHub, kOldNonce);
+        a.setSessionId(kHub, kOldNonce);
         a.setNodeNonce(kOldNodeNonce);
         a.saveSession();
         for (int i = 0; i < 20; ++i) a.nextTxId();
         a.save();
 
-        // A fresh LOGIN starts: setBaseNonce() (in-memory only) and
+        // A fresh LOGIN starts: setSessionId() (in-memory only) and
         // saveSession() (lsess, NVS) run — matching handleLogin's new
         // order — but the crash happens before save() (PersistState,
         // which would also persist resetCounters()'s in-memory 0s).
-        a.setBaseNonce(kHub, kNewNonce);
+        a.setSessionId(kHub, kNewNonce);
         a.setNodeNonce(kNewNodeNonce);
         a.saveSession();
         // a.save() deliberately NOT called — simulates the crash.
@@ -352,7 +352,7 @@ TEST(SessionManager, ACrashBetweenSaveSessionAndSaveLeavesTheNewKeysSafelyPaired
     b.loadSession();    // lsess: the NEW hub_nonce/node_nonce — "authoritative"
 
     uint32_t resumed_hub_nonce = 0;
-    ASSERT_TRUE(b.getBaseNonce(kHub, resumed_hub_nonce));
+    ASSERT_TRUE(b.getSessionId(kHub, resumed_hub_nonce));
     EXPECT_EQ(resumed_hub_nonce, kNewNonce)
         << "the keys resumed must be the NEW session's, from the durably-"
            "written lsess — not the old PersistState write that never happened";
@@ -372,7 +372,7 @@ TEST(SessionManager, SessionWithoutAConfirmedNonceSavesNothing) {
     {
         SessionManager a;
         a.setPersistPeer(kHub);
-        a.setBaseNonce(kHub, kNonce);
+        a.setSessionId(kHub, kNonce);
         // node_nonce left at its default (0) — no session established.
         a.saveSession();
     }
@@ -406,7 +406,7 @@ TEST(SessionManager, SavingUnderTheWrongPeerWritesNothing) {
     proto_sim_nvs_reset();
     {
         SessionManager a;
-        a.setBaseNonce(kHub, kNonce);   // real session with the hub
+        a.setSessionId(kHub, kNonce);   // real session with the hub
         a.setPersistPeer(0xFF);         // ...but we persist for 0xFF
         a.save();
     }
@@ -422,7 +422,7 @@ TEST(SessionManager, ThrottledPersistOnlyWritesAfterAFullMargin) {
     proto_sim_nvs_reset();
     SessionManager a;
     a.setPersistPeer(kHub);
-    a.setBaseNonce(kHub, kNonce);   // this itself does not write; caller decides
+    a.setSessionId(kHub, kNonce);   // this itself does not write; caller decides
 
     a.maybePersist();               // tx is 0 — nothing to write yet
     {

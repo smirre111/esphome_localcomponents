@@ -380,7 +380,7 @@ TEST_F(Seam, TheHubsRealBeaconVerifiesOnTheRealNode) {
     disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
                       esp_timer_get_time());
     uint32_t nonce = 0;
-    ASSERT_TRUE(disp.getBaseNonceForTest(1, nonce))
+    ASSERT_TRUE(disp.getSessionIdForTest(1, nonce))
         << "the node must hold the hub's base nonce before anything is encrypted";
     // What the hub's own ack path would set once the node answers the challenge.
     // Through the hook, not by writing the flag: while the session is being
@@ -488,7 +488,7 @@ TEST_F(Seam, BothSidesDeriveIdenticalSessionKeysFromARealLogin) {
     disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
                       esp_timer_get_time());
     uint32_t hub_nonce = 0;
-    ASSERT_TRUE(disp.getBaseNonceForTest(1, hub_nonce))
+    ASSERT_TRUE(disp.getSessionIdForTest(1, hub_nonce))
         << "precondition: the node must have accepted the (MIC-verified) LOGIN";
     ASSERT_EQ(disp.sessionGenerationForTest(), 1u)
         << "accepting LOGIN must derive session keys, not just store the nonce";
@@ -736,7 +736,7 @@ TEST_F(Seam, AProvisionedNodeAndAFreshlyBootedHubMustNotLoopRegisterAgainstLogin
     while (disp.runOneTxCommand()) {}
 
     uint32_t nonce = 0;
-    EXPECT_TRUE(disp.getBaseNonceForTest(1, nonce))
+    EXPECT_TRUE(disp.getSessionIdForTest(1, nonce))
         << "the node must ADOPT the hub's base nonce, which is what lets it "
            "encrypt the uplink that confirms the session. Answering with a "
            "REGISTER instead leaves it with no nonce and the link wedged";
@@ -1006,7 +1006,7 @@ TEST_F(Seam, ARealMacPingReachesANodeThatHoldsASession) {
     disp.onReceiveNew(const_cast<uint8_t *>(login.data()), (int) login.size(),
                       esp_timer_get_time());
     uint32_t nonce = 0;
-    ASSERT_TRUE(disp.getBaseNonceForTest(1, nonce)) << "precondition: the node holds a session";
+    ASSERT_TRUE(disp.getSessionIdForTest(1, nonce)) << "precondition: the node holds a session";
     rol.mark_session_confirmed_for_test();
 
     // Tier 3: the ModeTest frame below is encrypted, which needs the hub's
