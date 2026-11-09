@@ -5534,7 +5534,7 @@ TEST(ConfigHashPersistence, ANodeWithNothingPersistedIsUnaffected) {
 
 // ===========================================================================
 // 2026-10-06 hub cleanup: K_root pin + the msgid / CTR-space guard
-// (framecrypto::kMsgidCtrLimit), mirror of the node's guard.
+// (framecrypto::kFcntCtrLimit), mirror of the node's guard.
 // ===========================================================================
 
 namespace {
@@ -5636,13 +5636,13 @@ TEST(MsgidGuard, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
 
     const size_t before = f.radio.transcript().size();
     const uint32_t got = f.rol.incrTxFcnt();
-    EXPECT_EQ(got, framecrypto::kMsgidCtrLimit) << "the out-of-space marker";
-    EXPECT_FALSE(framecrypto::msgidFitsCtr(got));
+    EXPECT_EQ(got, framecrypto::kFcntCtrLimit) << "the out-of-space marker";
+    EXPECT_FALSE(framecrypto::fcntFitsCtr(got));
     EXPECT_EQ(f.rol.sequencer().txId(), 0x7FFFFFFFu) << "the counter must not wrap or advance";
     EXPECT_TRUE(f.rol.fcntReloginPendingForTest());
 
     // A second refusal asks for nothing more, and the id is still refused.
-    EXPECT_EQ(f.rol.incrTxFcnt(), framecrypto::kMsgidCtrLimit);
+    EXPECT_EQ(f.rol.incrTxFcnt(), framecrypto::kFcntCtrLimit);
     EXPECT_EQ(f.rol.fcntReloginRequestsForTest(), 1u) << "a repeat refusal must not ask again";
 
     // The relogin goes out on the next tick: one LOGIN, counters restarted,

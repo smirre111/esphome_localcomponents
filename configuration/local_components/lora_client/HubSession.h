@@ -147,7 +147,7 @@ namespace esphome
       // commit_rx() commits only after MAC-2 verified (or before any session).
       const mac1::Sequencer &seq() const { return this->seq_; }
       // The next downlink FCNT (loop only: allocating persists). An exhausted
-      // space hands back kMsgidCtrLimit, which the seal refuses, and asks for a
+      // space hands back kFcntCtrLimit, which the seal refuses, and asks for a
       // fresh session.
       uint32_t allocate_tx();
       // Commit an uplink FCNT the listener already check()ed.
@@ -357,7 +357,7 @@ namespace esphome
       void leave_onboarding_gate() { onboarding_gate_.release(this); }
       static void reset_onboarding_gate_for_test() { onboarding_gate_.reset(); }
 
-      // ---- fcnt / CTR-space guard (framecrypto::kMsgidCtrLimit) ----
+      // ---- fcnt / CTR-space guard (framecrypto::kFcntCtrLimit) ----
       // Starts a fresh session ONCE per exhaustion (cleared by send_login(),
       // where both counters restart).
       void     request_fcnt_relogin(const char *where);

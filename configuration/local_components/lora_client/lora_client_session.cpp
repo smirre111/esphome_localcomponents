@@ -1264,7 +1264,7 @@ namespace esphome
       // a forged frame must not be able to make the hub tear a session down.
       // The peer has run its counter off the end; the repair is a fresh
       // session (LOGIN resets both counters), requested once per exhaustion.
-      if (!framecrypto::msgidFitsCtr(up.fcnt))
+      if (!framecrypto::fcntFitsCtr(up.fcnt))
       {
         ESP_LOGW(TAG, "[%s] Authentic uplink with msgid %u beyond the CTR space — refusing it",
                  this->host_.session_name(), (unsigned) up.fcnt);
@@ -1506,7 +1506,7 @@ namespace esphome
           // not wrap); hand back the first out-of-space id, which the seal point
           // refuses, and ask for a fresh session below.
           exhausted = true;
-          val = framecrypto::kMsgidCtrLimit;
+          val = framecrypto::kFcntCtrLimit;
         }
         else
         {
@@ -1729,15 +1729,15 @@ namespace esphome
     {
       const mac::Addr peer = static_cast<mac::Addr>(this->host_.session_peer());
       const uint32_t first = (n > 0) ? this->allocate_tx() : 0;   // one persist
-      if (first == 0 || first >= framecrypto::kMsgidCtrLimit)
+      if (first == 0 || first >= framecrypto::kFcntCtrLimit)
       {
         std::lock_guard<std::mutex> lock(this->tx_mutex_);
         r->invalidate();
         return false;
       }
       uint32_t last = first + (n - 1);
-      if (last < first || last >= framecrypto::kMsgidCtrLimit)
-        last = framecrypto::kMsgidCtrLimit - 1;
+      if (last < first || last >= framecrypto::kFcntCtrLimit)
+        last = framecrypto::kFcntCtrLimit - 1;
       const uint32_t epoch = s_keys().keyEpoch(peer);   // keys_mutex_ never nests inside ours
       {
         std::lock_guard<std::mutex> lock(this->tx_mutex_);

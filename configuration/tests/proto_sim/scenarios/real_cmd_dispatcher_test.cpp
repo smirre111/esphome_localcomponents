@@ -7193,7 +7193,7 @@ TEST_F(RealNodeFixture, AModeBResidualShowsTheDriftAnUncorrectedPredictionLeaves
 
 // ===========================================================================
 // 2026-10-06 node cleanup: BaseNonceExchange removal + the msgid / CTR-space
-// guard (FrameCrypto.h kMsgidCtrLimit).
+// guard (FrameCrypto.h kFcntCtrLimit).
 // ===========================================================================
 
 namespace {
