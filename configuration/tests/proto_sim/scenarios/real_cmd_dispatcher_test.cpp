@@ -146,7 +146,7 @@ macwire::WireHdr dl_wire_hdr(const DlHdr &h, DownlinkCase c, macwire::Auth a) {
     w.dst       = (uint8_t) h.destaddress;
     w.src       = (uint8_t) h.senderaddress;
     w.subnet    = (uint8_t) h.destsubnet;
-    w.fcnt      = h.msgid;
+    w.fcnt      = h.fcnt;
     w.port      = dl_port(c);
     w.burst_idx = (uint8_t) h.burstindex;
     w.burst_cnt = (uint8_t) h.burstcount;
@@ -192,7 +192,7 @@ std::vector<uint8_t> seal_op(CmdDispatcherTestPeer &disp, const DownlinkView &in
     std::vector<uint8_t> f = proto_sim::v1_plain_frame(w, body);   // header || body || tag room
     const size_t hlen = macwire::headerLen(w);
     uint8_t iv[framecrypto::kCtrBlockBytes];
-    framecrypto::buildCtrInitialBlock(nonce, (uint8_t) h.destaddress, /*downlink=*/true, h.msgid, 0, iv);
+    framecrypto::buildCtrInitialBlock(nonce, (uint8_t) h.destaddress, /*downlink=*/true, h.fcnt, 0, iv);
     if (!body.empty() && !disp.ctrEncryptForTest(iv, body.data(), body.size(), f.data() + hlen))
         ADD_FAILURE() << "seal_op: no session keys on disp (missing/mismatched LOGIN?)";
     std::vector<uint8_t> mi(macwire::kMacInputPrefixBytes);
@@ -216,7 +216,7 @@ std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header         = &hdr;
 
     LoginMsg login     = LOGIN_MSG__INIT;
@@ -431,7 +431,7 @@ TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
     op_hdr.destaddress   = kNodeAddr;
     op_hdr.destsubnet    = kSubnet;
     op_hdr.senderaddress = kHubAddr;
-    op_hdr.msgid         = kOpMsgId;
+    op_hdr.fcnt         = kOpMsgId;
     std::vector<uint8_t> op_bytes = seal_op(disp, inner_op, op_hdr, kHubNonce);
     disp.onReceiveNew(op_bytes.data(), static_cast<int>(op_bytes.size()));
     ASSERT_EQ(disp.rxFcntForTest(), 5u) << "precondition: msgid 5 was accepted";
@@ -467,7 +467,7 @@ TEST_F(RealNodeFixture, CmdOperationReplayRejected) {
     hdr.destaddress = kNodeAddr;
     hdr.destsubnet = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid = 1;
+    hdr.fcnt = 1;
     op.header = &hdr;
 
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
@@ -506,7 +506,7 @@ TEST_F(RealNodeFixture, CmdLoginDestinedForDifferentNodeIsIgnored) {
     hdr.destaddress   = 17;             // ← addressed to a DIFFERENT node
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 1;
+    hdr.fcnt         = 1;
     op.header         = &hdr;
 
     LoginMsg login = LOGIN_MSG__INIT;
@@ -536,7 +536,7 @@ TEST_F(RealNodeFixture, CmdCoverConfigAppliesGeometry) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 1;
+    hdr.fcnt         = 1;
     op.header         = &hdr;
 
     CoverConfig cc = COVER_CONFIG__INIT;
@@ -578,7 +578,7 @@ TEST_F(RealNodeFixture, CmdCoverConfigAllZeroGeometryKeepsTheStoredGeometry) {
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
-        hdr.msgid         = msgid;
+        hdr.fcnt         = msgid;
         op.header         = &hdr;
         CoverConfig cc = COVER_CONFIG__INIT;
         cc.opentime         = 60;
@@ -604,7 +604,7 @@ TEST_F(RealNodeFixture, CmdCoverConfigRejectsPartialGeometry) {
     DlHdr hdr;
     hdr.destaddress = kNodeAddr;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid = 1;
+    hdr.fcnt = 1;
     op.header = &hdr;
 
     CoverConfig cc = COVER_CONFIG__INIT;
@@ -652,7 +652,7 @@ TEST_F(RealNodeFixture, CmdCoverConfigRefusesZeroTravelDurations) {
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
-        hdr.msgid         = msgid;
+        hdr.fcnt         = msgid;
         op.header         = &hdr;
 
         CoverConfig cc = COVER_CONFIG__INIT;
@@ -704,7 +704,7 @@ TEST_F(RealNodeFixture, CmdCoverConfigStillAppliesRealTravelDurations) {
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
-        hdr.msgid         = msgid;
+        hdr.fcnt         = msgid;
         op.header         = &hdr;
 
         CoverConfig cc = COVER_CONFIG__INIT;
@@ -741,7 +741,7 @@ std::vector<uint8_t> plaintextClientConfigFor(uint64_t mac, uint32_t addr, uint3
     DlHdr hdr;
     hdr.destaddress   = 18;
     hdr.senderaddress = 1;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header         = &hdr;
     ClientConfig cc = CLIENT_CONFIG__INIT;
     cc.mac_addr = mac;
@@ -820,7 +820,7 @@ TEST(RealCmdDispatcherFresh, FreshNodeAcceptsClientConfigByMac) {
     DlHdr hdr;
     hdr.destaddress   = 18;      // hub-intended address (node has cfgAddress=0)
     hdr.senderaddress = 0xFF;
-    hdr.msgid         = 1;
+    hdr.fcnt         = 1;
     op.header         = &hdr;
 
     ClientConfig cc = CLIENT_CONFIG__INIT;
@@ -847,7 +847,7 @@ TEST_F(RealNodeFixture, CmdClientConfigAppliesAddressOnlyForMatchingMac) {
     DlHdr hdr;
     hdr.destaddress = 17;          // CLIENTCONFIG bypasses destaddr check
     hdr.senderaddress = kHubAddr;
-    hdr.msgid = 1;
+    hdr.fcnt = 1;
     op.header = &hdr;
 
     ClientConfig cfg = CLIENT_CONFIG__INIT;
@@ -892,7 +892,7 @@ std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     // Which copy of the hub's burst this is. Re-stamped per copy by the hub,
     // and the number every phase path has to back out before it stamps a mark.
     hdr.burstindex    = burst_index;
@@ -918,7 +918,7 @@ std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header         = &hdr;
 
     TimeSync ts  = TIME_SYNC__INIT;
@@ -1210,7 +1210,7 @@ TEST_F(RealNodeFixture, DecryptedDownlinkProvesSessionEndToEnd) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = kMsgId;
+    hdr.fcnt         = kMsgId;
     std::vector<uint8_t> frame = seal_op(disp, inner, hdr, kNonce);
 
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
@@ -1371,7 +1371,7 @@ TEST_F(RealNodeFixture, ScheduleConfigIsAppliedAndAcked) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 300;
+    hdr.fcnt         = 300;
     op.header   = &hdr;
     op.cmd_case = DL_SCHEDULE;
     op.schedule = &sc;
@@ -1643,7 +1643,7 @@ TEST_F(RealNodeFixture, ApplyingAScheduleDoesNotSleepImmediately) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 501;   // must differ from the TimeSync above, or the
+    hdr.fcnt         = 501;   // must differ from the TimeSync above, or the
                                // replay filter drops it and the test lies
     op.header   = &hdr;
     op.cmd_case = DL_SCHEDULE;
@@ -1878,7 +1878,7 @@ std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header   = &hdr;
     op.cmd_case = DL_SCHEDULE;
     op.schedule = &sc;
@@ -2547,7 +2547,7 @@ TEST_F(RealNodeFixture, ForeignClientConfigDoesNotWedgeOurLink) {
     hdr.destaddress   = 17;              // not us
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 900;             // far ahead of our stream
+    hdr.fcnt         = 900;             // far ahead of our stream
     op.header = &hdr;
 
     ClientConfig cfg = CLIENT_CONFIG__INIT;
@@ -2804,7 +2804,7 @@ TEST_F(RealNodeFixture, ModeSysopsSwitchTheNodeMode) {
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
-    hdr.senderaddress = kHubAddr; hdr.msgid = 1;
+    hdr.senderaddress = kHubAddr; hdr.fcnt = 1;
     op.header = &hdr;
     op.cmd_case = DL_SYSOP;
 
@@ -2830,7 +2830,7 @@ TEST_F(RealNodeFixture, AModeSysopDoesNotLeakIntoTheSystemCommandQueue) {
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
-    hdr.senderaddress = kHubAddr; hdr.msgid = 2;
+    hdr.senderaddress = kHubAddr; hdr.fcnt = 2;
     op.header = &hdr;
     op.cmd_case = DL_SYSOP;
     op.sysop = CLIENT_OPERATION__CMD_MODE_AUTO;
@@ -2860,7 +2860,7 @@ std::vector<uint8_t> build_mac_ping(uint32_t seq, bool want_echo,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;          // the hub
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.onmark        = true;       // a phase sample in the tests that time it
 
     MacControl mc = MAC_CONTROL__INIT;
@@ -2941,7 +2941,7 @@ TEST_F(RealNodeFixture, MacEchoFromAPeerIsIgnored) {
     hdr.destaddress = kNodeAddr;
     hdr.destsubnet  = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid = 300;
+    hdr.fcnt = 300;
 
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind     = MAC_CONTROL__KIND__MAC_ECHO;
@@ -3043,7 +3043,7 @@ std::vector<uint8_t> build_mac_config(bool disable_counter, bool disable_crypto,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
 
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind          = MAC_CONTROL__KIND__MAC_CONFIG;
@@ -3126,7 +3126,7 @@ TEST_F(RealNodeFixture, ForeignPlaintextFramesAreCountedNotIgnored) {
     hdr.destaddress   = kNodeAddr + 7;   // someone else's
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid         = 440;
+    hdr.fcnt         = 440;
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
     mc.seq  = 1;
@@ -3170,7 +3170,7 @@ TEST_F(RealNodeFixture, AForeignFrameCommitsNoPhaseSample) {
     hdr.destaddress   = kNodeAddr + 5;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid         = 510;
+    hdr.fcnt         = 510;
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
     mc.seq  = 1;
@@ -3215,7 +3215,7 @@ std::vector<uint8_t> build_grid_sync(bool enable, uint32_t slot, uint32_t msgid,
     hdr.destaddress   = dest_address;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.burstindex    = burst_index;
     hdr.burstcount    = 17;
     hdr.onmark        = true;   // the hub places a GridSync on the node's mark
@@ -3759,7 +3759,7 @@ TEST_F(RealNodeFixture, AckingACommandArmsTheReAckCache) {
     ASSERT_EQ(drain_acks(disp), 1);
 
     EXPECT_TRUE(disp.ackCacheForTest().valid());
-    EXPECT_EQ(disp.ackCacheForTest().msgid(), 930u);
+    EXPECT_EQ(disp.ackCacheForTest().fcnt(), 930u);
     EXPECT_EQ(disp.ackCacheForTest().reacks(), 0);
 }
 
@@ -4224,7 +4224,7 @@ std::vector<uint8_t> encrypt_op(CmdDispatcherTestPeer &disp, DownlinkView &inner
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.burstindex    = burst_index;
     hdr.onmark        = on_mark;   // placed, as the hub places a session downlink
     return seal_op(disp, inner, hdr, nonce);
@@ -4383,7 +4383,7 @@ std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
 
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind           = MAC_CONTROL__KIND__MAC_CONFIG;
@@ -5196,7 +5196,7 @@ std::vector<uint8_t> build_grid_demote(uint32_t dest = 0xFF) {
     hdr.destaddress   = dest;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 0;     // a broadcast belongs to no per-node sequence
+    hdr.fcnt         = 0;     // a broadcast belongs to no per-node sequence
 
     GridDemote gd = GRID_DEMOTE__INIT;
     DlMsg op;
@@ -5435,7 +5435,7 @@ TEST_F(RealNodeFixture, AForgedLoginCannotHoldOffSyncStaleOrFeedPhaseTracking) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 4;
+    hdr.fcnt         = 4;
     hdr.onmark        = true;
     hdr.firestamped   = true;
     hdr.fireround     = 999;
@@ -5727,7 +5727,7 @@ std::vector<uint8_t> pack_stamped_sysop(uint32_t msgid, uint32_t fire_round,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.burstindex    = burst_index;
     hdr.burstcount    = 17;
     hdr.onmark        = false;
@@ -5798,7 +5798,7 @@ TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
 
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 750; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 750; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped  = true;
     hdr.fireround    = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs + kLate);
@@ -5837,7 +5837,7 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
 
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 790; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 790; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -5898,7 +5898,7 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
 
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 790; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 790; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -6771,7 +6771,7 @@ TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
-        hdr.msgid         = 33;
+        hdr.fcnt         = 33;
         op.header         = &hdr;
         TimeSync ts2  = TIME_SYNC__INIT;
         ts2.epoch     = 1787000000ULL;
@@ -7025,7 +7025,7 @@ constexpr int64_t  kRefAnchor = 90'000'000;
 void deliverStampedGridSync(CmdDispatcherTestPeer &disp, uint32_t msgid, int64_t err_us) {
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = msgid; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = msgid; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kRefSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -7208,7 +7208,7 @@ std::vector<uint8_t> old_basenonce_frame(uint32_t msgid, uint32_t dest) {
     hdr.destaddress   = dest;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header = &hdr;
     std::vector<uint8_t> out = pack_op(op);
     const uint8_t field15[] = {0x7A, 0x06, 0x12, 0x04, 0xDE, 0xAD, 0xBE, 0xEF};
@@ -7358,7 +7358,7 @@ TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
     hdr.destaddress   = kHubAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kNodeAddr;
-    hdr.msgid         = 5;
+    hdr.fcnt         = 5;
     UplinkMsg msg;
     msg.header     = &hdr;
     msg.proto_case = UL_AVAIL;
@@ -7370,7 +7370,7 @@ TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
     free(buf);
     ASSERT_FALSE(disp.fcntReloginPendingForTest());
 
-    hdr.msgid = 0x80000005u;     // would reuse msgid 5's keystream
+    hdr.fcnt = 0x80000005u;     // would reuse msgid 5's keystream
     buf = nullptr;
     EXPECT_FALSE(disp.packUplinkFrame_(msg, hdr, &buf, &len)) << "must not seal";
     EXPECT_EQ(buf, nullptr);
@@ -7398,7 +7398,7 @@ std::vector<uint8_t> admit_plain_sysop(uint32_t dest, uint32_t sender, uint32_t 
     hdr.destaddress   = dest;
     hdr.destsubnet    = subnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.onmark        = on_mark;
     op.header   = &hdr;
     op.cmd_case = DL_SYSOP;
@@ -7416,7 +7416,7 @@ std::vector<uint8_t> admit_plain_coverconfig(uint32_t dest, uint32_t sender, uin
     hdr.destaddress   = dest;
     hdr.destsubnet    = subnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header   = &hdr;
     static CoverConfig cc = COVER_CONFIG__INIT;
     cc.opentime = 61; cc.closetime = 66;
@@ -7432,7 +7432,7 @@ std::vector<uint8_t> admit_plain_ping(uint32_t sender, uint32_t seq, uint32_t ms
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.onmark        = true;
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
@@ -7454,7 +7454,7 @@ std::vector<uint8_t> admit_enc_sysop_copy(CmdDispatcherTestPeer &disp, uint32_t 
     inner.sysop    = CLIENT_OPERATION__CMD_STATUS;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
-    hdr.msgid = msgid; hdr.burstindex = burst_index; hdr.burstcount = burst_count;
+    hdr.fcnt = msgid; hdr.burstindex = burst_index; hdr.burstcount = burst_count;
     return seal_op(disp, inner, hdr, kMtNonce);
 }
 
@@ -7479,7 +7479,7 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionAcceptsPl
 
     DlMsg op;
     DlHdr hdr;
-    hdr.destaddress = 0; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr; hdr.msgid = 1;
+    hdr.destaddress = 0; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr; hdr.fcnt = 1;
     op.header = &hdr;
     CoverConfig cc = COVER_CONFIG__INIT;
     cc.opentime = 61; cc.closetime = 66;
@@ -7591,7 +7591,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AForgedLoginAgainstARestoredSessionIsStale) {
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
-    hdr.msgid = 4;
+    hdr.fcnt = 4;
     op.header = &hdr;
     LoginMsg forged = LOGIN_MSG__INIT;
     forged.nonce = 0xDEADBEEFu;
@@ -7912,7 +7912,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnch
 
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 830; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 830; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -7950,7 +7950,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
     nodeclock::setSettledForTest(false);
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 840; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 840; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -8103,7 +8103,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ABeaconIsNotAPhaseSampleEvenWhenAddressedAndP
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
-    hdr.msgid = 861; hdr.onmark = true;
+    hdr.fcnt = 861; hdr.onmark = true;
     op.header = &hdr;
     GridBeacon gb = GRID_BEACON__INIT;
     gb.txround = 5;
