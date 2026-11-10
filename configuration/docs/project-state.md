@@ -9,13 +9,13 @@ ESPHome hub plus ESP-IDF node firmware controlling motorized window blinds over 
 - Node repo: github.com/smirre111/BlindsESP = `C:\Development\PlatformIO\PlatformIO\BlindsESP` (battery-powered, ESP-IDF, IDF 6.0).
 - Two nodes on the bench/production: node 1 `RollladenWohnzimmer1` (OTA only, no serial; its bootloader predates rollback support), node 2 `RollladenWohnzimmer2` (COM6, the test node). Hub on COM9 and 192.168.178.91.
 
-## 2. Status at 2026-11-09 (production runs hub `9a901ad` / node `7ea87ca`; everything below is local, NOT pushed, NOT flashed)
+## 2. Status at 2026-11-10 (production runs hub `d9db3bb` and node fw 1.1.59, verified on hardware in round 6; origin/main lags until the user approves a push)
 
 | Item | Value |
 |---|---|
 | Hub `main` | local, unpushed: fast-forward of `hub-decisions` (on top of `hub-cleanup`: R3/R4 onboarding-gate and LOGIN-airtime fixes, dead-code cleanup, and the user's 2026-11-08 decisions D2, D4/D7, D5 steps 1+2, D8, D13, D19, D24/H-D24/H-D24b, H2/H3), vendored headers and stubs synced to node main `d812190`; `origin/main` = `9a901ad`, which is what production runs (flashed from `C:\hsr11`, config_hash build-path specific `0xfd9b621a`) |
-| Hub `hub-decisions` | merged into local hub `main` (fast-forward); the combined rollout (hub main + node fw 1.1.59) is NOT flashed and needs hardware verification |
-| Node `origin/main` | `7ea87ca`; both nodes run fw 1.1.58 |
+| Round 6 rollout (2026-11-10) | hub `d9db3bb` (production build `C:\hsr19`, config_hash `0xe038e832`) and node fw 1.1.59 on BOTH nodes; hardware-verified: R3/R4 behave as designed (3 plain Hub Restarts, no node needed more than 3 LoginMsgs except one node-2 login at burst 8 after a bench flash, see section 7), REGISTER path clean (6.3/6.6 s), Mode A 7.86/8.65 and 9.88/10.58 ms, Mode B 598/598 FER 0 MIC_FAIL 0, no resets/panics. Node 1 still intermittently deaf (link) |
+| Node `origin/main` | `7ea87ca` (production runs `d812190` fw 1.1.59, not yet pushed) |
 | Node `main` (local) | `d812190` = ff of `node-final` (N2 deprecated D24 aliases deleted, D5 step 2 in `regen_stubs.sh`, H-D24b field renames) on top of `15e855c` (DriftTest, continuous RX and the HW-2 sweep removed; D3, D19, D24); fw **1.1.59**, image code/data identical to `15e855c`; unpushed |
 | proto_sim | hub main: 1773 pass, 0 disabled against a clean fresh-timestamp snapshot of node main `d812190` (all drift gates green; 5 fewer than before = the per-header drift gates of the five headers no longer vendored) |
 | Node host ctest | 27/27 |
