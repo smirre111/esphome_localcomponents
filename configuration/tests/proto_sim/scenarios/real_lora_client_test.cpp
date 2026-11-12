@@ -12819,3 +12819,72 @@ TEST(ArqS7, AnAckAfterTheBurstFallbackIsMeasuredFromTheFirstShotsMarkAndNotRecor
     EXPECT_EQ(occurrences(log, "after a burst fallback or retry, not recorded"), 1) << log;
     EXPECT_EQ(h.rol.ack_latency_for_test().count(nowMs()), before);
 }
+
+// =============================================================================
+// Session diagnostics on the sensor child (SessionDiag.h): the counters and the
+// last recovery time, as Home Assistant sees them. The tracker is pinned in
+// session_diag_test.cpp and its wiring in SessionDiagListener
+// (mac_wire_v1_test.cpp); this pins the child's publishing.
+// =============================================================================
+namespace {
+struct DiagSensorRig : real_helpers::RealHubHarness {
+    esphome::loracov::LoraCover child;
+    esphome::sensor::Sensor recovery, logins, reg_ok, reg_refused, keyless, dropped, stale;
+    DiagSensorRig() : real_helpers::RealHubHarness(18, kMacRol2) {
+        child.set_session_recovery_time(&recovery);
+        child.set_login_messages(&logins);
+        child.set_registers_accepted(&reg_ok);
+        child.set_registers_refused(&reg_refused);
+        child.set_keyless_uplinks(&keyless);
+        child.set_sessions_dropped(&dropped);
+        child.set_stale_periods(&stale);
+        child.setup();
+        rol.register_lora_node(&child);
+    }
+};
+struct ConfirmProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::confirm_session_;
+};
+}  // namespace
+
+TEST(SessionDiagSensors, TheCountersFollowARegisterAndItsLoginAndPublishOnChangeOnly) {
+    using namespace real_helpers;
+    DiagSensorRig h;
+    proto_sim_timer_advance_us(100'000'000);
+
+    auto reg = serialize_register(kMacRol2, /*needs_config=*/true);
+    h.rol.set_response(reg.data(), reg.size());
+    ASSERT_TRUE(h.rol.registered_);
+    EXPECT_FLOAT_EQ(h.reg_ok.state, 1.0f);
+    EXPECT_EQ(h.reg_ok.publishes, 1);
+    EXPECT_EQ(h.logins.publishes, 1) << "a counter still at 0 is published too, once";
+    EXPECT_FLOAT_EQ(h.logins.state, 0.0f);
+    EXPECT_EQ(h.recovery.publishes, 0) << "no recovery has been measured yet";
+
+    proto_sim_timer_advance_us(4'100'000);
+    h.clock.tick(4100);                         // the REGISTER's login fires
+    EXPECT_FLOAT_EQ(h.logins.state, 1.0f);
+    EXPECT_EQ(h.reg_ok.publishes, 1) << "unchanged: not published again";
+    EXPECT_EQ(h.keyless.publishes, 1);
+    EXPECT_FLOAT_EQ(h.keyless.state, 0.0f);
+    EXPECT_FLOAT_EQ(h.dropped.state, 0.0f);
+    EXPECT_FLOAT_EQ(h.stale.state, 0.0f);
+    EXPECT_FLOAT_EQ(h.reg_refused.state, 0.0f);
+}
+
+TEST(SessionDiagSensors, TheRecoveryTimeIsPublishedInSecondsAtTheConfirmation) {
+    using namespace real_helpers;
+    DiagSensorRig h;
+    proto_sim_timer_advance_us(100'000'000);
+    h.rol.registered_ = true;
+    h.rol.send_login();
+    ASSERT_EQ(h.recovery.publishes, 0);
+
+    proto_sim_timer_advance_us(6'500'000);
+    static_cast<ConfirmProbe &>(h.rol).confirm_session_();
+    EXPECT_EQ(h.recovery.publishes, 1);
+    EXPECT_FLOAT_EQ(h.recovery.state, 6.5f);
+
+    static_cast<ConfirmProbe &>(h.rol).confirm_session_();   // every later uplink confirms again
+    EXPECT_EQ(h.recovery.publishes, 1);
+}

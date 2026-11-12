@@ -48,6 +48,10 @@ namespace esphome
       // only the platforms that surface it need to implement it.
       virtual void on_clock_offset(float offset_s) { (void) offset_s; }
 
+      // The session diagnostics of this child's node changed (SessionDiag.h,
+      // read through LORAListener::session_diag()). Default no-op.
+      virtual void on_session_diag() {}
+
       virtual void loop() {}
       void set_lora_client_parent(LORAListener *parent) { this->parent_ = parent; }
 

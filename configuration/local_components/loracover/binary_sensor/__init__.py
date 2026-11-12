@@ -8,7 +8,7 @@ from esphome.const import (
     ENTITY_CATEGORY_DIAGNOSTIC,
 )
 
-# Two diagnostics share this platform, selected by `type:`:
+# Several diagnostics share this platform, selected by `type:`:
 #
 #   command_failed  (F-4, default)  — a cover command was not acknowledged by
 #                   the node after all retransmissions; cleared on the next
@@ -22,6 +22,12 @@ from esphome.const import (
 #                   modelled wake minus the boot margin). Commands issued meanwhile
 #                   are ignored. Not a problem state: give it `device_class: ""`.
 #
+#   session_stale   (problem)       — the node is heard WITHOUT a session and no
+#                   session was confirmed within 30 s of the first such uplink
+#                   (its LOGIN is not landing, or its REGISTER is refused).
+#                   Cleared by the next confirmed session or a sleep. A silent
+#                   node is never stale. See lora_client/SessionDiag.h.
+#
 # `type:` defaults to command_failed so existing configurations keep working
 # unchanged.
 
@@ -32,7 +38,8 @@ DEPENDENCIES = ["lora_tracker", "lora_client"]
 TYPE_COMMAND_FAILED = "command_failed"
 TYPE_SCHEDULE_PENDING = "schedule_pending"
 TYPE_ASLEEP = "asleep"
-TYPES = [TYPE_COMMAND_FAILED, TYPE_SCHEDULE_PENDING, TYPE_ASLEEP]
+TYPE_SESSION_STALE = "session_stale"
+TYPES = [TYPE_COMMAND_FAILED, TYPE_SCHEDULE_PENDING, TYPE_ASLEEP, TYPE_SESSION_STALE]
 
 CONFIG_SCHEMA = (
     binary_sensor.binary_sensor_schema(
@@ -58,5 +65,7 @@ async def to_code(config):
         cg.add(paren.set_schedule_pending_binary_sensor(sens))
     elif config[CONF_TYPE] == TYPE_ASLEEP:
         cg.add(paren.set_asleep_binary_sensor(sens))
+    elif config[CONF_TYPE] == TYPE_SESSION_STALE:
+        cg.add(paren.set_session_stale_binary_sensor(sens))
     else:
         cg.add(paren.set_command_failed_binary_sensor(sens))

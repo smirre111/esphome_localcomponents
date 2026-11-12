@@ -47,6 +47,24 @@ drift gate. Change them in the node repo and re-vendor; never edit them here.
   firmware without the field cannot REGISTER again until the hub reboots
   (press 'Hub Restart').
 
+## Session diagnostics (`lora_client/SessionDiag.h`)
+
+What happened to a node's REGISTER / LOGIN path, visible in Home Assistant and
+the log instead of only in a serial capture. `HubSession` notes every event
+where it happens; the listener publishes on change.
+
+| Entity (loracover platform) | Meaning |
+|---|---|
+| `binary_sensor`, `type: session_stale` | ON while the node is heard WITHOUT a session (keyless uplink, no session id on record, accepted REGISTER) and none was confirmed within 30 s of the first such uplink. Cleared by the next confirmed session or a sleep. A silent node is never stale. |
+| `text_sensor`, `type: session_state` | `confirmed`, `login pending`, `no session`, `asleep`, or `stale (heard, no session)`. |
+| `sensor: session_recovery_time` | Seconds from the first sign a session was needed (LoginMsg sent, node heard without a session, session dropped) to its confirmation. No value before the first recovery after a hub boot. |
+| `sensor: login_messages`, `registers_accepted`, `registers_refused`, `keyless_uplinks`, `sessions_dropped`, `stale_periods` | Counters since hub boot (`total_increasing`). |
+
+Log lines to grep: `SESSION STALE` (WARN, once per period, with the counters and
+the last REGISTER refusal reason) and `Session recovered in N s (K LoginMsg)`.
+A keyless uplink is unauthenticated, so a forged frame can raise the flag;
+nothing acts on these values.
+
 ## Tests and checks
 
 - `tests/proto_sim` -- the host test suite (gtest + CMake, WSL). It compiles

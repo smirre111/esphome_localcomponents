@@ -383,6 +383,7 @@ namespace esphome
         if (!this->register_authentic_(data, len))
         {
           ESP_LOGW(TAG, "%s: REGISTER failed MIC verification — dropping", this->host_.session_name());
+          this->note_register_refused_(sessiondiag::RegisterRefusal::BadTag);
           return false;
         }
 
@@ -394,6 +395,7 @@ namespace esphome
           ESP_LOGW(TAG, "%s: REGISTER replayed (register_seq %u, highest seen %u) — dropping",
                    this->host_.session_name(), (unsigned) reg->register_seq,
                    (unsigned) this->register_seq_.highest());
+          this->note_register_refused_(sessiondiag::RegisterRefusal::Replayed);
           return false;
         }
 
@@ -417,6 +419,7 @@ namespace esphome
           ESP_LOGW(TAG, "%s: REGISTER rate-limited (%lld ms after the last one) — dropping",
                    this->host_.session_name(),
                    (long long) ((now_us - this->last_register_accepted_us_) / 1000));
+          this->note_register_refused_(sessiondiag::RegisterRefusal::RateLimited);
           return false;
         }
         this->last_register_accepted_us_ = now_us;
@@ -434,6 +437,7 @@ namespace esphome
         // uplink offset when it is on a grid (rollout-4, see send_login_frame_).
         this->register_t0_us_      = this->host_.session_rx_t0_us();
         this->register_login_sends_ = 0;
+        this->diag_.noteRegisterAccepted(diag_now_ms_());
         this->host_.session_register_accepted();
         const bool push_config = this->host_.session_register_config(reg->needs_config);
 
@@ -469,6 +473,9 @@ namespace esphome
         this->host_.session_set_timeout("login_startup", login_delay_ms, [this]() {
           this->do_login_and_arm_retry();
         });
+        // After the state above: the text reads "login pending", and the stale
+        // clock this REGISTER started gets its timeout.
+        this->host_.session_diag_changed();
     }
 
     // A successful decrypt proves the node holds the matching base nonce, so
@@ -484,6 +491,11 @@ namespace esphome
       this->login_.confirmed       = true;
       this->login_.relogin_pending = false;
       this->register_t0_us_        = 0;   // later challenges have no REGISTER to aim from
+      if (this->diag_.noteConfirmed(diag_now_ms_()))
+        ESP_LOGI(TAG, "[%s] Session recovered in %u.%u s (%u LoginMsg)", this->host_.session_name(),
+                 (unsigned) (this->diag_.lastRecoveryMs() / 1000u),
+                 (unsigned) ((this->diag_.lastRecoveryMs() % 1000u) / 100u),
+                 (unsigned) this->diag_.lastRecoveryLogins());
 
       // The settle clock for the onboarding gate starts here: the pushes that
       // follow a confirmation are queued over the next ~2 s.
@@ -513,6 +525,7 @@ namespace esphome
                  this->host_.session_name());
         this->host_.session_on_login_acknowledged();
       }
+      this->host_.session_diag_changed();
     }
 
     void HubSession::send_login(bool into_uplink_window)
@@ -630,6 +643,8 @@ namespace esphome
                  (unsigned) this->sweep_sends_);
       else
         this->host_.session_send(f.bytes.data(), f.bytes.size(), f.seal);
+      this->diag_.noteLoginSent(diag_now_ms_());
+      this->host_.session_diag_changed();
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
                this->host_.session_name(), (unsigned) base, (unsigned) this->seq().txId(),
                (int) login.request_register);
@@ -712,6 +727,27 @@ namespace esphome
       this->login_.login_retry_count   = 0;
       this->login_.pending_login_nonce = 0;   // sleep ends the session; mint fresh on wake
       this->host_.session_cancel_timeout("login_retry");   // ("login_startup" is replaced by the arming below)
+      this->diag_.noteAsleep();
+      this->host_.session_diag_changed();
+    }
+
+    // ---- diagnostics (SessionDiag.h) ----
+
+    int64_t HubSession::diag_now_ms_() { return esp_timer_get_time() / 1000; }
+
+    void HubSession::note_register_refused_(sessiondiag::RegisterRefusal why)
+    {
+      this->diag_.noteRegisterRefused(why);
+      this->host_.session_diag_changed();
+    }
+
+    // A command went fully unacked: the session is dead (DeliveryService).
+    void HubSession::drop_confirmation()
+    {
+      if (this->login_.confirmed)
+        this->diag_.noteSessionDropped(diag_now_ms_());
+      this->login_.confirmed = false;
+      this->host_.session_diag_changed();
     }
 
     // ---- the listener's side of the session lifecycle (SessionHost events) ----
@@ -1168,6 +1204,8 @@ namespace esphome
       // no retry, so a dropped re-provisioning LoginMsg had no recovery
       // until this node happened to send another encrypted uplink.
       ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", up.sender);
+      this->diag_.noteKeylessUplink(diag_now_ms_());
+      this->host_.session_diag_changed();
       this->host_.session_relogin();
       return false;
     }
@@ -1219,6 +1257,8 @@ namespace esphome
       {
         ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", up.sender);
         this->drop_candidate_(up);
+        this->diag_.noteKeylessUplink(diag_now_ms_());
+        this->host_.session_diag_changed();
         this->note_keyless_uplink_();
         return false;
       }

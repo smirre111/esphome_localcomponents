@@ -31,6 +31,7 @@
 #include "esphome/components/lora_client/ModeBSupervisor.h"
 #include "esphome/components/lora_client/OnboardingGate.h"
 #include "esphome/components/lora_client/RegisterFreshness.h"
+#include "esphome/components/lora_client/SessionDiag.h"
 #include "esphome/components/lora_client/SleepModel.h"
 #include "esphome/components/lora_client/Sequencer.h"
 
@@ -113,6 +114,8 @@ namespace esphome
       // past its restored replay floor. The listener re-publishes the grid and
       // sends a TimeSync for a node that lost its RAM.
       virtual void session_node_restored(uint32_t fcnt_jump) = 0;
+      // The session's diagnostics (SessionDiag.h) changed: publish them.
+      virtual void session_diag_changed() = 0;
 
     protected:
       ~SessionHost() = default;
@@ -282,7 +285,7 @@ namespace esphome
       // has no keys until its first LOGIN: defer commands until then (HB5).
       void mark_relogin_pending() { this->login_.relogin_pending = true; }
       // A command went fully unacked: the session is dead (DeliveryService).
-      void drop_confirmation() { this->login_.confirmed = false; }
+      void drop_confirmation();
       // setup() of a node restored as registered: a login challenge is due.
       void reset_for_boot()
       {
@@ -307,6 +310,24 @@ namespace esphome
       void handle_register(const hubframes::Up *rcv_message, const uint8_t *data, size_t len);
 
       LoginState &login_state_for_test() { return this->login_; }
+
+      // ---- diagnostics (SessionDiag.h): counters, recovery time, stale period ----
+      // Read-only for the listener, which publishes them; every event is noted
+      // here, where it happens, and announced through session_diag_changed().
+      const sessiondiag::Tracker &diag() const { return this->diag_; }
+      // The stale flag, counting a period once (the listener's poll).
+      bool diag_poll_stale(bool *became) { return this->diag_.poll(diag_now_ms_(), became); }
+      uint32_t diag_ms_until_stale() const { return this->diag_.msUntilStale(diag_now_ms_()); }
+      uint32_t diag_heard_without_session_ms() const
+      {
+        return this->diag_.heardWithoutSessionMs(diag_now_ms_());
+      }
+      // A challenge is in flight or due (the "login pending" state).
+      bool challenge_in_flight() const
+      {
+        return this->login_.relogin_pending || this->login_.pending_login_nonce != 0 ||
+               this->login_.startup_login_initiated;
+      }
 
       // ---- a node reboot, as MAC-1 sees it (review "ota-hang", 2026-10-31) ----
       // A node that boots on a resumed session restores tx = persisted + 64 (its
@@ -392,6 +413,8 @@ namespace esphome
       bool verify_uplink_(EncUplink &up);
       mac2::LinkSecurity::Verify tag_verdict_(EncUplink &up);
       void drop_candidate_(EncUplink &up);
+      static int64_t diag_now_ms_();
+      void note_register_refused_(sessiondiag::RegisterRefusal why);
 
       SessionHost &host_;
       mac1::Sequencer seq_{mac1::Config{mac1::Policy::ForwardRatchet, 1, 1}};
@@ -405,6 +428,7 @@ namespace esphome
       uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       static onboarding::Gate onboarding_gate_;
       LoginState login_{};
+      sessiondiag::Tracker diag_{};
       // When a keyless uplink last re-sent the LOGIN (0 = never).
       int64_t  last_keyless_login_us_{0};
       // That uplink's T0: where the re-sent LOGIN is aimed (review rollout-3 F1).

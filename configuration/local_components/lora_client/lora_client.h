@@ -1153,6 +1153,13 @@ namespace esphome
       // the SLEEP ack until the node is awake again; "Sleep Status" says why.
       void set_asleep_binary_sensor(binary_sensor::BinarySensor *bs) { this->asleep_bsensor_ = bs; }
       void set_sleep_status_text_sensor(text_sensor::TextSensor *ts) { this->sleep_status_tsensor_ = ts; }
+      // Diagnostics of the node's session (SessionDiag.h): "Session Stale" is ON
+      // while the node is heard without a session for more than 30 s; "Session
+      // State" says where the session is.
+      void set_session_stale_binary_sensor(binary_sensor::BinarySensor *bs) { this->session_stale_bsensor_ = bs; }
+      void set_session_state_text_sensor(text_sensor::TextSensor *ts) { this->session_state_tsensor_ = ts; }
+      // The counters and the last recovery time, for the children's sensors.
+      const sessiondiag::Tracker &session_diag() const { return this->session_.diag(); }
 
       // std::string address_str() const;
       uint64_t address_uint64() const { return this->address_uint64_; };
@@ -1418,6 +1425,7 @@ namespace esphome
       void session_on_confirmed() override;
       void session_on_login_acknowledged() override;
       void session_node_restored(uint32_t fcnt_jump) override;
+      void session_diag_changed() override;
       int64_t session_tx_drain_us() const override;
       bool session_schedule_outstanding() const override;
       // Move the replay counter. Called only for a frame that has been
@@ -1474,6 +1482,7 @@ namespace esphome
       void     refresh_sleep_status_();
       void     start_sleep_status_();
       void     publish_sleep_status_(sleepmodel::State s);
+      void     publish_session_diag_();
       // True (and logs one line) when a request must be ignored: the node sleeps.
       bool     refuse_while_asleep_(const deliverypolicy::ControlCmd &c);
       // Inputs of pending_shadow_inputs(), split out to keep it flat.
@@ -1570,6 +1579,10 @@ namespace esphome
       // What was last PUBLISHED (publish on change only). -1 / empty: nothing yet.
       int8_t                       sleep_pub_asleep_{-1};
       std::string                  sleep_pub_text_;
+      binary_sensor::BinarySensor *session_stale_bsensor_{nullptr};
+      text_sensor::TextSensor     *session_state_tsensor_{nullptr};
+      int8_t                       session_pub_stale_{-1};
+      std::string                  session_pub_text_;
 
       // 3000 ms (not 2000): a burst is ~1.5 s and the tracker holds a post-burst
       // RX window after it, so the cycle is ~1.9 s.  2000 ms re-burst almost

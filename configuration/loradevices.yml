@@ -1354,6 +1354,30 @@ sensor:
     battery_calib_nominal_run:
       name: "RollladenWohnzimmer1 Battery Calib Nominal Run"
       id: rol_1_calib_nominal_run
+    # Session diagnostics (lora_client/SessionDiag.h). The recovery time is
+    # how long the last REGISTER / LOGIN recovery took; the counters run
+    # since hub boot.
+    session_recovery_time:
+      name: "RollladenWohnzimmer1 Session Recovery Time"
+      id: rol_1_session_recovery_time
+    login_messages:
+      name: "RollladenWohnzimmer1 Login Messages"
+      id: rol_1_login_messages
+    registers_accepted:
+      name: "RollladenWohnzimmer1 Registers Accepted"
+      id: rol_1_registers_accepted
+    registers_refused:
+      name: "RollladenWohnzimmer1 Registers Refused"
+      id: rol_1_registers_refused
+    keyless_uplinks:
+      name: "RollladenWohnzimmer1 Keyless Uplinks"
+      id: rol_1_keyless_uplinks
+    sessions_dropped:
+      name: "RollladenWohnzimmer1 Sessions Dropped"
+      id: rol_1_sessions_dropped
+    stale_periods:
+      name: "RollladenWohnzimmer1 Stale Periods"
+      id: rol_1_stale_periods
 
   - platform: loracover
     lora_client_id: rol_2
@@ -1388,6 +1412,30 @@ sensor:
     battery_calib_nominal_run:
       name: "RollladenWohnzimmer2 Battery Calib Nominal Run"
       id: rol_2_calib_nominal_run
+    # Session diagnostics (lora_client/SessionDiag.h). The recovery time is
+    # how long the last REGISTER / LOGIN recovery took; the counters run
+    # since hub boot.
+    session_recovery_time:
+      name: "RollladenWohnzimmer2 Session Recovery Time"
+      id: rol_2_session_recovery_time
+    login_messages:
+      name: "RollladenWohnzimmer2 Login Messages"
+      id: rol_2_login_messages
+    registers_accepted:
+      name: "RollladenWohnzimmer2 Registers Accepted"
+      id: rol_2_registers_accepted
+    registers_refused:
+      name: "RollladenWohnzimmer2 Registers Refused"
+      id: rol_2_registers_refused
+    keyless_uplinks:
+      name: "RollladenWohnzimmer2 Keyless Uplinks"
+      id: rol_2_keyless_uplinks
+    sessions_dropped:
+      name: "RollladenWohnzimmer2 Sessions Dropped"
+      id: rol_2_sessions_dropped
+    stale_periods:
+      name: "RollladenWohnzimmer2 Stale Periods"
+      id: rol_2_stale_periods
 
 
 switch:
@@ -1581,6 +1629,20 @@ binary_sensor:
     name: "RollladenWohnzimmer2 Asleep"
     id: rol_2_asleep
 
+  # ON while the node is heard WITHOUT a session for more than 30 s: its LOGIN
+  # is not landing, or its REGISTER is refused. Cleared by the next confirmed
+  # session or a sleep; a silent node is never stale.
+  - platform: loracover
+    lora_client_id: rol_1
+    type: session_stale
+    name: "RollladenWohnzimmer1 Session Stale"
+    id: rol_1_session_stale
+  - platform: loracover
+    lora_client_id: rol_2
+    type: session_stale
+    name: "RollladenWohnzimmer2 Session Stale"
+    id: rol_2_session_stale
+
 # Companion of the Asleep sensors: "awake", "asleep until 05:00",
 # "sleep unconfirmed" (or "auto mode").
 text_sensor:
@@ -1592,6 +1654,20 @@ text_sensor:
     lora_client_id: rol_2
     name: "RollladenWohnzimmer2 Sleep Status"
     id: rol_2_sleep_status
+  # Where the session is: "confirmed", "login pending", "no session",
+  # "asleep", or "stale (heard, no session)".
+  - platform: loracover
+    lora_client_id: rol_1
+    type: session_state
+    icon: "mdi:lan-connect"
+    name: "RollladenWohnzimmer1 Session State"
+    id: rol_1_session_state
+  - platform: loracover
+    lora_client_id: rol_2
+    type: session_state
+    icon: "mdi:lan-connect"
+    name: "RollladenWohnzimmer2 Session State"
+    id: rol_2_session_state
 
 # ---- Schedule editing from Home Assistant (node 2 first) --------------------
 #

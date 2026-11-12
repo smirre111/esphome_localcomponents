@@ -12,6 +12,8 @@
 #include "esphome/components/lora_client/lora_client.h"
 #include "esphome/components/lora_tracker/lora_tracker.h"
 #include "esphome/components/homeassistant/time/homeassistant_time.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 
 #include "blinds.pb-c.h"
 #include "HubWire.h"
@@ -1614,4 +1616,168 @@ TEST(MacWireV1Seal, ANewSessionIdMakesEveryFrameSealedBeforeItStale) {
     EXPECT_EQ(sf.retag(), mac2::LinkSecurity::Retag::Stale)
         << "a copy was tagged under the new session id with the old frame's binding";
     EXPECT_TRUE(sf.untouched());
+}
+
+// ===========================================================================
+// Session diagnostics (SessionDiag.h) on the real listener: the "Session Stale"
+// problem sensor, the "Session State" text and the counters behind the
+// children's sensors. The predicate itself is pinned in session_diag_test.cpp;
+// these pin that every event of the real REGISTER / LOGIN path reaches it.
+// ===========================================================================
+namespace {
+// Protected members addressed through a probe that adds no state (the pattern
+// of real_lora_client_test.cpp).
+struct DiagProbe : LORAClient {
+    using esphome::lora_tracker::LORAListener::dlv_drop_session;
+    using esphome::lora_tracker::LORAListener::session_;
+};
+DiagProbe &DP(Hub &h) { return static_cast<DiagProbe &>(h.rol); }
+
+struct DiagRig : Hub {
+    esphome::binary_sensor::BinarySensor stale;
+    esphome::text_sensor::TextSensor     state;
+    DiagRig() {
+        rol.set_session_stale_binary_sensor(&stale);
+        rol.set_session_state_text_sensor(&state);
+    }
+    // Both clocks: esp_timer (the tracker's) and the scheduler (the timeout).
+    void pass(uint32_t ms) {
+        proto_sim_timer_advance_us((int64_t) ms * 1000);
+        clock.tick(ms);
+    }
+    const sessiondiag::Counters &c() { return rol.session_diag().counters(); }
+};
+}  // namespace
+
+TEST(SessionDiagListener, ANodeHeardWithoutASessionTurnsStaleAfterThirtySecondsOnItsOwn) {
+    DiagRig hub;
+    const uint32_t session = pendingLogin(hub);
+    EXPECT_EQ(hub.state.state, "login pending");
+    EXPECT_FALSE(hub.stale.state);
+    EXPECT_EQ(hub.c().logins_sent, 1u);
+
+    sessionUplink(hub, session, 50);   // the node transmits; the hub holds no keys
+    EXPECT_EQ(hub.c().keyless_uplinks, 1u);
+    EXPECT_FALSE(hub.stale.state);
+
+    hub.pass(sessiondiag::kStaleAfterMs - 1000);
+    EXPECT_FALSE(hub.stale.state) << "29 s: not yet";
+    EXPECT_EQ(hub.c().stale_periods, 0u);
+
+    testing::internal::CaptureStderr();
+    hub.pass(1100);                    // nothing is received: the timeout raises it
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(hub.stale.state);
+    EXPECT_EQ(hub.state.state, "stale (heard, no session)");
+    EXPECT_EQ(hub.c().stale_periods, 1u);
+    EXPECT_NE(log.find("SESSION STALE"), std::string::npos) << log;
+
+    hub.pass(60'000);
+    EXPECT_TRUE(hub.stale.state);
+    EXPECT_EQ(hub.c().stale_periods, 1u) << "one period, counted once";
+}
+
+TEST(SessionDiagListener, AConfirmedSessionEndsTheStalePeriodAndReportsTheRecoveryTime) {
+    DiagRig hub;
+    const uint32_t session = pendingLogin(hub);
+    sessionUplink(hub, session, 50);
+    hub.pass(sessiondiag::kStaleAfterMs + 5000);
+    ASSERT_TRUE(hub.stale.state);
+
+    testing::internal::CaptureStderr();
+    openSession(hub);
+    const std::string log = testing::internal::GetCapturedStderr();
+    ASSERT_TRUE(hub.rol.session_confirmed());
+    EXPECT_FALSE(hub.stale.state);
+    EXPECT_EQ(hub.state.state, "confirmed");
+    EXPECT_EQ(hub.c().recoveries, 1u);
+    EXPECT_GE(hub.rol.session_diag().lastRecoveryMs(), sessiondiag::kStaleAfterMs + 5000);
+    EXPECT_GE(hub.rol.session_diag().lastRecoveryLogins(), 2u) << "pendingLogin's and openSession's";
+    EXPECT_NE(log.find("Session recovered in"), std::string::npos) << log;
+}
+
+TEST(SessionDiagListener, LoginsIntoSilenceAreCountedButNeverStale) {
+    DiagRig hub;
+    pendingLogin(hub);
+    hub.pass(10 * sessiondiag::kStaleAfterMs);
+    EXPECT_FALSE(hub.stale.state) << "nothing was heard: asleep or out of range, not this fault";
+    EXPECT_EQ(hub.state.state, "login pending");
+    EXPECT_EQ(hub.c().logins_sent, 1u);
+    EXPECT_EQ(hub.c().stale_periods, 0u);
+}
+
+TEST(SessionDiagListener, AnAcceptedRegisterStartsTheClockAndARefusedOneIsCounted) {
+    DiagRig hub;
+    const Bytes first = registerFrame(5);
+    ASSERT_TRUE(takesRegister(hub, first));
+    EXPECT_EQ(hub.c().registers_accepted, 1u);
+    EXPECT_EQ(hub.c().registers_refused, 0u);
+
+    ASSERT_FALSE(takesRegister(hub, first));   // its replay
+    EXPECT_EQ(hub.c().registers_refused, 1u);
+    EXPECT_EQ(hub.rol.session_diag().lastRefusal(), sessiondiag::RegisterRefusal::Replayed);
+
+    Bytes forged = registerFrame(9);
+    forged[forged.size() - 2] ^= 0x10;
+    ASSERT_FALSE(takesRegister(hub, forged));
+    EXPECT_EQ(hub.c().registers_refused, 2u);
+    EXPECT_EQ(hub.rol.session_diag().lastRefusal(), sessiondiag::RegisterRefusal::BadTag);
+
+    EXPECT_EQ(hub.c().registers_accepted, 1u);
+
+    // No LOGIN ever lands: 30 s after the accepted REGISTER the node is stale.
+    hub.pass(sessiondiag::kStaleAfterMs);
+    EXPECT_TRUE(hub.stale.state);
+}
+
+TEST(SessionDiagListener, ARateLimitedRegisterIsCountedAsRefused) {
+    DiagRig hub;
+    ASSERT_TRUE(takesRegister(hub, registerFrame(7)));
+    Bytes limited = registerFrame(8);
+    proto_sim_timer_advance_us(1'000'000);
+    hub.rol.set_response(limited.data(), limited.size());
+    EXPECT_EQ(hub.c().registers_accepted, 1u);
+    EXPECT_EQ(hub.c().registers_refused, 1u);
+    EXPECT_EQ(hub.rol.session_diag().lastRefusal(), sessiondiag::RegisterRefusal::RateLimited);
+}
+
+TEST(SessionDiagListener, AHealthySessionIsConfirmedAndNeverStale) {
+    DiagRig hub;
+    proto_sim_timer_advance_us(100'000'000);
+    const uint32_t session = openSession(hub);
+    ASSERT_TRUE(hub.rol.session_confirmed());
+    EXPECT_EQ(hub.state.state, "confirmed");
+    EXPECT_FALSE(hub.stale.state);
+    const int publishes = hub.state.publishes;
+    for (uint32_t fcnt = 2; fcnt < 6; ++fcnt)
+        sessionUplink(hub, session, fcnt);
+    hub.pass(10 * sessiondiag::kStaleAfterMs);
+    EXPECT_FALSE(hub.stale.state);
+    EXPECT_EQ(hub.c().keyless_uplinks, 0u);
+    EXPECT_EQ(hub.c().recoveries, 1u) << "the login itself, and no further 'recovery' per uplink";
+    EXPECT_EQ(hub.state.publishes, publishes) << "published on change only";
+}
+
+TEST(SessionDiagListener, ADroppedSessionIsCountedAndReadsAsNotConfirmed) {
+    DiagRig hub;
+    openSession(hub);
+    ASSERT_EQ(hub.state.state, "confirmed");
+    DP(hub).dlv_drop_session();
+    EXPECT_EQ(hub.c().sessions_dropped, 1u);
+    EXPECT_NE(hub.state.state, "confirmed");
+    DP(hub).dlv_drop_session();
+    EXPECT_EQ(hub.c().sessions_dropped, 1u) << "there was no session left to drop";
+}
+
+TEST(SessionDiagListener, SleepEndsAStalePeriod) {
+    DiagRig hub;
+    const uint32_t session = pendingLogin(hub);
+    sessionUplink(hub, session, 50);
+    hub.pass(sessiondiag::kStaleAfterMs + 1000);
+    ASSERT_TRUE(hub.stale.state);
+    DP(hub).session_.end_for_sleep();
+    EXPECT_FALSE(hub.stale.state);
+    hub.pass(10 * sessiondiag::kStaleAfterMs);
+    EXPECT_FALSE(hub.stale.state);
+    EXPECT_EQ(hub.c().stale_periods, 1u);
 }

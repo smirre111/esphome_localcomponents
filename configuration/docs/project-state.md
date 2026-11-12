@@ -75,6 +75,10 @@ Known noise: Mode B phase error p50/p99 varies run to run (105/926 .. 4029/5445 
 7. Optional: second optimistic single-shot op ~25 s after a move misses its single shot (hub could skip the optimistic shot while a node's motor runs); node 1 position belief after an OTA reset is off (send "open" once); deep-sleep current is ASSUMED uA-level (not measured, user decision); H5 key provisioning; telemetry `optional` fields.
 8. Cleanup by hand: scratch dirs `C:\hs`, `C:\hs1`..`C:\hs4`, `C:\hsr2`..`C:\hsr4`; untracked `.vscode/`, `LoaNode.md`, `events150.csv`, `full150.csv`, `trace150.json`, `../git`, `../tasmota-minimal.bin.gz` in the hub tree.
 
+## 7a. Session diagnostics (added after 2026-11-06; host-tested, NOT yet compiled with ESPHome or run on hardware)
+
+`lora_client/SessionDiag.h` + `HubSession` + the loracover platforms: per node a `Session Stale` problem sensor (heard without a session for > 30 s), a `Session State` text sensor, a `Session Recovery Time` sensor and six counters since hub boot (LoginMsg sent, REGISTER accepted / refused, keyless uplinks, sessions dropped, stale periods), plus the log lines `SESSION STALE` and `Session recovered in N s (K LoginMsg)`. Details: `local_components/README.md`. Use them for open issue 1 (the hub-restart LOGIN): after a `Hub Restart` each node's `Session Recovery Time` is the number that was read out of the serial log by hand before. Before flashing: `esphome compile loradevices.yml` (the production yml gains 18 entities, 9 per node; check flash/RAM against section 2).
+
 ## 8. Where things are
 
 - Procedures (build, test, flash, OTA, bench campaigns, traps): `docs/rollout-runbook.md`. Bench runbook: `docs/bench-runbook.md`. Tools: `tools/{hubctl,benchlog,make_bench_yaml,mac1_turnaround,mac1_campaign,mac2_campaign,layer_lint}.py`, `tools/campaigns/` (the last campaign driver and helpers).

@@ -151,5 +151,34 @@ namespace esphome
         this->clock_offset_->publish_state(offset_s);
     }
 
+    void LoraCover::publish_diag_(DiagSlot slot, float value)
+    {
+      DiagSensor &d = this->diag_[slot];
+      if (d.sensor == nullptr || (d.published && d.last == value))
+        return;
+      d.published = true;
+      d.last      = value;
+      d.sensor->publish_state(value);
+    }
+
+    // The counters start at 0 and are published as such at setup, so a node that
+    // never had trouble shows zeros rather than "unknown". The recovery time has
+    // no value before the first recovery and is left unpublished until then.
+    void LoraCover::on_session_diag()
+    {
+      if (this->parent_ == nullptr)
+        return;
+      const sessiondiag::Tracker &t = this->parent_->session_diag();
+      const sessiondiag::Counters &c = t.counters();
+      if (c.recoveries != 0)
+        this->publish_diag_(kDiagRecovery, static_cast<float>(t.lastRecoveryMs()) / 1000.0f);
+      this->publish_diag_(kDiagLogins, static_cast<float>(c.logins_sent));
+      this->publish_diag_(kDiagRegAccepted, static_cast<float>(c.registers_accepted));
+      this->publish_diag_(kDiagRegRefused, static_cast<float>(c.registers_refused));
+      this->publish_diag_(kDiagKeyless, static_cast<float>(c.keyless_uplinks));
+      this->publish_diag_(kDiagDropped, static_cast<float>(c.sessions_dropped));
+      this->publish_diag_(kDiagStale, static_cast<float>(c.stale_periods));
+    }
+
   }  // namespace loracov
 } // namespace esphome

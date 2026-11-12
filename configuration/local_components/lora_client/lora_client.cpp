@@ -103,6 +103,7 @@ namespace esphome
         this->session_.mark_relogin_pending();
 
       this->start_sleep_status_();
+      this->publish_session_diag_();   // the first values: "no session" / "login pending", not stale
 
       // Initialise PSA Crypto (idempotent — safe from multiple instances) and
       // derive K_auth once. Every other PSA user on the hub (session key
@@ -566,6 +567,57 @@ namespace esphome
       return true;
     }
 
+    // The session diagnostics (SessionDiag.h), on change only: the stale flag,
+    // the state text and the children's counters. While the node is heard
+    // without a session, a timeout lands on the instant the period turns stale,
+    // so the flag rises on time even if nothing else happens.
+    void LORAListener::session_diag_changed() { this->publish_session_diag_(); }
+
+    void LORAListener::publish_session_diag_()
+    {
+      bool became = false;
+      const bool stale = this->session_.diag_poll_stale(&became);
+      if (became)
+      {
+        const sessiondiag::Counters &c = this->session_.diag().counters();
+        ESP_LOGW(TAG, "[%s] SESSION STALE: node heard for %u s without a session "
+                      "(%u LoginMsg this recovery; since boot: %u LoginMsg, REGISTER %u accepted / %u refused, "
+                      "%u keyless uplinks, %u sessions dropped; last REGISTER refusal: %s)",
+                 this->get_name().c_str(),
+                 (unsigned) (this->session_.diag_heard_without_session_ms() / 1000u),
+                 (unsigned) this->session_.diag().recoveryLogins(), (unsigned) c.logins_sent,
+                 (unsigned) c.registers_accepted, (unsigned) c.registers_refused,
+                 (unsigned) c.keyless_uplinks, (unsigned) c.sessions_dropped,
+                 this->session_.diag().hasRefusal()
+                     ? sessiondiag::refusalText(this->session_.diag().lastRefusal())
+                     : "none");
+      }
+      const int8_t stale_i = stale ? 1 : 0;
+      if (stale_i != this->session_pub_stale_)
+      {
+        this->session_pub_stale_ = stale_i;
+        if (this->session_stale_bsensor_ != nullptr)
+          this->session_stale_bsensor_->publish_state(stale);
+      }
+      const sessiondiag::State st = sessiondiag::classify(
+          this->node_asleep_(), this->session_.confirmed(), this->session_.challenge_in_flight());
+      const char *text = sessiondiag::stateText(st, stale);
+      if (this->session_pub_text_ != text)
+      {
+        this->session_pub_text_ = text;
+        if (this->session_state_tsensor_ != nullptr)
+          this->session_state_tsensor_->publish_state(this->session_pub_text_);
+      }
+      for (auto *node : this->nodes_)
+        node->on_session_diag();
+
+      const uint32_t until = this->session_.diag_ms_until_stale();
+      if (until != 0)
+        this->set_timeout("session_stale", until + 1u, [this]() { this->publish_session_diag_(); });
+      else
+        this->cancel_timeout("session_stale");
+    }
+
     void LORAListener::publish_sleep_status_(sleepmodel::State s)
     {
       const int8_t asleep = (s == sleepmodel::State::Asleep) ? 1 : 0;
@@ -574,6 +626,9 @@ namespace esphome
         this->sleep_pub_asleep_ = asleep;
         if (this->asleep_bsensor_ != nullptr)
           this->asleep_bsensor_->publish_state(asleep != 0);
+        // "asleep" is one of the session states: keep the text in step.
+        if (this->session_pub_stale_ >= 0)
+          this->publish_session_diag_();
       }
       char text[40];
       sleepmodel::statusText(s, this->next_wake_epoch_(), esphome::ESPTime::timezone_offset(),

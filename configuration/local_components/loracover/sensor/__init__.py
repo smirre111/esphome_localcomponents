@@ -11,6 +11,7 @@ from esphome.const import (
     DEVICE_CLASS_SIGNAL_STRENGTH,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL_INCREASING,
     UNIT_AMPERE,
     UNIT_DECIBEL_MILLIWATT,
     UNIT_PERCENT,
@@ -23,6 +24,17 @@ CONF_MOTOR_CURRENT = "motor_current"
 CONF_CLOCK_OFFSET = "clock_offset"
 CONF_CALIB_ACTUAL_RUN = "battery_calib_actual_run"
 CONF_CALIB_NOMINAL_RUN = "battery_calib_nominal_run"
+# Session diagnostics (lora_client/SessionDiag.h). The counters run since hub
+# boot; the key is also the C++ setter's name (set_<key>).
+CONF_SESSION_RECOVERY_TIME = "session_recovery_time"
+SESSION_COUNTERS = {
+    "login_messages": "mdi:login",
+    "registers_accepted": "mdi:account-check-outline",
+    "registers_refused": "mdi:account-cancel-outline",
+    "keyless_uplinks": "mdi:key-remove",
+    "sessions_dropped": "mdi:link-off",
+    "stale_periods": "mdi:timer-alert-outline",
+}
 
 AUTO_LOAD = ["loracover", "blindsproto"]
 CODEOWNERS = ["@buxtronix"]
@@ -108,6 +120,26 @@ CONFIG_SCHEMA = (
                 icon="mdi:timer-outline",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            # How long the last session recovery took: from the first sign a
+            # session was needed (a LoginMsg sent, the node heard without a
+            # session, a session dropped) to its confirmation. No value before
+            # the first recovery after a hub boot.
+            cv.Optional(CONF_SESSION_RECOVERY_TIME): sensor.sensor_schema(
+                unit_of_measurement=UNIT_SECOND,
+                state_class=STATE_CLASS_MEASUREMENT,
+                accuracy_decimals=1,
+                icon="mdi:timer-sync-outline",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            **{
+                cv.Optional(key): sensor.sensor_schema(
+                    state_class=STATE_CLASS_TOTAL_INCREASING,
+                    accuracy_decimals=0,
+                    icon=icon,
+                    entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                )
+                for key, icon in SESSION_COUNTERS.items()
+            },
         }
     )
     .extend(lora_client.LORA_CLIENT_SCHEMA)
@@ -147,3 +179,12 @@ async def to_code(config):
     if nominal_run_config := config.get(CONF_CALIB_NOMINAL_RUN):
         sens = await sensor.new_sensor(nominal_run_config)
         cg.add(var.set_calib_nominal_run(sens))
+
+    if recovery_config := config.get(CONF_SESSION_RECOVERY_TIME):
+        sens = await sensor.new_sensor(recovery_config)
+        cg.add(var.set_session_recovery_time(sens))
+
+    for key in SESSION_COUNTERS:
+        if counter_config := config.get(key):
+            sens = await sensor.new_sensor(counter_config)
+            cg.add(getattr(var, f"set_{key}")(sens))

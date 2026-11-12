@@ -40,6 +40,17 @@ namespace esphome
       // P2: node clock minus hub clock, from the wake beacon.
       void set_clock_offset(sensor::Sensor *offset) { clock_offset_ = offset; }
       void on_clock_offset(float offset_s) override;
+      // The session diagnostics of this node (lora_client/SessionDiag.h): how
+      // long the last session recovery took, and counters since hub boot.
+      // Published on change only.
+      void set_session_recovery_time(sensor::Sensor *s) { diag_[kDiagRecovery].sensor = s; }
+      void set_login_messages(sensor::Sensor *s) { diag_[kDiagLogins].sensor = s; }
+      void set_registers_accepted(sensor::Sensor *s) { diag_[kDiagRegAccepted].sensor = s; }
+      void set_registers_refused(sensor::Sensor *s) { diag_[kDiagRegRefused].sensor = s; }
+      void set_keyless_uplinks(sensor::Sensor *s) { diag_[kDiagKeyless].sensor = s; }
+      void set_sessions_dropped(sensor::Sensor *s) { diag_[kDiagDropped].sensor = s; }
+      void set_stale_periods(sensor::Sensor *s) { diag_[kDiagStale].sensor = s; }
+      void on_session_diag() override;
       // void set_illuminance(sensor::Sensor *illuminance) { illuminance_ = illuminance; }
 
       void send_remote_config() override;
@@ -53,6 +64,19 @@ namespace esphome
       sensor::Sensor *calib_actual_run_{nullptr};
       sensor::Sensor *calib_nominal_run_{nullptr};
       sensor::Sensor *clock_offset_{nullptr};
+      enum DiagSlot : uint8_t
+      {
+        kDiagRecovery, kDiagLogins, kDiagRegAccepted, kDiagRegRefused,
+        kDiagKeyless, kDiagDropped, kDiagStale, kDiagCount
+      };
+      struct DiagSensor
+      {
+        sensor::Sensor *sensor{nullptr};
+        bool            published{false};
+        float           last{0.0f};
+      };
+      DiagSensor diag_[kDiagCount]{};
+      void publish_diag_(DiagSlot slot, float value);
       // sensor::Sensor *illuminance_{nullptr};
       uint8_t current_sensor_;
       // The LoraCov often gets into a state where it spams loads of battery update
