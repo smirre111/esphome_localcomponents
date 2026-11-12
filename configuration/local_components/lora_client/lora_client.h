@@ -555,6 +555,16 @@ namespace esphome
       // Broadcast withdrawal, addressed to every node at once. Deliberately
       // separate: after a restart the hub may not yet know which nodes exist.
       void broadcast_grid_demote();
+      // THE DEMOTE PHASE SWEEP. One unplaced burst reaches a Mode B node only if
+      // a copy (88 ms apart) falls in its one ~29 ms window per round, ~1 in 3,
+      // and a node that misses it stays on a dead grid, where every LOGIN is the
+      // same lottery (round 5, 2026-11-06: 2-3.5 min to a session after a plain
+      // hub restart). The broadcast therefore goes out as kLoginSweepBursts
+      // bursts at the first one's phase + kLoginSweepOffsetsUs (the LOGIN
+      // sweep's table, pinned against the node's window in seam_test): one of
+      // them meets every Mode B node, which then free-runs Mode A windows that
+      // any LOGIN burst covers. A node already in Mode A ignores the repeats.
+      static constexpr uint32_t kDemoteSweepGapMs = 2000;   // one burst (~1.5 s) plus margin
 
       // B3: put this node into (or out of) Mode B. THE ENTRY POINT THAT WAS
       // MISSING — `send_grid_sync(true)` was never called from anywhere and
@@ -1483,6 +1493,9 @@ namespace esphome
       void     start_sleep_status_();
       void     publish_sleep_status_(sleepmodel::State s);
       void     publish_session_diag_();
+      void     send_demote_sweep_burst_();
+      int64_t  demote_sweep_base_us_{0};   // the first burst's fire instant (0: none yet)
+      uint32_t demote_sweep_sent_{0};
       // True (and logs one line) when a request must be ignored: the node sleeps.
       bool     refuse_while_asleep_(const deliverypolicy::ControlCmd &c);
       // Inputs of pending_shadow_inputs(), split out to keep it flat.

@@ -1597,6 +1597,56 @@ TEST(MacWireV1Listener, TheStartupDemoteIsAPlainBroadcastOnPortZero) {
     EXPECT_EQ(h.fcnt, 0u);
 }
 
+// The demote phase sweep: four bursts, the later three at the first one's phase
+// + 22 / 44 / 66 ms (+ whole rounds), 2 s apart, so one of them meets a Mode B
+// node whatever its mark (the table against the node's window: LoginSweep in
+// seam_test). After a plain hub restart a node that hears it free-runs Mode A
+// windows, which every LOGIN burst covers.
+TEST(MacWireV1Listener, TheStartupDemoteSweepsTheRoundInFourBursts) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    const size_t before = hub.radio.hub_to_node_frames().size();
+    const int64_t now = esp_timer_get_time();
+    hub.rol.broadcast_grid_demote();
+    const int64_t base = hub.tracker.last_earliest_us;
+    EXPECT_EQ(base, now + txqueue::kPrepareLeadUs) << "burst 1: at once";
+    EXPECT_NE(hub.tracker.last_copies, 1) << "a burst, not a single shot";
+    ASSERT_EQ(hub.radio.hub_to_node_frames().size(), before + 1);
+
+    const int64_t offsets[] = {22'000, 44'000, 66'000};
+    for (int k = 0; k < 3; ++k) {
+        proto_sim_timer_advance_us(2'000'000);
+        hub.clock.tick(2000);
+        ASSERT_EQ(hub.radio.hub_to_node_frames().size(), before + 2 + (size_t) k) << "burst " << k + 2;
+        const int64_t since = hub.tracker.last_earliest_us - base - offsets[k];
+        EXPECT_GT(since, 0);
+        EXPECT_EQ(since % 1'500'000, 0) << "burst " << k + 2 << " at the first one's phase + its offset";
+        const macwire::WireHdr h = hdrOf(lastDown(hub.radio));
+        EXPECT_EQ(h.dst, macwire::kBroadcast);
+        EXPECT_EQ(h.auth(), macwire::Auth::None);
+        EXPECT_EQ(h.port, macwire::kPortMac0Mgmt);
+    }
+    proto_sim_timer_advance_us(20'000'000);
+    hub.clock.tick(20'000);
+    EXPECT_EQ(hub.radio.hub_to_node_frames().size(), before + 4) << "four bursts and no more";
+}
+
+TEST(MacWireV1Listener, ASecondDemoteBroadcastStartsItsSweepAfresh) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    const size_t before = hub.radio.hub_to_node_frames().size();
+    hub.rol.broadcast_grid_demote();
+    proto_sim_timer_advance_us(2'000'000);
+    hub.clock.tick(2000);                       // burst 2 of the first sweep
+    ASSERT_EQ(hub.radio.hub_to_node_frames().size(), before + 2);
+    const int64_t now = esp_timer_get_time();
+    hub.rol.broadcast_grid_demote();            // again: its own burst 1, at once
+    EXPECT_EQ(hub.tracker.last_earliest_us, now + txqueue::kPrepareLeadUs);
+    proto_sim_timer_advance_us(20'000'000);
+    hub.clock.tick(20'000);
+    EXPECT_EQ(hub.radio.hub_to_node_frames().size(), before + 2 + 4) << "the old sweep's rest was dropped";
+}
+
 // Review HB7: the session id and the key epoch used to be coupled only by call
 // order (every caller cleared the keys before setting a new id). A new session
 // id with the old keys still installed let a copy be tagged under (new id, old

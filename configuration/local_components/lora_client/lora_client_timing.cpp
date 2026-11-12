@@ -363,11 +363,41 @@ namespace esphome
       // whose anchor is by definition already wrong -- so there is no mark to
       // place it on that any of them would agree with. FCNT 0: a broadcast
       // belongs to no per-node sequence (spec 2.4).
+      this->cancel_timeout("demote_sweep");
+      this->demote_sweep_base_us_ = 0;
+      this->demote_sweep_sent_    = 0;
+      this->send_demote_sweep_burst_();
+    }
+
+    // One burst of the demote phase sweep (lora_client.h), then the next.
+    void LORAListener::send_demote_sweep_burst_()
+    {
       MacFrame f;
-      if (this->v1_demote_frame_(&f))
+      if (!this->v1_demote_frame_(&f))
+        return;
+      const uint32_t k = this->demote_sweep_sent_;
+      const int64_t phase = (this->demote_sweep_base_us_ == 0)
+                                ? 0
+                                : this->demote_sweep_base_us_ + HubSession::kLoginSweepOffsetsUs[k];
+      const int64_t fire = this->link_.send_burst_at_phase(
+          f.bytes.data(), f.bytes.size(), mac2::FrameSeal{}, phase,
+          esp_timer_get_time() + this->session_tx_drain_us());
+      if (fire == 0)
+      {
+        // It could not be timed (no radio yet): the classic burst, once.
         this->mac0_send_(f.bytes.data(), f.bytes.size(), TxPolicy{}, mac2::FrameSeal{});
-      ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent (%u B)",
-               this->get_name().c_str(), (unsigned) f.bytes.size());
+        ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent (%u B, not swept)",
+                 this->get_name().c_str(), (unsigned) f.bytes.size());
+        return;
+      }
+      if (this->demote_sweep_base_us_ == 0)
+        this->demote_sweep_base_us_ = fire;
+      this->demote_sweep_sent_ = k + 1;
+      ESP_LOGW(TAG, "[%s] startup: broadcast grid demote sent (%u B, burst %u of %u of the phase sweep)",
+               this->get_name().c_str(), (unsigned) f.bytes.size(), (unsigned) (k + 1),
+               (unsigned) HubSession::kLoginSweepBursts);
+      if (this->demote_sweep_sent_ < HubSession::kLoginSweepBursts)
+        this->set_timeout("demote_sweep", kDemoteSweepGapMs, [this]() { this->send_demote_sweep_burst_(); });
     }
 
     bool NodeLinkTiming::send_aligned(const uint8_t *buf, size_t len, const mac2::FrameSeal &seal)
