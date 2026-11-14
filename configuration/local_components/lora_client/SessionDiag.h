@@ -226,4 +226,121 @@ private:
     RegisterRefusal last_refusal_{RegisterRefusal::BadTag};
 };
 
+// ---------------------------------------------------------------------------
+// The event log: the last kEventLogSize session events of one node, with the
+// time each happened, for the moment someone asks "what led up to this?" --
+// the serial log has no dates and needs a capture running at the right time.
+// RAM only (lost at a hub reboot, like the counters). A run of the same event
+// is one entry with a count and the time of the first and the last.
+// ---------------------------------------------------------------------------
+
+enum class Event : uint8_t
+{
+    LoginSent,          // arg: 0 burst, 1 aimed after an uplink, 2 placed on the REGISTER mark, 3 phase sweep
+    RegisterAccepted,   // arg: register_seq
+    RegisterRefused,    // arg: RegisterRefusal
+    KeylessUplink,      // arg: 0 no keys, 1 no session id on record
+    Confirmed,          // arg: recovery time in ms (0: nothing was being recovered)
+    SessionDropped,
+    Asleep,
+    StaleRaised,        // arg: seconds heard without a session
+    NodeRestored,       // arg: the uplink FCNT jump
+    NodeReport,         // the node's own account in a beacon; arg: its LOGIN wait in ms
+};
+
+constexpr const char *eventText(Event e)
+{
+    return e == Event::LoginSent ? "LOGIN sent"
+           : e == Event::RegisterAccepted ? "REGISTER accepted"
+           : e == Event::RegisterRefused ? "REGISTER refused"
+           : e == Event::KeylessUplink ? "uplink without a session"
+           : e == Event::Confirmed ? "session confirmed"
+           : e == Event::SessionDropped ? "session dropped"
+           : e == Event::Asleep ? "put to sleep"
+           : e == Event::StaleRaised ? "STALE raised"
+           : e == Event::NodeRestored ? "node restored its counters" : "node reports its session path";
+}
+
+constexpr uint32_t kEventLogSize = 24;
+
+struct EventEntry
+{
+    int64_t  first_ms{0};
+    int64_t  last_ms{0};
+    uint32_t arg{0};      // of the LAST event of the run
+    uint16_t count{0};    // events in the run (saturates)
+    Event    kind{Event::LoginSent};
+};
+
+class EventLog
+{
+public:
+    void add(Event kind, uint32_t arg, int64_t now_ms)
+    {
+        if (size_ != 0)
+        {
+            EventEntry &last = e_[index_(size_ - 1)];
+            if (last.kind == kind)
+            {
+                last.last_ms = now_ms;
+                last.arg     = arg;
+                if (last.count != 0xFFFF)
+                    ++last.count;
+                return;
+            }
+        }
+        if (size_ == kEventLogSize)
+        {
+            head_ = (head_ + 1) % kEventLogSize;   // the oldest entry goes
+            --size_;
+        }
+        EventEntry &n = e_[index_(size_)];
+        n.kind     = kind;
+        n.arg      = arg;
+        n.count    = 1;
+        n.first_ms = now_ms;
+        n.last_ms  = now_ms;
+        ++size_;
+    }
+    uint32_t size() const { return size_; }
+    // Entry i, oldest first (i < size()).
+    const EventEntry &at(uint32_t i) const { return e_[index_(i)]; }
+
+private:
+    uint32_t index_(uint32_t i) const { return (head_ + i) % kEventLogSize; }
+    EventEntry e_[kEventLogSize]{};
+    uint32_t   head_{0};
+    uint32_t   size_{0};
+};
+
+// ---------------------------------------------------------------------------
+// The NODE's account of its REGISTER / LOGIN path (NodeWakeBeacon.sess*, node
+// SessionForensics.h, firmware >= 1.1.59): RAM counters since its boot or wake,
+// repeated in every beacon until they change. `changed` tells a new report from
+// a repeat, so each is logged once.
+// ---------------------------------------------------------------------------
+struct NodeReport
+{
+    uint32_t registers_sent{0};
+    uint32_t login_wait_ms{0};      // 0: none measured
+    uint32_t login_copy{0};         // burst index + 1; 0: no LOGIN accepted
+    uint32_t regseq_save_fails{0};
+
+    constexpr bool empty() const
+    {
+        return registers_sent == 0 && login_wait_ms == 0 && login_copy == 0 && regseq_save_fails == 0;
+    }
+    constexpr bool operator==(const NodeReport &o) const
+    {
+        return registers_sent == o.registers_sent && login_wait_ms == o.login_wait_ms &&
+               login_copy == o.login_copy && regseq_save_fails == o.regseq_save_fails;
+    }
+};
+
+// Worth a log line: it says something, and not what the last beacon said.
+constexpr bool nodeReportIsNews(const NodeReport &now, const NodeReport &last)
+{
+    return !now.empty() && !(now == last);
+}
+
 }  // namespace sessiondiag

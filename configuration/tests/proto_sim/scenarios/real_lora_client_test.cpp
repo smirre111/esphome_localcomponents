@@ -12888,3 +12888,85 @@ TEST(SessionDiagSensors, TheRecoveryTimeIsPublishedInSecondsAtTheConfirmation) {
     static_cast<ConfirmProbe &>(h.rol).confirm_session_();   // every later uplink confirms again
     EXPECT_EQ(h.recovery.publishes, 1);
 }
+
+// =============================================================================
+// The node's own account of its REGISTER / LOGIN path (NodeWakeBeacon.sess*,
+// node SessionForensics.h): the hub logs each new report once, warns when the
+// node could not save its register_seq, and keeps it in the session event log.
+// =============================================================================
+namespace {
+void deliverBeaconWithSessionReport(LORAClient &rol, uint32_t registers, uint32_t wait_ms,
+                                    uint32_t copy, uint32_t save_fails) {
+    NodeWakeBeacon b = NODE_WAKE_BEACON__INIT;
+    b.reason              = (WakeReason) WAKE_REASON__WAKE_MODE_CHANGED;
+    b.sessregisterssent   = registers;
+    b.sessloginwaitms     = wait_ms;
+    b.sesslogincopy       = copy;
+    b.sessregseqsavefails = save_fails;
+    static_cast<BeaconProbe &>(rol).handle_beacon_(&b);
+}
+int countOf(const std::string &hay, const char *needle) {
+    int n = 0;
+    for (size_t p = hay.find(needle); p != std::string::npos; p = hay.find(needle, p + 1)) ++n;
+    return n;
+}
+}  // namespace
+
+TEST(NodeSessionReport, ANewReportIsLoggedOnceAndRepeatsAreSilent) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    testing::internal::CaptureStderr();
+    deliverBeaconWithSessionReport(h.rol, 2, 6100, 5, 0);
+    deliverBeaconWithSessionReport(h.rol, 2, 6100, 5, 0);   // the next beacon repeats it
+    deliverBeaconWithSessionReport(h.rol, 2, 6100, 5, 0);
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(countOf(log, "Node reports its session path"), 1) << log;
+    EXPECT_NE(log.find("2 REGISTER sent, LOGIN accepted after 6100 ms (copy 5 of the burst)"),
+              std::string::npos) << log;
+    EXPECT_EQ(countOf(log, "COULD NOT SAVE"), 0);
+    EXPECT_EQ(h.rol.node_session_report().registers_sent, 2u);
+    EXPECT_EQ(h.rol.node_session_report().login_wait_ms, 6100u);
+}
+
+TEST(NodeSessionReport, ABeaconFromOldFirmwareSaysNothing) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    testing::internal::CaptureStderr();
+    deliverBeaconWithSessionReport(h.rol, 0, 0, 0, 0);
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(countOf(log, "Node reports its session path"), 0) << log;
+    EXPECT_TRUE(h.rol.node_session_report().empty());
+}
+
+TEST(NodeSessionReport, AChangedReportIsLoggedAgain) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    testing::internal::CaptureStderr();
+    deliverBeaconWithSessionReport(h.rol, 1, 6000, 1, 0);
+    deliverBeaconWithSessionReport(h.rol, 4, 187000, 9, 0);
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(countOf(log, "Node reports its session path"), 2) << log;
+    EXPECT_NE(log.find("LOGIN accepted after 187000 ms"), std::string::npos) << log;
+}
+
+TEST(NodeSessionReport, ARegisterSeqThatWasNotSavedIsAWarningOncePerFailure) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    testing::internal::CaptureStderr();
+    deliverBeaconWithSessionReport(h.rol, 1, 6000, 1, 1);
+    deliverBeaconWithSessionReport(h.rol, 1, 6000, 1, 1);
+    deliverBeaconWithSessionReport(h.rol, 2, 6000, 1, 1);   // news, but no NEW failure
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(countOf(log, "COULD NOT SAVE ITS register_seq"), 1) << log;
+}
+
+TEST(NodeSessionReport, ANodeRebootIsNotNewsButTheNextReportAfterItIs) {
+    using namespace real_helpers;
+    RealHubHarness h{18, kMacRol2};
+    deliverBeaconWithSessionReport(h.rol, 2, 6100, 5, 0);
+    testing::internal::CaptureStderr();
+    deliverBeaconWithSessionReport(h.rol, 0, 0, 0, 0);       // its counters restarted
+    deliverBeaconWithSessionReport(h.rol, 2, 6100, 5, 0);    // the same numbers, a new cycle
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(countOf(log, "Node reports its session path"), 1) << log;
+}

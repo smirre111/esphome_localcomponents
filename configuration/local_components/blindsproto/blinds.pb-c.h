@@ -724,10 +724,33 @@ struct  NodeWakeBeacon
    */
   uint64_t prevsleeprequestedus;
   uint64_t prevsleepappliedus;
+  /*
+   * --- MAC-2: session forensics (SessionForensics.h) ----------------------
+   * What the REGISTER / LOGIN path did since this boot or wake, as the NODE
+   * saw it (RAM: zero again after a deep sleep). Reported on whatever beacon
+   * comes next, typically the mode-change beacon after a recovery. All 0 =
+   * nothing to report (or firmware older than 1.1.59).
+   */
+  /*
+   * REGISTERs sent
+   */
+  uint32_t sessregisterssent;
+  /*
+   * first REGISTER -> the LOGIN accepted after it; 0 = none measured
+   */
+  uint32_t sessloginwaitms;
+  /*
+   * burst index of that LOGIN's copy + 1; 0 = no LOGIN accepted
+   */
+  uint32_t sesslogincopy;
+  /*
+   * register_seq NVS writes that failed (the hub will refuse a repeat)
+   */
+  uint32_t sessregseqsavefails;
 };
 #define NODE_WAKE_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
-    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*

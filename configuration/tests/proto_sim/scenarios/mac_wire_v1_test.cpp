@@ -1831,3 +1831,62 @@ TEST(SessionDiagListener, SleepEndsAStalePeriod) {
     EXPECT_FALSE(hub.stale.state);
     EXPECT_EQ(hub.c().stale_periods, 1u);
 }
+
+// ---- the session event log on the real listener ----------------------------
+
+TEST(SessionDiagListener, TheEventLogRecordsARegisterItsLoginAndTheConfirmationInOrder) {
+    DiagRig hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.tracker.last_rx_t0_us_v = esp_timer_get_time() - 7'000;
+    Bytes f = registerFrame(11);
+    hub.rol.set_response(f.data(), f.size());
+    ASSERT_TRUE(hub.rol.registered_);
+    (void) openSession(hub);
+    ASSERT_TRUE(hub.rol.session_confirmed());
+
+    const sessiondiag::EventLog &log = DP(hub).session_.diag_events();
+    ASSERT_EQ(log.size(), 3u);
+    EXPECT_EQ(log.at(0).kind, sessiondiag::Event::RegisterAccepted);
+    EXPECT_EQ(log.at(0).arg, 11u) << "the register_seq";
+    EXPECT_EQ(log.at(1).kind, sessiondiag::Event::LoginSent);
+    EXPECT_EQ(log.at(1).arg, 2u) << "placed on the REGISTER's mark";
+    EXPECT_EQ(log.at(2).kind, sessiondiag::Event::Confirmed);
+
+    // Later uplinks confirm again and again: they must not flood the log.
+    const uint32_t session = 0;
+    (void) session;
+    DP(hub).session_.confirm();
+    DP(hub).session_.confirm();
+    EXPECT_EQ(log.size(), 3u);
+    EXPECT_EQ(log.at(2).count, 1u);
+}
+
+TEST(SessionDiagListener, AStalePeriodDumpsTheEventLogWithWhatLedUpToIt) {
+    DiagRig hub;
+    const uint32_t session = pendingLogin(hub);
+    for (uint32_t i = 0; i < 4; ++i) {
+        sessionUplink(hub, session, 50 + i);
+        hub.pass(6000);
+    }
+    testing::internal::CaptureStderr();
+    hub.pass(sessiondiag::kStaleAfterMs);
+    const std::string log = testing::internal::GetCapturedStderr();
+    ASSERT_TRUE(hub.stale.state);
+    EXPECT_NE(log.find("session log:"), std::string::npos) << log;
+    EXPECT_NE(log.find("LOGIN sent"), std::string::npos) << log;
+    EXPECT_NE(log.find("uplink without a session"), std::string::npos) << log;
+    EXPECT_NE(log.find("STALE raised"), std::string::npos) << log;
+}
+
+TEST(SessionDiagListener, TheEventLogCanBeDumpedOnDemand) {
+    DiagRig hub;
+    proto_sim_timer_advance_us(100'000'000);
+    (void) openSession(hub);
+    DP(hub).dlv_drop_session();
+    testing::internal::CaptureStderr();
+    hub.rol.dump_session_events();
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_NE(log.find("session log: 3 entries"), std::string::npos) << log;
+    EXPECT_NE(log.find("session confirmed"), std::string::npos) << log;
+    EXPECT_NE(log.find("session dropped"), std::string::npos) << log;
+}

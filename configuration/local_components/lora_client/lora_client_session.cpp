@@ -438,6 +438,7 @@ namespace esphome
         this->register_t0_us_      = this->host_.session_rx_t0_us();
         this->register_login_sends_ = 0;
         this->diag_.noteRegisterAccepted(diag_now_ms_());
+        this->event_(sessiondiag::Event::RegisterAccepted, reg->register_seq);
         this->host_.session_register_accepted();
         const bool push_config = this->host_.session_register_config(reg->needs_config);
 
@@ -491,7 +492,11 @@ namespace esphome
       this->login_.confirmed       = true;
       this->login_.relogin_pending = false;
       this->register_t0_us_        = 0;   // later challenges have no REGISTER to aim from
-      if (this->diag_.noteConfirmed(diag_now_ms_()))
+      const bool recovered = this->diag_.noteConfirmed(diag_now_ms_());
+      // Every authentic uplink confirms again: logged when it changes something.
+      if (recovered || !this->login_.login_acked)
+        this->event_(sessiondiag::Event::Confirmed, recovered ? this->diag_.lastRecoveryMs() : 0u);
+      if (recovered)
         ESP_LOGI(TAG, "[%s] Session recovered in %u.%u s (%u LoginMsg)", this->host_.session_name(),
                  (unsigned) (this->diag_.lastRecoveryMs() / 1000u),
                  (unsigned) ((this->diag_.lastRecoveryMs() % 1000u) / 100u),
@@ -614,6 +619,7 @@ namespace esphome
                                        bool into_uplink_window)
     {
       DeliveryFrame f;
+      uint32_t how = 0;   // how it was sent, for the event log (sessiondiag::Event::LoginSent)
       if (!this->login_frame(login, fcnt, &f))
         ESP_LOGE(TAG, "[%s] v1 LOGIN could not be framed/authenticated — not sent",
                  this->host_.session_name());
@@ -623,8 +629,11 @@ namespace esphome
       else if (into_uplink_window &&
                this->host_.session_send_after_uplink(f.bytes.data(), f.bytes.size(), f.seal,
                                                      this->keyless_t0_us_))
+      {
+        how = 1;
         ESP_LOGI(TAG, "[%s] LoginMsg aimed at the node's receive window after its uplink",
                  this->host_.session_name());
+      }
       // After a REGISTER, the burst with copy 0 on the node's mark (rollout-4: a
       // Mode B node missed every unplaced burst of a REGISTER cycle, which all
       // met its one window per round at the same phase).
@@ -634,16 +643,23 @@ namespace esphome
       else if (this->next_register_send_placed_() &&
                this->host_.session_send_on_register_mark(f.bytes.data(), f.bytes.size(), f.seal,
                                                          this->register_t0_us_))
+      {
+        how = 2;
         ESP_LOGI(TAG, "[%s] LoginMsg burst placed on the node's mark from its REGISTER",
                  this->host_.session_name());
+      }
       // No REGISTER of this challenge to aim from: the phase sweep. (A REGISTER's
       // odd sends stay the classic unplaced burst, as the user chose.)
       else if (this->register_t0_us_ == 0 && this->send_swept_(f))
+      {
+        how = 3;
         ESP_LOGI(TAG, "[%s] LoginMsg burst %u of the phase sweep", this->host_.session_name(),
                  (unsigned) this->sweep_sends_);
+      }
       else
         this->host_.session_send(f.bytes.data(), f.bytes.size(), f.seal);
       this->diag_.noteLoginSent(diag_now_ms_());
+      this->event_(sessiondiag::Event::LoginSent, how);
       this->host_.session_diag_changed();
       ESP_LOGI(TAG, "[%s] LoginMsg sent (base_nonce=0x%08x msgid=%u request_register=%d)",
                this->host_.session_name(), (unsigned) base, (unsigned) this->seq().txId(),
@@ -678,7 +694,10 @@ namespace esphome
       if (!rebootJump(this->login_.confirmed, session_opening, rx, fcnt))
         return;
       if (this->advance_tx_for_boot())
+      {
+        this->event_(sessiondiag::Event::NodeRestored, fcnt - rx);
         this->host_.session_node_restored(fcnt - rx);
+      }
     }
 
     // The node is transmitting (and listens after each uplink) while the hub
@@ -728,6 +747,7 @@ namespace esphome
       this->login_.pending_login_nonce = 0;   // sleep ends the session; mint fresh on wake
       this->host_.session_cancel_timeout("login_retry");   // ("login_startup" is replaced by the arming below)
       this->diag_.noteAsleep();
+      this->event_(sessiondiag::Event::Asleep);
       this->host_.session_diag_changed();
     }
 
@@ -738,6 +758,7 @@ namespace esphome
     void HubSession::note_register_refused_(sessiondiag::RegisterRefusal why)
     {
       this->diag_.noteRegisterRefused(why);
+      this->event_(sessiondiag::Event::RegisterRefused, (uint32_t) why);
       this->host_.session_diag_changed();
     }
 
@@ -745,7 +766,10 @@ namespace esphome
     void HubSession::drop_confirmation()
     {
       if (this->login_.confirmed)
+      {
         this->diag_.noteSessionDropped(diag_now_ms_());
+        this->event_(sessiondiag::Event::SessionDropped);
+      }
       this->login_.confirmed = false;
       this->host_.session_diag_changed();
     }
@@ -1205,6 +1229,7 @@ namespace esphome
       // until this node happened to send another encrypted uplink.
       ESP_LOGW(TAG, "No base nonce for peer %u — re-provisioning via login", up.sender);
       this->diag_.noteKeylessUplink(diag_now_ms_());
+      this->event_(sessiondiag::Event::KeylessUplink, 1);
       this->host_.session_diag_changed();
       this->host_.session_relogin();
       return false;
@@ -1258,6 +1283,7 @@ namespace esphome
         ESP_LOGW(TAG, "No session keys derived yet for peer %u — dropping encrypted uplink", up.sender);
         this->drop_candidate_(up);
         this->diag_.noteKeylessUplink(diag_now_ms_());
+        this->event_(sessiondiag::Event::KeylessUplink, 0);
         this->host_.session_diag_changed();
         this->note_keyless_uplink_();
         return false;

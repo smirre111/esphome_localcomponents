@@ -592,6 +592,8 @@ namespace esphome
                      ? sessiondiag::refusalText(this->session_.diag().lastRefusal())
                      : "none");
       }
+      if (became)
+        this->dump_session_events();   // what led up to it, while it is still in the ring
       const int8_t stale_i = stale ? 1 : 0;
       if (stale_i != this->session_pub_stale_)
       {
@@ -616,6 +618,34 @@ namespace esphome
         this->set_timeout("session_stale", until + 1u, [this]() { this->publish_session_diag_(); });
       else
         this->cancel_timeout("session_stale");
+    }
+
+    void LORAListener::dump_session_events()
+    {
+      const sessiondiag::EventLog &log = this->session_.diag_events();
+      const sessiondiag::Counters &c   = this->session_.diag().counters();
+      const int64_t  now_ms   = HubSession::diag_now_ms();
+      const bool     have_clk = (this->time != nullptr) && this->time->now().is_valid();
+      const uint32_t epoch    = have_clk ? (uint32_t) this->time->now().timestamp : 0u;
+      const int32_t  tz       = esphome::ESPTime::timezone_offset();
+      ESP_LOGW(TAG, "[%s] session log: %u entries (LoginMsg %u, REGISTER %u accepted / %u refused, "
+                    "%u keyless uplinks, %u dropped, %u stale periods, %u recoveries, last %u ms)",
+               this->get_name().c_str(), (unsigned) log.size(), (unsigned) c.logins_sent,
+               (unsigned) c.registers_accepted, (unsigned) c.registers_refused,
+               (unsigned) c.keyless_uplinks, (unsigned) c.sessions_dropped, (unsigned) c.stale_periods,
+               (unsigned) c.recoveries, (unsigned) this->session_.diag().lastRecoveryMs());
+      for (uint32_t i = 0; i < log.size(); ++i)
+      {
+        const sessiondiag::EventEntry &e = log.at(i);
+        const uint32_t ago_s = (uint32_t) ((now_ms - e.last_ms) / 1000);
+        unsigned h = 0, m = 0;
+        if (have_clk)
+          sleepmodel::clockHm(epoch - ago_s, tz, &h, &m);
+        ESP_LOGW(TAG, "[%s] session log %2u: -%u s (%02u:%02u) %s x%u arg=%u span=%u s",
+                 this->get_name().c_str(), (unsigned) (i + 1), (unsigned) ago_s, h, m,
+                 sessiondiag::eventText(e.kind), (unsigned) e.count, (unsigned) e.arg,
+                 (unsigned) ((e.last_ms - e.first_ms) / 1000));
+      }
     }
 
     void LORAListener::publish_sleep_status_(sleepmodel::State s)
@@ -1519,10 +1549,42 @@ static const char *s_wake_reason_name(int r)
   return (r >= 0 && r < (int) (sizeof(kReason) / sizeof(kReason[0]))) ? kReason[r] : "?";
 }
 
+    // The node's own account of its REGISTER / LOGIN path (sess* fields, node fw
+    // >= 1.1.59). It repeats in every beacon until it changes: logged once per
+    // change. A register_seq that did not reach NVS is a fault in waiting -- after
+    // the node's next reboot the hub refuses its REGISTER as a replay (HB14) until
+    // the hub itself restarts -- so that one is a warning.
+    void LORAListener::note_beacon_session_report_(const ::NodeWakeBeacon *b)
+    {
+      sessiondiag::NodeReport r;
+      r.registers_sent    = b->sessregisterssent;
+      r.login_wait_ms     = b->sessloginwaitms;
+      r.login_copy        = b->sesslogincopy;
+      r.regseq_save_fails = b->sessregseqsavefails;
+      if (!sessiondiag::nodeReportIsNews(r, this->last_node_report_))
+      {
+        if (r.empty())
+          this->last_node_report_ = r;   // the node rebooted or slept: its counters restarted
+        return;
+      }
+      const bool new_save_fail = r.regseq_save_fails > this->last_node_report_.regseq_save_fails;
+      this->last_node_report_ = r;
+      this->session_.note_node_report(r.login_wait_ms);
+      ESP_LOGI(TAG, "[%s] Node reports its session path: %u REGISTER sent, LOGIN accepted after %u ms "
+                    "(copy %u of the burst), register_seq save failures %u",
+               this->get_name().c_str(), (unsigned) r.registers_sent, (unsigned) r.login_wait_ms,
+               (unsigned) r.login_copy, (unsigned) r.regseq_save_fails);
+      if (new_save_fail)
+        ESP_LOGW(TAG, "[%s] NODE COULD NOT SAVE ITS register_seq (%u failures): after its next reboot "
+                      "its REGISTER will be refused as a replay until this hub restarts",
+                 this->get_name().c_str(), (unsigned) r.regseq_save_fails);
+    }
+
 void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
     {
       if (b == nullptr)
         return;
+      this->note_beacon_session_report_(b);
 
       this->last_beacon_reason_  = b->reason;
       this->node_mode_           = b->mode;

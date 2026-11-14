@@ -65,6 +65,38 @@ the last REGISTER refusal reason) and `Session recovered in N s (K LoginMsg)`.
 A keyless uplink is unauthenticated, so a forged frame can raise the flag;
 nothing acts on these values.
 
+**Event log.** Each node keeps its last 24 session events in RAM (LOGIN sent
+and how: 0 burst, 1 aimed after an uplink, 2 placed on the REGISTER mark,
+3 phase sweep; REGISTER accepted / refused; uplink without a session;
+confirmed; dropped; put to sleep; stale raised; node restored its counters;
+node report). A run of the same event is one entry with a count.
+`LORAListener::dump_session_events()` writes it to the log with wall-clock
+times (`session log NN: -S s (HH:MM) <event> xN arg=A span=S s`); the hub does
+that by itself when a stale period starts, and the yaml has a `Dump Session
+Log` button per node.
+
+**The node's own account.** Node fw >= 1.1.59 reports in its beacon how many
+REGISTERs it sent, how long it waited for the LOGIN it accepted, which copy of
+the burst that was and how often it could not save its `register_seq`
+(`NodeWakeBeacon` fields 36..39, node `SessionForensics.h`). The hub logs each
+new report once (`Node reports its session path: ...`) and warns on a save
+failure (`NODE COULD NOT SAVE ITS register_seq`).
+
+**Measuring it.** `tools/restart_soak.py --rounds N` restarts the hub N times
+and prints each node's recovery time; `--analyze hub.log` does the same from a
+captured log.
+
+## Startup demote sweep
+
+After a restart the hub's grid has a new anchor, so it broadcasts `GridDemote`
+before anything else. One unplaced burst reaches a Mode B node only if a copy
+falls into its one ~29 ms window per round (about 1 in 3), and a node that
+misses it stays Mode-B-only, where every LOGIN is the same lottery. The
+broadcast therefore goes out as four bursts, the later three at the first
+one's phase + 22 / 44 / 66 ms (the LOGIN sweep's table,
+`HubSession::kLoginSweepOffsetsUs`), 2 s apart (`kDemoteSweepGapMs`). Log:
+`startup: broadcast grid demote sent (... burst K of 4 of the phase sweep)`.
+
 ## Tests and checks
 
 - `tests/proto_sim` -- the host test suite (gtest + CMake, WSL). It compiles

@@ -2623,7 +2623,7 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   (ProtobufCMessageInit) cover_position__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[22] =
+static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[26] =
 {
   {
     "reason",
@@ -2889,6 +2889,54 @@ static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[22] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "sessRegistersSent",
+    36,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, sessregisterssent),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "sessLoginWaitMs",
+    37,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, sessloginwaitms),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "sessLoginCopy",
+    38,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, sesslogincopy),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "sessRegSeqSaveFails",
+    39,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_UINT32,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, sessregseqsavefails),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned node_wake_beacon__field_indices_by_name[] = {
   6,   /* field[6] = awakeWindow_ms */
@@ -2911,6 +2959,10 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
   11,   /* field[11] = resetReason */
   15,   /* field[15] = rtcPeriodQ19 */
   1,   /* field[1] = schedVersion */
+  24,   /* field[24] = sessLoginCopy */
+  23,   /* field[23] = sessLoginWaitMs */
+  25,   /* field[25] = sessRegSeqSaveFails */
+  22,   /* field[22] = sessRegistersSent */
   8,   /* field[8] = sessionResume */
   4,   /* field[4] = voltage */
 };
@@ -2918,7 +2970,7 @@ static const ProtobufCIntRange node_wake_beacon__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 26, 12 },
-  { 0, 22 }
+  { 0, 26 }
 };
 const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
 {
@@ -2928,7 +2980,7 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   "NodeWakeBeacon",
   "",
   sizeof(NodeWakeBeacon),
-  22,
+  26,
   node_wake_beacon__field_descriptors,
   node_wake_beacon__field_indices_by_name,
   2,  node_wake_beacon__number_ranges,

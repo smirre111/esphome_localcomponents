@@ -286,6 +286,21 @@ button:
   - platform: restart
     name: "Hub Restart"
     id: hub_restart
+  # Write the node's session event log (the last 24 REGISTER / LOGIN events with
+  # their times, lora_client/SessionDiag.h) to the hub log. The hub also does
+  # this by itself when a 'Session Stale' period starts.
+  - platform: template
+    name: "RollladenWohnzimmer1 Dump Session Log"
+    id: rol_1_dump_session_log
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_1)->dump_session_events();'
+  - platform: template
+    name: "RollladenWohnzimmer2 Dump Session Log"
+    id: rol_2_dump_session_log
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(rol_2)->dump_session_events();'
   - platform: loracover
     lora_client_id: rol_1
     name: "Trigger OTA1"

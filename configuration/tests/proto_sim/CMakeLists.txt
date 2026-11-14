@@ -457,6 +457,11 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME layer_lint_hub
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/layer_lint.py)
+    # tools/restart_soak.py parses the hub's session-diagnostics entities and
+    # log lines; its self-test pins that parsing without hardware.
+    add_test(NAME restart_soak_selftest
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/restart_soak.py --selftest)
 endif()
 
 add_executable(golden_tracker_frames_test scenarios/golden_tracker_frames_test.cpp)

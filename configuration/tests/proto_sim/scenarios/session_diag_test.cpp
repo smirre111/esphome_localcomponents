@@ -208,3 +208,96 @@ TEST(SessionDiagState, RefusalTexts) {
     EXPECT_STREQ(refusalText(RegisterRefusal::Replayed), "replayed register_seq");
     EXPECT_STREQ(refusalText(RegisterRefusal::RateLimited), "rate-limited");
 }
+
+// ---- the event log ----------------------------------------------------------
+
+TEST(SessionDiagEvents, KeepsEventsInOrderWithTheirTimes) {
+    EventLog log;
+    log.add(Event::RegisterAccepted, 7, 1'000);
+    log.add(Event::LoginSent, 2, 5'000);
+    log.add(Event::Confirmed, 4'500, 5'500);
+    ASSERT_EQ(log.size(), 3u);
+    EXPECT_EQ(log.at(0).kind, Event::RegisterAccepted);
+    EXPECT_EQ(log.at(0).arg, 7u);
+    EXPECT_EQ(log.at(1).kind, Event::LoginSent);
+    EXPECT_EQ(log.at(1).first_ms, 5'000);
+    EXPECT_EQ(log.at(2).kind, Event::Confirmed);
+    EXPECT_EQ(log.at(2).arg, 4'500u);
+}
+
+TEST(SessionDiagEvents, ARunOfTheSameEventIsOneEntryWithACountAndItsSpan) {
+    EventLog log;
+    log.add(Event::LoginSent, 3, 0);
+    for (int i = 1; i <= 9; ++i)
+        log.add(Event::KeylessUplink, 0, i * 5'000);
+    log.add(Event::LoginSent, 1, 60'000);
+    ASSERT_EQ(log.size(), 3u) << "a node transmitting every 5 s must not push the history out";
+    EXPECT_EQ(log.at(1).count, 9u);
+    EXPECT_EQ(log.at(1).first_ms, 5'000);
+    EXPECT_EQ(log.at(1).last_ms, 45'000);
+    EXPECT_EQ(log.at(2).count, 1u) << "the same kind again after another is a new entry";
+    EXPECT_EQ(log.at(2).arg, 1u);
+}
+
+TEST(SessionDiagEvents, ARunKeepsTheArgumentOfItsLastEvent) {
+    EventLog log;
+    log.add(Event::LoginSent, 3, 0);
+    log.add(Event::LoginSent, 0, 5'000);
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_EQ(log.at(0).arg, 0u);
+    EXPECT_EQ(log.at(0).count, 2u);
+}
+
+TEST(SessionDiagEvents, WhenFullTheOldestEntryGoes) {
+    EventLog log;
+    // Alternate two kinds so nothing coalesces.
+    for (uint32_t i = 0; i < kEventLogSize + 5; ++i)
+        log.add((i % 2) ? Event::LoginSent : Event::KeylessUplink, i, (int64_t) i * 1000);
+    ASSERT_EQ(log.size(), kEventLogSize);
+    EXPECT_EQ(log.at(0).arg, 5u) << "entries 0..4 were dropped";
+    EXPECT_EQ(log.at(kEventLogSize - 1).arg, kEventLogSize + 4);
+    for (uint32_t i = 1; i < log.size(); ++i)
+        EXPECT_EQ(log.at(i).arg, log.at(i - 1).arg + 1) << "still in order across the wrap";
+}
+
+TEST(SessionDiagEvents, EveryEventHasAText) {
+    for (int e = 0; e <= (int) Event::NodeReport; ++e)
+        EXPECT_GT(std::strlen(eventText((Event) e)), 3u) << e;
+    EXPECT_STREQ(eventText(Event::LoginSent), "LOGIN sent");
+    EXPECT_STREQ(eventText(Event::StaleRaised), "STALE raised");
+    EXPECT_STREQ(eventText(Event::NodeRestored), "node restored its counters");
+}
+
+// ---- the node's own account (beacon) ----------------------------------------
+
+TEST(SessionDiagNodeReport, AnEmptyReportIsNeverNews) {
+    NodeReport none, last;
+    EXPECT_TRUE(none.empty());
+    EXPECT_FALSE(nodeReportIsNews(none, last));
+    last.registers_sent = 3;
+    EXPECT_FALSE(nodeReportIsNews(none, last)) << "the node rebooted: zeros say nothing";
+}
+
+TEST(SessionDiagNodeReport, ARepeatIsNotNewsAndAnyChangedFieldIs) {
+    NodeReport r;
+    r.registers_sent = 2; r.login_wait_ms = 6100; r.login_copy = 5;
+    NodeReport last;
+    EXPECT_TRUE(nodeReportIsNews(r, last));
+    last = r;
+    EXPECT_FALSE(nodeReportIsNews(r, last)) << "every beacon repeats it";
+    NodeReport a = r; a.registers_sent = 3;
+    NodeReport b = r; b.login_wait_ms = 6101;
+    NodeReport c = r; c.login_copy = 6;
+    NodeReport d = r; d.regseq_save_fails = 1;
+    EXPECT_TRUE(nodeReportIsNews(a, last));
+    EXPECT_TRUE(nodeReportIsNews(b, last));
+    EXPECT_TRUE(nodeReportIsNews(c, last));
+    EXPECT_TRUE(nodeReportIsNews(d, last));
+}
+
+TEST(SessionDiagNodeReport, ASaveFailureAloneIsAReport) {
+    NodeReport r;
+    r.regseq_save_fails = 1;
+    EXPECT_FALSE(r.empty());
+    EXPECT_TRUE(nodeReportIsNews(r, NodeReport{}));
+}

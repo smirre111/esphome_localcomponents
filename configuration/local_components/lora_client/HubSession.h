@@ -315,8 +315,26 @@ namespace esphome
       // Read-only for the listener, which publishes them; every event is noted
       // here, where it happens, and announced through session_diag_changed().
       const sessiondiag::Tracker &diag() const { return this->diag_; }
+      const sessiondiag::EventLog &diag_events() const { return this->events_; }
+      // The node's own account arrived in a beacon (the listener logs it).
+      void note_node_report(uint32_t login_wait_ms)
+      {
+        this->event_(sessiondiag::Event::NodeReport, login_wait_ms);
+      }
+      // Milliseconds since the hub booted, the clock the event log is kept in.
+      static int64_t diag_now_ms() { return diag_now_ms_(); }
       // The stale flag, counting a period once (the listener's poll).
-      bool diag_poll_stale(bool *became) { return this->diag_.poll(diag_now_ms_(), became); }
+      bool diag_poll_stale(bool *became)
+      {
+        bool b = false;
+        const bool s = this->diag_.poll(diag_now_ms_(), &b);
+        if (b)
+          this->events_.add(sessiondiag::Event::StaleRaised,
+                            this->diag_.heardWithoutSessionMs(diag_now_ms_()) / 1000u, diag_now_ms_());
+        if (became != nullptr)
+          *became = b;
+        return s;
+      }
       uint32_t diag_ms_until_stale() const { return this->diag_.msUntilStale(diag_now_ms_()); }
       uint32_t diag_heard_without_session_ms() const
       {
@@ -429,6 +447,8 @@ namespace esphome
       static onboarding::Gate onboarding_gate_;
       LoginState login_{};
       sessiondiag::Tracker diag_{};
+      sessiondiag::EventLog events_{};
+      void event_(sessiondiag::Event e, uint32_t arg = 0) { this->events_.add(e, arg, diag_now_ms_()); }
       // When a keyless uplink last re-sent the LOGIN (0 = never).
       int64_t  last_keyless_login_us_{0};
       // That uplink's T0: where the re-sent LOGIN is aimed (review rollout-3 F1).

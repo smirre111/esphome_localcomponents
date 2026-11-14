@@ -75,7 +75,11 @@ Known noise: Mode B phase error p50/p99 varies run to run (105/926 .. 4029/5445 
 7. Optional: second optimistic single-shot op ~25 s after a move misses its single shot (hub could skip the optimistic shot while a node's motor runs); node 1 position belief after an OTA reset is off (send "open" once); deep-sleep current is ASSUMED uA-level (not measured, user decision); H5 key provisioning; telemetry `optional` fields.
 8. Cleanup by hand: scratch dirs `C:\hs`, `C:\hs1`..`C:\hs4`, `C:\hsr2`..`C:\hsr4`; untracked `.vscode/`, `LoaNode.md`, `events150.csv`, `full150.csv`, `trace150.json`, `../git`, `../tasmota-minimal.bin.gz` in the hub tree.
 
-## 7a. Session diagnostics (added after 2026-11-06; host-tested, NOT yet compiled with ESPHome or run on hardware)
+## 7a. Branch `ccr-4b558aad-w6vrnk` in BOTH repos (2026-11-12; host-tested, NOT yet compiled with ESPHome / ESP-IDF or run on hardware)
+
+**To pick this up on the real machine: `docs/hardware-pickup-session-diag.md`** (what is on the branch, the order of steps, the pass lines, rollback). In short: session diagnostics and a per-node session event log on the hub, the startup GridDemote as a four-burst phase sweep (the hub-side fix for the slow LOGIN after a plain hub restart, open issue 1), node fw 1.1.59 reporting its own REGISTER / LOGIN path in the beacon, and `tools/restart_soak.py` to measure recovery over N hub restarts. The hub part works with node fw 1.1.58.
+
+### Session diagnostics
 
 `lora_client/SessionDiag.h` + `HubSession` + the loracover platforms: per node a `Session Stale` problem sensor (heard without a session for > 30 s), a `Session State` text sensor, a `Session Recovery Time` sensor and six counters since hub boot (LoginMsg sent, REGISTER accepted / refused, keyless uplinks, sessions dropped, stale periods), plus the log lines `SESSION STALE` and `Session recovered in N s (K LoginMsg)`. Details: `local_components/README.md`. Use them for open issue 1 (the hub-restart LOGIN): after a `Hub Restart` each node's `Session Recovery Time` is the number that was read out of the serial log by hand before. Before flashing: `esphome compile loradevices.yml` (the production yml gains 18 entities, 9 per node; check flash/RAM against section 2).
 

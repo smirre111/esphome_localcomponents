@@ -1170,6 +1170,12 @@ namespace esphome
       void set_session_state_text_sensor(text_sensor::TextSensor *ts) { this->session_state_tsensor_ = ts; }
       // The counters and the last recovery time, for the children's sensors.
       const sessiondiag::Tracker &session_diag() const { return this->session_.diag(); }
+      // Write the node's session event log (SessionDiag.h: the last 24 events,
+      // with times) to the log. Also done by itself when a stale period starts.
+      // From YAML: a template button with `id(rol_1)->dump_session_events();`.
+      void dump_session_events();
+      // The node's last own account (beacon, fw >= 1.1.59); empty before one.
+      const sessiondiag::NodeReport &node_session_report() const { return this->last_node_report_; }
 
       // std::string address_str() const;
       uint64_t address_uint64() const { return this->address_uint64_; };
@@ -1494,6 +1500,9 @@ namespace esphome
       void     publish_sleep_status_(sleepmodel::State s);
       void     publish_session_diag_();
       void     send_demote_sweep_burst_();
+      // The node's own account of its REGISTER / LOGIN path, from a beacon.
+      void     note_beacon_session_report_(const ::NodeWakeBeacon *b);
+      sessiondiag::NodeReport last_node_report_{};
       int64_t  demote_sweep_base_us_{0};   // the first burst's fire instant (0: none yet)
       uint32_t demote_sweep_sent_{0};
       // True (and logs one line) when a request must be ignored: the node sleeps.

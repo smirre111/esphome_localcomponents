@@ -50,6 +50,7 @@
 #include "GridState.h"
 #include "PendingData.h"
 #include "ModeTestPolicy.h"
+#include "SessionForensics.h"   // the node's REGISTER / LOGIN report (beacon sess*)
 
 #include "sim/wire_view.h"
 #include "sim/sim_clock.h"
@@ -1070,4 +1071,50 @@ TEST_F(E2E, AConfigPushNeverAcknowledgedLeavesTheNodeUnsyncedButTheSessionAlone)
         << "never acked: the acknowledged hash does not move, so the next hub boot pushes again";
     EXPECT_TRUE(rol.session_confirmed()) << "a lost config push does not tear the session down";
     EXPECT_FALSE(rol.commandFailed());
+}
+
+// ---------------------------------------------------------------------------
+// Session forensics, end to end: the node's own account of its REGISTER / LOGIN
+// path (node SessionForensics.h) travels in the beacon it sends after the LOGIN
+// and reaches the hub's listener (NodeWakeBeacon.sess*, hub SessionDiag.h).
+// Real code on both sides and the real protobuf between them.
+// ---------------------------------------------------------------------------
+
+TEST_F(E2E, TheNodesOwnAccountOfARegisterAndItsLoginReachesTheHubInTheBeacon) {
+    sessionforensics::tracker().reset();
+    const uint8_t mac[6] = {0x00, 0x00, 0x11, 0x22, 0x33, 0x44};   // kMac
+    proto_sim_set_factory_mac(mac);
+    ASSERT_TRUE(rol.node_session_report().empty());
+
+    // The node registers (as after a boot with no usable session)...
+    disp.sendRegister();
+    ASSERT_GT(pumpUp(), 0) << "the REGISTER must reach the hub";
+    EXPECT_EQ(sessionforensics::tracker().report().registers_sent, 1u);
+
+    // ...the hub answers with its LOGIN a few seconds later...
+    proto_sim_timer_set_now_us(esp_timer_get_time() + 4'200'000);
+    clock.tick(4200);
+    settle();
+
+    // ...and the node, with a session again, sends its beacon.
+    uint32_t nonce = 0;
+    ASSERT_TRUE(disp.getBaseNonceForTest(kHub, nonce)) << "the node accepted the LOGIN";
+    ASSERT_TRUE(rol.login_acked()) << "and the hub saw it answer";
+
+    const sessiondiag::NodeReport &r = rol.node_session_report();
+    EXPECT_EQ(r.registers_sent, 1u) << "the node's count, read by the hub from the beacon";
+    EXPECT_GE(r.login_wait_ms, 4200u) << "REGISTER -> accepted LOGIN, on the node's clock";
+    EXPECT_LT(r.login_wait_ms, 10'000u);
+    EXPECT_GE(r.login_copy, 1u) << "a LOGIN was accepted";
+    EXPECT_EQ(r.regseq_save_fails, 0u);
+}
+
+TEST_F(E2E, APlainLoginWithoutARegisterReportsNoWait) {
+    sessionforensics::tracker().reset();
+    bringUpSession();
+    ASSERT_TRUE(rol.login_acked());
+    const sessiondiag::NodeReport &r = rol.node_session_report();
+    EXPECT_EQ(r.registers_sent, 0u);
+    EXPECT_EQ(r.login_wait_ms, 0u) << "no REGISTER: nothing to time";
+    EXPECT_GE(r.login_copy, 1u) << "but the LOGIN it accepted is reported";
 }
