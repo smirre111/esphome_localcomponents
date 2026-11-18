@@ -677,6 +677,8 @@ namespace esphome
       // application indication (deliver_uplink_).
       if (msg->proto_case == hubframes::UL_BEACON && msg->beacon)
         this->handle_beacon_(msg->beacon);
+      if (msg->proto_case == hubframes::UL_POSITION && msg->position)
+        this->note_position_unknown_(msg->position->positionunknown);
     }
 
     void LORAListener::deliver_uplink_(hubframes::Up *msg, const hubframes::Hdr *outer,
@@ -1478,11 +1480,32 @@ static const char *s_wake_reason_name(int r)
                  this->get_name().c_str(), (unsigned) r.regseq_save_fails);
     }
 
+    // Node fw >= 1.1.61: the node says it does not trust its own position (stored
+    // value lost in a power loss or an OTA, or an endstop contradicted it). Logged
+    // once per change, from the beacon and from every position report. The cause
+    // it prevents: node 1 acked "open" and sat IDLE at 0 % with the blind fully
+    // open (2026-11-18). The cover keeps showing the node's number; a command
+    // that ends on an endstop makes the node believe it again.
+    void LORAListener::note_position_unknown_(bool unknown)
+    {
+      if (unknown == this->last_position_unknown_)
+        return;
+      this->last_position_unknown_ = unknown;
+      if (unknown)
+        ESP_LOGW(TAG, "[%s] NODE DOES NOT TRUST ITS POSITION (reference lost): the shown cover "
+                      "position may be wrong until a full open or close ends on an endstop",
+                 this->get_name().c_str());
+      else
+        ESP_LOGI(TAG, "[%s] Node position trusted again (a move ended on an endstop)",
+                 this->get_name().c_str());
+    }
+
 void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
     {
       if (b == nullptr)
         return;
       this->note_beacon_session_report_(b);
+      this->note_position_unknown_(b->positionunknown);
 
       this->last_beacon_reason_  = b->reason;
       this->node_mode_           = b->mode;

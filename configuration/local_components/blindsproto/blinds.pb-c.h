@@ -625,10 +625,17 @@ struct  CoverPosition
    * the raw factory duration in force for this move
    */
   float nominalruns;
+  /*
+   * The node does not trust `position`: its stored value was lost (power loss,
+   * an OTA to another RTC layout) or an endstop contradicted it. Cleared again
+   * by a move that draws real current and ends on an endstop. false = trusted,
+   * or firmware older than 1.1.61 (which never says).
+   */
+  protobuf_c_boolean positionunknown;
 };
 #define COVER_POSITION__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&cover_position__descriptor) \
-    , 0, 0, 0, 0, 0 }
+    , 0, 0, 0, 0, 0, 0 }
 
 
 /*
@@ -732,10 +739,14 @@ struct  NodeWakeBeacon
    * register_seq NVS writes that failed (the hub will refuse a repeat)
    */
   uint32_t sessregseqsavefails;
+  /*
+   * as CoverPosition.positionUnknown
+   */
+  protobuf_c_boolean positionunknown;
 };
 #define NODE_WAKE_BEACON__INIT \
  { PROTOBUF_C_MESSAGE_INIT (&node_wake_beacon__descriptor) \
-    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+    , WAKE_REASON__WAKE_BOOT, 0, 0, NODE_MODE__MODE_INTERACTIVE, 0, 0, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 
 /*

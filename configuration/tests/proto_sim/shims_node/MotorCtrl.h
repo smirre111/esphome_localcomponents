@@ -22,6 +22,9 @@ public:
     void  setTargetPosition(float p)                { target_position_ = p; }
     float getPosition() const                       { return state_.position_; }
     State getState() const                          { return state_; }
+    // Mirrors production (node fw >= 1.1.61): true while the stored position is not trusted.
+    bool  positionUnknown() const                   { return position_unknown_; }
+    void  set_position_unknown(bool u)              { position_unknown_ = u; }
     int   getLastMotorCurrentAdcRaw() const         { return 0; }
     // Mirrors production: the restored position must also land in state_,
     // which is what the wake beacon reads.
@@ -121,6 +124,7 @@ private:
     bool     supply_ok_{true};
     bool  busy_{false};
     float restore_to_{0.0f};
+    bool  position_unknown_{false};
     State state_;
     float target_position_{0.0f};
     bool  geometry_set_{false};

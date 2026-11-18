@@ -2474,7 +2474,7 @@ const ProtobufCMessageDescriptor client_battery__descriptor =
   (ProtobufCMessageInit) client_battery__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor cover_position__field_descriptors[5] =
+static const ProtobufCFieldDescriptor cover_position__field_descriptors[6] =
 {
   {
     "position",
@@ -2536,18 +2536,31 @@ static const ProtobufCFieldDescriptor cover_position__field_descriptors[5] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "positionUnknown",
+    6,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(CoverPosition, positionunknown),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cover_position__field_indices_by_name[] = {
   3,   /* field[3] = actualRunS */
   2,   /* field[2] = current */
   4,   /* field[4] = nominalRunS */
   0,   /* field[0] = position */
+  5,   /* field[5] = positionUnknown */
   1,   /* field[1] = voltage */
 };
 static const ProtobufCIntRange cover_position__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 5 }
+  { 0, 6 }
 };
 const ProtobufCMessageDescriptor cover_position__descriptor =
 {
@@ -2557,14 +2570,14 @@ const ProtobufCMessageDescriptor cover_position__descriptor =
   "CoverPosition",
   "",
   sizeof(CoverPosition),
-  5,
+  6,
   cover_position__field_descriptors,
   cover_position__field_indices_by_name,
   1,  cover_position__number_ranges,
   (ProtobufCMessageInit) cover_position__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[26] =
+static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[27] =
 {
   {
     "reason",
@@ -2878,6 +2891,18 @@ static const ProtobufCFieldDescriptor node_wake_beacon__field_descriptors[26] =
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "positionUnknown",
+    40,
+    PROTOBUF_C_LABEL_NONE,
+    PROTOBUF_C_TYPE_BOOL,
+    0,   /* quantifier_offset */
+    offsetof(NodeWakeBeacon, positionunknown),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned node_wake_beacon__field_indices_by_name[] = {
   6,   /* field[6] = awakeWindow_ms */
@@ -2888,6 +2913,7 @@ static const unsigned node_wake_beacon__field_indices_by_name[] = {
   2,   /* field[2] = nodeEpoch */
   12,   /* field[12] = phase */
   5,   /* field[5] = position */
+  26,   /* field[26] = positionUnknown */
   13,   /* field[13] = prevBeaconFcnt */
   14,   /* field[14] = prevBeaconT0Ticks */
   21,   /* field[21] = prevSleepAppliedUs */
@@ -2911,7 +2937,7 @@ static const ProtobufCIntRange node_wake_beacon__number_ranges[2 + 1] =
 {
   { 1, 0 },
   { 26, 12 },
-  { 0, 26 }
+  { 0, 27 }
 };
 const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
 {
@@ -2921,7 +2947,7 @@ const ProtobufCMessageDescriptor node_wake_beacon__descriptor =
   "NodeWakeBeacon",
   "",
   sizeof(NodeWakeBeacon),
-  26,
+  27,
   node_wake_beacon__field_descriptors,
   node_wake_beacon__field_indices_by_name,
   2,  node_wake_beacon__number_ranges,

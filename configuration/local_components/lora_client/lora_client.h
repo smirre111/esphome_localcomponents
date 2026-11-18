@@ -1409,6 +1409,8 @@ namespace esphome
       void     send_demote_sweep_burst_();
       // The node's own account of its REGISTER / LOGIN path, from a beacon.
       void     note_beacon_session_report_(const ::NodeWakeBeacon *b);
+      void     note_position_unknown_(bool unknown);
+      bool     last_position_unknown_{false};
       sessiondiag::NodeReport last_node_report_{};
       int64_t  demote_sweep_base_us_{0};   // the first burst's fire instant (0: none yet)
       uint32_t demote_sweep_sent_{0};
