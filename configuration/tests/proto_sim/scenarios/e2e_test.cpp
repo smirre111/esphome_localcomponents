@@ -1097,7 +1097,7 @@ TEST_F(E2E, TheNodesOwnAccountOfARegisterAndItsLoginReachesTheHubInTheBeacon) {
 
     // ...and the node, with a session again, sends its beacon.
     uint32_t nonce = 0;
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHub, nonce)) << "the node accepted the LOGIN";
+    ASSERT_TRUE(disp.getSessionIdForTest(kHub, nonce)) << "the node accepted the LOGIN";
     ASSERT_TRUE(rol.login_acked()) << "and the hub saw it answer";
 
     const sessiondiag::NodeReport &r = rol.node_session_report();

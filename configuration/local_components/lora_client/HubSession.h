@@ -343,7 +343,7 @@ namespace esphome
       // A challenge is in flight or due (the "login pending" state).
       bool challenge_in_flight() const
       {
-        return this->login_.relogin_pending || this->login_.pending_login_nonce != 0 ||
+        return this->login_.relogin_pending || this->login_.pending_session_id != 0 ||
                this->login_.startup_login_initiated;
       }
 
