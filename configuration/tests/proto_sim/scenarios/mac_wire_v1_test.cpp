@@ -108,6 +108,7 @@ struct V1Probe : LORAClient {
     using esphome::lora_tracker::LORAListener::ctl;
     using esphome::lora_tracker::LORAListener::ctl_cmd_;
     using esphome::lora_tracker::LORAListener::do_login_and_arm_retry_;
+    using esphome::lora_tracker::LORAListener::schedule_startup_login_;
 };
 V1Probe &P(LORAClient &r) { return static_cast<V1Probe &>(r); }
 
@@ -174,7 +175,6 @@ TEST(HubWireRoute, EveryAckedDeliveryAndOnlyThoseAskForAMacAck) {
         {hubframes::DL_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
         {hubframes::DL_MODETEST,     macwire::kPortMac0Mgmt, false},
         {hubframes::DL_MACCONTROL,   macwire::kPortMac0Mgmt, false},
-        {hubframes::DL_DRIFTTEST,    macwire::kPortMac0Mgmt, false},
         {hubframes::DL_GRIDBEACON,   macwire::kPortMac0Mgmt, false},
         {hubframes::DL_GRIDDEMOTE,   macwire::kPortMac0Mgmt, false},
     };
@@ -301,7 +301,7 @@ TEST(HubWireUplink, EachPortDecodesAsItsOwnMessage) {
         ASSERT_EQ(u.view()->proto_case, hubframes::UL_POSITION);
         EXPECT_FLOAT_EQ(u.view()->position->position, 1.0f);
         EXPECT_EQ(u.view()->header->senderaddress, 0x12u);
-        EXPECT_EQ(u.view()->header->msgid, 10u) << "FCNT is the msgid";
+        EXPECT_EQ(u.view()->header->fcnt, 10u) << "FCNT is the msgid";
     }
     {   // PORT 0: MacAck needs FLAGS.ACK; ACKED_FCNT becomes ack_msg_id
         const mv::Vector &v = vec("mac_ack");
@@ -313,7 +313,7 @@ TEST(HubWireUplink, EachPortDecodesAsItsOwnMessage) {
         h.acked_fcnt = 7;
         ASSERT_TRUE(u.parse(h, v.body, v.body_len));
         ASSERT_EQ(u.view()->proto_case, hubframes::UL_ACK);
-        EXPECT_EQ(u.view()->ack->ack_msg_id, 7u);
+        EXPECT_EQ(u.view()->ack->ack_fcnt, 7u);
         ASSERT_NE(u.view()->ack->phase, nullptr) << "the phase report still rides on the ack";
     }
     {   // PORT 1: ClientRegister
@@ -455,10 +455,10 @@ TEST(MacWireVectorsHub, NoSessionMeansPlaintextAndASpentFcntIsRefused) {
         << "no session id for the node: plaintext, the pre-session rule";
 
     VectorSession s;
-    hub.rol.clearMsgidReloginForTest();
+    hub.rol.clearFcntReloginForTest();
     EXPECT_FALSE(P(hub.rol).v1_frame_(&op, macwire::kFcntLimit, true, &f));
     EXPECT_TRUE(f.bytes.empty());
-    EXPECT_TRUE(hub.rol.msgidReloginPendingForTest()) << "FCNT bit 31: a fresh session";
+    EXPECT_TRUE(hub.rol.fcntReloginPendingForTest()) << "FCNT bit 31: a fresh session";
 }
 
 TEST(MacWireVectorsHub, UplinksVerifyDecryptAndDecode) {
@@ -572,16 +572,16 @@ TEST(MacWireV1Seal, ASpentFcntIsRefusedOnlyWhenSealing) {
     TimeSync ts;
     hubframes::Down op = timeSyncOp(&ts);
     esphome::lora_tracker::DeliveryFrame f;
-    hub.rol.clearMsgidReloginForTest();
+    hub.rol.clearFcntReloginForTest();
     EXPECT_FALSE(P(hub.rol).v1_frame_(&op, 0x80000005u, true, &f)) << "2^31 + 5 would reuse FCNT 5's keystream";
     EXPECT_TRUE(f.bytes.empty());
-    EXPECT_TRUE(hub.rol.msgidReloginPendingForTest());
+    EXPECT_TRUE(hub.rol.fcntReloginPendingForTest());
 
     // The same FCNT in the clear is not a CTR problem (no keystream).
-    hub.rol.clearMsgidReloginForTest();
+    hub.rol.clearFcntReloginForTest();
     ASSERT_TRUE(P(hub.rol).v1_frame_(&op, 0x80000005u, /*encrypt=*/false, &f));
     EXPECT_EQ(macwire::authOf(f.bytes[1]), macwire::Auth::None);
-    EXPECT_FALSE(hub.rol.msgidReloginPendingForTest());
+    EXPECT_FALSE(hub.rol.fcntReloginPendingForTest());
 }
 
 TEST(MacWireV1Seal, NoKeysOrASessionIdOfZeroSealsNothingAndAsksForNothing) {
@@ -593,10 +593,10 @@ TEST(MacWireV1Seal, NoKeysOrASessionIdOfZeroSealsNothingAndAsksForNothing) {
     {
         VectorSession s;
         st.clearKeys(mv::kNodeAddr);   // the session id stays; K_enc/K_mac are gone
-        hub.rol.clearMsgidReloginForTest();
+        hub.rol.clearFcntReloginForTest();
         EXPECT_FALSE(P(hub.rol).v1_frame_(&op, 5, true, &f));
         EXPECT_TRUE(f.bytes.empty()) << "never sent half-sealed, never downgraded";
-        EXPECT_FALSE(hub.rol.msgidReloginPendingForTest()) << "not an FCNT-space refusal";
+        EXPECT_FALSE(hub.rol.fcntReloginPendingForTest()) << "not an FCNT-space refusal";
     }
     {
         VectorSession s;
@@ -641,7 +641,7 @@ TEST(MacWireV1Seal, EveryRetagRefusalLeavesTheTagBytesAlone) {
         SealedFrame c(hub.rol);
         c.copy.fcnt = macwire::kFcntLimit;
         const uint32_t before = st.staleDrops(mv::kNodeAddr);
-        EXPECT_EQ(c.retag(), R::MsgidSpent);
+        EXPECT_EQ(c.retag(), R::FcntSpent);
         EXPECT_TRUE(c.untouched());
         EXPECT_EQ(st.staleDrops(mv::kNodeAddr), before) << "refused for the FCNT, not as stale";
     }
@@ -690,7 +690,7 @@ TEST(WireBurstFrame, TouchesOnlyTheDocumentedOffsets) {
     mac0::WireBurstFrame fr(in.data(), in.size());
     ASSERT_TRUE(fr.ok());
     ASSERT_TRUE(fr.encrypted());
-    EXPECT_EQ(fr.msgid(), v.fcnt);
+    EXPECT_EQ(fr.fcnt(), v.fcnt);
     fr.setBurst(9, true);
     fr.setIndex(4);
     Bytes out(fr.packedSize());
@@ -953,13 +953,13 @@ TEST(MacWireV1Listener, AnAckNamingAnotherFcntCompletesNothing) {
 TEST(MacWireV1Listener, AnAuthenticUplinkPastTheFcntSpaceAsksForAFreshSession) {
     Hub hub;
     const uint32_t session = openSession(hub);
-    hub.rol.clearMsgidReloginForTest();
+    hub.rol.clearFcntReloginForTest();
     // The node's counter is at the edge (the replay window admits the step).
     hub.rol.setCountersForTest(3, macwire::kFcntLimit - 1);
     macwire::WireHdr h = uplinkHdr(macwire::kFcntLimit + 5, macwire::kPortApp, macwire::Auth::Session);
     Bytes up = proto_sim::v1_session_frame(session, kNodeNonce, kHub, kNode, false, h, availBody());
     hub.rol.set_response(up.data(), up.size());
-    EXPECT_TRUE(hub.rol.msgidReloginPendingForTest());
+    EXPECT_TRUE(hub.rol.fcntReloginPendingForTest());
 }
 
 TEST(MacWireV1Listener, RegisterIsAcceptedOnlyUnderKAuth) {
@@ -1292,6 +1292,116 @@ TEST(MacWireV1Listener, AKeylessUplinksLoginKeepsItsAimThroughAShortOnboardingWa
     EXPECT_EQ(hub.tracker.last_copies, 1) << "still one copy on the node's mark";
 }
 
+namespace {
+// The session id (nonce) of a LOGIN frame.
+uint32_t pendingSessionOf(const Bytes &login) {
+    macwire::WireHdr h;
+    size_t off = 0, blen = 0;
+    if (!macwire::decode(login.data(), login.size(), &h, &off, &blen) || h.port != macwire::kPortSession)
+        return 0;
+    LoginMsg *lm = login_msg__unpack(nullptr, blen, login.data() + off);
+    const uint32_t s = lm ? lm->nonce : 0;
+    if (lm) login_msg__free_unpacked(lm, nullptr);
+    return s;
+}
+// The LOGIN frames the tracker took since `from`: bursts (copies != 1) and
+// single copies.
+void countLogins(const Hub &hub, size_t from, int *bursts, int *singles) {
+    for (size_t k = from; k < hub.tracker.sent_raw.size(); ++k) {
+        if (pendingSessionOf(hub.tracker.sent_raw[k]) == 0) continue;   // not a LOGIN
+        if (hub.tracker.sent_copies[k] == 1) ++*singles; else ++*bursts;
+    }
+}
+}  // namespace
+
+// Review 2026-11-08 R4: every check-in uplink of a deaf node re-sent its LOGIN
+// and RESTARTED the ladder (retry 5/24 -> 1/24), so the fast retries repeated
+// every 15 min: 103 LoginMsgs to node 1 in 2 h. The ladder now continues.
+TEST(MacWireV1Listener, ADeafNodesCheckInsDoNotRestartTheLoginLadder) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    const size_t from = hub.tracker.sent_raw.size();
+    P(hub.rol).do_login_and_arm_retry_();
+    const uint32_t session = pendingSessionOf(lastDown(hub.radio));
+    uint32_t fcnt = 50;
+    for (int s = 1; s <= 7200; ++s) {   // two hours, a check-in every 15 min
+        proto_sim_timer_advance_us(1'000'000);
+        hub.clock.tick(1000);
+        if (s % 900 == 0) sessionUplink(hub, session, fcnt++);
+    }
+    int bursts = 0, singles = 0;
+    countLogins(hub, from, &bursts, &singles);
+    EXPECT_LE(bursts, 30) << "LOGIN bursts in 2 h to a node that never answers (" << singles
+                          << " single copies)";
+    EXPECT_GE(hub.rol.login_retry_count(), 8u) << "the ladder went on, it was not restarted";
+}
+
+// R4: a node's uplink 2.7 s after a hub boot started a challenge, and the
+// startup timer a second one 2.3 s later (one wasted burst per boot).
+TEST(MacWireV1Listener, AnUplinkAtBootStartsOneLoginChallengeNotTwo) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    P(hub.rol).schedule_startup_login_();   // "login challenge in 5 s"
+    const size_t from = hub.tracker.sent_raw.size();
+    for (int i = 0; i < 27; ++i) { proto_sim_timer_advance_us(100'000); hub.clock.tick(100); }
+    hub.tracker.last_rx_t0_us_v = esp_timer_get_time() - 1000;
+    sessionUplink(hub, 0x1234u, 5);          // a session the rebooted hub does not know
+    for (int i = 0; i < 38; ++i) { proto_sim_timer_advance_us(100'000); hub.clock.tick(100); }
+    int bursts = 0, singles = 0;
+    countLogins(hub, from, &bursts, &singles);
+    EXPECT_EQ(bursts + singles, 1) << "one challenge within 6.5 s of the boot";
+}
+
+// R4 / round 5: after a hub reboot a node's first uplink names a session the
+// hub never held ("No base nonce"): its LOGIN goes on that node's mark too.
+TEST(MacWireV1Listener, AnUplinkTheRebootedHubHoldsNoSessionForIsAnsweredOnTheNodesMark) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    hub.rol.enable_timed_mode(true);
+    const int64_t t0 = esp_timer_get_time();
+    hub.tracker.last_rx_t0_us_v = t0;
+    sessionUplink(hub, 0x1234u, 5);
+    hub.clock.tick(10);
+    EXPECT_EQ(hub.tracker.last_copies, 1) << "one copy, aimed";
+    const int64_t since = loratiming::t0FromFireInstantUs(hub.tracker.last_earliest_us, 0) - (t0 - 60'000);
+    EXPECT_GT(since, 0);
+    EXPECT_EQ(since % 1'500'000, 0) << "on the node's own mark";
+}
+
+// Ported from the retired model scenario login_test (MaxLoginRetriesExhaustsAndStops,
+// 2026-11-08): a node that never answers gets the first LOGIN plus
+// kMaxLoginRetries - 1 retries, then the ladder gives up and stays quiet.
+TEST(MacWireV1Listener, AnUnansweredLoginLadderGivesUpAfterItsRetryBudget) {
+    Hub hub;
+    proto_sim_timer_advance_us(100'000'000);
+    hub.time.set_now(1787000000, true);
+    hub.rol.registered_    = true;
+    hub.rol.config_synced_ = true;
+    const size_t from = loginsOnAir(hub.radio);
+    P(hub.rol).do_login_and_arm_retry_();
+    for (int s = 0; s < 30 * 3600 / 10; ++s) {   // 30 h in 10 s steps
+        proto_sim_timer_advance_us(10'000'000);
+        hub.clock.tick(10'000);
+    }
+    const size_t sent = loginsOnAir(hub.radio) - from;
+    EXPECT_EQ(sent, (size_t) esphome::lora_tracker::HubSession::kMaxLoginRetries)
+        << "the first LOGIN and kMaxLoginRetries - 1 retries";
+    for (int s = 0; s < 3 * 3600 / 10; ++s) {
+        proto_sim_timer_advance_us(10'000'000);
+        hub.clock.tick(10'000);
+    }
+    EXPECT_EQ(loginsOnAir(hub.radio) - from, sent) << "and nothing after giving up";
+}
+
 TEST(MacWireV1Listener, AKeylessUplinksLoginToAModeANodeIsTheBurst) {
     Hub hub;
     const uint32_t session = pendingLogin(hub);
@@ -1431,7 +1541,6 @@ TEST(MacWireV1Listener, APlaintextUplinkBeforeTheSessionIsHeard) {
 
 namespace {
 struct CaptureNode : esphome::lora_tracker::LORAClientNode {
-    void send_remote_config() override {}
     void on_app_indication(const esphome::lora_tracker::AppIndication &ind) override {
         ++count;
         last_case = ind.msg ? ind.msg->proto_case : hubframes::UL_NOT_SET;

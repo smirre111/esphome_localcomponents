@@ -192,7 +192,7 @@ struct GoldenHub {
 
     void ackCtl() {
         auto &p = static_cast<GProbe &>(rol);
-        p.handle_command_ack_(p.ctl().last_msgid);
+        p.handle_command_ack_(p.ctl().last_fcnt);
     }
 
     // The node acks every acked config push in turn (review rollout-3 D1): the
@@ -202,7 +202,7 @@ struct GoldenHub {
         for (int i = 0; i < 8; ++i) {
             auto &s = rol.dlv_slot_for_test(esphome::lora_tracker::CH_SETUP);
             if (!s.awaiting_ack) break;
-            p.handle_command_ack_(s.last_msgid);
+            p.handle_command_ack_(s.last_fcnt);
         }
     }
 
@@ -298,7 +298,7 @@ TEST(GoldenHubFrames, GridSyncWithdrawAndDemote) {
 TEST(GoldenHubFrames, ModeTestStream) {
     GoldenHub h;
     h.session();
-    h.rol.start_mode_test(60, 1500, 2, 1, true, true, true, true, 0);
+    h.rol.start_mode_test(60, 1500, 2, 1, true, true, true, true);
     h.tick(3100);                 // the grid arms and builds the first mark
     proto_sim_timer_fire_all();   // mark 1
     proto_sim_timer_fire_all();   // mark 2
@@ -318,17 +318,6 @@ TEST(GoldenHubFrames, MacPingStreams) {
     proto_sim_timer_fire_all();
     h.rol.stop_mac_ping();
     EXPECT_TRUE(golden::matches("hub_mac_ping_streams", h.dump()));
-}
-
-// Drift test stream: START burst, one grid tick, STOP.
-TEST(GoldenHubFrames, DriftTestStream) {
-    GoldenHub h;
-    h.session();
-    h.rol.start_drift_test(30, 1000);
-    h.tick(3100);
-    proto_sim_timer_fire_all();
-    h.rol.stop_drift_test();
-    EXPECT_TRUE(golden::matches("hub_drift_test_stream", h.dump()));
 }
 
 // Per-copy retag: a full 17-copy encrypted burst, each copy re-stamped and

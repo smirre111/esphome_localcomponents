@@ -6,7 +6,7 @@
 // candidate, install, clear), the v1 downlink framing and seal, the uplink's
 // shape check and the security stages of the encrypted-uplink pipeline
 // (session id present, key selection, CMAC verify, CTR decrypt into its own
-// buffer), and the msgid / CTR-space guard. It reaches the listener ONLY
+// buffer), and the fcnt / CTR-space guard. It reaches the listener ONLY
 // through SessionHost. What the listener DOES with an authentic frame (commit
 // the counter, confirm the session, hand the body on) stays the listener's.
 //
@@ -62,8 +62,8 @@ namespace esphome
       virtual void session_cancel_timeout(const char *name) = 0;
       // The transmit queue's drain estimate (0 without a radio).
       virtual int64_t session_tx_drain_us() const = 0;
-      // A schedule push that can still be retried is outstanding.
-      virtual bool session_schedule_outstanding() const = 0;
+      // A published GridSync is not yet acknowledged.
+      virtual bool session_gridsync_outstanding() const = 0;
 
       // ---- what the login lifecycle needs to know or do ----
       // A tracker to send through.
@@ -132,7 +132,7 @@ namespace esphome
       mac2::KeyPair candidate{};   // an unverified candidate; destroyed unless installed
       mac::MacHdr   hdr{};         // the outer header, decoded for MAC-2
       bool          needs_candidate{false};
-      uint32_t     msgid{0};
+      uint32_t     fcnt{0};
     };
 
     class HubSession
@@ -150,7 +150,7 @@ namespace esphome
       // commit_rx() commits only after MAC-2 verified (or before any session).
       const mac1::Sequencer &seq() const { return this->seq_; }
       // The next downlink FCNT (loop only: allocating persists). An exhausted
-      // space hands back kMsgidCtrLimit, which the seal refuses, and asks for a
+      // space hands back kFcntCtrLimit, which the seal refuses, and asks for a
       // fresh session.
       uint32_t allocate_tx();
       // Commit an uplink FCNT the listener already check()ed.
@@ -219,7 +219,7 @@ namespace esphome
 
       // ---- the security stages of the encrypted-uplink pipeline ----
       // Each returns false when the frame is dropped (candidate destroyed).
-      bool     check_base_nonce(const EncUplink &up);
+      bool     check_session_id(const EncUplink &up);
       bool     select_keys(EncUplink &up);
       bool     verify(EncUplink &up);
       // CTR-decrypt into the session's own buffer; nullptr on failure.
@@ -241,7 +241,7 @@ namespace esphome
         bool     relogin_pending{false};
         // The base nonce of the challenge in flight, reused on every retry
         // (the node keeps the FIRST LoginMsg it accepts per 5 s).
-        uint32_t pending_login_nonce{0};
+        uint32_t pending_session_id{0};
         uint8_t  login_retry_count{0};
         // The startup login path was initiated (never cleared by incoming
         // frames, so an NTP resync does not restart a running session).
@@ -278,7 +278,7 @@ namespace esphome
       bool     confirmed() const { return this->login_.confirmed; }
       bool     login_acked() const { return this->login_.login_acked; }
       bool     relogin_pending() const { return this->login_.relogin_pending; }
-      uint32_t pending_login_nonce() const { return this->login_.pending_login_nonce; }
+      uint32_t pending_session_id() const { return this->login_.pending_session_id; }
       uint8_t  login_retry_count() const { return this->login_.login_retry_count; }
       bool     startup_login_initiated() const { return this->login_.startup_login_initiated; }
       // A node restored as registered still holds its NVS session, but the hub
@@ -396,13 +396,13 @@ namespace esphome
       void leave_onboarding_gate() { onboarding_gate_.release(this); }
       static void reset_onboarding_gate_for_test() { onboarding_gate_.reset(); }
 
-      // ---- msgid / CTR-space guard (framecrypto::kMsgidCtrLimit) ----
+      // ---- fcnt / CTR-space guard (framecrypto::kFcntCtrLimit) ----
       // Starts a fresh session ONCE per exhaustion (cleared by send_login(),
       // where both counters restart).
-      void     request_msgid_relogin(const char *where);
-      bool     msgid_relogin_pending() const { return this->msgid_relogin_pending_; }
-      uint32_t msgid_relogin_requests() const { return this->msgid_relogin_requests_; }
-      void     clear_msgid_relogin() { this->msgid_relogin_pending_ = false; }
+      void     request_fcnt_relogin(const char *where);
+      bool     fcnt_relogin_pending() const { return this->fcnt_relogin_pending_; }
+      uint32_t fcnt_relogin_requests() const { return this->fcnt_relogin_requests_; }
+      void     clear_fcnt_relogin() { this->fcnt_relogin_pending_ = false; }
 
     private:
       // The Sequencer's PersistHook: the listener's save_state + notePersisted.
@@ -414,6 +414,7 @@ namespace esphome
       bool register_authentic_(const uint8_t *data, size_t len);
       bool register_admitted_(const ::ClientRegister *reg, const uint8_t *data, size_t len);
       void note_keyless_uplink_();
+      void login_from_uplink_();
       static constexpr int64_t kKeylessLoginGapUs = 5000000;   // the node's LOGIN rate limit
       // The receive stamp of the node's last admitted REGISTER: every LOGIN of
       // the challenge it starts is placed from it while it is fresh (0: none).
@@ -426,7 +427,7 @@ namespace esphome
       int64_t  sweep_base_us_{0};
       uint32_t sweep_sends_{0};
       bool send_swept_(const DeliveryFrame &f);
-      void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t base,
+      void send_login_frame_(const ::LoginMsg &login, uint32_t fcnt, uint32_t session_id,
                              bool into_uplink_window);
       bool verify_uplink_(EncUplink &up);
       mac2::LinkSecurity::Verify tag_verdict_(EncUplink &up);
@@ -442,8 +443,8 @@ namespace esphome
       size_t           rx_len_{0};
       // The decrypted body of the uplink being processed (loop only, HB8).
       uint8_t uplink_pt_[256]{};
-      bool     msgid_relogin_pending_{false};
-      uint32_t msgid_relogin_requests_{0};   // how many fresh sessions the guard has asked for
+      bool     fcnt_relogin_pending_{false};
+      uint32_t fcnt_relogin_requests_{0};   // how many fresh sessions the guard has asked for
       static onboarding::Gate onboarding_gate_;
       LoginState login_{};
       sessiondiag::Tracker diag_{};
@@ -463,6 +464,8 @@ namespace esphome
       bool     onboarding_waiting_logged_{false};   // log the wait once, not per poll
       bool     onboarding_confirmed_{false};
       bool     onboarding_heard_{false};
+      // The previous hold ended NodeSilent and the node has not been heard since.
+      bool     onboarding_was_silent_{false};
       uint32_t onboarding_age_ms_{0};
       uint32_t onboarding_since_confirm_ms_{0};
     };

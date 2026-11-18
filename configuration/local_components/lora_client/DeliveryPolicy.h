@@ -25,7 +25,7 @@
 // optimistic single shot, the SHORT adaptive one (SingleShotAckWait.h). When the
 // wait elapses nothing has been heard: the command is either given up, retried,
 // or (short wait only) bursted without charging the budget. A retry that lands
-// inside a relogin is deferred, uncharged. An ack names one msgid; a request may
+// inside a relogin is deferred, uncharged. An ack names one fcnt; a request may
 // have been sent under several (a SET), and any of them completes it.
 // ---------------------------------------------------------------------------
 
@@ -119,16 +119,16 @@ constexpr GiveUpAction giveUpAction(bool outcome_ambiguous)
 
 // ---- which acks complete a request ----------------------------------------
 
-// A request is sent under one msgid, or under a RANGE of them when each
-// retransmission mints a fresh one: an ack for any msgid in [first, last].
-constexpr bool msgIdInRange(uint32_t id, uint32_t first, uint32_t last)
+// A request is sent under one fcnt, or under a RANGE of them when each
+// retransmission mints a fresh one: an ack for any fcnt in [first, last].
+constexpr bool fcntInRange(uint32_t id, uint32_t first, uint32_t last)
 {
     return id >= first && id <= last;
 }
 
 // ...or under an explicit SET (GridSync keeps every published id). Linear: sets
 // are a handful of entries.
-constexpr bool msgIdInSet(const uint32_t *ids, unsigned count, uint32_t id)
+constexpr bool fcntInSet(const uint32_t *ids, unsigned count, uint32_t id)
 {
     for (unsigned i = 0; i < count; ++i)
         if (ids[i] == id)
@@ -137,14 +137,14 @@ constexpr bool msgIdInSet(const uint32_t *ids, unsigned count, uint32_t id)
 }
 
 // An ack counts only while the command is still awaited, and only if it names a
-// msgid of this command.
+// fcnt of this command.
 constexpr bool acceptsRangeAck(bool awaiting, uint32_t id, uint32_t first, uint32_t last)
 {
-    return awaiting && msgIdInRange(id, first, last);
+    return awaiting && fcntInRange(id, first, last);
 }
 
 // Position of `id` in the set, -1 when it is not a member.
-constexpr int msgIdIndex(const uint32_t *ids, unsigned count, uint32_t id)
+constexpr int fcntIndex(const uint32_t *ids, unsigned count, uint32_t id)
 {
     for (unsigned i = 0; i < count; ++i)
         if (ids[i] == id)
@@ -154,7 +154,7 @@ constexpr int msgIdIndex(const uint32_t *ids, unsigned count, uint32_t id)
 
 // ---- the ack-id set of one request (step 3) -------------------------------
 
-// Every msgid a request has been sent under, each with a TAG: whatever the
+// Every fcnt a request has been sent under, each with a TAG: whatever the
 // attempt that carried it stood for (a ScheduleConfig's version). A request is
 // re-built on every resend, so a late ack for an EARLIER attempt must apply what
 // THAT attempt carried, not what the latest one does. The set is bounded: a full
@@ -183,7 +183,7 @@ struct AckIds
         this->tag[this->n] = new_tag;
         ++this->n;
     }
-    int find(uint32_t wanted) const { return msgIdIndex(this->id, this->n, wanted); }
+    int find(uint32_t wanted) const { return fcntIndex(this->id, this->n, wanted); }
     void clear() { this->n = 0; }
     uint32_t last() const { return this->n != 0 ? this->id[this->n - 1] : 0; }
 };
@@ -272,7 +272,7 @@ constexpr bool fireDeferred(const Policy &p, bool relogin_pending)
 // ---- the Control channel (step 5): cover operations and sysops --------------
 //
 // One command per node at a time, the ladder the hardware verified: the stored
-// frame is re-sent byte for byte (same msgid, so the node re-acks it from its
+// frame is re-sent byte for byte (same fcnt, so the node re-acks it from its
 // AckCache instead of running it twice), 3 s apart plus the transmit backlog,
 // 4 counted retries. Out of retries the session is presumed dead (FailRelogin)
 // -- except SLEEP, whose silence is ambiguous (the node may have slept and lost
@@ -290,7 +290,7 @@ constexpr Policy kSysopPolicy = {Mode::Acked, Shape::Auto, Resend::SameBytes, kC
 constexpr Policy kSleepPolicy = {Mode::Acked, Shape::Auto, Resend::SameBytes, kControlMaxRetries,
                                  kControlWaitMs, GiveUpAction::FailKeep, false, false, true};
 // CMD_OTA: as a sysop, but AT MOST ONCE -- it is never re-packed under a fresh
-// msgid, because the node may already have run the first one.
+// fcnt, because the node may already have run the first one.
 constexpr Policy kOtaPolicy = {Mode::Acked, Shape::Auto, Resend::SameBytes, kControlMaxRetries,
                                kControlWaitMs, GiveUpAction::FailRelogin, true, false, true};
 
@@ -408,9 +408,8 @@ private:
     }
 };
 
-// A ladder is live and still has a counted retry to spend: the push is "owed"
-// to the pending-shadow and holds the onboarding gate. (The final wait, after
-// the last retry, no longer does.)
+// A ladder is live and still has a counted retry to spend: the push is "owed".
+// (The final wait, after the last retry, no longer counts.)
 constexpr bool ladderHasRetryLeft(bool awaiting, uint8_t retries_spent, uint8_t max_retries)
 {
     return awaiting && retries_spent < max_retries;

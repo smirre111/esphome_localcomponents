@@ -50,6 +50,17 @@ static constexpr uint32_t kSettleAfterConfirmMs = 3000;
 // this; letting it hold the gate longer only makes the nodes that ARE there wait.
 static constexpr uint32_t kSilentAfterMs = 15000;
 
+// A node whose PREVIOUS turn already ended silent, while another node waits:
+// one burst and its answer window, not another 15 s (review 2026-11-08 R3: a
+// deaf node took the gate for 15 s per retry, and node 2's four sweep bursts
+// were spread over two or three such turns).
+static constexpr uint32_t kRepeatSilentAfterMs = 5000;
+
+// After confirmation the gate waits for the GridSync ack (a Timed Mode node's
+// grid), but not for ever: a node that answered its login and then does not
+// ack its grid is a weak link, and the GridSync channel retries on its own.
+static constexpr uint32_t kGridSyncWaitMaxMs = 10000;
+
 // The ceiling on any one hold. Every retry ladder in the listener ends well
 // inside it; it exists so a state nobody anticipated cannot park the gate.
 static constexpr uint32_t kMaxHoldMs = 60000;
@@ -71,7 +82,11 @@ struct HoldState
   uint32_t since_confirm_ms{0};
   bool     node_heard{false};        // any frame from the node since the grant
   int64_t  tx_drain_us{0};           // the hub's own queue, see LORATracker::txDrainUs
-  bool     schedule_outstanding{false};   // a ScheduleConfig sent, not yet acked
+  // A GridSync published, not yet acked. NOT the ScheduleConfig: it is acked and
+  // retried on its own channel and must not hold the other nodes back (R3/R6).
+  bool     gridsync_outstanding{false};
+  bool     repeat_silent{false};     // this node's previous turn ended NodeSilent
+  bool     others_waiting{false};    // another node is in line for the gate
 };
 
 inline Verdict assess(const HoldState &s)
@@ -83,8 +98,8 @@ inline Verdict assess(const HoldState &s)
 
   if (s.confirmed)
   {
-    if (s.since_confirm_ms >= kSettleAfterConfirmMs &&
-        s.tx_drain_us <= 0 && !s.schedule_outstanding)
+    const bool grid_done = !s.gridsync_outstanding || s.since_confirm_ms >= kGridSyncWaitMaxMs;
+    if (s.since_confirm_ms >= kSettleAfterConfirmMs && s.tx_drain_us <= 0 && grid_done)
       return Verdict::Settled;
     return Verdict::Keep;
   }
@@ -92,7 +107,9 @@ inline Verdict assess(const HoldState &s)
   // Not confirmed. Silence only counts once the hub's own frames have left the
   // radio: a login still queued behind another node's traffic has not been
   // "unanswered", it has not been asked.
-  if (!s.node_heard && s.tx_drain_us <= 0 && s.age_ms >= kSilentAfterMs)
+  const uint32_t silent_after =
+      (s.repeat_silent && s.others_waiting) ? kRepeatSilentAfterMs : kSilentAfterMs;
+  if (!s.node_heard && s.tx_drain_us <= 0 && s.age_ms >= silent_after)
     return Verdict::NodeSilent;
   return Verdict::Keep;
 }

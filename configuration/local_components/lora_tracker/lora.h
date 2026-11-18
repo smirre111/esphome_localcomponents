@@ -63,9 +63,7 @@ struct DeviceMode
 };
 
 int lora_init(void);
-void lora_end();
 int lora_beginPacket(int implicitHeader = false);
-int lora_endPacket(bool async = false);
 // The TX-done wait on its own, so a caller can separate PREPARE (config, FIFO
 // fill) from FIRE (lora_tx) and still block for completion afterwards. Returns
 // 0 on timeout, like lora_endPacket.
@@ -78,20 +76,14 @@ int lora_parsePacket(int size);
 int lora_parsePacket(uint8_t irqFlags, int size);
 int lora_packetRssi(void);
 float lora_packetSnr(void);
-float lora_packetFrequencyError();
-void lora_compensateFrequencyOffset(const float &fError);
 size_t lora_write(uint8_t byte);
 size_t lora_write(const uint8_t *buffer, size_t size);
-int lora_available();
-int lora_read();
-int lora_peek();
 void lora_receive(void);
 void lora_receive(int size);
 uint8_t lora_getPayloadLength();
 
 void lora_idle(void);
 void lora_sleep(void);
-void lora_cad(void);
 void lora_tx();
 void lora_rxSingle();
 void lora_rxContinuous();
@@ -108,32 +100,18 @@ void lora_setLdoFlag();
 
 void lora_setCodingRate4(int denominator);
 void lora_setPreambleLength(long length);
-void lora_setSymbolTimeout(uint16_t symbols);
-uint16_t lora_getSymbolTimeout();
 void lora_setSyncWord(int sw);
-void lora_setMaxPayloadLength(const uint8_t payloadLength);
-void lora_enableLowDataRateOptimize(bool enabled);
-void lora_enableTcxo(const bool enabled);
 void lora_enableCrc(void);
-void lora_disableCrc(void);
-void lora_enableInvertIQ();
-void lora_disableInvertIQ();
 void lora_setOCP(uint8_t mA);
-void lora_setGain(uint8_t gain);
 void lora_setInterruptMode(uint8_t pin, uint8_t mode); // pin: [DIO]0..5; mode: see LORA_IRQ_DIO*
 uint8_t lora_readInterrupts();
 void lora_clearInterrupts(uint8_t irqFlags);
-uint8_t lora_random();
-void lora_dump_registers(void);
 uint8_t lora_getDeviceMode();
 
 void lora_explicitHeaderMode(void);
 void lora_implicitHeaderMode(int size);
 void lora_implicitHeaderMode();
 void lora_reset(void);
-void lora_send_packet(uint8_t *buf, int size);
 int lora_receive_packet(uint8_t *buf, int size);
-int lora_received(void);
-void lora_close(void);
 
 #endif

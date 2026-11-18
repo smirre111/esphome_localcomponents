@@ -52,7 +52,7 @@ namespace esphome
         return;
       }
       // The publish is the Mac channel's request: re-published until the node's
-      // MAC ACK names one of its msgids (the set), a re-publish is REBUILT, and
+      // MAC ACK names one of its fcnts (the set), a re-publish is REBUILT, and
       // giving up only logs (the node stays in Mode A, the session is fine).
       DeliveryRequest req;
       req.what        = "GridSync";
@@ -163,7 +163,7 @@ namespace esphome
 
     // ONE attempt at publishing the grid, built from the grid's position NOW (a
     // re-publish re-declares the position it will actually occupy, so a stale one
-    // cannot anchor the node wrong). Returns its msgid, 0 when it did not pack.
+    // cannot anchor the node wrong). Returns its fcnt, 0 when it did not pack.
     // One GridSync attempt's payload (S7: the delivery service frames, places
     // through place_grid_sync_, matches the ack and runs the ladder).
     bool LORAListener::encode_grid_sync_(bool retry, const DeliveryRequest::FrameFn &frame)
@@ -221,12 +221,12 @@ namespace esphome
                (unsigned) this->grid_slot_);
     }
 
-    // The node confirmed the grid (any of the published msgids): it is on the
+    // The node confirmed the grid (any of the published fcnts): it is on the
     // grid, stop re-publishing.
-    bool LORAListener::on_grid_sync_acked_(uint32_t msgid)
+    bool LORAListener::on_grid_sync_acked_(uint32_t fcnt)
     {
       ESP_LOGI(TAG, "[%s] GridSync acknowledged (msgid=%u, %u re-publishes)",
-               this->get_name().c_str(), (unsigned) msgid,
+               this->get_name().c_str(), (unsigned) fcnt,
                (unsigned) this->gridsync_republishes_);
       this->last_gridsync_ack_us_ = esp_timer_get_time();
       return true;
@@ -556,7 +556,7 @@ namespace esphome
     // the same guard the node's phase tracking uses, so "in slot" means the
     // same thing at both ends.
     // The stamp is captured with the frame and committed once the frame earned
-    // it (MAC-1's commit, commit_rx_msgid_); the same stamp answers whether
+    // it (MAC-1's commit, commit_rx_fcnt_); the same stamp answers whether
     // the uplink landed where the grid says this node transmits.
     void NodeLinkTiming::commit_uplink_stamp(int64_t t0_us, uint32_t unc_us)
     {
@@ -907,7 +907,7 @@ namespace esphome
       }
 
       // This node's own uplink (by default the last one committed in
-      // commit_rx_msgid_) — never the tracker's live stamp, which by now belongs
+      // commit_rx_fcnt_) — never the tracker's live stamp, which by now belongs
       // to whichever node transmitted most recently.
       if (t0_uplink <= 0)
         return ClassAPlacement::NoUplinkStamp;

@@ -21,10 +21,6 @@ namespace esphome
       this->parent_->triggerOTA();
     }
 
-    void TriggerOtaButton::send_remote_config()
-    {
-    }
-
 
   } // namespace loracov
 } // namespace esphome

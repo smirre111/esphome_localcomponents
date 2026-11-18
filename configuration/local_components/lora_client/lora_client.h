@@ -15,8 +15,7 @@
 #include "esphome/components/lora_client/RegisterFreshness.h"
 // How often an automatic-mode node needs its wall clock resynced.
 #include "esphome/components/lora_client/TimeSyncPolicy.h"
-// Hub-only: the first ack wait of an optimistic single shot, and the shadow
-// pending-data mask (computed and logged, never transmitted).
+// Hub-only: the first ack wait of an optimistic single shot.
 #include "esphome/components/lora_client/SingleShotAckWait.h"
 #include "esphome/components/lora_client/DeliveryPolicy.h"
 #include "esphome/components/lora_client/DeliveryService.h"
@@ -36,7 +35,6 @@
 #include "esphome/components/lora_client/HubFrames.h"
 #include "esphome/components/lora_client/HubWire.h"
 #include <memory>
-#include "esphome/components/lora_client/PendingShadow.h"
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -111,8 +109,8 @@ namespace esphome
     struct LORAClientRestoreState
     {
       uint8_t  version;           // must equal LORAListener::kRestoreStateVersion; otherwise discarded
-      uint32_t rx_message_id;
-      uint32_t tx_message_id;
+      uint32_t rx_fcnt;
+      uint32_t tx_fcnt;
       bool     logged_in;
       uint32_t last_sleep_epoch;  // Unix timestamp when enterSleep() was last called; 0 = unknown
       // What ClientConfig's fields hashed to when this was saved. A hub reboot
@@ -142,13 +140,13 @@ namespace esphome
       // per command from Home Assistant — never per retransmission, which must
       // stay under the generation it belongs to.
       //
-      // Deliberately NOT msgid, even though msgid is also monotonic: a LoginMsg
-      // ZEROES the message counters, so a generation taken from msgid would go
+      // Deliberately NOT fcnt, even though fcnt is also monotonic: a LoginMsg
+      // ZEROES the message counters, so a generation taken from fcnt would go
       // backwards after a re-login and the first command afterwards would be
       // dropped as stale by frames queued before it. Starts at 1 because 0 is
       // the table's "takes no part in this" value.
       uint32_t generation{1};
-      // Stored operation, replayed on each retransmission with a fresh msgid.
+      // Stored operation, replayed on each retransmission with a fresh fcnt.
       uint32_t covop_case{0};
       int32_t  operation{0};
       float    position{0.0f};
@@ -268,12 +266,6 @@ namespace esphome
       // A sleeping node does not learn of an edit until it next wakes, up to
       // checkin_interval_. The `Schedule Pending` binary sensor already shows
       // exactly that window.
-      void set_slot_minute(uint8_t slot, uint16_t minute_of_day);
-      void set_slot_days(uint8_t slot, uint8_t day_mask);
-      void set_slot_action(uint8_t slot, uint8_t action);
-      void set_slot_position(uint8_t slot, uint8_t position_pct);
-      void set_slot_enabled(uint8_t slot, bool on);
-      const SchedEntryCfg &slot(uint8_t slot) const { return this->sched_entries_[slot]; }
       // ---- compact text form ---------------------------------------------
       //
       // Applies a whole schedule from one string (see ScheduleText.h). Returns
@@ -299,23 +291,6 @@ namespace esphome
       bool schedule_pending();
       void send_schedule_config();
 
-      // --- Drift test (bench only) --------------------------------------
-      // Puts BOTH ends into test mode: the node holds continuous RX, and the
-      // hub emits a burst every grid_ms so there is a regular ruler to measure
-      // against. Without the hub half the node would only get a fit whenever
-      // the hub happened to have traffic, which in interactive mode is rare
-      // and irregular.
-      //
-      // The grid frame IS the DriftTest message, re-sent. That makes the test
-      // self-limiting: each one re-arms the node deadline, so if the hub stops
-      // or this component reboots, the node exits on its own.
-      void start_drift_test(uint32_t duration_s = 300, uint32_t grid_ms = 15000)
-      {
-        this->drift_.start(duration_s, grid_ms);
-      }
-      void stop_drift_test() { this->drift_.stop(); }
-      bool drift_test_active() const { return this->drift_.active(); }
-
       // ModeTest — the on-hardware validation mode (test-plan.md section 10).
       //
       // Same shape as the drift test, and deliberately so: the two lessons that
@@ -329,14 +304,13 @@ namespace esphome
       void start_mode_test(uint32_t duration_s, uint32_t grid_ms, uint32_t mode,
                            uint32_t copies, bool keep_power_profile,
                            bool enable_counter, bool enable_crypto,
-                           bool mac_echo, int32_t arm_offset_us = 0)
+                           bool mac_echo)
       {
         if (this->parent_ == nullptr)
           return;
         this->mbs_owns_test_ = this->mbs_starting_;
-        this->mode_test_.clear_last_report();
         this->mode_test_.start(duration_s, grid_ms, mode, copies, keep_power_profile,
-                               enable_counter, enable_crypto, mac_echo, arm_offset_us);
+                               enable_counter, enable_crypto, mac_echo);
       }
       void stop_mode_test() { this->mode_test_.stop(); }
       bool mode_test_active() const { return this->mode_test_.active(); }
@@ -371,7 +345,7 @@ namespace esphome
       uint32_t sessionGenerationForTest() const { return this->session_.generation(); }
       // For tests: install a session directly (sets the base nonce AND
       // derives K_enc/K_mac from it), without a real LOGIN/uplink round
-      // trip. Mirrors CmdDispatcher's setBaseNonceForTest reasoning: some
+      // trip. Mirrors CmdDispatcher's setSessionIdForTest reasoning: some
       // tests need "a second, DIFFERENT session now exists" as a precise,
       // one-line precondition rather than a second full handshake.
       bool deriveSessionKeysForTest(uint32_t session_id, uint32_t node_nonce)
@@ -382,10 +356,10 @@ namespace esphome
       // (SHA-256(fleet key phrase)[0:16]). A wrong byte here is invisible to
       // anything that derives and compares on the SAME side, so a test pins it.
       static bool deriveRootKeyForTest(uint8_t out[16]);
-      // For tests: the msgid / CTR-space guard (see requestMsgidRelogin_).
-      bool msgidReloginPendingForTest() const { return this->session_.msgid_relogin_pending(); }
-      uint32_t msgidReloginRequestsForTest() const { return this->session_.msgid_relogin_requests(); }
-      void clearMsgidReloginForTest() { this->session_.clear_msgid_relogin(); }
+      // For tests: the fcnt / CTR-space guard (see HubSession::request_fcnt_relogin).
+      bool fcntReloginPendingForTest() const { return this->session_.fcnt_relogin_pending(); }
+      uint32_t fcntReloginRequestsForTest() const { return this->session_.fcnt_relogin_requests(); }
+      void clearFcntReloginForTest() { this->session_.clear_fcnt_relogin(); }
       // For tests: encrypt a block under this listener's CURRENT K_enc with
       // CTR — the only way to prove the hub and node landed on bit-IDENTICAL
       // session keys, since opaque PSA key ids can't be compared directly.
@@ -428,7 +402,6 @@ namespace esphome
       // `help` entity fell into. The NUMBERS below are what belongs in HA, one
       // per sensor, because B3's gate ("reception >= Mode A over a week") is a
       // week of history and a string cannot be graphed.
-      const std::string &last_mode_test_report() const { return this->mode_test_.last_report(); }
 
       // --- The last ModeTest report, as numbers ---------------------------
       //
@@ -514,12 +487,12 @@ namespace esphome
       }
       // Capture this node's own uplink T0 and score it against the grid. Called
       // only for a frame that has earned the replay counter — see
-      // commit_rx_msgid_.
+      // commit_rx_fcnt_.
       // MAC-0 receive ticket (S5, mirrors the node's RxTicket/commitTiming): what
       // MAC-0 knows about the frame being processed -- the tracker's T0 stamp,
       // its uncertainty and the on-air length (always a trustworthy T0 input in
       // v1). Captured at admission (set_response),
-      // committed by MAC-1 only once the frame has earned it (commit_rx_msgid_).
+      // committed by MAC-1 only once the frame has earned it (commit_rx_fcnt_).
       struct Mac0Rx
       {
         mac::RxTicket ticket{};
@@ -548,7 +521,6 @@ namespace esphome
 
       // §4.6: did this uplink land where the grid says this node transmits?
       // Called with the node's own T0, from admit_frame_.
-      void noteUplinkPlacement_(int64_t t0_uplink_us) { this->link_.note_uplink_placement(t0_uplink_us); }
       // belief_ with confirmation_age_s filled in from the clock — the one
       // field that is a function of now rather than of an event.
       timedmode::HubBelief hubBeliefNow_() const { return this->link_.belief_now(); }
@@ -630,11 +602,6 @@ namespace esphome
       bool grid_aligned() const     { return this->grid_aligned_; }
       uint8_t grid_slot() const     { return this->grid_slot_; }
 
-      // SHADOW pending-data mask (PendingShadow.h): everything the would-be
-      // mask decision reads about THIS node, gathered in one place. Called from
-      // LORATracker::serviceBeacon only, never from the transmit path. Not
-      // const because schedule_version() lazily recomputes its CRC.
-      pendingshadow::NodeInputs pending_shadow_inputs(int64_t now_us);
       // For tests: optimistic-single-shot bookkeeping of the tracked command.
       bool op_short_wait_spent_for_test() const { return this->ctl().short_wait_spent; }
       bool op_sent_optimistic_for_test() const  { return this->ctl().sent_optimistic; }
@@ -649,7 +616,6 @@ namespace esphome
       uint32_t ms_until_node_awake_for_test() const { return ms_until_node_awake_(); }
       // D4: fire one ModeTest mark exactly as the esp_timer would.
       void mode_test_tick_for_test() { this->mode_test_.tick_for_test(); }
-      void drift_tick_for_test() { this->drift_.tick_for_test(); }
       std::vector<uint8_t> mode_test_frame_for_test() const {
         return this->mode_test_.frame_for_test();
       }
@@ -662,7 +628,6 @@ namespace esphome
       static void reset_sleep_gate_for_test() { s_sleep_gate_.reset(); }
       bool onboarding_held_for_test() const { return this->session_.onboarding_held(); }
       int64_t last_timesync_sent_us_for_test() const { return this->last_timesync_sent_us_; }
-      void reset_timesync_policy_for_test() { this->last_timesync_sent_us_ = 0; }
       // Simulates the config-confirmed-and-saved moment without driving a full
       // REGISTER/LOGIN exchange, for the reboot-persistence tests.
       void save_state_for_test() { this->save_state_(true); }
@@ -678,7 +643,7 @@ namespace esphome
       bool     session_confirmed() const { return this->session_.confirmed(); }
       bool     login_acked() const { return this->session_.login_acked(); }
       bool     relogin_pending() const { return this->session_.relogin_pending(); }
-      uint32_t pending_login_nonce() const { return this->session_.pending_login_nonce(); }
+      uint32_t pending_session_id() const { return this->session_.pending_session_id(); }
       uint8_t  login_retry_count() const { return this->session_.login_retry_count(); }
       bool     startup_login_initiated() const { return this->session_.startup_login_initiated(); }
       // For tests: set a precondition of the session's state machine.
@@ -704,10 +669,10 @@ namespace esphome
       // invariant I3 (a) needs this cleared on every fresh send_login()
       // challenge, see clearSessionKeys_().
       bool     trackedOpFrameEmptyForTest() const { return this->ctl().frame.bytes.empty(); }
-      // The msgid of the latest ScheduleConfig attempt, 0 when none is on record
+      // The fcnt of the latest ScheduleConfig attempt, 0 when none is on record
       // (acked, or never sent). Kept after the ladder is spent, so a late ack is
       // still recognised.
-      uint32_t schedulePushMsgid() const { return this->cfg().acks.last(); }
+      uint32_t schedulePushFcnt() const { return this->cfg().acks.last(); }
       // A published GridSync the node has not confirmed yet, and how many times
       // it has been re-published for that.
       bool     gridSyncAwaitingAck() const { return this->mac().awaiting_ack; }
@@ -718,34 +683,6 @@ namespace esphome
       // Plaintext uplinks refused because this node holds a confirmed session.
       uint32_t plaintextRefused() const { return this->plaintext_refused_; }
       uint32_t opRetryCount() const    { return this->ctl().retry_count; }
-      // Why the node says it is NOT in Mode B, and whether it says it IS. Both
-      // arrive in every decrypted beacon's PhaseReport and were stored in
-      // belief_ without ever being published — so a bench operator could only
-      // infer the node's arming state from side effects.
-      //
-      // That inference cost two void HW-2 points (2026-09-19): a sweep started
-      // inside the 600 s anti-flap hold (Demotion::RecentlyDemoted) armed
-      // nothing and reported `windows 0/0`, indistinguishable from "no
-      // reception at this offset" — a false edge.
-      //
-      // That PARTICULAR trap is gone: the hold and the missed-mark demotion
-      // that triggered it were retired 2026-09-20. The reason for publishing is
-      // unchanged, because reasons 1, 2, 4 and 5 are still live and any
-      // non-zero one still voids a point — the precondition should be readable
-      // before pressing, not reconstructed from timestamps afterwards.
-      uint32_t node_demotion_reason() const { return this->link_.belief().node_demotion; }
-      bool     node_timed_rx_active() const { return this->link_.belief().node_timed_rx; }
-      // The four inputs phaseTrustworthy() actually tests, so a NoPhase can be
-      // attributed instead of guessed. Demotion::NoPhase has TWO producers
-      // (TimedModePolicy.h:173 and :175) and they report as the same value:
-      // !phase_valid (samples, frames, outside_guard, spread) versus the LAST
-      // sample being outside the guard. Without these the two are
-      // indistinguishable, which is what made a stuck node unreadable.
-      int32_t  node_phase_err_us() const     { return this->link_.belief().phase_err_us; }
-      int32_t  node_phase_spread_us() const  { return this->link_.belief().phase_spread_us; }
-      uint32_t node_phase_samples() const    { return this->link_.belief().phase_samples; }
-      uint32_t node_phase_outside_guard() const { return this->link_.belief().phase_outside_guard; }
-
       const MacStats &mac_stats() const { return this->mac_ping_.stats(); }
       void reset_mac_stats() { this->mac_ping_.reset_stats(); }
 
@@ -779,15 +716,10 @@ namespace esphome
         uint32_t crc_valid = 0;  // of those, CRC-valid
       };
       const ClassAStats &class_a_stats() const { return this->class_a_stats_; }
-      void reset_class_a_stats()
-      {
-        this->class_a_stats_          = ClassAStats{};
-        this->class_a_last_prev_msgid_ = 0;
-      }
 
      protected:
       // block == nullptr: a fresh FCNT (loop only); else the run's reserved
-      // block (any task). See pack_test_frame_.
+      // block (any task). See pack_stream_frame.
       void handle_mode_test_report_(const ::ModeTestReport *rep) { this->mode_test_.on_report(rep); }
 
       // Same shape as the drift frame, and for the same reason: the NEXT frame
@@ -839,12 +771,12 @@ namespace esphome
       // One packed hub->node data frame, ready for MAC-0.
       using MacFrame = DeliveryFrame;
       // THE framing path for hub->node data frames: the header (this node, the
-      // hub, the msgid), the pack and, under a confirmed session, the seal.
-      // `op` carries the payload only. The first form allocates the msgid from
+      // hub, the fcnt), the pack and, under a confirmed session, the seal.
+      // `op` carries the payload only. The first form allocates the fcnt from
       // the session counter and encrypts iff the session is confirmed; the
-      // second is the MAC ping's (reserved / dedicated msgids, its own choice).
+      // second is the MAC ping's (reserved / dedicated fcnts, its own choice).
       bool mac_frame_(hubframes::Down *op, MacFrame *out, bool ack_req = false);
-      bool mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt, MacFrame *out,
+      bool mac_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt, MacFrame *out,
                       bool ack_req = false);
       // THE MAC-0 data request: every frame this listener puts on the air
       // passes here, with its copy sealer attached when it is sealed.
@@ -922,8 +854,6 @@ namespace esphome
       // 0 = never (the sentinel every other "last X" field in this class uses).
       int64_t  last_timesync_sent_us_{0};
       // The onboarding gate: HubSession's (see HubSession.h).
-      bool     acquire_onboarding_() { return this->session_.acquire_onboarding(); }
-      void     release_onboarding_(const char *why) { this->session_.release_onboarding(why); }
 
 
       // Grid slot, claimed in declaration order exactly as login_slot_ is, so
@@ -959,7 +889,6 @@ namespace esphome
       uint32_t published_resync_max_s_{0};
 
       // The drift test (BenchStreams.h): its state, timer and FCNT block.
-      DriftStream drift_{*this};
 
       // ModeTest (BenchStreams.h). Every frame carries the full request (the
       // node arms on the first one it hears, so a node that missed the first is
@@ -973,13 +902,13 @@ namespace esphome
       // The prevbeaconfcnt whose funnel has already been added. Each beacon
       // reports the PREVIOUS wake, so two beacons from one wake would count
       // that wake twice — exactly what fw 1.1.2 and 1.1.3 did before the
-      // one-uplink fix. Keying on the msgid makes the accumulation idempotent
+      // one-uplink fix. Keying on the fcnt makes the accumulation idempotent
       // rather than trusting that fix to hold.
-      uint32_t    class_a_last_prev_msgid_{0};
+      uint32_t    class_a_last_prev_fcnt_{0};
 
       // N-3 (hub side): the last resetReason this listener has already acted
       // on, so a run of beacons from the SAME boot (every Mode-C wake reports
-      // the same value) only advances tx_message_id once per actual reboot,
+      // the same value) only advances tx_fcnt once per actual reboot,
       // not once per beacon. 0xFFFFFFFF never matches a real IDF reset-reason
       // code, so the very first beacon always counts as "new".
       uint32_t    last_handled_reset_reason_{0xFFFFFFFFu};
@@ -1027,7 +956,7 @@ namespace esphome
       // Duplicate suppression for PLAINTEXT uplinks before a session exists
       // (accept_plaintext_uplink_, review HB4). Separate from the MAC-1 rx
       // mark, which an unauthenticated frame never moves; never persisted;
-      // reset by every LOGIN and kept with the counter by commit_rx_msgid_.
+      // reset by every LOGIN and kept with the counter by commit_rx_fcnt_.
       uint32_t plaintext_hwm_{0};
       bool     have_plaintext_hwm_{false};
       uint32_t node_sched_version_{0};
@@ -1058,9 +987,9 @@ namespace esphome
       // Retransmit until the node's MAC ACK confirms delivery.
       // The push is the Config channel's request (dlv_.slot(CH_CONFIG), deliver_).
       // A GridSync is re-published until the node's MAC ACK names one of its
-      // msgids. Measured 2026-09-15 on node 2: the single GridSync sent after a
+      // fcnts. Measured 2026-09-15 on node 2: the single GridSync sent after a
       // login was lost (the node spent the burst in CAD retries) and nothing
-      // re-sent it — 13 minutes in Mode A with Timed Mode ON. Exact msgids, not a
+      // re-sent it — 13 minutes in Mode A with Timed Mode ON. Exact fcnts, not a
       // range: a tracked op sent in between must not be mistaken for it.
       // It is the Mac channel's request (dlv_.slot(CH_MAC), deliver_): the ids are
       // its ack-id SET, the ladder is deliverypolicy::kGridSyncPolicy.
@@ -1076,7 +1005,7 @@ namespace esphome
       int64_t       last_gridsync_ack_us_{0};
       // A re-publish after a node reboot / NoGrid refusal is scheduled and not yet sent.
       bool          regrid_pending_{false};
-      // When we last advanced tx_message_id for a node boot (0 = never) and for which
+      // When we last advanced tx_fcnt for a node boot (0 = never) and for which
       // wake (the beacon's prevBeaconMsgId); when the last reboot-driven re-publish
       // was decided; when a spent ladder last forced a LOGIN.
       uint32_t      last_wake_key_{0};
@@ -1133,19 +1062,19 @@ namespace esphome
       // Call it after send(), so the frame just sent is counted as well.
       uint32_t ack_wait_ms_(uint32_t base_ms) const { return this->dlv_.ack_wait_ms(base_ms); }
       virtual void send_remote_config();
-      uint32_t incrTxMessageId() { return this->session_.allocate_tx(); }
-      void setRxMessageId(uint32_t msg_id) { this->session_.commit_rx(msg_id); }
+      uint32_t incrTxFcnt() { return this->session_.allocate_tx(); }
+      void setRxFcnt(uint32_t msg_id) { this->session_.commit_rx(msg_id); }
 
       // The ONE way a child cover hands its CoverConfig to the radio: a Fire request
       // through the delivery mechanism, so it is encrypted whenever the session is
       // confirmed and plaintext only before that — packing raw and calling
       // parent_->send() is what sent a CoverConfig in the clear onto a confirmed
-      // session, which the node refuses. Header and msgid are the mechanism's.
+      // session, which the node refuses. Header and fcnt are the mechanism's.
       // Returns false when it could not be packed or the transmit pool refused.
       bool send_cover_config(const ::CoverConfig &cc);
 
       // F-4: Send a cover operation with delivery tracking.  The operation is
-      // stored so it can be retransmitted (with a fresh, incrementing msgid)
+      // stored so it can be retransmitted (with a fresh, incrementing fcnt)
       // until the node returns a MAC ACK.  After kOpMaxRetries the command is
       // marked failed and surfaced to Home Assistant via the optional binary
       // sensor.  covop_case / operation use the generated LoraCoverOperation /
@@ -1177,12 +1106,7 @@ namespace esphome
       // The node's last own account (beacon, fw >= 1.1.59); empty before one.
       const sessiondiag::NodeReport &node_session_report() const { return this->last_node_report_; }
 
-      // std::string address_str() const;
-      uint64_t address_uint64() const { return this->address_uint64_; };
 
-      const uint8_t *address() const { return (const uint8_t *)(&this->address_); }
-      uint8_t *get_remote_bda() { return this->remote_bda_; }
-      uint64_t get_address() const { return this->address_uint64_; }
       virtual void set_address(uint64_t address)
       {
         this->address_uint64_ = address;
@@ -1193,12 +1117,6 @@ namespace esphome
         this->remote_bda_[1] = (address >> 8) & 0xFF;
         this->remote_bda_[0] = (address >> 0) & 0xFF;
 
-        this->address_[5] = (address >> 40) & 0xFF;
-        this->address_[4] = (address >> 32) & 0xFF;
-        this->address_[3] = (address >> 24) & 0xFF;
-        this->address_[2] = (address >> 16) & 0xFF;
-        this->address_[1] = (address >> 8) & 0xFF;
-        this->address_[0] = (address >> 0) & 0xFF;
 
         if (address == 0)
         {
@@ -1210,7 +1128,6 @@ namespace esphome
         }
       }
       const char *address_str() const { return this->address_str_; }
-      bool check_addr(esp_bd_addr_t &addr) { return memcmp(addr, this->remote_bda_, sizeof(esp_bd_addr_t)) == 0; }
 
       void set_time(time::RealTimeClock *time) { this->time = time; }
 
@@ -1240,9 +1157,6 @@ namespace esphome
 
       // Group 1: 8-byte types
       uint64_t address_uint64_{0};
-      esp_bd_addr_t address_{
-          0,
-      };
 
     public:
       // For tests (S4): retag one stamped copy exactly as the tracker does for a
@@ -1270,15 +1184,10 @@ namespace esphome
       void set_counters_no_write_(uint32_t tx, uint32_t rx) { this->session_.set_counters_no_write(tx, rx); }
       // ---- the MAC-1 counter interface ------------------------------------
       // The only operations the application uses to move the counters (the
-      // allocation and the commit are incrTxMessageId / setRxMessageId);
+      // allocation and the commit are incrTxFcnt / setRxFcnt);
       // tools/layer_lint.py counts every other writer. None writes NVS.
       // A new session (or no persisted state): both directions restart at 0.
       void mac1_restart_session_() { this->set_counters_no_write_(0, 0); }
-      // The node rebooted on a resumed session: skip n tx ids it may have seen.
-      void mac1_skip_tx_(uint32_t n)
-      {
-        this->set_counters_no_write_(this->session_.seq().txId() + n, this->session_.seq().rxId());
-      }
       // Install a persisted (tx, rx) snapshot.
       void mac1_restore_(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
       // FCNT blocks for the esp_timer streams: HubSession's (see HubSession.h).
@@ -1293,20 +1202,18 @@ namespace esphome
       {
         return this->session_.sealed_in_epoch(f, r);
       }
-      bool pack_test_frame_(hubframes::Down *op, mac1::FcntReservation *block, MacFrame *f);
       // Placement for a frame built on the esp_timer task with an explicit
       // shape (MAC ping): touches no loop-owned state (last_placed_*, belief).
       bool send_placed_from_timer_(const uint8_t *buf, size_t len, TxPolicy policy,
                                    const mac2::FrameSeal &seal, int64_t *last_mark_t0_us);
       // Spin until an esp_timer callback that may still be running has
       // returned (its timer is already stopped and its active flag false).
-      static void wait_callback_idle_(const std::atomic<bool> &busy);
     public:
       // For tests: put the counters anywhere (a boundary, an exhausted space).
       void setCountersForTest(uint32_t tx, uint32_t rx) { this->set_counters_no_write_(tx, rx); }
 
-      // msgId of the frame link_.last_uplink_t0_us() belongs to.
-      uint32_t last_uplink_msgid_{0};
+      // fcnt of the frame link_.last_uplink_t0_us() belongs to.
+      uint32_t last_uplink_fcnt_{0};
       // Mode C, MAC-0: this node's wake-clock rate against the hub, from the
       // RTC tick counts its beacons report. See WakeClockFit.h.
       wakeclock::Fit wake_fit_{};
@@ -1319,8 +1226,8 @@ namespace esphome
       // (a'): Unix epoch of the last ACCEPTED uplink from this node — a REGISTER
       // for its MAC or an authenticated frame. See is_node_awake_().
       uint32_t last_heard_epoch_{0};
-      // Same event on the monotonic clock (esp_timer), 0 = never. The shadow
-      // pending mask needs "how long ago" without depending on a valid wall clock.
+      // Same event on the monotonic clock (esp_timer), 0 = never: the
+      // wall-clock-free observable of note_node_heard_ (the EncUplink tests).
       int64_t  last_heard_us_{0};
       void     note_node_heard_();
       // The login / session state machine (login_acked, session confirmed,
@@ -1384,7 +1291,7 @@ namespace esphome
       bool admit_frame_(hubframes::Up *rcv_message);
       void handle_encrypted_(hubframes::Up *rcv_message, uint8_t *data, size_t len);
       // The node's MAC-2 link (HubSession.h): keys, v1 framing and seal, the
-      // uplink's security stages, the msgid guard.
+      // uplink's security stages, the fcnt guard.
       HubSession session_{*this};
       // The last stage of handle_encrypted_ (the frame is authentic and decrypted).
       void     uplink_accept_(EncUplink &up, uint8_t *plaintext);
@@ -1443,10 +1350,10 @@ namespace esphome
       void session_node_restored(uint32_t fcnt_jump) override;
       void session_diag_changed() override;
       int64_t session_tx_drain_us() const override;
-      bool session_schedule_outstanding() const override;
+      bool session_gridsync_outstanding() const override;
       // Move the replay counter. Called only for a frame that has been
       // authenticated, or one that arrived before any session existed.
-      void commit_rx_msgid_(const hubframes::Up *rcv_message);
+      void commit_rx_fcnt_(const hubframes::Up *rcv_message);
       void dispatch_payload_(hubframes::Up *msg);
       void dispatch_mac_payload_(hubframes::Up *msg);
       // S6: the listener's own handling (dispatch_payload_, demultiplexed by
@@ -1507,15 +1414,11 @@ namespace esphome
       uint32_t demote_sweep_sent_{0};
       // True (and logs one line) when a request must be ignored: the node sleeps.
       bool     refuse_while_asleep_(const deliverypolicy::ControlCmd &c);
-      // Inputs of pending_shadow_inputs(), split out to keep it flat.
-      bool     push_awaiting_ack_();
-      bool     frames_queued_(int64_t now_us) const;
       uint32_t ms_until_node_awake_() const;
       void     schedule_startup_login_() { this->session_.schedule_startup_login(); }
       void     do_login_and_arm_retry_() { this->session_.do_login_and_arm_retry(); }
 
-      // Msgid / CTR-space guard: HubSession::request_msgid_relogin.
-      void     requestMsgidRelogin_(const char *where) { this->session_.request_msgid_relogin(where); }
+      // Msgid / CTR-space guard: HubSession::request_fcnt_relogin.
       // Arm a ONE-SHOT login retry that re-arms itself.  Uses set_timeout rather than set_interval: an
       // interval's first firing is randomly phased within [0, interval), which
       // fired the "hourly" login retry within ~0.6 s of the challenge, stepping
@@ -1541,7 +1444,7 @@ namespace esphome
 
       // ---- the delivery service, as the listener uses it ----
       void deliver_(DeliveryChannel ch, DeliveryRequest req) { this->dlv_.deliver(ch, std::move(req)); }
-      bool dlv_ack_(uint32_t ack_msg_id) { return this->dlv_.ack(ack_msg_id); }
+      bool dlv_ack_(uint32_t ack_fcnt) { return this->dlv_.ack(ack_fcnt); }
       void dlv_cancel_(DeliveryChannel ch) { this->dlv_.cancel(ch); }
       void dlv_forget_ids_() { this->dlv_.forget_ids(); }
       void arm_dlv_timer_(DeliveryChannel ch) { this->dlv_.arm_timer(ch); }
@@ -1579,7 +1482,7 @@ namespace esphome
       bool     encode_grid_sync_(bool retry, const DeliveryRequest::FrameFn &frame);
       void     place_grid_sync_(const MacFrame &f);
       int64_t  gridsync_planned_t0_{0};   // encode_grid_sync_ -> place_grid_sync_
-      bool     on_grid_sync_acked_(uint32_t msgid);
+      bool     on_grid_sync_acked_(uint32_t fcnt);
       void     on_grid_sync_failed_();
       void     withdraw_grid_sync_();
       int64_t  grid_sync_planned_t0_();
@@ -1632,11 +1535,11 @@ namespace esphome
       // is included BY lora_tracker.h, not the other way round), so an inline
       // body would need a complete type this header must not have.
       TxPolicy tracked_op_policy_() const;
-      void     handle_command_ack_(uint32_t ack_msg_id, AckStatus status = ACK_STATUS__ACK_OK);
+      void     handle_command_ack_(uint32_t ack_fcnt, AckStatus status = ACK_STATUS__ACK_OK);
       // An ack whose status says the node will not execute the request (P3).
-      bool     dlv_refused_(uint32_t ack_msg_id, AckStatus status)
+      bool     dlv_refused_(uint32_t ack_fcnt, AckStatus status)
       {
-        return this->dlv_.refused(ack_msg_id, status);
+        return this->dlv_.refused(ack_fcnt, status);
       }
       // Stages of handle_command_ack_: each returns true when it consumed the ack.
       void     record_ack_latency_();
@@ -1647,7 +1550,7 @@ namespace esphome
       DeliveryRequest ctl_request_();
       // Send the slot's command now (a fresh one, or the one a relogin deferred).
       void     ctl_send_();
-      bool     on_ctl_acked_(uint32_t ack_msg_id);
+      bool     on_ctl_acked_(uint32_t ack_fcnt);
       void     on_ctl_failed_();
       void     on_ctl_abandoned_();
       // A Control request from outside: starts now, replaces a cover op, or waits
@@ -1734,7 +1637,7 @@ namespace esphome
 
     inline void LORAClientRestoreState::apply(LORAListener *listener)
     {
-      listener->mac1_restore_(this->tx_message_id + 64, this->rx_message_id);
+      listener->mac1_restore_(this->tx_fcnt + 64, this->rx_fcnt);
       listener->registered_       = this->logged_in;
       listener->last_sleep_epoch_ = this->last_sleep_epoch;
     }

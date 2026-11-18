@@ -15,7 +15,7 @@
 // installed session id). It replaces the listener members k_enc_key_id_,
 // k_mac_key_id_, session_generation_, installed_session_id_ and the five static
 // maps s_k_enc_map, s_k_mac_map, s_session_generation_map,
-// s_seal_generation_map, s_base_nonce_map.
+// s_seal_generation_map and the session-id map.
 //
 // The API speaks mac::MacHdr + bytes (MacSap.h), never protobuf: lora_client
 // decodes the protobuf header into a MacHdr (refusing values that do not fit,
@@ -166,7 +166,6 @@ public:
     static bool deriveRootKey(uint8_t out[kRootKeyBytes]);
     // Idempotent; derives K_auth from K_root on first use.
     bool initAuthKey();
-    bool authKeyReady() const { return auth_key_ != PSA_KEY_ID_NULL; }
     // Test seam (S8 shared vectors fix K_auth): swap the K_auth handle; returns
     // the previous one so the test can restore it. No ownership transfer.
     psa_key_id_t swapAuthKeyForTest(psa_key_id_t id)
@@ -183,9 +182,9 @@ public:
     static void destroy(KeyPair &keys);
 
     // -- downlink --------------------------------------------------------------
-    enum class Seal : uint8_t { Ok, MsgidSpent, NoSession, NoKey, Failed };
+    enum class Seal : uint8_t { Ok, FcntSpent, NoSession, NoKey, Failed };
 
-    enum class Retag : uint8_t { Ok, MsgidSpent, NoSession, Stale, Failed };
+    enum class Retag : uint8_t { Ok, FcntSpent, NoSession, Stale, Failed };
 
 
     // -- uplink ----------------------------------------------------------------

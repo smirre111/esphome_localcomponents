@@ -33,7 +33,6 @@ SAME_CASE(DL_COVERCONFIG);
 SAME_CASE(DL_LOGIN);
 SAME_CASE(DL_TIMESYNC);
 SAME_CASE(DL_SCHEDULE);
-SAME_CASE(DL_DRIFTTEST);
 SAME_CASE(DL_MACCONTROL);
 SAME_CASE(DL_GRIDSYNC);
 SAME_CASE(DL_MODETEST);
@@ -59,7 +58,7 @@ static_assert(sizeof(hubframes::Hdr) == sizeof(MacFrameHdr), "Hdr / MacFrameHdr 
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, destaddress);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, destsubnet);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, senderaddress);
-SAME_FIELD(hubframes::Hdr, MacFrameHdr, msgid);
+SAME_FIELD(hubframes::Hdr, MacFrameHdr, fcnt);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, burstindex);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, burstcount);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, onmark);
@@ -68,7 +67,7 @@ SAME_FIELD(hubframes::Hdr, MacFrameHdr, fireround);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, fireoffsetus);
 SAME_FIELD(hubframes::Hdr, MacFrameHdr, sessionnonce);
 static_assert(sizeof(hubframes::UpAck) == sizeof(UplinkAck), "UpAck / UplinkAck differ");
-SAME_FIELD(hubframes::UpAck, UplinkAck, ack_msg_id);
+SAME_FIELD(hubframes::UpAck, UplinkAck, ack_fcnt);
 SAME_FIELD(hubframes::UpAck, UplinkAck, status);
 SAME_FIELD(hubframes::UpAck, UplinkAck, phase);
 static_assert(sizeof(hubframes::Down) == sizeof(DownlinkView), "Down / DownlinkView differ");
@@ -104,7 +103,7 @@ TEST(MirrorTables, EveryDownlinkCaseHasThePortAndAckRuleTheNodeHas) {
         EXPECT_EQ(r.ack_req, portmap::ackedWhenExecuted(static_cast<DownlinkCase>(c)))
             << "case " << c << ": the hub's ACK_REQ and the node's 'acked' table disagree";
     }
-    EXPECT_EQ(checked, 12) << "every routed downlink case was compared";
+    EXPECT_EQ(checked, 11) << "every routed downlink case was compared";
 }
 
 // Every uplink case the node sends on a port is classified to that port by the

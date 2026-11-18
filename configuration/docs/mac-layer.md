@@ -90,6 +90,8 @@ are not.
 
 ## 2. What is on the wire today, and what is missing
 
+> **Historical (noted 2026-11-08):** the diagram below is the v0 frame (`LoraHeader`, `msgId`). Since 2026-10-19 the only wire is MAC wire v1, see `docs/mac-wire-format.md`.
+
 ```
   SX1278 payload
   ┌───────────────────────────────────────────────────────────┐

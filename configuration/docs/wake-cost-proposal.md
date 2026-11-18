@@ -1,5 +1,7 @@
 # Cutting the wake: a proposal
 
+> **Tier 3 status (2026-11-08):** the hub's SHADOW pending mask (`PendingShadow.h`, the `beacon shadow` log line) was deleted by user decision: as specified it could never clear a bit while nodes are interactive (its only latency-tolerance input was `auto_mode`), so no soak could produce data. What remains is the wire side: the GridBeacon still carries `pendingmask`/`pendingmaskvalid` and the hub always sends `pending::allListening()`; the node consumes it. Tier 3 needs a real latency-tolerance input (an explicit per-node flag, or a rule for when an interactive node may miss a window) designed first.
+
 Measured 2026-08-31. A routine check-in wake costs **28.1 s**, of which the
 actual work is **4.7 s**. The rest is the node waiting.
 

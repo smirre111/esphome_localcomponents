@@ -99,8 +99,6 @@ add_library(proto_sim STATIC
     sim/sim_radio.cpp
     sim/wire_codec.cpp
     sim/crypto.cpp
-    sim/hub_model.cpp
-    sim/node_model.cpp
     ${BLINDSPROTO_DIR}/blinds.pb-c.c
 )
 # FrameCrypto.h: the sim builds the frames the tests assert against, so it must
@@ -182,18 +180,6 @@ else()
 endif()
 
 
-add_scenario(register_test)
-add_scenario(login_test)
-add_scenario(addressing_test)
-add_scenario(sleep_wake_test)
-add_scenario(sysop_test)
-add_scenario(boundary_test)
-add_scenario(cover_config_test)
-add_scenario(reboot_test)
-add_scenario(race_test)
-add_scenario(crypto_test)
-add_scenario(garbage_test)
-add_scenario(recovery_test)
 add_scenario(auto_mode_proto_test)   # P0: automatic-mode schema + frame budget
 
 # ----------------------------------------------------------------------------
@@ -209,6 +195,19 @@ function(add_header_test name)
     target_link_libraries(${name} PRIVATE GTest::gtest GTest::gtest_main)
     gtest_discover_tests(${name})
 endfunction()
+# Tests of NODE-ONLY policy headers (review D5: the hub firmware includes none of
+# them): compiled against the node tree, so they need it -- without it they are
+# missing like every other node-side target (and CI fails at configure).
+# Hub headers the test also uses come from SHARED_HDR_DIR, after the node's.
+function(add_node_header_test name)
+    if(NOT NODE_TREE_FOUND)
+        return()
+    endif()
+    add_executable(${name} scenarios/${name}.cpp)
+    target_include_directories(${name} PRIVATE ${BLINDS_ESP_INCLUDE} ${SHARED_HDR_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(${name} PRIVATE GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(${name})
+endfunction()
 
 add_header_test(lora_timing_test)
 add_header_test(timed_grid_test)
@@ -217,20 +216,18 @@ add_header_test(timed_mode_policy_test)
 add_header_test(class_a_windows_test)
 add_header_test(mode_a_reliability_test)
 add_header_test(mac_funnel_test)
-add_header_test(mac_sublayers_test)
-add_header_test(phase_tracker_test)
-add_header_test(grid_state_test)
+add_node_header_test(mac_sublayers_test)
+add_node_header_test(phase_tracker_test)
+add_node_header_test(grid_state_test)
 add_header_test(air_channel_test)
-add_header_test(sweep_analysis_test)
 add_header_test(tx_queue_test)
-add_header_test(ack_cache_test)
+add_node_header_test(ack_cache_test)
 add_header_test(mixed_mode_test)
-add_header_test(mode_test_policy_test)
+add_node_header_test(mode_test_policy_test)
 add_header_test(pending_data_test)
-add_header_test(pending_shadow_test)
 add_header_test(single_shot_ack_wait_test)
 add_header_test(delivery_policy_test)
-add_header_test(mode_b_supervisor_test)
+add_node_header_test(mode_b_supervisor_test)
 add_header_test(sleep_model_test)
 add_header_test(session_diag_test)
 add_header_test(uplink_demux_test)
@@ -357,13 +354,6 @@ add_library(real_lora_tracker STATIC
     ${SHIM_DIR}/esphome/core/component.cpp
     ${SHIM_DIR}/esp_random.c
     ${SHIM_DIR}/esp_timer_stub.c
-    # Tier 3: this target has no real LORAListener (its hub-client side is
-    # never linked here — see the shim tracker real_lora_client uses
-    # instead, the mirror image of this target), but
-    # LORATracker::sendPacketBurst() now calls
-    # LORAListener::sealBurstCopyTag() directly. See the stub file's own
-    # comment for why always-false is correct here.
-    ${SHIM_DIR}/esphome/components/lora_client/lora_client_seal_stub.cpp
 )
 # NODE_SHIM_DIR comes LAST of the header dirs on purpose: it carries a lora.h
 # of its own (the node's driver stub), and the hub's production lora.h must

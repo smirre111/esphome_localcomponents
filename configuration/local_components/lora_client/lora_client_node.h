@@ -41,7 +41,6 @@ namespace esphome
       // The node REGISTERed (mac::Port::Session): push this child's own
       // configuration if it has one. Default: nothing to push.
       virtual void on_register() {}
-      virtual void send_remote_config() = 0;
 
       // P2: the node reported its own clock in a wake beacon; offset_s is
       // node_epoch - hub_epoch (positive = node runs ahead).  Default no-op so

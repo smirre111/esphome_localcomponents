@@ -161,7 +161,7 @@ TEST(AutoModeProto, WakeBeaconRoundTrip) {
     m.header = make_header();
     m.header.senderAddress = 17;
     m.proto  = ps::LoraClientResponseMessage::Proto::Beacon;
-    m.beacon.reason         = ps::WakeReason::WAKE_TIMER_EVENT;
+    m.beacon.reason         = ps::WakeReason::WAKE_TIMER_CHECKIN;
     m.beacon.schedVersion   = 0xDEADBEEF;
     m.beacon.nodeEpoch      = 1787000123ULL;
     m.beacon.mode           = ps::NodeMode::MODE_AUTO;
@@ -177,7 +177,7 @@ TEST(AutoModeProto, WakeBeaconRoundTrip) {
     auto back  = ps::deserialize_resp(bytes.data(), bytes.size());
     ASSERT_TRUE(back.has_value());
     EXPECT_EQ(back->proto, ps::LoraClientResponseMessage::Proto::Beacon);
-    EXPECT_EQ(back->beacon.reason,         ps::WakeReason::WAKE_TIMER_EVENT);
+    EXPECT_EQ(back->beacon.reason,         ps::WakeReason::WAKE_TIMER_CHECKIN);
     EXPECT_EQ(back->beacon.schedVersion,   0xDEADBEEFu);
     EXPECT_EQ(back->beacon.nodeEpoch,      1787000123ULL);
     EXPECT_EQ(back->beacon.mode,           ps::NodeMode::MODE_AUTO);
@@ -394,7 +394,7 @@ TEST(AutoModeFrameBudget, BeaconIsSmall) {
     ps::LoraClientResponseMessage m;
     m.header = make_header();
     m.proto  = ps::LoraClientResponseMessage::Proto::Beacon;
-    m.beacon.reason         = ps::WakeReason::WAKE_TIMER_EVENT;
+    m.beacon.reason         = ps::WakeReason::WAKE_TIMER_CHECKIN;
     m.beacon.schedVersion   = 0xDEADBEEF;
     m.beacon.nodeEpoch      = 1787000123ULL;
     m.beacon.mode           = ps::NodeMode::MODE_AUTO;

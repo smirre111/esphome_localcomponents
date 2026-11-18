@@ -1,10 +1,9 @@
 // mac_mgmt.cpp -- the hub's MAC management unit. See mac_mgmt.h. Moved out of
-// lora_tracker.cpp in stage S5 (beacon build, fleet key, beacon CMAC, shadow
-// gather), byte-identical on the air (tests/proto_sim/golden/).
+// lora_tracker.cpp in stage S5 (beacon build, fleet key, beacon CMAC), byte-identical on the air (tests/proto_sim/golden/).
 #include "mac_mgmt.h"
 
 #include "lora_tracker.h"
-#include "esphome/components/lora_client/lora_client.h"   // MAC-0 -> listener calls (fan-out, shadow gather)
+#include "esphome/components/lora_client/lora_client.h"   // MAC-0 -> listener calls (fan-out)
 #include "esphome/core/log.h"
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 #include "esphome/components/lora_client/TimedGrid.h"
@@ -63,33 +62,9 @@ void HubMacManagement::mintFleetKey()
     ESP_LOGI(TAG, "Fleet key minted for the grid (id %08x)", (unsigned) this->net_key_id_);
 }
 
-void HubMacManagement::addShadowSource(LORAListener *listener)
-{
-    this->sources_.push_back(listener);
-}
-
-// SHADOW pending mask: gather what each node's bit WOULD depend on, before the
-// beacon enters the transmit queue. The node states are read on the loop task,
-// which is where they are written.
-void HubMacManagement::gatherShadow_(int64_t now_us, BeaconFrame *out) const
-{
-    out->shadow_in.reserve(this->sources_.size());
-    out->shadow_names.reserve(this->sources_.size());
-    for (LORAListener *l : this->sources_)
-    {
-        if (l == nullptr)
-            continue;
-        out->shadow_in.push_back(l->pending_shadow_inputs(now_us));
-        out->shadow_names.push_back(l->get_name());
-    }
-}
-
 // Builds and packs the signed beacon for `round`.
-BeaconBuild HubMacManagement::buildBeacon(uint32_t round, int64_t now_us, size_t max_len,
-                                          BeaconFrame *out)
+BeaconBuild HubMacManagement::buildBeacon(uint32_t round, size_t max_len, BeaconFrame *out)
 {
-    this->gatherShadow_(now_us, out);
-
     // A broadcast belongs to no per-node sequence (FCNT 0, packBeaconV1), and
     // the nodes exempt it from their replay filter for exactly that reason:
     // running it through one would ratchet every node's rx counter onto the

@@ -125,7 +125,7 @@ namespace esphome
       // build_frame_). Encrypted pings: a block of the session's own FCNTs,
       // reserved in start() on the loop and dropped on every counter restart
       // or key change (FcntReservation.h); guarded by the host's lock.
-      uint32_t msgid_{0};
+      uint32_t plain_fcnt_{0};
       bool     crypto_{false};
       mac1::FcntReservation fcnts_{};
       esp_timer_handle_t timer_{nullptr};
@@ -183,14 +183,13 @@ namespace esphome
 
       void start(uint32_t duration_s, uint32_t grid_ms, uint32_t mode, uint32_t copies,
                  bool keep_power_profile, bool enable_counter, bool enable_crypto,
-                 bool mac_echo, int32_t arm_offset_us);
+                 bool mac_echo);
       void stop();
       // send_stop = false is the supervisor's quiet abort.
       void stop_(bool send_stop);
       // One enable=false frame for a node that may still be running a test.
       void send_stop_frame();
       bool active() const { return this->active_; }
-      uint32_t marks_sent() const { return this->seq_; }
       // The running test's request, as the node is told it on every mark.
       uint32_t duration_s() const { return this->duration_s_; }
       uint32_t grid_ms() const { return this->grid_ms_; }
@@ -209,8 +208,6 @@ namespace esphome
       void on_report(const ::ModeTestReport *rep);
       const ModeTestSummary &summary() const { return this->summary_; }
       ModeTestSummary &summary_for_test() { return this->summary_; }
-      const std::string &last_report() const { return this->last_report_; }
-      void clear_last_report() { this->last_report_.clear(); }
 
     private:
       void build_frame_(bool enable, mac1::FcntReservation *block = nullptr);
@@ -227,7 +224,6 @@ namespace esphome
       bool     enable_counter_{false};
       bool     enable_crypto_{false};
       bool     mac_echo_{false};
-      int32_t  arm_offset_us_{0};
       uint32_t seq_{0};
       // The last grid mark a Mode B mark was aimed at (owned by the esp_timer
       // task; the loop's last_placed_* are the listener's).
@@ -238,41 +234,7 @@ namespace esphome
       uint8_t  frame_[160]{};
       size_t   frame_len_{0};
       mac2::FrameSeal seal_{};
-      std::string     last_report_{};
       ModeTestSummary summary_{};
-    };
-
-    // The drift test: a hardware-timed ruler, one frame per esp_timer tick.
-    class DriftStream
-    {
-    public:
-      explicit DriftStream(StreamHost &host) : host_(host) {}
-      ~DriftStream();
-      DriftStream(const DriftStream &) = delete;
-      DriftStream &operator=(const DriftStream &) = delete;
-
-      void start(uint32_t duration_s, uint32_t grid_ms);
-      void stop();
-      bool active() const { return this->active_; }
-      mac1::FcntReservation *fcnts() { return &this->fcnts_; }
-      void tick_for_test() { timer_cb_(this); }
-
-    private:
-      // Builds the NEXT frame into frame_, so the timer callback only sends.
-      void build_frame_(bool enable, mac1::FcntReservation *block = nullptr);
-      static void timer_cb_(void *arg);
-
-      StreamHost &host_;
-      std::atomic<bool> active_{false};    // loop writes, timer reads
-      std::atomic<bool> cb_busy_{false};   // timer_cb_ running; a stop waits for it
-      uint32_t duration_s_{0};
-      uint32_t grid_ms_{0};
-      esp_timer_handle_t timer_{nullptr};
-      // The run's tick FCNTs, reserved on the loop; guarded by the host's lock.
-      mac1::FcntReservation fcnts_{};
-      uint8_t  frame_[128]{};
-      size_t   frame_len_{0};
-      mac2::FrameSeal seal_{};
     };
 
   }  // namespace lora_tracker

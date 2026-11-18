@@ -35,7 +35,7 @@ struct Hdr
     uint8_t  destaddress{0};
     uint8_t  destsubnet{0};
     uint8_t  senderaddress{0};
-    uint32_t msgid{0};          // the FCNT
+    uint32_t fcnt{0};          // the FCNT
     uint8_t  burstindex{0};
     uint8_t  burstcount{0};
     bool     onmark{false};
@@ -55,7 +55,6 @@ enum DownCase : int
     DL_LOGIN        = 14,
     DL_TIMESYNC     = 16,
     DL_SCHEDULE     = 17,
-    DL_DRIFTTEST    = 18,
     DL_MACCONTROL   = 20,
     DL_GRIDSYNC     = 21,
     DL_MODETEST     = 22,
@@ -76,7 +75,6 @@ struct Down
         LoginMsg           *login;
         TimeSync           *timesync;
         ScheduleConfig     *schedule;
-        DriftTest          *drifttest;
         MacControl         *maccontrol;
         GridSync           *gridsync;
         ModeTest           *modetest;
@@ -102,7 +100,7 @@ enum UpCase : int
 
 struct UpAck
 {
-    uint32_t     ack_msg_id{0};   // the acknowledged FCNT (header ACKED_FCNT)
+    uint32_t     ack_fcnt{0};   // the acknowledged FCNT (header ACKED_FCNT)
     AckStatus    status{ACK_STATUS__ACK_OK};
     PhaseReport *phase{nullptr};
 };

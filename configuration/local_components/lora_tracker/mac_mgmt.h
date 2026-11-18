@@ -6,12 +6,9 @@
 // GridBeacon that is not "put these bytes on this mark" lives here --
 //   * the fleet key and its id, minted with the grid anchor;
 //   * the beacon's AUTH = FLEET tag (fleetTagV1, spec 4.4);
-//   * the beacon itself, a MAC wire v1 frame (PORT 0, GridBeacon body);
-//   * the per-node inputs of the SHADOW pending mask, gathered from the
-//     registered listeners.
-// The tracker (MAC-0) asks buildBeacon() for one round and gets an OPAQUE frame
-// plus the shadow inputs; it never builds a beacon, holds the key, runs PSA or
-// iterates listeners for it.
+//   * the beacon itself, a MAC wire v1 frame (PORT 0, GridBeacon body).
+// The tracker (MAC-0) asks buildBeacon() for one round and gets an OPAQUE frame;
+// it never builds a beacon, holds the key or runs PSA for it.
 //
 // Hub-only. Wire output is byte-identical to before S5 (golden frames).
 
@@ -21,7 +18,6 @@
 #include <vector>
 
 #include "esphome/components/lora_client/FrameCrypto.h"
-#include "esphome/components/lora_client/PendingShadow.h"
 #include "esphome/components/blindsproto/blinds.pb-c.h"
 
 namespace esphome
@@ -42,14 +38,10 @@ enum class BeaconBuild : uint8_t
     TooBig,     // the packed beacon would not fit the transmit buffer
 };
 
-// One beacon round, ready for MAC-0: the frame (opaque to the tracker) and the
-// shadow-mask inputs gathered at the same moment, before the beacon is queued
-// (so the beacon itself does not count as "queued frames" for every node).
+// One beacon round, ready for MAC-0: the frame, opaque to the tracker.
 struct BeaconFrame
 {
-    std::vector<uint8_t>                   bytes;
-    std::vector<pendingshadow::NodeInputs> shadow_in;
-    std::vector<std::string>               shadow_names;
+    std::vector<uint8_t> bytes;
 };
 
 class HubMacManagement
@@ -63,13 +55,8 @@ public:
     uint32_t       netKeyId() const { return this->net_key_id_; }
 
 
-    // A listener whose state feeds the shadow pending mask.
-    void   addShadowSource(esphome::lora_tracker::LORAListener *listener);
-    size_t shadowSourceCount() const { return this->sources_.size(); }
-
-    // The signed beacon for `round` (at most max_len bytes) and the shadow
-    // inputs as of now_us.
-    BeaconBuild buildBeacon(uint32_t round, int64_t now_us, size_t max_len, BeaconFrame *out);
+    // The signed beacon for `round` (at most max_len bytes).
+    BeaconBuild buildBeacon(uint32_t round, size_t max_len, BeaconFrame *out);
 
     // MAC wire v1 (S8, docs/mac-wire-format.md 4.4): the AUTH = FLEET tag,
     // CMAC-8 under the fleet key over macwire::buildMacInputPrefix(downlink,
@@ -86,11 +73,8 @@ public:
     void setNetKeyIdForTest(uint32_t id) { this->net_key_id_ = id; }
 
 private:
-    void gatherShadow_(int64_t now_us, BeaconFrame *out) const;
-
     uint8_t  net_key_[framecrypto::kNetKeyBytes]{};
     uint32_t net_key_id_{0};
-    std::vector<esphome::lora_tracker::LORAListener *> sources_;
 };
 
 }  // namespace macmgmt

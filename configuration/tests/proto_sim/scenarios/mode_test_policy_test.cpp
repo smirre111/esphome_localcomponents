@@ -19,9 +19,8 @@ NodeContext armable() {
     NodeContext c;
     c.frame_authenticated = true;
     c.has_session    = true;
-    c.is_bench_node  = false;
-    // A node that has everything it needs to arm, which for MODE_B and
-    // MODE_SWEEP includes an adopted grid — there is no window to arm without
+    // A node that has everything it needs to arm, which for MODE_B
+    // includes an adopted grid — there is no window to arm without
     // one. The tests that are ABOUT that requirement clear it explicitly.
     c.has_adopted_grid = true;
     c.battery_mv     = 4000;
@@ -48,12 +47,6 @@ TEST(ModeTestPolicy, DurationIsCappedByTheNodeNotTheHub) {
     EXPECT_EQ(testDurationS(kMaxDurationS + 1), kMaxDurationS);
     EXPECT_EQ(testDurationS(0xFFFFFFFF), kMaxDurationS)
         << "a hub that asks for forever gets fifteen minutes";
-}
-
-TEST(ModeTestPolicy, TheCeilingIsTighterThanDriftTests) {
-    // DriftTest caps at 1800 s. ModeTest can hold continuous RX AND force a
-    // mode, so an abandoned run costs more.
-    EXPECT_LT(kMaxDurationS, 1800u);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,25 +141,6 @@ TEST(ModeTestPolicy, ModeBRequiresTheCommensuratePeriodItWouldOtherwiseRefuse) {
     EXPECT_FALSE(periodMattersFor(Mode::B));
     EXPECT_FALSE(periodMattersFor(Mode::C));
     EXPECT_TRUE(periodMattersFor(Mode::A));
-    // Sweep is exempt for exactly the same reason as B, changed 2026-09-19 after
-    // it was measured. A sweep arms one timed window per round against the grid;
-    // it is not free-running, so its period must BE the round. Forced onto an
-    // incommensurate 1093 ms while the hub places each mark on the next free
-    // round T0 (1500 ms apart), the mark timer fell 407 ms behind per tick and
-    // scheduled 411 s of marks inside a 299 s test: 53 of 196 delivered,
-    // windows 0/0, no promotion.
-    EXPECT_FALSE(periodMattersFor(Mode::Sweep));
-
-    // And the period a sweep must now be able to use is the round itself, which
-    // the commensurate check would otherwise refuse (gcd(1500, 500) = 500 ms).
-    Request sw;
-    sw.mode           = Mode::Sweep;
-    sw.grid_period_ms = 1500;
-    sw.copies         = 1;
-    auto bench = armable();
-    bench.is_bench_node = true;       // MODE_SWEEP is refused off the bench
-    EXPECT_EQ(armRefusal(sw, bench), ArmRefusal::None)
-        << "a sweep at the round must arm: its windows hang off that round";
 }
 
 TEST(ModeTestPolicy, CommensurabilityIsSymmetricAndZeroSafe) {
@@ -236,21 +210,6 @@ TEST(ModeTestPolicy, TheSessionCheckComesFirst) {
     Request r = modeA(1000);           // also commensurate
     r.copies  = 99;                    // also out of range
     EXPECT_EQ(armRefusal(r, c), ArmRefusal::NoSession);
-}
-
-TEST(ModeTestPolicy, SweepIsRefusedOffTheBench) {
-    // MODE_SWEEP deliberately mis-arms windows to find the reception edge. On a
-    // deployed node that is just a node that stops hearing the hub.
-    Request r;
-    r.mode           = Mode::Sweep;
-    r.grid_period_ms = 1093;
-    r.copies         = 1;
-
-    EXPECT_EQ(armRefusal(r, armable()), ArmRefusal::SweepOffBench);
-
-    NodeContext bench = armable();
-    bench.is_bench_node = true;
-    EXPECT_EQ(armRefusal(r, bench), ArmRefusal::None);
 }
 
 TEST(ModeTestPolicy, AFlatBatteryRefusesTheTest) {
@@ -422,7 +381,6 @@ TEST(ModeTestPolicy, TheDefaultsAreTheProductionConfiguration) {
     // both sublayers on.
     SavedState s;
     EXPECT_TRUE(s.power_profile_production);
-    EXPECT_FALSE(s.continuous_rx);
     EXPECT_TRUE(s.counter_enabled);
     EXPECT_TRUE(s.crypto_enabled);
     EXPECT_TRUE(s.deep_sleep_allowed);
@@ -494,23 +452,6 @@ TEST(ModeTestPolicy, ModeBWithoutAnAdoptedGridIsRefused) {
         << "MODE_B needs no grid PERIOD — the round is the period";
 }
 
-TEST(ModeTestPolicy, SweepNeedsBothTheBenchAndAGrid) {
-    NodeContext c = armable();
-    c.is_bench_node    = true;
-    c.has_adopted_grid = false;
-    Request r;
-    r.mode           = Mode::Sweep;
-    r.grid_period_ms = 1093;
-    r.copies         = 1;
-    EXPECT_EQ(armRefusal(r, c), ArmRefusal::NoGrid);
-
-    // And the bench check still comes first: a field node is refused for being
-    // a field node, whatever its grid state.
-    c.is_bench_node    = false;
-    c.has_adopted_grid = true;
-    EXPECT_EQ(armRefusal(r, c), ArmRefusal::SweepOffBench);
-}
-
 TEST(ModeTestPolicy, ModeCIsRefusedRatherThanSilentlyNotApplied) {
     // Class A is a sleep discipline, not a flag: the node wakes, transmits,
     // opens RX1/RX2 and sleeps. Refusing is what stops a report carrying
@@ -524,7 +465,6 @@ TEST(ModeTestPolicy, ModeCIsRefusedRatherThanSilentlyNotApplied) {
     EXPECT_FALSE(modeIsImplemented(Mode::C));
     EXPECT_TRUE(modeIsImplemented(Mode::A));
     EXPECT_TRUE(modeIsImplemented(Mode::B));
-    EXPECT_TRUE(modeIsImplemented(Mode::Sweep));
 }
 
 TEST(ModeTestPolicy, ACapabilityRefusalOutranksTheRequestsParameters) {
@@ -552,15 +492,10 @@ TEST(ModeTestPolicy, TheReportsModeComesFromStateNotFromTheRequest) {
     // UNSPEC leaves the mode alone, so it reports whatever the node was in.
     EXPECT_EQ(modeApplied(Mode::Unspec, true),  Mode::B);
     EXPECT_EQ(modeApplied(Mode::Unspec, false), Mode::A);
-
-    // Sweep is a timed-window run distinguished by its arm offset, so it keeps
-    // its own identity rather than collapsing into B.
-    EXPECT_EQ(modeApplied(Mode::Sweep, true), Mode::Sweep);
 }
 
 TEST(ModeTestPolicy, OnlyTimedModesNeedAGrid) {
     EXPECT_TRUE(modeNeedsGrid(Mode::B));
-    EXPECT_TRUE(modeNeedsGrid(Mode::Sweep));
     EXPECT_FALSE(modeNeedsGrid(Mode::A));
     EXPECT_FALSE(modeNeedsGrid(Mode::Unspec));
 }

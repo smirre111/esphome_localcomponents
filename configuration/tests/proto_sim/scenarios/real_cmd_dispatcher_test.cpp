@@ -77,7 +77,7 @@ uint8_t dl_port(DownlinkCase c) {
     switch (c) {
     case DL_LOGIN:
         return macwire::kPortSession;
-    case DL_DRIFTTEST: case DL_MACCONTROL: case DL_GRIDSYNC: case DL_MODETEST:
+    case DL_MACCONTROL: case DL_GRIDSYNC: case DL_MODETEST:
     case DL_GRIDBEACON: case DL_GRIDDEMOTE:
         return macwire::kPortMac0Mgmt;
     default:
@@ -107,7 +107,6 @@ std::vector<uint8_t> dl_body(const DownlinkView &op) {
         GridDemote empty = GRID_DEMOTE__INIT;
         p.pdu_case = (HubMacPdu__PduCase) op.cmd_case;
         switch (op.cmd_case) {
-        case DL_DRIFTTEST:  p.drifttest  = op.drifttest;  break;
         case DL_MACCONTROL: p.maccontrol = op.maccontrol; break;
         case DL_GRIDSYNC:   p.gridsync   = op.gridsync;   break;
         case DL_MODETEST:   p.modetest   = op.modetest;   break;
@@ -147,7 +146,7 @@ macwire::WireHdr dl_wire_hdr(const DlHdr &h, DownlinkCase c, macwire::Auth a) {
     w.dst       = (uint8_t) h.destaddress;
     w.src       = (uint8_t) h.senderaddress;
     w.subnet    = (uint8_t) h.destsubnet;
-    w.fcnt      = h.msgid;
+    w.fcnt      = h.fcnt;
     w.port      = dl_port(c);
     w.burst_idx = (uint8_t) h.burstindex;
     w.burst_cnt = (uint8_t) h.burstcount;
@@ -193,7 +192,7 @@ std::vector<uint8_t> seal_op(CmdDispatcherTestPeer &disp, const DownlinkView &in
     std::vector<uint8_t> f = proto_sim::v1_plain_frame(w, body);   // header || body || tag room
     const size_t hlen = macwire::headerLen(w);
     uint8_t iv[framecrypto::kCtrBlockBytes];
-    framecrypto::buildCtrInitialBlock(nonce, (uint8_t) h.destaddress, /*downlink=*/true, h.msgid, 0, iv);
+    framecrypto::buildCtrInitialBlock(nonce, (uint8_t) h.destaddress, /*downlink=*/true, h.fcnt, 0, iv);
     if (!body.empty() && !disp.ctrEncryptForTest(iv, body.data(), body.size(), f.data() + hlen))
         ADD_FAILURE() << "seal_op: no session keys on disp (missing/mismatched LOGIN?)";
     std::vector<uint8_t> mi(macwire::kMacInputPrefixBytes);
@@ -217,7 +216,7 @@ std::vector<uint8_t> pack_login_op(uint32_t msgid, uint32_t nonce,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header         = &hdr;
 
     LoginMsg login     = LOGIN_MSG__INIT;
@@ -432,10 +431,10 @@ TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
     op_hdr.destaddress   = kNodeAddr;
     op_hdr.destsubnet    = kSubnet;
     op_hdr.senderaddress = kHubAddr;
-    op_hdr.msgid         = kOpMsgId;
+    op_hdr.fcnt         = kOpMsgId;
     std::vector<uint8_t> op_bytes = seal_op(disp, inner_op, op_hdr, kHubNonce);
     disp.onReceiveNew(op_bytes.data(), static_cast<int>(op_bytes.size()));
-    ASSERT_EQ(disp.rxMsgIdForTest(), 5u) << "precondition: msgid 5 was accepted";
+    ASSERT_EQ(disp.rxFcntForTest(), 5u) << "precondition: msgid 5 was accepted";
     CmdDispatcher::tx_command_t rx_drain{};
     while (xQueueReceive(disp.rxCmdQueueNew, &rx_drain, 0) == pdTRUE) {}
     while (xQueueReceive(disp.txCmdQueueNew, &rx_drain, 0) == pdTRUE) {}
@@ -448,7 +447,7 @@ TEST_F(RealNodeFixture, CmdLoginRetryOfTheSameSessionDoesNotResetCounters) {
 
     EXPECT_EQ(disp.sessionGenerationForTest(), 1u)
         << "a retry of the live session must not re-derive K_enc/K_mac";
-    EXPECT_EQ(disp.rxMsgIdForTest(), 5u)
+    EXPECT_EQ(disp.rxFcntForTest(), 5u)
         << "a retry of the live session must not reset rx_message_id_";
     EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 2u)
         << "the retry must still resend the beacon + AVAILABLE ack";
@@ -468,7 +467,7 @@ TEST_F(RealNodeFixture, CmdOperationReplayRejected) {
     hdr.destaddress = kNodeAddr;
     hdr.destsubnet = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid = 1;
+    hdr.fcnt = 1;
     op.header = &hdr;
 
     LoraCoverOperation covop = LORA_COVER_OPERATION__INIT;
@@ -507,7 +506,7 @@ TEST_F(RealNodeFixture, CmdLoginDestinedForDifferentNodeIsIgnored) {
     hdr.destaddress   = 17;             // ← addressed to a DIFFERENT node
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 1;
+    hdr.fcnt         = 1;
     op.header         = &hdr;
 
     LoginMsg login = LOGIN_MSG__INIT;
@@ -537,7 +536,7 @@ TEST_F(RealNodeFixture, CmdCoverConfigAppliesGeometry) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 1;
+    hdr.fcnt         = 1;
     op.header         = &hdr;
 
     CoverConfig cc = COVER_CONFIG__INIT;
@@ -569,12 +568,43 @@ TEST_F(RealNodeFixture, CmdCoverConfigAppliesGeometry) {
 // CoverConfig with one zero geometry field must NOT apply ANY of them
 // (atomic guard — production CmdDispatcher.cpp:1291 requires all three
 // non-zero). Documents the "partial = unset" production behaviour.
+// Ported from the retired model scenario cover_config_test (G2, 2026-11-08):
+// all-zero geometry is the proto3 'unset' encoding, so it must leave the
+// geometry the node already holds alone rather than wipe it.
+TEST_F(RealNodeFixture, CmdCoverConfigAllZeroGeometryKeepsTheStoredGeometry) {
+    auto send = [&](float h, float a, float t, uint32_t msgid) {
+        DlMsg op;
+        DlHdr hdr;
+        hdr.destaddress   = kNodeAddr;
+        hdr.destsubnet    = kSubnet;
+        hdr.senderaddress = kHubAddr;
+        hdr.fcnt         = msgid;
+        op.header         = &hdr;
+        CoverConfig cc = COVER_CONFIG__INIT;
+        cc.opentime         = 60;
+        cc.closetime        = 65;
+        cc.blindheightmm    = h;
+        cc.axlediametermm   = a;
+        cc.blindthicknessmm = t;
+        op.cmd_case    = DL_COVERCONFIG;
+        op.coverconfig = &cc;
+        std::vector<uint8_t> bytes = pack_op(op);
+        disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()));
+    };
+    send(2000.0f, 60.0f, 8.0f, /*msgid=*/1);
+    ASSERT_TRUE(sys.geometry_set()) << "precondition: geometry installed";
+    send(0.0f, 0.0f, 0.0f, /*msgid=*/2);
+    EXPECT_FLOAT_EQ(sys.height_mm(),    2000.0f) << "an unset geometry is not a zero geometry";
+    EXPECT_FLOAT_EQ(sys.axle_mm(),        60.0f);
+    EXPECT_FLOAT_EQ(sys.thickness_mm(),    8.0f);
+}
+
 TEST_F(RealNodeFixture, CmdCoverConfigRejectsPartialGeometry) {
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid = 1;
+    hdr.fcnt = 1;
     op.header = &hdr;
 
     CoverConfig cc = COVER_CONFIG__INIT;
@@ -622,7 +652,7 @@ TEST_F(RealNodeFixture, CmdCoverConfigRefusesZeroTravelDurations) {
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
-        hdr.msgid         = msgid;
+        hdr.fcnt         = msgid;
         op.header         = &hdr;
 
         CoverConfig cc = COVER_CONFIG__INIT;
@@ -674,7 +704,7 @@ TEST_F(RealNodeFixture, CmdCoverConfigStillAppliesRealTravelDurations) {
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
-        hdr.msgid         = msgid;
+        hdr.fcnt         = msgid;
         op.header         = &hdr;
 
         CoverConfig cc = COVER_CONFIG__INIT;
@@ -711,7 +741,7 @@ std::vector<uint8_t> plaintextClientConfigFor(uint64_t mac, uint32_t addr, uint3
     DlHdr hdr;
     hdr.destaddress   = 18;
     hdr.senderaddress = 1;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header         = &hdr;
     ClientConfig cc = CLIENT_CONFIG__INIT;
     cc.mac_addr = mac;
@@ -741,7 +771,7 @@ TEST(RealCmdDispatcherFresh, AnUnprovisionedNodeWithAStaleSessionStillAcceptsIts
     CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
     constexpr uint64_t kMac = 0xCAFEBABEFEEDULL;
     pinFactoryMac(kMac);
-    disp.setBaseNonceForTest(1, 0xABCDEF01);   // the session NVS restored
+    disp.setSessionIdForTest(1, 0xABCDEF01);   // the session NVS restored
     ASSERT_EQ(sys.getConfigAddress(), 0u);
 
     auto cfg = plaintextClientConfigFor(kMac, 18, 5);
@@ -759,7 +789,7 @@ TEST(RealCmdDispatcherFresh, AProvisionedNodeWithASessionStillRefusesPlaintextCo
     CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
     constexpr uint64_t kMac = 0xCAFEBABEFEEDULL;
     pinFactoryMac(kMac);
-    disp.setBaseNonceForTest(1, 0xABCDEF01);
+    disp.setSessionIdForTest(1, 0xABCDEF01);
 
     auto cfg = plaintextClientConfigFor(kMac, 42, 5);
     disp.onReceiveNew(cfg.data(), static_cast<int>(cfg.size()));
@@ -790,7 +820,7 @@ TEST(RealCmdDispatcherFresh, FreshNodeAcceptsClientConfigByMac) {
     DlHdr hdr;
     hdr.destaddress   = 18;      // hub-intended address (node has cfgAddress=0)
     hdr.senderaddress = 0xFF;
-    hdr.msgid         = 1;
+    hdr.fcnt         = 1;
     op.header         = &hdr;
 
     ClientConfig cc = CLIENT_CONFIG__INIT;
@@ -817,7 +847,7 @@ TEST_F(RealNodeFixture, CmdClientConfigAppliesAddressOnlyForMatchingMac) {
     DlHdr hdr;
     hdr.destaddress = 17;          // CLIENTCONFIG bypasses destaddr check
     hdr.senderaddress = kHubAddr;
-    hdr.msgid = 1;
+    hdr.fcnt = 1;
     op.header = &hdr;
 
     ClientConfig cfg = CLIENT_CONFIG__INIT;
@@ -862,7 +892,7 @@ std::vector<uint8_t> pack_sysop_op(uint32_t msgid, ClientOperation what,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     // Which copy of the hub's burst this is. Re-stamped per copy by the hub,
     // and the number every phase path has to back out before it stamps a mark.
     hdr.burstindex    = burst_index;
@@ -888,7 +918,7 @@ std::vector<uint8_t> pack_timesync_op(uint32_t msgid, uint64_t epoch,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header         = &hdr;
 
     TimeSync ts  = TIME_SYNC__INIT;
@@ -1180,7 +1210,7 @@ TEST_F(RealNodeFixture, DecryptedDownlinkProvesSessionEndToEnd) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = kMsgId;
+    hdr.fcnt         = kMsgId;
     std::vector<uint8_t> frame = seal_op(disp, inner, hdr, kNonce);
 
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
@@ -1341,7 +1371,7 @@ TEST_F(RealNodeFixture, ScheduleConfigIsAppliedAndAcked) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 300;
+    hdr.fcnt         = 300;
     op.header   = &hdr;
     op.cmd_case = DL_SCHEDULE;
     op.schedule = &sc;
@@ -1613,7 +1643,7 @@ TEST_F(RealNodeFixture, ApplyingAScheduleDoesNotSleepImmediately) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 501;   // must differ from the TimeSync above, or the
+    hdr.fcnt         = 501;   // must differ from the TimeSync above, or the
                                // replay filter drops it and the test lies
     op.header   = &hdr;
     op.cmd_case = DL_SCHEDULE;
@@ -1739,7 +1769,7 @@ TEST_F(RealNodeFixture, AProvisionedNodeWithoutASessionKeepsRegistering) {
     proto_sim_timer_reset();
     sys.setAddress(kNodeAddr, kSubnet);
     uint32_t nonce = 0;
-    ASSERT_FALSE(disp.getBaseNonceForTest(kHubAddr, nonce))
+    ASSERT_FALSE(disp.getSessionIdForTest(kHubAddr, nonce))
         << "precondition: no session with the hub";
 
     disp.sendRegister();              // boot REGISTER - lost on air
@@ -1848,7 +1878,7 @@ std::vector<uint8_t> pack_schedule_op(uint32_t msgid, uint32_t version, uint32_t
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header   = &hdr;
     op.cmd_case = DL_SCHEDULE;
     op.schedule = &sc;
@@ -2517,7 +2547,7 @@ TEST_F(RealNodeFixture, ForeignClientConfigDoesNotWedgeOurLink) {
     hdr.destaddress   = 17;              // not us
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 900;             // far ahead of our stream
+    hdr.fcnt         = 900;             // far ahead of our stream
     op.header = &hdr;
 
     ClientConfig cfg = CLIENT_CONFIG__INIT;
@@ -2756,50 +2786,6 @@ TEST_F(RealNodeFixture, AutoSleepRechecksTheConditionWhenItFires) {
 }
 
 // ---------------------------------------------------------------------------
-// Drift test: the node must always come back to the PRODUCTION power profile
-// ---------------------------------------------------------------------------
-
-TEST_F(RealNodeFixture, DriftTestStartsInMeasuringProfileAndEndsInProduction) {
-    // Node N15 (ae291f4): a DriftTest starts only on a bench node and from an
-    // authenticated frame, so the node is a bench node with a session here.
-    disp.setBenchNode(true);
-    useSession();
-    // The measuring profile disables light sleep and pins the CPU at 240 MHz:
-    // ~11 mA against the ~1.2 mA interactive average. If a test ever ends
-    // without restoring production, the node quietly burns ~9x its budget and
-    // nothing says so until the battery is flat.
-    SystemCtrl::applyPowerProfile(false);
-    ASSERT_FALSE(SystemCtrl::measuringProfile());
-
-    DlMsg op;
-    DlHdr hdr;
-    hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
-    hdr.senderaddress = kHubAddr; hdr.msgid = 5;
-    op.header = &hdr;
-
-    DriftTest dt = DRIFT_TEST__INIT;
-    dt.enable = true; dt.durations = 60; dt.gridperiodms = 1093;
-    op.cmd_case = DL_DRIFTTEST;
-    op.drifttest = &dt;
-
-    auto on = pack_op(op);   // sealed: useSession() is on
-    disp.onReceiveNew(on.data(), static_cast<int>(on.size()));
-    EXPECT_TRUE(SystemCtrl::measuringProfile())
-        << "entering the test must disable light sleep";
-    EXPECT_TRUE(disp.driftTestActive());
-
-    dt.enable = false;
-    hdr.msgid = 6;
-    auto off = pack_op(op);
-    disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
-    EXPECT_FALSE(SystemCtrl::measuringProfile())
-        << "leaving the test MUST restore production power management";
-    EXPECT_FALSE(disp.driftTestActive());
-    EXPECT_FALSE(lif.continuousRx())
-        << "and must leave continuous RX — 11 mA otherwise";
-}
-
-// ---------------------------------------------------------------------------
 // Mode sysops must actually change the mode
 // ---------------------------------------------------------------------------
 
@@ -2818,7 +2804,7 @@ TEST_F(RealNodeFixture, ModeSysopsSwitchTheNodeMode) {
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
-    hdr.senderaddress = kHubAddr; hdr.msgid = 1;
+    hdr.senderaddress = kHubAddr; hdr.fcnt = 1;
     op.header = &hdr;
     op.cmd_case = DL_SYSOP;
 
@@ -2844,7 +2830,7 @@ TEST_F(RealNodeFixture, AModeSysopDoesNotLeakIntoTheSystemCommandQueue) {
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet;
-    hdr.senderaddress = kHubAddr; hdr.msgid = 2;
+    hdr.senderaddress = kHubAddr; hdr.fcnt = 2;
     op.header = &hdr;
     op.cmd_case = DL_SYSOP;
     op.sysop = CLIENT_OPERATION__CMD_MODE_AUTO;
@@ -2874,7 +2860,7 @@ std::vector<uint8_t> build_mac_ping(uint32_t seq, bool want_echo,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;          // the hub
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.onmark        = true;       // a phase sample in the tests that time it
 
     MacControl mc = MAC_CONTROL__INIT;
@@ -2955,7 +2941,7 @@ TEST_F(RealNodeFixture, MacEchoFromAPeerIsIgnored) {
     hdr.destaddress = kNodeAddr;
     hdr.destsubnet  = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid = 300;
+    hdr.fcnt = 300;
 
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind     = MAC_CONTROL__KIND__MAC_ECHO;
@@ -3057,7 +3043,7 @@ std::vector<uint8_t> build_mac_config(bool disable_counter, bool disable_crypto,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
 
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind          = MAC_CONTROL__KIND__MAC_CONFIG;
@@ -3140,7 +3126,7 @@ TEST_F(RealNodeFixture, ForeignPlaintextFramesAreCountedNotIgnored) {
     hdr.destaddress   = kNodeAddr + 7;   // someone else's
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid         = 440;
+    hdr.fcnt         = 440;
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
     mc.seq  = 1;
@@ -3160,9 +3146,9 @@ TEST_F(RealNodeFixture, ForeignPlaintextFramesAreCountedNotIgnored) {
 // B2 — phase samples are committed only for frames addressed to this node.
 //
 // This is the bug the design warns about, exercised through production code:
-// noteDriftSample() runs before parsing (correct for drift), so without the
-// commit-late split a node stamps its neighbours' frames and phaseErrUs goes
-// bimodal at 0 and one slot pitch.
+// The RxDone stamp is taken before parsing, so without the commit-late split
+// a node stamps its neighbours' frames and phaseErrUs goes bimodal at 0 and
+// one slot pitch.
 // ---------------------------------------------------------------------------
 
 TEST_F(RealNodeFixture, NoPhaseSampleWithoutAGrid) {
@@ -3184,7 +3170,7 @@ TEST_F(RealNodeFixture, AForeignFrameCommitsNoPhaseSample) {
     hdr.destaddress   = kNodeAddr + 5;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid         = 510;
+    hdr.fcnt         = 510;
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
     mc.seq  = 1;
@@ -3229,7 +3215,7 @@ std::vector<uint8_t> build_grid_sync(bool enable, uint32_t slot, uint32_t msgid,
     hdr.destaddress   = dest_address;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = 1;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.burstindex    = burst_index;
     hdr.burstcount    = 17;
     hdr.onmark        = true;   // the hub places a GridSync on the node's mark
@@ -3773,7 +3759,7 @@ TEST_F(RealNodeFixture, AckingACommandArmsTheReAckCache) {
     ASSERT_EQ(drain_acks(disp), 1);
 
     EXPECT_TRUE(disp.ackCacheForTest().valid());
-    EXPECT_EQ(disp.ackCacheForTest().msgid(), 930u);
+    EXPECT_EQ(disp.ackCacheForTest().fcnt(), 930u);
     EXPECT_EQ(disp.ackCacheForTest().reacks(), 0);
 }
 
@@ -3828,12 +3814,8 @@ TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
     // requires zero samples outside the guard, so it went permanently false on
     // the SECOND addressed frame and Mode B could never be entered. The failure
     // was silent and looked like a clock fault.
-    // noteDriftSample() is what the DIO0 task calls on every RxDone, and it is
-    // what sets the timestamp the phase sample is built from. Mirrored here
-    // because onReceiveNew alone does not set it.
     auto gs = build_grid_sync(true, /*slot=*/0, /*msgid=*/710);
     const int64_t anchor_rx = 10'000'000;
-    disp.noteDriftSample(anchor_rx);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), anchor_rx);
     ASSERT_TRUE(disp.gridState().active);
 
@@ -3850,7 +3832,6 @@ TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
     auto op1 = pack_sysop_op(/*msgid=*/711, CLIENT_OPERATION__CMD_STATUS);
     const int64_t mark1 = disp.expectedT0Us() + timedgrid::kRoundUs;
     const int64_t rx1 = mark1 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op1.size());
-    disp.noteDriftSample(rx1);
     disp.onReceiveNew(op1.data(), static_cast<int>(op1.size()), rx1);
     const int64_t expectation1 = disp.expectedT0Us();
     ASSERT_NE(expectation1, 0);
@@ -3858,7 +3839,6 @@ TEST_F(RealNodeFixture, ThePhaseExpectationTracksTheGridInsteadOfFreezing) {
     auto op2 = pack_sysop_op(/*msgid=*/712, CLIENT_OPERATION__CMD_STATUS);
     const int64_t mark2 = mark1 + timedgrid::kRoundUs;
     const int64_t rx2 = mark2 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op2.size());
-    disp.noteDriftSample(rx2);
     disp.onReceiveNew(op2.data(), static_cast<int>(op2.size()), rx2);
 
     EXPECT_NE(disp.expectedT0Us(), expectation1)
@@ -3913,7 +3893,6 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
     // never advanced. The commit now gates on the grid, so the test has to
     // establish one.
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/0, /*msgid=*/519);
-    disp.noteDriftSample(1'000'000);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), /*rx_us=*/1'000'000);
     ASSERT_TRUE(disp.gridState().active);
     disp.resetPhaseStats();
@@ -3923,7 +3902,6 @@ TEST_F(RealNodeFixture, AnAddressedFrameCommitsExactlyOnePhaseSample) {
     // would have made this test pass for the wrong reason.
     auto bytes = build_mac_ping(/*seq=*/1, /*want_echo=*/false, /*msgid=*/520);
     const int64_t rx = rxOnMark(disp, bytes.size(), 1'040'000, /*err_us=*/300);
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
     EXPECT_EQ(disp.phaseStats().n, 1u);
 }
@@ -4002,14 +3980,14 @@ TEST_F(RealNodeFixture, AnUnauthenticatedFrameCannotRatchetTheReplayCounter) {
     // past everything the hub had queued, and every legitimate command was
     // then rejected as a replay until the next LOGIN. The frame was refused
     // and the link was still wedged.
-    disp.setBaseNonceForTest(kHubAddr, 0xABCDEF01);
+    disp.setSessionIdForTest(kHubAddr, 0xABCDEF01);
 
-    const uint32_t before = disp.rxMsgIdForTest();
+    const uint32_t before = disp.rxFcntForTest();
     auto sched = pack_schedule_op(/*msgid=*/before + 1000, /*version=*/0xBEEF,
                                   NODE_MODE__MODE_INTERACTIVE);
     disp.onReceiveNew(sched.data(), static_cast<int>(sched.size()), 1'100'000);
 
-    EXPECT_EQ(disp.rxMsgIdForTest(), before)
+    EXPECT_EQ(disp.rxFcntForTest(), before)
         << "a plaintext frame must be refused before it can touch the counter";
     EXPECT_NE(sys.getSchedVersion(), 0xBEEFu);
 }
@@ -4027,9 +4005,9 @@ TEST_F(RealNodeFixture, AnUnknownSenderCannotWalkPastThePlaintextGate) {
     // The predicate was keyed on the one field the attacker chooses. The test
     // that was meant to cover this sent from kHubAddr — the single sender for
     // which the old gate happened to work.
-    disp.setBaseNonceForTest(kHubAddr, 0xABCDEF01);
+    disp.setSessionIdForTest(kHubAddr, 0xABCDEF01);
 
-    const uint32_t before = disp.rxMsgIdForTest();
+    const uint32_t before = disp.rxFcntForTest();
     auto sched = pack_schedule_op(/*msgid=*/before + 1000, /*version=*/0xBEEF,
                                   NODE_MODE__MODE_INTERACTIVE,
                                   /*sender=*/0x77);   // never seen by this node
@@ -4037,7 +4015,7 @@ TEST_F(RealNodeFixture, AnUnknownSenderCannotWalkPastThePlaintextGate) {
 
     EXPECT_NE(sys.getSchedVersion(), 0xBEEFu)
         << "naming an unknown sender must not be a way past the gate";
-    EXPECT_EQ(disp.rxMsgIdForTest(), before)
+    EXPECT_EQ(disp.rxFcntForTest(), before)
         << "and it must not ratchet the replay counter on its way through";
 }
 
@@ -4054,9 +4032,9 @@ TEST_F(RealNodeFixture, LoginItselfStaysAcceptedInPlaintext) {
     // test hands in: two logins 100 ms apart on the simulated clock land in the
     // same real millisecond, so the second is dropped by the limiter and the
     // test would be measuring F-30, not the security gate.
-    disp.setBaseNonceForTest(kHubAddr, 0x11223344);
+    disp.setSessionIdForTest(kHubAddr, 0x11223344);
     uint32_t bn = 0;
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, bn));
+    ASSERT_TRUE(disp.getSessionIdForTest(kHubAddr, bn));
     ASSERT_EQ(bn, 0x11223344u) << "precondition: a session exists";
 
     // Now the recovery case: the hub has lost its state and re-logs in, in the
@@ -4066,7 +4044,7 @@ TEST_F(RealNodeFixture, LoginItselfStaysAcceptedInPlaintext) {
     auto login = pack_login_op(/*msgid=*/811, /*nonce=*/0x55667788);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()), 2'100'000);
 
-    EXPECT_TRUE(disp.getBaseNonceForTest(kHubAddr, bn));
+    EXPECT_TRUE(disp.getSessionIdForTest(kHubAddr, bn));
     EXPECT_EQ(bn, 0x55667788u)
         << "plaintext login is the recovery path and must never be refused";
 }
@@ -4246,7 +4224,7 @@ std::vector<uint8_t> encrypt_op(CmdDispatcherTestPeer &disp, DownlinkView &inner
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.burstindex    = burst_index;
     hdr.onmark        = on_mark;   // placed, as the hub places a session downlink
     return seal_op(disp, inner, hdr, nonce);
@@ -4267,14 +4245,10 @@ std::vector<uint8_t> encrypted_sysop(CmdDispatcherTestPeer &disp, uint32_t msgid
 std::vector<uint8_t> encrypted_mode_test(CmdDispatcherTestPeer &disp, ModeTest__Mode mode, uint32_t msgid,
                                          uint32_t grid_period_ms = 1093,
                                          uint32_t seq = 0,
-                                         int32_t arm_offset_us = 0,
                                          bool counter = true,
                                          bool mac_echo = false,
                                          bool crypto = true) {
     ModeTest mt = MODE_TEST__INIT;
-    // HW-2: non-zero only for MODE_SWEEP, which deliberately mis-arms its
-    // windows. Defaulted so every existing caller builds the frame it did.
-    mt.armoffsetus      = arm_offset_us;
     mt.enable           = true;
     // 0 is the START. The hub resets its sequence immediately before building
     // it, so every later frame in the same test — each mark, and the STOP —
@@ -4409,7 +4383,7 @@ std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
 
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind           = MAC_CONTROL__KIND__MAC_CONFIG;
@@ -4432,7 +4406,7 @@ std::vector<uint8_t> build_mac_config_plain(bool disable_counter, uint32_t msgid
 void holdSessionAndArmTest(CmdDispatcherTestPeer &disp, bool counter_on, bool crypto_on = false) {
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, 0, counter_on,
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/2, 1093, 0, counter_on,
                                  /*mac_echo=*/true, crypto_on);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
 }
@@ -4605,7 +4579,7 @@ TEST_F(RealNodeFixture, ThePingSequenceRestartsWithEachTest) {
 
     auto off = encrypted_mode_test_off(disp, /*msgid=*/3);
     disp.onReceiveNew(off.data(), static_cast<int>(off.size()));
-    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, 0, true, true,
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/4, 1093, 0, true, true,
                                  /*crypto=*/false);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_TRUE(disp.modeTestActive());
@@ -4664,61 +4638,6 @@ TEST_F(RealNodeFixture, TheLogLevelsComeBackWhenTheNodeEndsItsOwnTest) {
     ASSERT_FALSE(disp.modeTestActive());
     for (const char *tag : {"CmdDispatcher", "LoraInterface", "frtosTasks"})
         EXPECT_EQ(tagLevel(tag), ESP_LOG_INFO) << tag;
-}
-
-// ---------------------------------------------------------------------------
-// HW-2: a sweep must not demote itself.
-//
-// MODE_SWEEP arms its windows deliberately off the mark to find the reception
-// edge, so the marks it loses ARE the measurement.
-//
-// WHAT THIS USED TO PREVENT, and no longer has to: three such misses tripped
-// kMaxMissedMarks, demotionReasonNow() returned MissedMarks, timedRxActive()
-// went false and the node armed nothing for the rest of the test. A point
-// outside the guard reported ~3 armed windows instead of ~109 — below
-// SweepAnalysis::Point::receives()'s min_armed of 8, so it read "no reception"
-// for the wrong reason — and the 600 s anti-flap hold made every LATER point
-// read the same way. The first failing offset planted a false edge and
-// poisoned the rest of the sweep.
-//
-// Both of those were retired on 2026-09-20 (see the Demotion banner in
-// TimedModePolicy.h), so the guard no longer protects the run from ending
-// itself. It is kept because it still keeps the DIAGNOSTIC honest: a sweep's
-// deliberate misses are not evidence about the link, and WMR is built on that
-// counter. The pair below — the sweep and its ordinary-run control — is what
-// stops the guard from quietly becoming "never count anything".
-// ---------------------------------------------------------------------------
-
-TEST_F(RealNodeFixture, ASweepsOwnMissedMarksNeitherCountNorDemote) {
-    disp.setBenchNode(true);   // MODE_SWEEP is refused outright off the bench
-
-    auto login = pack_login_op(/*msgid=*/1, kMtNonce);
-    disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    auto gs = encrypted_grid_sync(disp, /*slot=*/4, /*msgid=*/2);
-    disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
-    ASSERT_TRUE(disp.gridState().active) << "a sweep needs an anchor to mis-arm against";
-
-    auto sweep = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_SWEEP, /*msgid=*/3,
-                                     /*grid_period_ms=*/1093, /*seq=*/0,
-                                     /*arm_offset_us=*/12000);
-    disp.onReceiveNew(sweep.data(), static_cast<int>(sweep.size()));
-    ASSERT_TRUE(disp.modeTestActive());
-    ASSERT_EQ(disp.modeTestLastRefusal(), (uint32_t) modetest::ArmRefusal::None)
-        << "1093 ms, bench node, adopted grid: nothing here is refusable";
-
-    // Two missed marks. The control test below shows this same sequence leaves a
-    // count of 2 in an ordinary timed run — so 0 here is the guard acting, not
-    // an artefact of the counter being reset by a demotion that did happen.
-    disp.noteMarkArmed(/*generation=*/1);
-    disp.noteMarkMissed(/*generation=*/1);
-    disp.noteMarkArmed(/*generation=*/2);
-    disp.noteMarkMissed(/*generation=*/2);
-
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
-        << "the sweep's induced misses must not accumulate toward MissedMarks";
-    EXPECT_TRUE(disp.gridState().active) << "and must not cost the node its grid";
-    EXPECT_TRUE(disp.timedRxEnabledForTest())
-        << "the sweep must still be arming windows: that is what it measures";
 }
 
 TEST_F(RealNodeFixture, AnOrdinaryTimedRunStillCountsItsMissedMarks) {
@@ -5080,7 +4999,7 @@ TEST_F(RealNodeFixture, ABeaconDoesNotRatchetTheReplayCounter) {
     const uint32_t kNonce = 0xBEEF0001;
     auto login = pack_login_op(/*msgid=*/1, kNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    const uint32_t rx_id_before = disp.rxMsgIdForTest();
+    const uint32_t rx_id_before = disp.rxFcntForTest();
 
     auto gs = build_grid_sync(true, 4, 2);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()));
@@ -5091,7 +5010,7 @@ TEST_F(RealNodeFixture, ABeaconDoesNotRatchetTheReplayCounter) {
     const int64_t rx = rx_for_beacon(st, 90, 0, (uint32_t) b.size());
     disp.onReceiveNew(b.data(), static_cast<int>(b.size()), rx);
 
-    EXPECT_LE(disp.rxMsgIdForTest(), rx_id_before + 2)
+    EXPECT_LE(disp.rxFcntForTest(), rx_id_before + 2)
         << "the beacon's own counter must not become the node's";
     EXPECT_EQ(disp.gridState().anchor_us, st.anchor_us)
         << "and it still re-anchored (by zero) rather than being dropped";
@@ -5117,7 +5036,6 @@ constexpr int64_t kAimBound = 290000;
 int64_t settle_on_grid(CmdDispatcherTestPeer &disp, uint32_t slot, uint32_t first_msgid) {
     auto gs = build_grid_sync(/*enable=*/true, slot, first_msgid);
     const int64_t anchor_rx = 20'000'000;
-    disp.noteDriftSample(anchor_rx);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), anchor_rx);
     if (!disp.gridState().active) return 0;
 
@@ -5126,7 +5044,6 @@ int64_t settle_on_grid(CmdDispatcherTestPeer &disp, uint32_t slot, uint32_t firs
         auto op = pack_sysop_op(first_msgid + 1 + i, CLIENT_OPERATION__CMD_STATUS);
         mark = disp.expectedT0Us() + timedgrid::kRoundUs;
         const int64_t rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
-        disp.noteDriftSample(rx);
         disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
     }
     return mark;
@@ -5184,7 +5101,6 @@ TEST_F(RealNodeFixture, AnAnchorTheNodeDoesNotTrustIsNotAimedFrom) {
     // on another node's slot — 32 nodes with bad anchors would converge on one
     // window instead of spreading out.
     auto gs = build_grid_sync(/*enable=*/true, /*slot=*/4, /*msgid=*/980);
-    disp.noteDriftSample(20'000'000);
     disp.onReceiveNew(gs.data(), static_cast<int>(gs.size()), 20'000'000);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_TRUE(disp.timedRxEnabledForTest());
@@ -5280,7 +5196,7 @@ std::vector<uint8_t> build_grid_demote(uint32_t dest = 0xFF) {
     hdr.destaddress   = dest;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 0;     // a broadcast belongs to no per-node sequence
+    hdr.fcnt         = 0;     // a broadcast belongs to no per-node sequence
 
     GridDemote gd = GRID_DEMOTE__INIT;
     DlMsg op;
@@ -5519,7 +5435,7 @@ TEST_F(RealNodeFixture, AForgedLoginCannotHoldOffSyncStaleOrFeedPhaseTracking) {
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = 4;
+    hdr.fcnt         = 4;
     hdr.onmark        = true;
     hdr.firestamped   = true;
     hdr.fireround     = 999;
@@ -5791,7 +5707,6 @@ TEST_F(RealNodeFixture, ABurstCopyIsStampedAsCopyZero) {
     const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
     const int64_t rx = mark + (int64_t) kCopy * drift::kCopySpacingUs
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
 
     ASSERT_EQ(disp.phaseStats().n, 1u);
@@ -5812,7 +5727,7 @@ std::vector<uint8_t> pack_stamped_sysop(uint32_t msgid, uint32_t fire_round,
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.burstindex    = burst_index;
     hdr.burstcount    = 17;
     hdr.onmark        = false;
@@ -5831,7 +5746,6 @@ void deliverStamped(CmdDispatcherTestPeer &disp, const std::vector<uint8_t> &f,
                     uint32_t fire_round, uint32_t fire_offset_us, int64_t err_us) {
     const int64_t t0 = gridstate::t0ForHubInstantUs(disp.gridState(), fire_round, fire_offset_us);
     const int64_t rx = t0 + err_us + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(const_cast<uint8_t *>(f.data()), static_cast<int>(f.size()), rx);
 }
 
@@ -5884,7 +5798,7 @@ TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
 
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 750; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 750; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped  = true;
     hdr.fireround    = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs + kLate);
@@ -5900,7 +5814,6 @@ TEST_F(RealNodeFixture, AGridSyncThatLeftLateStillGivesTheTrueGrid) {
 
     const int64_t actual_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kLate;
     const int64_t rx = actual_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
     ASSERT_TRUE(disp.gridState().active);
 
@@ -5924,7 +5837,7 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
 
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 790; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 790; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -5939,7 +5852,6 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
 
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(gs_rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
@@ -5950,7 +5862,6 @@ TEST_F(RealNodeFixture, AGridAdoptedOnAnUnsettledClockIsReSolvedOnceItSettles) {
         auto f = pack_stamped_sysop(msgid, round, 300'000);
         const int64_t t0 = kTrueAnchor + (int64_t) round * timedgrid::kRoundUs + 300'000;
         const int64_t rx = t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-        disp.noteDriftSample(rx);
         disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
     };
 
@@ -5987,7 +5898,7 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
 
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 790; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 790; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -6002,7 +5913,6 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
 
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(gs_rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
@@ -6015,7 +5925,6 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
     auto at_truth = [&](uint32_t msgid, uint32_t round) {
         auto f = pack_stamped_sysop(msgid, round, 300'000);
         const int64_t rx = rx_for(round, f.size());
-        disp.noteDriftSample(rx);
         disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
         return f;
     };
@@ -6029,7 +5938,6 @@ TEST_F(RealNodeFixture, AReplayedCopyCannotTriggerTheProvisionalReSolve) {
     // delivering a genuinely new one.
     nodeclock::setSettledForTest(true);
     const int64_t replay_rx = rx_for(10, first.size());
-    disp.noteDriftSample(replay_rx);
     disp.onReceiveNew(const_cast<uint8_t *>(first.data()), static_cast<int>(first.size()),
                       replay_rx);
     EXPECT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError)
@@ -6114,7 +6022,6 @@ TEST_F(RealNodeFixture, AnUnplacedFrameIsNotAPhaseSample) {
                                   /*burst_index=*/0, /*on_mark=*/false);
     const int64_t rx_u = mark + 463000
                        + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) unplaced.size());
-    disp.noteDriftSample(rx_u);
     disp.onReceiveNew(unplaced.data(), static_cast<int>(unplaced.size()), rx_u);
 
     EXPECT_EQ(disp.phaseStats().n, 0u)
@@ -6126,7 +6033,6 @@ TEST_F(RealNodeFixture, AnUnplacedFrameIsNotAPhaseSample) {
     auto placed = pack_sysop_op(/*msgid=*/722, CLIENT_OPERATION__CMD_STATUS);
     const int64_t rx_p = mark + (int64_t) timedgrid::kRoundUs
                        + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) placed.size());
-    disp.noteDriftSample(rx_p);
     disp.onReceiveNew(placed.data(), static_cast<int>(placed.size()), rx_p);
 
     ASSERT_EQ(disp.phaseStats().n, 1u);
@@ -6155,7 +6061,6 @@ TEST_F(RealNodeFixture, APlaintextFrameCannotFeedThePhaseFit) {
     const int64_t mark = disp.expectedT0Us() + timedgrid::kRoundUs;
     const int64_t rx = mark + 7000
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) op.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(op.data(), static_cast<int>(op.size()), rx);
 
     EXPECT_EQ(disp.phaseStats().n, n_before)
@@ -6841,7 +6746,7 @@ TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
     ASSERT_TRUE(disp.classAActive());
 
     // SMALL MSGIDS DELIBERATELY. My first draft used 3100 and the handler was
-    // never reached: SessionManager::kMsgIdWindow bounds a forward jump to
+    // never reached: SessionManager::kFcntWindow bounds a forward jump to
     // 1024, because msgid increments by one per frame and a huge jump is a
     // corrupt frame that would wedge the link until the next login. The
     // assertion below is what caught it — without it the test would have
@@ -6866,7 +6771,7 @@ TEST_F(RealNodeFixture, ATimeSyncCarryingSleepOkIsWhatEndsTheSequence) {
         hdr.destaddress   = kNodeAddr;
         hdr.destsubnet    = kSubnet;
         hdr.senderaddress = kHubAddr;
-        hdr.msgid         = 33;
+        hdr.fcnt         = 33;
         op.header         = &hdr;
         TimeSync ts2  = TIME_SYNC__INIT;
         ts2.epoch     = 1787000000ULL;
@@ -7120,7 +7025,7 @@ constexpr int64_t  kRefAnchor = 90'000'000;
 void deliverStampedGridSync(CmdDispatcherTestPeer &disp, uint32_t msgid, int64_t err_us) {
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = msgid; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = msgid; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kRefSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -7134,7 +7039,6 @@ void deliverStampedGridSync(CmdDispatcherTestPeer &disp, uint32_t msgid, int64_t
     std::vector<uint8_t> bytes = pack_op(op);
     const int64_t rx = kRefAnchor + (int64_t) kRefSlot * timedgrid::kSlotPitchUs + err_us
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), rx);
 }
 
@@ -7190,7 +7094,6 @@ TEST_F(RealNodeFixture, TheBootMinuteReSolveStartsTheRateSpan) {
     auto f = pack_stamped_sysop(781, /*round=*/12, /*offset=*/300'000);
     const int64_t rx = gridstate::t0ForHubInstantUs(truth, 12, 300'000)
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
 
     auto b = build_grid_beacon(233, truth.params.beacon_slot, 1);
@@ -7290,7 +7193,7 @@ TEST_F(RealNodeFixture, AModeBResidualShowsTheDriftAnUncorrectedPredictionLeaves
 
 // ===========================================================================
 // 2026-10-06 node cleanup: BaseNonceExchange removal + the msgid / CTR-space
-// guard (FrameCrypto.h kMsgidCtrLimit).
+// guard (FrameCrypto.h kFcntCtrLimit).
 // ===========================================================================
 
 namespace {
@@ -7305,7 +7208,7 @@ std::vector<uint8_t> old_basenonce_frame(uint32_t msgid, uint32_t dest) {
     hdr.destaddress   = dest;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kHubAddr;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header = &hdr;
     std::vector<uint8_t> out = pack_op(op);
     const uint8_t field15[] = {0x7A, 0x06, 0x12, 0x04, 0xDE, 0xAD, 0xBE, 0xEF};
@@ -7337,7 +7240,7 @@ TEST_F(RealNodeFixture, AnOldPeersBaseNonceExchangeIsAnUnknownFieldAndInstallsNo
     disp.onReceiveNew(frame.data(), static_cast<int>(frame.size()));
 
     uint32_t nonce = 0;
-    EXPECT_FALSE(disp.getBaseNonceForTest(kHubAddr, nonce))
+    EXPECT_FALSE(disp.getSessionIdForTest(kHubAddr, nonce))
         << "the removed BaseNonceExchange must not install a session key";
     EXPECT_EQ(uxQueueMessagesWaiting(disp.txCmdQueueNew), 0u) << "and must not make the node transmit";
     EXPECT_EQ(uxQueueMessagesWaiting(disp.rxCmdQueueNew), 0u);
@@ -7345,13 +7248,13 @@ TEST_F(RealNodeFixture, AnOldPeersBaseNonceExchangeIsAnUnknownFieldAndInstallsNo
     // Same frame at a node that HOLDS a session: refused as plaintext, session untouched.
     auto login = pack_login_op(/*msgid=*/1, kMtNonce);
     disp.onReceiveNew(login.data(), static_cast<int>(login.size()));
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, nonce));
+    ASSERT_TRUE(disp.getSessionIdForTest(kHubAddr, nonce));
     ASSERT_EQ(nonce, kMtNonce);
     while (disp.runOneTxCommand()) {}
     (void) lif.drain_tx_queue();
     auto frame2 = old_basenonce_frame(/*msgid=*/2, kNodeAddr);
     disp.onReceiveNew(frame2.data(), static_cast<int>(frame2.size()));
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHubAddr, nonce));
+    ASSERT_TRUE(disp.getSessionIdForTest(kHubAddr, nonce));
     EXPECT_EQ(nonce, kMtNonce) << "a session must survive an old peer's plaintext key offer";
 }
 
@@ -7361,24 +7264,24 @@ TEST_F(RealNodeFixture, AnAuthenticDownlinkBeyondTheCtrSpaceIsRefusedAndStartsAF
     while (disp.runOneTxCommand()) {}
     (void) lif.drain_tx_queue();
     ASSERT_EQ(disp.sessionGenerationForTest(), 1u);
-    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+    ASSERT_FALSE(disp.fcntReloginPendingForTest());
 
     // CONTROL: an ordinary authentic downlink is accepted and asks for nothing.
     auto ok = encrypted_sysop(disp, /*msgid=*/2, CLIENT_OPERATION__CMD_STATUS, 0, true);
     disp.onReceiveNew(ok.data(), static_cast<int>(ok.size()));
-    ASSERT_EQ(disp.rxMsgIdForTest(), 2u) << "precondition: the control frame was accepted";
+    ASSERT_EQ(disp.rxFcntForTest(), 2u) << "precondition: the control frame was accepted";
     ASSERT_FALSE(reg_queued(disp));
-    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+    ASSERT_FALSE(disp.fcntReloginPendingForTest());
 
     // msgid 2^31 + 3 aliases msgid 3 in the CTR block but has its own valid tag.
     auto bad = encrypted_sysop(disp, /*msgid=*/0x80000003u, CLIENT_OPERATION__CMD_STATUS, 0, true);
     disp.onReceiveNew(bad.data(), static_cast<int>(bad.size()));
 
-    EXPECT_EQ(disp.rxMsgIdForTest(), 2u) << "the frame must not advance the replay counter";
+    EXPECT_EQ(disp.rxFcntForTest(), 2u) << "the frame must not advance the replay counter";
     uint32_t n = 0;
     EXPECT_TRUE(reg_queued(disp, &n)) << "a fresh session (REGISTER) must be requested";
     EXPECT_EQ(n, 1u);
-    EXPECT_TRUE(disp.msgidReloginPendingForTest());
+    EXPECT_TRUE(disp.fcntReloginPendingForTest());
 
     // A second such frame does not queue a second REGISTER.
     auto bad2 = encrypted_sysop(disp, /*msgid=*/0x80000004u, CLIENT_OPERATION__CMD_STATUS, 0, true);
@@ -7401,7 +7304,7 @@ TEST_F(RealNodeFixture, AForgedDownlinkWithAHugeMsgidCannotTearTheSessionDown) {
     disp.onReceiveNew(out.data(), static_cast<int>(out.size()));
 
     EXPECT_FALSE(reg_queued(disp)) << "an unauthenticated frame must not trigger a relogin";
-    EXPECT_FALSE(disp.msgidReloginPendingForTest());
+    EXPECT_FALSE(disp.fcntReloginPendingForTest());
 }
 
 TEST_F(RealNodeFixture, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
@@ -7411,33 +7314,33 @@ TEST_F(RealNodeFixture, TheTxCounterNeverHandsOutAMsgidBeyondTheCtrSpace) {
     (void) lif.drain_tx_queue();
 
     // Two ids short of the boundary: 2^31-2 and 2^31-1 are still sealable.
-    disp.seedTxMsgIdForTest(0x7FFFFFFDu);
+    disp.seedTxFcntForTest(0x7FFFFFFDu);
     disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
     ASSERT_TRUE(disp.runOneTxCommand());
-    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFEu);
+    EXPECT_EQ(disp.txFcntForTest(), 0x7FFFFFFEu);
     EXPECT_EQ(lif.drain_tx_queue().size(), 1u);
 
     disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
     ASSERT_TRUE(disp.runOneTxCommand());
-    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
+    EXPECT_EQ(disp.txFcntForTest(), 0x7FFFFFFFu) << "2^31-1 is the last usable id";
     EXPECT_EQ(lif.drain_tx_queue().size(), 1u);
-    EXPECT_FALSE(disp.msgidReloginPendingForTest());
+    EXPECT_FALSE(disp.fcntReloginPendingForTest());
     EXPECT_FALSE(reg_queued(disp));
 
     // The next one would be 2^31: refused, nothing sent, a relogin requested.
     disp.setStatus(BlindsStatusCmd::SYSCMD_AVAILABLE, 0);
     ASSERT_TRUE(disp.runOneTxCommand());
-    EXPECT_EQ(disp.txMsgIdForTest(), 0x7FFFFFFFu) << "the counter must not move past the boundary";
+    EXPECT_EQ(disp.txFcntForTest(), 0x7FFFFFFFu) << "the counter must not move past the boundary";
     EXPECT_TRUE(lif.drain_tx_queue().empty()) << "nothing may be sealed with msgid >= 2^31";
     uint32_t n = 0;
     EXPECT_TRUE(reg_queued(disp, &n));
     EXPECT_EQ(n, 1u);
-    EXPECT_TRUE(disp.msgidReloginPendingForTest());
+    EXPECT_TRUE(disp.fcntReloginPendingForTest());
 
     // The REGISTER itself goes out (plaintext, counters restart) and ends the episode.
     while (disp.runOneTxCommand()) {}
-    EXPECT_FALSE(disp.msgidReloginPendingForTest()) << "the counters restarted";
-    EXPECT_LT(disp.txMsgIdForTest(), 0x100u) << "msgids start over after the REGISTER";
+    EXPECT_FALSE(disp.fcntReloginPendingForTest()) << "the counters restarted";
+    EXPECT_LT(disp.txFcntForTest(), 0x100u) << "msgids start over after the REGISTER";
     EXPECT_FALSE(lif.drain_tx_queue().empty()) << "the REGISTER must reach the air";
 }
 
@@ -7455,7 +7358,7 @@ TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
     hdr.destaddress   = kHubAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = kNodeAddr;
-    hdr.msgid         = 5;
+    hdr.fcnt         = 5;
     UplinkMsg msg;
     msg.header     = &hdr;
     msg.proto_case = UL_AVAIL;
@@ -7465,13 +7368,13 @@ TEST_F(RealNodeFixture, TheSealPointItselfRefusesAMsgidBeyondTheCtrSpace) {
     size_t len = 0;
     ASSERT_TRUE(disp.packUplinkFrame_(msg, hdr, &buf, &len)) << "control: an ordinary msgid seals";
     free(buf);
-    ASSERT_FALSE(disp.msgidReloginPendingForTest());
+    ASSERT_FALSE(disp.fcntReloginPendingForTest());
 
-    hdr.msgid = 0x80000005u;     // would reuse msgid 5's keystream
+    hdr.fcnt = 0x80000005u;     // would reuse msgid 5's keystream
     buf = nullptr;
     EXPECT_FALSE(disp.packUplinkFrame_(msg, hdr, &buf, &len)) << "must not seal";
     EXPECT_EQ(buf, nullptr);
-    EXPECT_TRUE(disp.msgidReloginPendingForTest());
+    EXPECT_TRUE(disp.fcntReloginPendingForTest());
 }
 
 // ===========================================================================
@@ -7495,7 +7398,7 @@ std::vector<uint8_t> admit_plain_sysop(uint32_t dest, uint32_t sender, uint32_t 
     hdr.destaddress   = dest;
     hdr.destsubnet    = subnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.onmark        = on_mark;
     op.header   = &hdr;
     op.cmd_case = DL_SYSOP;
@@ -7513,7 +7416,7 @@ std::vector<uint8_t> admit_plain_coverconfig(uint32_t dest, uint32_t sender, uin
     hdr.destaddress   = dest;
     hdr.destsubnet    = subnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     op.header   = &hdr;
     static CoverConfig cc = COVER_CONFIG__INIT;
     cc.opentime = 61; cc.closetime = 66;
@@ -7529,7 +7432,7 @@ std::vector<uint8_t> admit_plain_ping(uint32_t sender, uint32_t seq, uint32_t ms
     hdr.destaddress   = kNodeAddr;
     hdr.destsubnet    = kSubnet;
     hdr.senderaddress = sender;
-    hdr.msgid         = msgid;
+    hdr.fcnt         = msgid;
     hdr.onmark        = true;
     MacControl mc = MAC_CONTROL__INIT;
     mc.kind = MAC_CONTROL__KIND__MAC_PING;
@@ -7551,14 +7454,13 @@ std::vector<uint8_t> admit_enc_sysop_copy(CmdDispatcherTestPeer &disp, uint32_t 
     inner.sysop    = CLIENT_OPERATION__CMD_STATUS;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
-    hdr.msgid = msgid; hdr.burstindex = burst_index; hdr.burstcount = burst_count;
+    hdr.fcnt = msgid; hdr.burstindex = burst_index; hdr.burstcount = burst_count;
     return seal_op(disp, inner, hdr, kMtNonce);
 }
 
 // Deliver `f` with its T0 on `mark`, as the radio would.
 void admit_deliver_on_mark(CmdDispatcherTestPeer &d, const std::vector<uint8_t> &f, int64_t mark) {
     const int64_t rx = mark + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-    d.noteDriftSample(rx);
     d.onReceiveNew(const_cast<uint8_t *>(f.data()), static_cast<int>(f.size()), rx);
 }
 
@@ -7572,12 +7474,12 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionAcceptsPl
     LoraInterface lif;
     portMUX_TYPE  motorMux{}, buttonMux{};
     CmdDispatcherTestPeer disp(&mot, &sys, &lif, motorMux, buttonMux);
-    disp.setBaseNonceForTest(1, 0xABCDEF01);
+    disp.setSessionIdForTest(1, 0xABCDEF01);
     ASSERT_EQ(sys.getConfigAddress(), 0u);
 
     DlMsg op;
     DlHdr hdr;
-    hdr.destaddress = 0; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr; hdr.msgid = 1;
+    hdr.destaddress = 0; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr; hdr.fcnt = 1;
     op.header = &hdr;
     CoverConfig cc = COVER_CONFIG__INIT;
     cc.opentime = 61; cc.closetime = 66;
@@ -7607,7 +7509,7 @@ TEST(RealCmdDispatcherFresh, AdmitFrame_AnUnprovisionedNodeWithASessionStillRefu
     disp.onReceiveNew(f1.data(), static_cast<int>(f1.size()));
     ASSERT_EQ(disp.uplinkAddress(), 33u) << "control: a node without a session admits provisioning";
 
-    disp.setBaseNonceForTest(1, 0xABCDEF01);
+    disp.setSessionIdForTest(1, 0xABCDEF01);
     auto f2 = admit_plain_sysop(/*dest=*/0, /*sender=*/77, kSubnet, /*msgid=*/2, false);
     disp.onReceiveNew(f2.data(), static_cast<int>(f2.size()));
     EXPECT_EQ(disp.uplinkAddress(), 33u)
@@ -7658,7 +7560,7 @@ TEST_F(RealNodeFixture, AdmitFrame_APlaintextPingOnlyReachesTheNodeWhileATestIsA
         << "a plaintext ping with no authenticated test armed is refused at the gate";
     EXPECT_EQ(disp.macCounters().ping_rx, 0u);
 
-    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/3, 1093, 0, 0,
+    auto a = encrypted_mode_test(disp, MODE_TEST__MODE__MODE_A, /*msgid=*/3, 1093, 0,
                                  /*counter=*/true, /*mac_echo=*/true, /*crypto=*/false);
     disp.onReceiveNew(a.data(), static_cast<int>(a.size()));
     ASSERT_TRUE(disp.modeTestActive());
@@ -7689,7 +7591,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AForgedLoginAgainstARestoredSessionIsStale) {
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
-    hdr.msgid = 4;
+    hdr.fcnt = 4;
     op.header = &hdr;
     LoginMsg forged = LOGIN_MSG__INIT;
     forged.nonce = 0xDEADBEEFu;
@@ -8010,7 +7912,7 @@ TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnch
 
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 830; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 830; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -8024,7 +7926,6 @@ TEST_F(RealNodeFixture, AdmitFrame_AnUnstampedFrameCannotReSolveAProvisionalAnch
     std::vector<uint8_t> bytes = pack_op(op);
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(gs_rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError);
@@ -8049,7 +7950,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
     nodeclock::setSettledForTest(false);
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = 1;
-    hdr.msgid = 840; hdr.burstcount = 17; hdr.onmark = true;
+    hdr.fcnt = 840; hdr.burstcount = 17; hdr.onmark = true;
     hdr.firestamped = true; hdr.fireround = 0;
     hdr.fireoffsetus = (uint32_t) (kSlot * timedgrid::kSlotPitchUs);
     GridSync g = GRID_SYNC__INIT;
@@ -8063,7 +7964,6 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
     std::vector<uint8_t> bytes = pack_op(op);
     const int64_t gs_t0 = kTrueAnchor + (int64_t) kSlot * timedgrid::kSlotPitchUs + kBootError;
     const int64_t gs_rx = gs_t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-    disp.noteDriftSample(gs_rx);
     disp.onReceiveNew(bytes.data(), static_cast<int>(bytes.size()), gs_rx);
     ASSERT_TRUE(disp.gridState().active);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor + kBootError);
@@ -8073,7 +7973,6 @@ TEST_F(RealNodeFixture, AdmitFrame_ASettledReSolveRearmsTheWindowsAndStartsARate
     auto f = pack_stamped_sysop(/*msgid=*/841, /*round=*/10, 300'000);
     const int64_t rx = kTrueAnchor + 10 * (int64_t) timedgrid::kRoundUs + 300'000
                      + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) f.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(f.data(), static_cast<int>(f.size()), rx);
     ASSERT_EQ(disp.gridState().anchor_us, kTrueAnchor) << "precondition: the anchor was re-solved";
     EXPECT_EQ(lif.rearmRequests(), rearms + 1u)
@@ -8104,7 +8003,6 @@ TEST_F(RealNodeFixture, AdmitFrame_AReplayedCopyCannotTriggerAnAnchorRecentre) {
         disp.gridState(), t0 + (int64_t) (timedmode::kPromotionPhaseSamples - 2) * (int64_t) timedgrid::kRoundUs);
     auto copy = pack_sysop_op(last_msgid, CLIENT_OPERATION__CMD_STATUS, /*burst_index=*/1);
     const int64_t rx = mark + kOffUs + 88'000 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) copy.size());
-    disp.noteDriftSample(rx);
     disp.onReceiveNew(copy.data(), static_cast<int>(copy.size()), rx);
     ASSERT_GE(disp.phaseStats().n, timedmode::kPromotionPhaseSamples) << "precondition: the copy was sampled";
     EXPECT_EQ(disp.gridState().anchor_us, anchor_before)
@@ -8205,7 +8103,7 @@ TEST_F(RealNodeFixture, AdmitFrame_ABeaconIsNotAPhaseSampleEvenWhenAddressedAndP
     DlMsg op;
     DlHdr hdr;
     hdr.destaddress = kNodeAddr; hdr.destsubnet = kSubnet; hdr.senderaddress = kHubAddr;
-    hdr.msgid = 861; hdr.onmark = true;
+    hdr.fcnt = 861; hdr.onmark = true;
     op.header = &hdr;
     GridBeacon gb = GRID_BEACON__INIT;
     gb.txround = 5;

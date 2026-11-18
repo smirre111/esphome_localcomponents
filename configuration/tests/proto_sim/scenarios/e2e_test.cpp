@@ -149,7 +149,6 @@ struct E2E : public ::testing::Test {
                 : esp_timer_get_time();
             const int64_t rxdone =
                 t0 + (int64_t) loratiming::t0ToRxDoneUs((uint32_t) bytes.size());
-            disp.noteDriftSample(rxdone);
             disp.onReceiveNew(const_cast<uint8_t *>(bytes.data()),
                               (int) bytes.size(), rxdone);
             ++n;
@@ -232,7 +231,7 @@ TEST_F(E2E, ALoginBecomesAProvenSessionOnBothSides) {
     bringUpSession();
 
     uint32_t nonce = 0;
-    ASSERT_TRUE(disp.getBaseNonceForTest(kHub, nonce))
+    ASSERT_TRUE(disp.getSessionIdForTest(kHub, nonce))
         << "the node must hold the hub's base nonce";
     EXPECT_NE(nonce, 0u);
 
@@ -482,12 +481,12 @@ TEST_F(E2E, ASchedulePushIsAcknowledgedAndTheVersionAgrees) {
     bringUpSession();
 
     rol.send_schedule_config();
-    ASSERT_NE(rol.schedulePushMsgid(), 0u)
+    ASSERT_NE(rol.schedulePushFcnt(), 0u)
         << "precondition: the hub is tracking the push";
 
     settle();
 
-    EXPECT_EQ(rol.schedulePushMsgid(), 0u)
+    EXPECT_EQ(rol.schedulePushFcnt(), 0u)
         << "the node's ack must have cleared the outstanding push";
 }
 
@@ -798,7 +797,7 @@ TEST_F(E2E, ARefusedArmReachesTheHubAsARefusal) {
     rol.start_mode_test(/*duration_s=*/300, /*grid_ms=*/1500, /*mode=*/2,
                         /*copies=*/1, /*keep_power_profile=*/true,
                         /*enable_counter=*/false, /*enable_crypto=*/false,
-                        /*mac_echo=*/true, /*arm_offset_us=*/0);
+                        /*mac_echo=*/true);
     settle();
     rol.stop_mode_test();
 
@@ -974,7 +973,7 @@ TEST_F(TwoNodes, ADeafNodeDoesNotCostAHealthyNodeItsSleepAck) {
     for (int i = 0; i < 120 && !(node1_settled && rol_2.last_sleep_epoch_ != 0); ++i) {
         const size_t n_before = radio.hub_to_node_frames().size();
         settle();
-        if (node2_first_frame == SIZE_MAX && SP(rol_2).ctl().first_msgid != 0 &&
+        if (node2_first_frame == SIZE_MAX && SP(rol_2).ctl().first_fcnt != 0 &&
             rol_2.ctl_cmd().sysop == CLIENT_OPERATION__CMD_SLEEP)
             node2_first_frame = n_before;
         if (!node1_settled && rol_1.ctl_cmd().sleep_unconfirmed) {

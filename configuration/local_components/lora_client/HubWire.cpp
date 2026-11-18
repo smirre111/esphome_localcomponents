@@ -18,7 +18,6 @@ struct RouteRow
 };
 static constexpr RouteRow kRoutes[] = {
     {hubframes::DL_GRIDSYNC,     macwire::kPortMac0Mgmt, true},
-    {hubframes::DL_DRIFTTEST,    macwire::kPortMac0Mgmt, false},
     {hubframes::DL_MACCONTROL,   macwire::kPortMac0Mgmt, false},
     {hubframes::DL_MODETEST,     macwire::kPortMac0Mgmt, false},
     {hubframes::DL_GRIDBEACON,   macwire::kPortMac0Mgmt, false},
@@ -44,8 +43,6 @@ static bool s_mac_pdu(const hubframes::Down *op, ::HubMacPdu *pdu)
 {
     switch (op->cmd_case)
     {
-    case hubframes::DL_DRIFTTEST:
-        pdu->pdu_case = HUB_MAC_PDU__PDU_DRIFTTEST;  pdu->drifttest  = op->drifttest;  break;
     case hubframes::DL_MACCONTROL:
         pdu->pdu_case = HUB_MAC_PDU__PDU_MACCONTROL; pdu->maccontrol = op->maccontrol; break;
     case hubframes::DL_GRIDSYNC:
@@ -59,7 +56,7 @@ static bool s_mac_pdu(const hubframes::Down *op, ::HubMacPdu *pdu)
     default:
         return false;
     }
-    return pdu->drifttest != nullptr;   // every case's pointer shares the union
+    return pdu->maccontrol != nullptr;   // every case's pointer shares the union
 }
 
 // HubAppPdu. The Control commands get their identity (section 7) here, in
@@ -145,7 +142,7 @@ void toHdr(const macwire::WireHdr &h, hubframes::Hdr *out)
     out->destaddress   = h.dst;
     out->destsubnet    = h.subnet;
     out->senderaddress = h.src;
-    out->msgid         = h.fcnt;
+    out->fcnt         = h.fcnt;
     out->burstindex    = h.burst_idx;
     out->burstcount    = h.burst_cnt;
     out->onmark        = h.onMark();
@@ -195,7 +192,7 @@ bool Uplink::viewMac_(const macwire::WireHdr &h)
     case NODE_MAC_PDU__PDU_ACK:
         if (!h.ack() || this->mac_->ack == nullptr)
             return false;
-        this->ack_.ack_msg_id = h.acked_fcnt;
+        this->ack_.ack_fcnt = h.acked_fcnt;
         this->ack_.status     = this->mac_->ack->status;
         this->ack_.phase      = this->mac_->ack->phase;
         this->msg_.proto_case = hubframes::UL_ACK;

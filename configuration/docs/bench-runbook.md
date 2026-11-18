@@ -334,7 +334,7 @@ one you act on; the legend is in the YAML), `Node overdue` (U-5),
      took that path during the 1.0.95 run (`turnaround … n 0`), so it appears in
      no capture.
    * No YAML entity exposes either value.
-   **FIXED 2026-09-19 (hub `951eaff`, OTA'd).** `Hub RX stamp — worst poll gap`
+   **FIXED 2026-09-19 (hub `951eaff`, OTA'd).** (The entity was later commented out and removed from the YAML on 2026-11-08; `dump_config()` still prints the value.) `Hub RX stamp — worst poll gap`
    publishes `worst_poll_gap_us()` every 60 s, and the same change closed HW-9's
    hub half with `Hub FreeRTOS tick rate`. First readings after the reboot:
    **83 788 us, then 191 611 us within the first minute** — already six figures,

@@ -38,7 +38,7 @@ namespace esphome
       void on_register() override;
 
       // void send_remote_duration();
-      void send_remote_config() override;
+      void send_remote_config();
 
     protected:
       void control(const cover::CoverCall &call) override;

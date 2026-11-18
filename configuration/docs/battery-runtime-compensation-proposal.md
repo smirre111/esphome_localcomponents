@@ -1,6 +1,8 @@
 # Battery-voltage runtime compensation — a plan
 
-**Status: IMPLEMENTED (2026-09-30).** Written 2026-09-27 as a plan; shipped as
+**Status (corrected 2026-11-08, review D3): PARTLY implemented.** What shipped is the learned travel durations and the node's report of the measured vs nominal run time (`actualRunS`/`nominalRunS`, shown by the hub's `battery_calib_*` sensors). The voltage->runtime fit of this plan (`BatteryRuntimeCalib.h` in the node repo, "the fit runs on the node") was written and unit-tested but is never included by the firmware: no compensation runs. Options: wire it into the node's motor run, or delete the header and its test (node repo).
+
+Original status line: IMPLEMENTED (2026-09-30). Written 2026-09-27 as a plan; shipped as
 node fw 1.1.10 plus the hub-side learned-duration/debug-button/hard-start-OTA
 work (node `d223b61` "Learned travel durations, on-demand debug toggles, and
 hard-start", hub `15e18c5` "Hub side: learned durations, debug buttons,

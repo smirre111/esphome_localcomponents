@@ -59,15 +59,15 @@ METRICS = {
     # MAC-0 calling up into MAC-2 per copy (V1).
     "tracker.seal_upcalls": (TRACKER, r"(?<!::)\bsealBurstCopyTag\s*\(",
                              "per-copy up-call into the listener's MAC-2"),
-    # MAC-0 reading listener/client internals (V1 address lookup, V3 shadow).
+    # MAC-0 reading listener/client internals (V1 address lookup).
     "tracker.client_iteration": (TRACKER, r"\b(?:listeners_|clients_)\b",
                                  "tracker iterates registered listeners/clients"),
     # Direct data requests that bypass one framing path (V15).
     "client.raw_parent_send": ([CLIENT], r"\bparent_->send\s*\(",
                                "direct parent_->send calls in lora_client.cpp"),
     # Hand-built frames: each allocates its own MAC-1 counter (V15).
-    "client.msgid_alloc_sites": ([CLIENT], r"(?<!::)\bincrTxMessageId\s*\(\s*\)",
-                                 "incrTxMessageId() call sites"),
+    "client.msgid_alloc_sites": ([CLIENT], r"(?<!::)\bincrTxFcnt\s*\(\s*\)",
+                                 "incrTxFcnt() call sites"),
     # Hand-built frames: each seals itself (V15).
     "client.pack_sites": ([CLIENT], r"(?<!::)\bpack_operation_\s*\(",
                           "pack_operation_ call sites"),

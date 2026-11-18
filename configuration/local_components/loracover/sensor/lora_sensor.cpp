@@ -18,16 +18,10 @@ namespace esphome
     void LoraCover::setup()
     {
       this->last_battery_update_ = 0;
-      this->current_sensor_ = 0;
     }
 
 
  
-
-    void LoraCover::send_remote_config()
-    {
-
-    }
 
 
     // The BLE GATT event handler this component was forked from lived here,
@@ -91,14 +85,6 @@ namespace esphome
     {
       if (this->rssi_ != nullptr && this->parent_ != nullptr && this->parent_->parent_ != nullptr)
         this->rssi_->publish_state(this->parent_->parent_->get_last_rssi());
-    }
-
-    // S6: the node REGISTERed. The sensor platform has no configuration of its
-    // own to push (send_remote_config is a no-op), as before.
-    void LoraCover::on_register()
-    {
-      ESP_LOGI(TAG, "Received REGISTER — sending sensor config (no-op)");
-      this->send_remote_config();
     }
 
     // S6: a decoded application uplink from THIS sensor's node (see

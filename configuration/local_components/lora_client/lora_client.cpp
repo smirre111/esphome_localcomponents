@@ -71,8 +71,8 @@ namespace esphome
                  "logged_in=%s last_sleep=%u",
                  this->get_name().c_str(),
                  (unsigned)restore->version,
-                 (unsigned)restore->rx_message_id,
-                 (unsigned)restore->tx_message_id,
+                 (unsigned)restore->rx_fcnt,
+                 (unsigned)restore->tx_fcnt,
                  restore->logged_in ? "yes" : "no",
                  (unsigned)restore->last_sleep_epoch);
         restore->apply(this);
@@ -250,8 +250,8 @@ namespace esphome
         LORAClientRestoreState restore{};
         memset(&restore, 0, sizeof(restore));
         restore.version          = kRestoreStateVersion;
-        restore.rx_message_id    = this->session_.seq().rxId();
-        restore.tx_message_id    = this->session_.seq().txId();
+        restore.rx_fcnt    = this->session_.seq().rxId();
+        restore.tx_fcnt    = this->session_.seq().txId();
         restore.logged_in        = this->registered_;
         restore.last_sleep_epoch = this->last_sleep_epoch_;
         // The hash the node ACKNOWLEDGED (review rollout-3 D1): the current one
@@ -272,8 +272,8 @@ namespace esphome
         }
         ESP_LOGD(TAG, "[%s] NVS save — rx_id=%u tx_id=%u logged_in=%s last_sleep=%u",
                  this->get_name().c_str(),
-                 (unsigned)restore.rx_message_id,
-                 (unsigned)restore.tx_message_id,
+                 (unsigned)restore.rx_fcnt,
+                 (unsigned)restore.tx_fcnt,
                  restore.logged_in ? "yes" : "no",
                  (unsigned)restore.last_sleep_epoch);
       }
@@ -424,58 +424,6 @@ namespace esphome
         this->save_state_(true);
       }
       this->refresh_sleep_status_();   // hearing the node ends "asleep" at once
-    }
-
-    pendingshadow::NodeInputs LORAListener::pending_shadow_inputs(int64_t now_us)
-    {
-      pendingshadow::NodeInputs in;
-      in.slot = static_cast<uint8_t>(this->grid_slot_ % timedgrid::kSlotCount);
-      in.op_awaiting_ack          = this->ctl().awaiting_ack;
-      in.op_deferred_until_login  = this->ctl_cmd_.deferred_until_login;
-      // "Login still settling" counts with an explicit relogin: both mean the
-      // hub is mid-conversation with this node (TimeSync's sleepOk reads the same).
-      in.relogin_pending          = this->session_.relogin_pending() || !this->session_.confirmed();
-      // Anything the node has been sent and not confirmed, or is still owed:
-      // a schedule push in flight or an edit not yet pushed, a GridSync, and
-      // this boot's configuration push.
-      in.push_awaiting_ack = this->push_awaiting_ack_();
-      in.timesync_due = timesyncpolicy::shouldSend(
-          this->auto_mode_,
-          this->last_timesync_sent_us_ == 0 ? -1 : now_us - this->last_timesync_sent_us_);
-      // OTA is a tracked sysop, so awaiting_ack above already covers it.
-      //
-      // The hub's own transmit side is global, not per node: a frame placed for
-      // this node that has not fired yet, or anything draining on the air.
-      in.queued_frames = this->frames_queued_(now_us);
-      in.timed_mode_off = !this->timed_mode_enabled_;
-      // THERE IS NO EXPLICIT LATENCY-TOLERANT FLAG. An automatic-mode node is
-      // the only kind that is already unreachable between check-ins by design
-      // (implementation-plan.md section 5.5), so that is the proxy.
-      in.latency_tolerant = this->auto_mode_;
-      // Traffic in EITHER direction: the last frame heard from it, or the last
-      // downlink placed for it (that mark, once past, is the last time it was
-      // addressed).
-      in.since_last_traffic_us = pendingshadow::sinceLastTrafficUs(
-          this->last_heard_us_, this->link_.last_placed_t0_us(), now_us);
-      return in;
-    }
-
-    // Anything the node has been sent and not confirmed, or is still owed (the
-    // push_awaiting_ack input of pending_shadow_inputs).
-    bool LORAListener::push_awaiting_ack_()
-    {
-      return this->sched_push_outstanding_() ||
-             this->sched_dirty_ || this->schedule_pending() ||
-             this->mac().awaiting_ack || !this->config_synced_ ||
-             this->config_push_pending_;
-    }
-
-    // The hub's own transmit side is global, not per node: a frame placed for
-    // this node that has not fired yet, or anything draining on the air.
-    bool LORAListener::frames_queued_(int64_t now_us) const
-    {
-      return (this->link_.last_placed_t0_us() > now_us) ||
-             (this->parent_ != nullptr && this->parent_->txDrainUs() > 0);
     }
 
     bool LORAListener::is_node_awake_() const
@@ -763,7 +711,7 @@ namespace esphome
         // refreshed at the one moment it is about to be read — without the
         // periodic per-node uplink §4.4 prices and rejects at 32 nodes.
         this->notePhaseReport_(msg->ack->phase);
-        this->handle_command_ack_(msg->ack->ack_msg_id, msg->ack->status);
+        this->handle_command_ack_(msg->ack->ack_fcnt, msg->ack->status);
       }
       // MAC-0: consumed here, never forwarded to a cover or a schedule.
       else if (msg->proto_case == hubframes::UL_MACCONTROL &&
@@ -963,7 +911,7 @@ namespace esphome
       this->stamp_sleep_epoch_();
       this->refresh_sleep_status_();
       this->session_.end_for_sleep();
-      // incrTxMessageId() no longer persists last_sleep_epoch_ as a side effect.
+      // incrTxFcnt() no longer persists last_sleep_epoch_ as a side effect.
       this->save_state_(true);
       this->arm_post_sleep_login_fallback_();
     }
@@ -1120,7 +1068,7 @@ namespace esphome
 
     // ---- S4: the single MAC data path ---------------------------------------
     //
-    // Every hub->node data frame is framed by mac_frame_ (header, msgid, pack,
+    // Every hub->node data frame is framed by mac_frame_ (header, fcnt, pack,
     // seal) and leaves through mac0_send_, which attaches the frame's own copy
     // sealer. LOGIN and the GridDemote broadcast build their own bootstrap
     // frames (MIC-authenticated / unsealed broadcast) but leave through
@@ -1128,13 +1076,13 @@ namespace esphome
 
     bool LORAListener::mac_frame_(hubframes::Down *op, MacFrame *out, bool ack_req)
     {
-      return this->mac_frame_(op, this->incrTxMessageId(), this->session_.confirmed(), out, ack_req);
+      return this->mac_frame_(op, this->incrTxFcnt(), this->session_.confirmed(), out, ack_req);
     }
 
-    bool LORAListener::mac_frame_(hubframes::Down *op, uint32_t msgid, bool encrypt,
+    bool LORAListener::mac_frame_(hubframes::Down *op, uint32_t fcnt, bool encrypt,
                                   MacFrame *out, bool ack_req)
     {
-      return this->session_.frame(op, msgid, encrypt, out, ack_req);
+      return this->session_.frame(op, fcnt, encrypt, out, ack_req);
     }
 
     // ---- S8: MAC wire v1 framing (docs/mac-wire-format.md) -------------------
@@ -1143,56 +1091,6 @@ namespace esphome
     // ------------------------------------------------------------------------
     // P4: schedule push
     // ------------------------------------------------------------------------
-    // ---- Home Assistant schedule editing ----------------------------------
-    //
-    // Slot-addressed rather than append-only: HA edits one field of one slot,
-    // so the entity needs a stable index. add_schedule_entry() below keeps its
-    // append semantics for the YAML seed.
-
-    void LORAListener::set_slot_minute(uint8_t slot, uint16_t minute_of_day)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].minute_of_day = minute_of_day;
-      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
-    void LORAListener::set_slot_days(uint8_t slot, uint8_t day_mask)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].day_mask = day_mask;
-      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
-    void LORAListener::set_slot_action(uint8_t slot, uint8_t action)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].action = action;
-      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
-    void LORAListener::set_slot_position(uint8_t slot, uint8_t position_pct)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].position_pct = position_pct;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
-    void LORAListener::set_slot_enabled(uint8_t slot, bool on)
-    {
-      if (slot >= kMaxScheduleEntries) return;
-      this->sched_entries_[slot].enabled = on;
-      if (slot >= this->sched_entry_count_) this->sched_entry_count_ = slot + 1;
-      this->sched_dirty_ = true;
-      this->save_schedule_();
-    }
-
     // Persist the whole slot table.
     //
     // Without this an HA-entered schedule would be silently reverted to the
@@ -1412,7 +1310,7 @@ namespace esphome
     {
       if (this->parent_ == nullptr)
         return;
-      // See relogin_pending_. Checked before the msgid is taken, so a deferred
+      // See relogin_pending_. Checked before the fcnt is taken, so a deferred
       // push does not burn one; confirm_session_ pushes the schedule again.
       if (this->session_.relogin_pending())
       {
@@ -1506,7 +1404,7 @@ namespace esphome
                  this->get_name().c_str(), a.retry ? "resent" : "sent", (unsigned) a.tag,
                  this->auto_mode_ ? "AUTO" : "INTERACTIVE",
                  (unsigned) this->sched_entry_count_, (unsigned) f.bytes.size(),
-                 (unsigned) f.msgid);
+                 (unsigned) f.fcnt);
       }
     }
 
@@ -1654,7 +1552,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
           this->link_.last_uplink_t0_us() == this->parent_->last_rx_t0_us())
       {
         const bool sampled = this->wake_fit_.addReported(b->prevbeaconfcnt, b->prevbeacont0ticks);
-        this->wake_fit_.noteHeard(this->last_uplink_msgid_, this->link_.last_uplink_t0_us());
+        this->wake_fit_.noteHeard(this->last_uplink_fcnt_, this->link_.last_uplink_t0_us());
         if (sampled)
           ESP_LOGW(TAG, "[%s] Wake clock: n %u span %u s ppm %d | crystal period %u Q19 -> %d ppm "
                         "| prev wake: windows %u hits %u detected %u crcValid %u",
@@ -1691,12 +1589,12 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       // IDEMPOTENT ON prevbeaconfcnt. Each beacon reports the previous wake,
       // so two beacons from one wake would add that wake twice — precisely
       // what fw 1.1.2 and 1.1.3 did before the one-uplink fix. Keying on the
-      // msgid means a duplicate, a retransmission or a regression of that fix
+      // fcnt means a duplicate, a retransmission or a regression of that fix
       // cannot inflate the ledger.
       if (b->prevbeaconfcnt != 0 &&
-          b->prevbeaconfcnt != this->class_a_last_prev_msgid_)
+          b->prevbeaconfcnt != this->class_a_last_prev_fcnt_)
       {
-        this->class_a_last_prev_msgid_ = b->prevbeaconfcnt;
+        this->class_a_last_prev_fcnt_ = b->prevbeaconfcnt;
         this->class_a_stats_.windows   += b->prevwakewindows;
         this->class_a_stats_.hits      += b->prevwakehits;
         this->class_a_stats_.detected  += b->prevwakedetected;
@@ -1709,7 +1607,7 @@ void LORAListener::handle_beacon_(const ::NodeWakeBeacon *b)
       // N-3 (hub side): a non-deep-sleep reset means the node's SessionManager
       // restored rx_id_ with a +16 margin and a fully-seen bitmap over it (see
       // BlindsESP's SessionManager::load()) — the node will refuse to accept
-      // any downlink msgid inside that margin. Advance this listener's own
+      // any downlink fcnt inside that margin. Advance this listener's own
       // downlink counter to match, once per actual reboot (not once per
       // beacon — DEEPSLEEP wakes report the same reason on every beacon).
       const bool changed = (b->resetreason != this->last_handled_reset_reason_);
@@ -1880,10 +1778,10 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
       req.policy  = deliverypolicy::kTimeSyncPolicy;
       req.admit   = [this]() { return this->timesync_due_(); };
       req.fill    = [this, ts](hubframes::Down *op) { this->fill_timesync_(op, ts.get()); };
-      req.on_sent = [this, ts](uint32_t msgid) {
+      req.on_sent = [this, ts](uint32_t fcnt) {
         ESP_LOGI(TAG, "[%s] TimeSync sent (epoch=%llu utcoffset=%+d s msgid=%u)",
                  this->get_name().c_str(), (unsigned long long) ts->epoch,
-                 (int) ts->utcoffset, (unsigned) msgid);
+                 (int) ts->utcoffset, (unsigned) fcnt);
       };
       this->deliver_(CH_NONE, std::move(req));
     }
@@ -1926,7 +1824,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     }
 
     // The CoverConfig, as a Fire request. The cover component builds the payload;
-    // the header, msgid, encryption and placement are the mechanism's.
+    // the header, fcnt, encryption and placement are the mechanism's.
     bool LORAListener::send_cover_config(const ::CoverConfig &cc)
     {
       if (this->config_goes_acked_())   // CoverConfig: acked on a session
@@ -2126,8 +2024,7 @@ ESP_LOGI(TAG, "[%s] Beacon: reason=%s reset=%s clock=INVALID fw=%u resume=%d —
     // Somebody else's measurement is on the air for this node.
     bool LORAListener::mbs_other_test_() const
     {
-      return (this->mode_test_.active() && !this->mbs_owns_test_) || this->mac_ping_.active() ||
-             this->drift_.active();
+      return (this->mode_test_.active() && !this->mbs_owns_test_) || this->mac_ping_.active();
     }
 
     modebsup::Inputs LORAListener::mbs_inputs_() const

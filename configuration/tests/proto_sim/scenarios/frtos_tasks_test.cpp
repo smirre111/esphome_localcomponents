@@ -108,8 +108,6 @@ struct Irq : public ::testing::Test {
     Probe         lif{motorMux, buttonMux};
     DispProbe     disp{&mot, &sys, &lif, motorMux, buttonMux};
 
-    Dio0LoopState st{};
-
     void SetUp() override {
         loranode::rec().reset();
         resetIrqSession();
@@ -127,7 +125,7 @@ struct Irq : public ::testing::Test {
         loranode::rec().next_interrupts = flags;
         lora_irq_evt_t evt{};
         evt.rx_us = rx_us;
-        serviceDio0Event(evt, st);
+        serviceDio0Event(evt);
     }
     void dio1(uint8_t flags) {
         loranode::rec().next_interrupts = flags;
@@ -339,24 +337,6 @@ TEST_F(Irq, AWindowEndAfterTheRadioLeftReceiveClosesNothing) {
     EXPECT_EQ(lif.staleWindowEnds(), 1u);
 }
 
-TEST_F(Irq, AnEndQueuedBeforeTheDriftTestsReceiveDoesNotEndIt) {
-    // The drift test's continuous receive opens no window and so moves no window
-    // generation on. Only the receive that ENDED can make the queued end stale.
-    proto_sim_timer_set_now_us(5'000'000);
-    lif.armTimedRxWindow();
-    const uint8_t end = LoraInterface::windowEndEvent(lif.windowGeneration());
-    lif.noteRadioSlept();          // RxDone
-    lif.setContinuousRx(true);
-    lif.armContinuousRx();
-    const size_t sleeps = r().count("lora_sleep");
-
-    serviceDio1Event(end);
-
-    EXPECT_EQ(r().count("lora_sleep"), sleeps)
-        << "a stale window end must not stop the drift test's receive";
-    EXPECT_EQ(lif.staleWindowEnds(), 1u);
-}
-
 TEST_F(Irq, AWindowEndThatClosesNothingLeavesTheRadioAlone) {
     proto_sim_timer_set_now_us(5'000'000);
     lif.armTimedRxWindow();
@@ -453,60 +433,6 @@ TEST_F(Irq, AContinuousWindowIsNeverRestartedAsAnRxSingle) {
 // ---------------------------------------------------------------------------
 // Review findings 4 and 5 (2026-09-15).
 // ---------------------------------------------------------------------------
-
-// DISABLED 2026-09-20 — the requirement is right, the implementation was not.
-//
-// The guard this pins (`!sweeping` in windowEndClosesWindow) was REVERTED
-// because it made the node deaf for whole runs: sweepMisArming_() is
-// `mode_test_active_ && arm_offset_us != 0`, and handleModeTest sets both while
-// processing the START, so the node refused the extension its own START burst
-// needed and never joined the test. Measured on fw 1.0.98: `detected 0,
-// seq 0..0 exp 1` at +4 000 AND +19 000 us, against `detected 198,
-// windows 187/186` for a plain Mode B run on the same firmware.
-//
-// KEPT, DISABLED, RATHER THAN DELETED: a deliberately mis-armed window still
-// must not be rescued by an extension, or HW-2 measures its own repair. The
-// gate has to be PER-WINDOW — scoped to windows armed with the offset applied —
-// not a run-wide mode flag that also covers the frames carrying the test.
-// Re-enable when that lands, together with the promotion/anti-flap rework.
-TEST_F(Irq, DISABLED_ASweepsMisArmedWindowIsNeverRescuedByAnExtension) {
-    // HW-2 (2026-09-20). A sweep arms early or late ON PURPOSE and asks whether
-    // the frame is still caught. An extension re-arms a FULL kWindowUs, which
-    // carries the window back over the frame — so the measurement repairs the
-    // very thing it is measuring. Measured before this gate: the sweep reported
-    // `armed 189, hit 189` at EVERY offset, including +19 000 us (window opens
-    // 760 us AFTER T0) and -20 000 us (38 ms early).
-    //
-    // Note what is NOT changed: the modem-status evidence itself. An earlier
-    // attempt removed it and broke three tests immediately —
-    // AFrameArrivingAtTheWindowsEndKeepsItOpen pins the real case it serves, a
-    // frame synchronised on its preamble at the window boundary before
-    // ValidHeader lands. The cap from finding 4 already bounds it. Only a
-    // DELIBERATELY mis-armed window is refused the rescue.
-    proto_sim_timer_set_now_us(5'000'000);
-    // The fixture sets the GLOBAL cmdDispatcher, but LoraInterface reaches the
-    // dispatcher through its own MEMBER, assigned only by setCmdDispatcher()
-    // (main.cpp does it at startup). Without this the member is null, the
-    // guard's null check short-circuits, and the window extends anyway — which
-    // is exactly how this test first failed.
-    lif.setCmdDispatcher(&disp);
-    disp.setModeTestActiveForTest(true);
-    disp.mac0ForTest().setArmOffsetUs(12'000);   // a sweep, arming late
-
-    lif.armTimedRxWindow();
-    disp.noteMarkArmed(lif.windowGeneration());
-    const size_t sleeps = r().count("lora_sleep");
-    loranode::rec().modem_status = 0x01;   // signal detected: would normally extend
-
-    serviceDio1Event(LoraInterface::windowEndEvent(lif.windowGeneration()));
-
-    EXPECT_EQ(lif.windowEndExtensions(), 0u)
-        << "a deliberately mis-armed window must not be extended onto the frame";
-    EXPECT_EQ(disp.consecutiveMissedMarks(), 0u)
-        << "the sweep guard still stops its own induced misses from demoting it";
-    EXPECT_GE(r().count("lora_sleep"), sleeps + 1)
-        << "the window closes instead of being held open";
-}
 
 TEST_F(Irq, AWindowIsExtendedAtMostAsFarAsTheLongestFrameNeeds) {
     // Finding 4. The modem's "signal detected" bit is weak evidence — interference
@@ -1054,7 +980,6 @@ TEST_F(Irq, TxDoneSleepsTheRadioAndReturnsTheMutex) {
     // transmit path has a recovery branch for.
     dio0(LORA_IRQ_FLAG_TX_DONE, 5'000'000);
     EXPECT_GE(r().count("lora_sleep"), 1u);
-    EXPECT_FALSE(lif.continuousRx());
 }
 
 TEST_F(Irq, CadDetectedAndCadClearBothPostExactlyOneAnswer) {
@@ -1074,21 +999,6 @@ TEST_F(Irq, CadDetectedAndCadClearBothPostExactlyOneAnswer) {
     EXPECT_EQ(uxQueueMessagesWaiting(lif.lora_cad_queue_), 1u) << "free";
     ASSERT_EQ(xQueueReceive(lif.lora_cad_queue_, &answer, 0), pdTRUE);
     EXPECT_EQ(answer, 0) << "CAD done with nothing detected means free";
-}
-
-TEST_F(Irq, TheSpinSignatureIsCounted) {
-    // Woken with no flag behind it. The counters exist to tell an INTERRUPT
-    // STORM apart from other causes of idle starvation: wakes >> rxdone with a
-    // large zeroflags count is this task spinning on a line that keeps
-    // re-asserting, which is what a TASK_WDT reset with a prvIdleTask
-    // backtrace looks like. In normal mode lora_sleep() drops the line, so it
-    // cannot persist; continuous RX removed that.
-    dio0(0);
-    dio0(0);
-    dio0(LORA_IRQ_FLAG_TX_DONE, 1'000'000);
-
-    EXPECT_EQ(st.wakes, 3u) << "every wake counts";
-    EXPECT_EQ(st.zero_flags, 2u) << "two of them had nothing to do";
 }
 
 TEST_F(Irq, TheHandlersToleratePartlyWiredFirmware) {

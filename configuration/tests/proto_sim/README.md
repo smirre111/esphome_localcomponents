@@ -1,5 +1,7 @@
 # LoRa Blinds protocol simulation tests
 
+> **Note (2026-11-08):** the hand-written v0 model layer (`sim/hub_model.*`, `sim/node_model.*`, the AES-GCM helpers in `sim/crypto.*`) and the twelve scenarios built only on it (addressing, boundary, cover_config, crypto, garbage, login, race, reboot, recovery, register, sleep_wake, sysop; 47 tests) were DELETED by user decision: they simulated the deleted v0 protocol. Their still-meaningful assertions are covered by the real-code tests (`real_*`, `e2e_test`, `seam_test`, `mac_wire_v1*`); the two that were not were ported (`RealNodeFixture.CmdCoverConfigAllZeroGeometryKeepsTheStoredGeometry`, `MacWireV1Listener.AnUnansweredLoginLadderGivesUpAfterItsRetryBudget`). `sim/messages.h` and `sim/wire_codec.*` stay: they are the tests' decoded view of v1 frames (`as_op`, `OpCmd`, ...), used by `real_lora_client_test` and others. The 'Phase 1' list below is history.
+
 Host-native GoogleTest harness for the protocol that lives across the hub
 (ESPHome `local_components/lora_client/`, `local_components/lora_tracker/`,
 `local_components/loracover/`) and the node (`BlindsESP/main/CmdDispatcher.cpp`,

@@ -21,10 +21,6 @@ namespace esphome
       this->parent_->sendDebugSysop(this->op_);
     }
 
-    void DebugSysopButton::send_remote_config()
-    {
-    }
-
 
   } // namespace loracov
 } // namespace esphome

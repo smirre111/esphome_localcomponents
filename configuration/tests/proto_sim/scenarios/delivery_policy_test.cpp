@@ -110,25 +110,25 @@ TEST(DeliveryPolicy, AnAmbiguousSilenceKeepsTheSessionAnyOtherTearsItDown) {
 // ---- which acks count ------------------------------------------------------------
 
 TEST(DeliveryPolicy, ARangeAckIsAnyIdFromFirstToLastInclusive) {
-    EXPECT_FALSE(msgIdInRange(9, 10, 12));
-    EXPECT_TRUE(msgIdInRange(10, 10, 12)) << "first is inclusive";
-    EXPECT_TRUE(msgIdInRange(11, 10, 12));
-    EXPECT_TRUE(msgIdInRange(12, 10, 12)) << "last is inclusive";
-    EXPECT_FALSE(msgIdInRange(13, 10, 12));
-    EXPECT_TRUE(msgIdInRange(7, 7, 7)) << "a single id";
-    EXPECT_FALSE(msgIdInRange(7, 12, 10)) << "an inverted range matches nothing";
+    EXPECT_FALSE(fcntInRange(9, 10, 12));
+    EXPECT_TRUE(fcntInRange(10, 10, 12)) << "first is inclusive";
+    EXPECT_TRUE(fcntInRange(11, 10, 12));
+    EXPECT_TRUE(fcntInRange(12, 10, 12)) << "last is inclusive";
+    EXPECT_FALSE(fcntInRange(13, 10, 12));
+    EXPECT_TRUE(fcntInRange(7, 7, 7)) << "a single id";
+    EXPECT_FALSE(fcntInRange(7, 12, 10)) << "an inverted range matches nothing";
 }
 
 TEST(DeliveryPolicy, ASetAckIsAnyMemberAndOnlyTheFirstCountEntriesAreRead) {
     const uint32_t ids[] = {4, 5, 99, 0};
-    EXPECT_TRUE(msgIdInSet(ids, 2, 4));
-    EXPECT_TRUE(msgIdInSet(ids, 2, 5)) << "the last counted entry";
-    EXPECT_FALSE(msgIdInSet(ids, 2, 6));
-    EXPECT_FALSE(msgIdInSet(ids, 2, 99)) << "beyond count is stale storage, not a member";
-    EXPECT_TRUE(msgIdInSet(ids, 3, 99));
-    EXPECT_FALSE(msgIdInSet(ids, 0, 4)) << "an empty set matches nothing";
-    EXPECT_FALSE(msgIdInSet(ids, 0, 0));
-    EXPECT_FALSE(msgIdInSet(ids, 3, 0)) << "0 is 'no id' and is not a member unless counted";
+    EXPECT_TRUE(fcntInSet(ids, 2, 4));
+    EXPECT_TRUE(fcntInSet(ids, 2, 5)) << "the last counted entry";
+    EXPECT_FALSE(fcntInSet(ids, 2, 6));
+    EXPECT_FALSE(fcntInSet(ids, 2, 99)) << "beyond count is stale storage, not a member";
+    EXPECT_TRUE(fcntInSet(ids, 3, 99));
+    EXPECT_FALSE(fcntInSet(ids, 0, 4)) << "an empty set matches nothing";
+    EXPECT_FALSE(fcntInSet(ids, 0, 0));
+    EXPECT_FALSE(fcntInSet(ids, 3, 0)) << "0 is 'no id' and is not a member unless counted";
 }
 
 TEST(DeliveryPolicy, ARangeAckCountsOnlyWhileTheCommandIsAwaited) {
@@ -140,10 +140,10 @@ TEST(DeliveryPolicy, ARangeAckCountsOnlyWhileTheCommandIsAwaited) {
 
 TEST(DeliveryPolicy, TheIndexOfAnIdIsItsPositionAmongTheCountedEntriesOrMinusOne) {
     const uint32_t ids[] = {4, 5, 99, 0};
-    EXPECT_EQ(msgIdIndex(ids, 3, 4), 0);
-    EXPECT_EQ(msgIdIndex(ids, 3, 99), 2);
-    EXPECT_EQ(msgIdIndex(ids, 2, 99), -1) << "beyond count is stale storage";
-    EXPECT_EQ(msgIdIndex(ids, 0, 4), -1);
+    EXPECT_EQ(fcntIndex(ids, 3, 4), 0);
+    EXPECT_EQ(fcntIndex(ids, 3, 99), 2);
+    EXPECT_EQ(fcntIndex(ids, 2, 99), -1) << "beyond count is stale storage";
+    EXPECT_EQ(fcntIndex(ids, 0, 4), -1);
 }
 
 TEST(AckIds, EveryIdAddedIsFoundWithTheTagOfItsOwnAttempt) {
